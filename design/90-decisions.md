@@ -1067,3 +1067,14 @@ Staging only. Once an item becomes an issue it leaves this list.
   one. Those are different features, and the queue has no home in storage either way.
 - **Cost per shipped PR has no source.** D53 keeps the tile; the server has no "shipped PR"
   signal and no way to get one without reaching outside itself. Deferred to `/contract`.
+- **D58's persisted theme preference contradicts the `Operator` entity.** `10-design.md § Data
+  model § Operator` states that an operator is `{ id }`, **not persisted**, with no profile and
+  no preferences, because D3 chose delegated identity so that no account state lives here. A
+  per-operator theme choice is account state. One of the two gives, and which one is an owner
+  decision rather than an editorial fix — carried into the brief amendment.
+- **`10-design.md` is stale against D46 and D49.** The module-boundaries section still hands
+  adapters an `emit` callback, which D46 replaced with a notification union; and neither the
+  `meta.json` write protocol nor the corrupt-`meta.json` failure row mentions the
+  `schemaVersion` D49 added or the unknown-version case it defines as corrupt. Both are drift
+  from the contract derivation, not new decisions. The design outranks the contract, so which
+  side is wrong is a ruling, not a merge — the working read is that the design is stale in both.
