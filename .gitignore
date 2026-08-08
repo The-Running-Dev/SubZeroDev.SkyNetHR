@@ -1,2 +1,4 @@
 node_modules/
 .data/
+.claude/gates.json
+.claude/session-costs.tsv
