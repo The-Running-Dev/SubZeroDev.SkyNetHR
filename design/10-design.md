@@ -547,16 +547,38 @@ operator, because that would need a container per session and is explicitly out 
 | Adversary | In scope | Control |
 |---|---|---|
 | The internet | Yes | Server refuses to bind non-loopback without auth configured |
-| A curious operator wandering outside their workspace | Yes | Path jail, resolved after symlinks |
+| A curious operator starting a session outside their workspace | Yes | Path jail, resolved after symlinks — see below for what this does *not* cover |
+| An agent reaching outside the workspace once running | Partly | Permission prompt (Claude) or vendor sandbox (Codex). **Not the jail** |
 | An operator reading another's session | Yes | Ownership check on every session route |
 | A confused agent, or prompt injection reaching one | Partly | Permission prompts, sandbox mode, checkpoints to undo |
 | A determined operator | **No** | Out of scope — needs per-session containers |
 | A compromised server | No | Out of scope |
 
-The fourth row deserves attention. Content the agent reads — a README, an issue body, a web
-page — can contain text aimed at the agent. The permission prompt is the control, which
-means **the prompt must show what is actually being run**, not a summary of it, and the
-audit log must record the exact input that was approved.
+**`workspaceRoot` is not a sandbox, and reading it as one is the most likely
+misunderstanding of this design** (D28). The jail decides where a session may *start*, and it
+pins `cwd` so a session cannot drift to another directory between turns (D4). It does nothing
+about where the child process may reach once running: the agent runs with the server user's
+full filesystem access, so an approved `cat` of a path outside every root succeeds.
+
+What actually constrains a running agent differs by vendor, and the difference is not
+cosmetic:
+
+- **Claude** — the permission prompt, and nothing else. Containment is the operator's
+  attention, one tool call at a time. This is the control the console exists to make usable
+  from somewhere other than the server's terminal.
+- **Codex** — its own `sandbox_mode`, enforced by the CLI below us. A `read-only` or
+  `workspace-write` session is genuinely confined in a way a Claude session is not, which is
+  the one place the vendor asymmetry runs in Codex's favour.
+
+The two together are the honest statement of the *confused agent* row. Content the agent
+reads — a README, an issue body, a web page — can contain text aimed at it. Where the control
+is a prompt, **the prompt must show what is actually being run**, not a summary of it, and
+the audit log must record the exact input that was approved. Where the control is a sandbox,
+the operator must be told which one, which is what D5's standing banner is for.
+
+None of this contradicts the brief; it makes explicit what the brief's first non-goal already
+concedes. It is written out because a table row reading "path jail" invites a reader to
+believe the agent is confined, and that belief is the one that gets someone hurt.
 
 ## Security controls
 
@@ -580,6 +602,8 @@ shell, and the failure mode of a warning is that nobody reads it.
 working directory is accepted only if its **fully resolved real path** — symlinks followed,
 `..` collapsed, case-normalised on Windows — is inside a root. The check runs at session
 creation and the resolved path, never the client's string, is what gets passed as `cwd`.
+What this control does and does not cover is stated in *Threat model*; the short version is
+that it governs where a session starts, not where the agent can reach.
 
 **Every route that reads session data is under `/api/sessions/:id`.** Not a style
 preference — it is what makes "ownership check on every session route" a true statement
@@ -929,6 +953,15 @@ New in this pass:
   decision is unchanged; its premise is corrected. Rejected: leaving the earlier wording —
   it reads as a settled capability gap and would have justified never running the experiment
   that open question 4 asks for.
+
+- **D28 — the workspace jail is a start-time control, not a sandbox, and the threat model
+  now says so.** Chosen: split the jail row into what it covers (where a session starts, and
+  `cwd` not drifting between turns) and what constrains a running agent (the permission
+  prompt for Claude, the vendor sandbox for Codex). Rejected: leaving the row — it was not
+  false against the brief, whose first non-goal already concedes console access is shell
+  access, and that is the problem: a cell reading "path jail" invites belief in containment
+  while the concession sits in another document. Rejected adding real containment instead —
+  that is per-session containers, a binding non-goal.
 
 Standing decisions this design rests on, all in `90-decisions.md`: D1/D10 transport,
 D2 sequencing, D3 delegated auth, D4 the jail, D5 the permission asymmetry, D6 shadow git,

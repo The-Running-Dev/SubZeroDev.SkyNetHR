@@ -471,6 +471,28 @@ it depends on is sharpened from "does Codex offer any runtime approval hook" to 
 `on-request` reachable programmatically".
 Reversibility: not applicable; this is a factual correction.
 
+### 2026-08-08 — D28 The workspace jail is stated as a start-time control, not a sandbox
+Context: `10-design.md § Threat model` listed "a curious operator wandering outside their
+workspace" as in scope with "path jail" as the control. The jail decides where a session may
+start and pins `cwd` across turns (D4). It does nothing about where the child may reach once
+running — the agent has the server user's full filesystem access, so an approved read of a
+path outside every root succeeds. The row credited one control with the work of another.
+Chosen: split the row into the start-time control and the runtime one, and say outright that
+`workspaceRoot` is not a sandbox. Name what actually constrains a running agent per vendor:
+for Claude the permission prompt and nothing else, for Codex its own `sandbox_mode` enforced
+below us — the one place the vendor asymmetry runs in Codex's favour.
+Rejected: leaving the row as written. The brief's first non-goal already concedes that console
+access is equivalent to shell access, so the row was not *false* against the brief, and that
+is precisely the problem — a table cell reading "path jail" invites a reader to believe the
+agent is confined, and the concession is three sections away in a different document. Rejected
+adding a real sandbox instead — that is per-session containers, which the brief makes a binding
+non-goal.
+No behaviour changes. This is a claim being brought back in line with what the system does,
+which is why it is logged rather than left as a wording edit: the next reader who assumes
+containment will assume it from a document, and the record should show the assumption was
+considered and rejected.
+Reversibility: not applicable; this is a factual correction.
+
 ## Open
 
 Staging only. Once an item becomes an issue it leaves this list.
