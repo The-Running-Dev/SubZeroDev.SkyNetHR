@@ -525,14 +525,22 @@ Grouped by boundary, because that is where the handling lives.
 | CLI not installed | `spawn` `ENOENT` | `error / agent_unavailable`, `fatal`; turn cleared | "Agent unavailable" | Session live, no turn. Retryable |
 | Child dies mid-turn | `close` with non-zero or signal | Resolve every pending permission with `cancelled_process_exit`; `turn.ended` | Turn ended abnormally, stderr shown | Session live. Checkpoint from before the turn is intact |
 | Child exits normally | `result` then `close(0)` | `turn.ended`, clear turn | Turn complete | Session idle |
-| Child hangs with no output | *not detected* | — | Spinner forever | **Open question.** No turn timeout is specified |
+| Child hangs with no output | Client-side elapsed-since-last-envelope | **Nothing is killed** (D21); the client shows "no output for N min" | Elapsed time, and interrupt | Turn continues until the operator acts |
 | Unrecognised record kind | `default` in the mapper | `error / adapter_unknown_record`, non-fatal, record preserved in `raw` | A diagnostic line | Stream continues |
 | Malformed JSON line | Splitter parse failure | `error / adapter_bad_line`, non-fatal | A diagnostic line | Stream continues |
 | Codex stream shape mismatch | Adapter schema check | `error / adapter_schema_mismatch`, **fatal** | Session refuses to start | Nothing renders and it says so |
 
-The last one is worth its own sentence: **a Codex adapter that silently renders nothing is
-worse than one that refuses to start**, because the operator will believe the agent is
-thinking. Fail loudly, never degrade quietly.
+Two rows deserve their own sentence.
+
+**A Codex adapter that silently renders nothing is worse than one that refuses to start**,
+because the operator will believe the agent is thinking. Fail loudly, never degrade quietly.
+
+**Nothing in this system kills a turn on a timer** (D21). A long compile emits nothing and
+looks exactly like a hang, so any threshold would kill the legitimate case this console
+exists to supervise. The client instead reports elapsed silence and leaves interrupt to
+hand — consistent with the threat model, where the operator is the control and can only be
+one if they are given the information to act on. The SSE keepalive every 15 s is what lets
+a client tell a silent agent from a dead connection, so this costs nothing on the wire.
 
 ### Client boundary
 
@@ -724,6 +732,13 @@ New in this pass:
   conversation the operator believes is continuous. Rejected deleting storage on boot —
   discards hours-old transcripts and weakens the audit trail S7 exists for. Rejected keeping
   today's behaviour — the storage root grows without bound with sessions nothing can reach.
+- **D21 — no turn timeout; a stall indicator instead.** Chosen: no server-side timer ends a
+  turn; the client reports elapsed silence and interrupt stays to hand. Rejected an idle
+  timeout on silence, and rejected a hard cap on duration — a long compile or test run emits
+  nothing and is indistinguishable from a hang, so both kill the legitimate case this
+  console exists to supervise. Rejected configurable-and-off-by-default — a kill path that
+  is off by default is never exercised, which is how it becomes a bug found during an
+  incident.
 
 Standing decisions this design rests on, all in `90-decisions.md`: D1/D10 transport,
 D2 sequencing, D3 delegated auth, D4 the jail, D5 the permission asymmetry, D6 shadow git,
@@ -754,10 +769,7 @@ Questions this design cannot answer without information it was not given. Carrie
 
 **Needing a decision from the owner:**
 
-1. **Is there a turn timeout?** A child that produces no output is currently indistinguishable
-   from one that is thinking, forever. Any timeout risks killing a legitimately long tool
-   call, and no value is derivable from the brief.
-2. Once D20's spill reader exists, a too-old `Last-Event-ID` could be served from disk
+1. Once D20's spill reader exists, a too-old `Last-Event-ID` could be served from disk
    rather than answered with `replay_gap`. That removes a failure mode, but S3.3 tests for
    `replay_gap` existing — so it is a slice change, not a free simplification.
 

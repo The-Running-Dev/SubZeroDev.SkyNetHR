@@ -324,6 +324,28 @@ Three consequences, each a real change rather than a restatement:
 Reversibility: cheap toward full resumption, which is additive. Expensive away from
 persistence entirely, since the read path and the `lastSeq` field become load-bearing.
 
+### 2026-08-08 — D21 No turn timeout; a stall indicator instead
+Context: a child producing no output is indistinguishable from one that is thinking, so an
+operator gets a spinner with no information and the failure table had a row reading "not
+detected". The brief yields no timeout value, and any value chosen would be arbitrary.
+Chosen: no server-side timer terminates a turn. The client tracks elapsed time since the
+last envelope and surfaces it — "no output for 6 min" — with interrupt always available.
+The operator judges; the console informs.
+Rejected: an idle timeout on silence — a long compile, test run or download emits nothing
+and is indistinguishable from a hang, so the legitimate case most likely to be killed is
+exactly the one this console exists to supervise. Rejected a hard cap on turn duration —
+same objection, less discriminating. Rejected shipping it configurable and defaulting off —
+adds a config surface and a kill path that is off by default and therefore never exercised,
+which is how a rarely-run code path becomes a bug discovered during an incident.
+This follows the threat model rather than departing from it: the operator is already the
+control against a confused agent, and that only works if they are given the information to
+act on. A timeout substitutes a guess for a judgement.
+Costs nothing on the wire. Envelopes already carry `ts`, and the SSE keepalive every 15 s
+lets a client distinguish a silent agent from a dead connection — so the indicator is
+purely client-side and needs no contract change.
+Reversibility: cheap. Adding a timeout later is additive and would arrive with evidence
+about real turn durations, which is the thing we do not have now.
+
 ## Open
 
 Staging only. Once an item becomes an issue it leaves this list.
