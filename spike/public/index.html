@@ -1,0 +1,131 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Agent Console — spike</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font: 14px/1.5 ui-monospace, Consolas, monospace; margin: 0; display: flex;
+         flex-direction: column; height: 100vh; }
+  header { display: flex; gap: .5rem; padding: .6rem; border-bottom: 1px solid #8884; }
+  input { font: inherit; padding: .3rem; flex: 1; }
+  #log { flex: 1; overflow-y: auto; padding: .6rem; }
+  .e { padding: .3rem .5rem; margin: .2rem 0; border-left: 3px solid #8886; white-space: pre-wrap;
+       word-break: break-word; }
+  .k { opacity: .55; font-size: 11px; text-transform: uppercase; letter-spacing: .05em; }
+  .message { border-color: #4a9; } .thinking { border-color: #a7c; opacity: .75; }
+  .tool\.call { border-color: #e93; } .tool\.result { border-color: #89a; }
+  .error { border-color: #e44; } .permission\.request { border-color: #fb0; background: #fb01a; }
+  button { font: inherit; cursor: pointer; padding: .25rem .7rem; }
+  footer { display: flex; gap: .5rem; padding: .6rem; border-top: 1px solid #8884; }
+</style>
+
+<header>
+  <input id="cwd" placeholder="workspace path (must be inside a configured root)">
+  <button id="start">Start session</button>
+  <span id="status" class="k"></span>
+</header>
+
+<div id="log"></div>
+
+<footer>
+  <input id="msg" placeholder="message" disabled>
+  <button id="send" disabled>Send</button>
+  <button id="stop" disabled>Interrupt</button>
+</footer>
+
+<script type="module">
+const $ = (id) => document.getElementById(id);
+const log = $('log');
+let sessionId = null;
+
+// Everything is rendered as text. The model's output is never interpreted as markup —
+// that is the single biggest departure from the prior art's webview.
+function add(kind, text) {
+  const el = document.createElement('div');
+  el.className = 'e ' + kind;
+  const k = document.createElement('div');
+  k.className = 'k'; k.textContent = kind;
+  const b = document.createElement('div');
+  b.textContent = text;
+  el.append(k, b);
+  log.append(el);
+  log.scrollTop = log.scrollHeight;
+  return el;
+}
+
+function render(env) {
+  const d = env.data;
+  switch (env.kind) {
+    case 'session.started': return add(env.kind, `${d.vendor} · ${d.cwd} · policy=${d.policy.mode}`);
+    case 'message':         return add(env.kind, `${d.role}: ${d.text}`);
+    case 'thinking':        return add(env.kind, d.text);
+    case 'tool.call':       return add(env.kind, `${d.name} — ${d.summary}`);
+    case 'tool.result':     return add(env.kind, (d.ok ? '' : 'ERROR ') + d.output.slice(0, 4000));
+    case 'usage':           return;   // spike: not shown
+    case 'turn.ended':      return add(env.kind, d.stopReason);
+    case 'permission.request': return permission(env);
+    case 'permission.resolved': return add(env.kind, `${d.requestId.slice(0, 8)} → ${d.decision} (${d.reason})`);
+    case 'error':           return add(env.kind, `[${d.kind}] ${d.message}`);
+    default:                return add(env.kind, JSON.stringify(d));
+  }
+}
+
+function permission(env) {
+  const { requestId, tool, input } = env.data;
+  // The exact input, not a summary — the operator can only be a control if they see
+  // what actually runs (10-design.md § Threat model).
+  const el = add(env.kind, `${tool}\n${JSON.stringify(input, null, 2)}`);
+  const row = document.createElement('div');
+  for (const [label, decision, scope] of [
+    ['Allow once', 'allow', 'once'], ['Always allow', 'allow', 'always'], ['Deny', 'deny', 'once'],
+  ]) {
+    const b = document.createElement('button');
+    b.textContent = label;
+    b.onclick = async () => {
+      row.remove();
+      await fetch(`/api/sessions/${sessionId}/permission`, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ requestId, decision, scope, input }),
+      });
+    };
+    row.append(b, document.createTextNode(' '));
+  }
+  el.append(row);
+}
+
+$('start').onclick = async () => {
+  const r = await fetch('/api/sessions', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ vendor: 'claude', cwd: $('cwd').value }),
+  });
+  const j = await r.json();
+  if (!r.ok) return add('error', `${j.error.code}: ${j.error.message}`);
+
+  sessionId = j.sessionId;
+  $('status').textContent = j.cwd;
+  $('msg').disabled = $('send').disabled = $('stop').disabled = false;
+
+  // EventSource reconnects on its own and replays via Last-Event-ID (90-decisions.md D1).
+  const es = new EventSource(`/api/sessions/${sessionId}/events`);
+  es.onmessage = (m) => render(JSON.parse(m.data));
+  for (const k of ['session.started', 'session.notice', 'session.exit', 'turn.started',
+                   'turn.ended', 'message', 'thinking', 'tool.call', 'tool.result',
+                   'permission.request', 'permission.resolved', 'usage', 'error']) {
+    es.addEventListener(k, (m) => render(JSON.parse(m.data)));
+  }
+  es.onerror = () => $('status').textContent = 'reconnecting…';
+};
+
+$('send').onclick = async () => {
+  const text = $('msg').value.trim();
+  if (!text) return;
+  $('msg').value = '';
+  const r = await fetch(`/api/sessions/${sessionId}/message`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ text }),
+  });
+  if (!r.ok) add('error', (await r.json()).error.message);
+};
+
+$('msg').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('send').click(); });
+$('stop').onclick = () => fetch(`/api/sessions/${sessionId}/interrupt`, { method: 'POST' });
+</script>
