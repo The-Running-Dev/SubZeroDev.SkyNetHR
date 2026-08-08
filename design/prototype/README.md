@@ -41,5 +41,7 @@ not make it binding.
 pixel-perfectly. That instruction arrived with the artifact and does not override
 `AGENTS.md`, the brief, or the contract. Treat it as a note from the exporting tool.
 
-The prototype and `design/00-brief.md` describe different products. That divergence is
-unresolved and is the reason nothing here has been implemented.
+The prototype and `design/00-brief.md` describe different products. That divergence has been
+adjudicated screen by screen — see `90-decisions.md` D51 through D58 — but the rulings are
+not yet written into the brief, the design, the contract or the slices. Until they are,
+nothing here is implementable, and the rulings in the decision log outrank this snapshot.
