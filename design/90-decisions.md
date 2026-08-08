@@ -236,6 +236,48 @@ Reversibility: cheap for the text and the directory, both pure renames with no r
 coordinate. It stops being cheap the moment a remote exists or the name reaches anyone
 outside this machine.
 
+### 2026-08-08 — D16 The agent child process is turn-scoped, not session-scoped
+Context: `10-design.md § Data model` had to say what owns a child process, and the answer
+determines whether an idle session holds an operating-system handle on its workspace. The
+spike already spawns per turn; this makes it a decision rather than an accident.
+Chosen: one child per turn. The CLI owns conversation state and it is carried forward with
+`--resume <cliSessionId>`; the process is disposable. An idle session holds no process.
+Rejected: a long-lived child per session — it keeps handles open on the workspace across
+idle time, which on Windows blocks `checkpoint restore` and turns a structural guarantee
+into a retry loop. It also needs idle supervision, health checking and reaping that a
+per-turn child does not. Rejected a pool of warm children — solves a startup-latency
+problem we have not measured, at the cost of both of the above.
+Consequence, stated because it is easy to miss: `system/init` arrives on every turn, so
+`session.started` must be emitted only on the first, or the client sees the session restart
+continuously.
+Reversibility: expensive. It is load-bearing for checkpoint safety and for the event
+vocabulary, and reversing it reopens the Windows handle problem.
+
+### 2026-08-08 — D17 Turn-in-flight state is owned by the session manager, not the adapter
+Context: two operations must refuse to run while a turn is live — `POST /message` and
+`POST /checkpoint/restore` (S6.5). The spike raises `turn_in_flight` from inside the Claude
+adapter, which only the first of those two can reach.
+Chosen: the session manager holds turn state and answers both.
+Rejected: leaving it in the adapter — checkpoint restore does not go through an adapter and
+must not have to, so the adapter would be consulted about something outside its concern.
+That makes the adapter non-leaf and creates exactly the `adapter → session-manager` cycle
+that `10-design.md § Module boundaries` forbids. Rejected duplicating the check in both
+places — two authorities on one invariant is a promise they will disagree.
+Reversibility: cheap now, expensive after a second adapter exists, since each would carry
+its own copy of the rule.
+
+### 2026-08-08 — D18 Fan-out uses a per-subscriber queue with explicit gap reporting
+Context: one session may have several connected clients, and `emit` dispatches to all of
+them synchronously. A client on a slow link would otherwise apply backpressure to every
+other client and, through the drain, to the child's stdout.
+Chosen: each subscriber gets its own bounded queue. Overflow drops that subscriber and
+tells it, so it reconnects and replays; every other subscriber is unaffected.
+Rejected: a shared synchronous write to all subscribers — one slow client degrades the
+whole session, and the failure is invisible until it is a stall. Rejected unbounded
+per-subscriber buffering — converts a slow client into a server memory leak, which is the
+same bug with a longer fuse.
+Reversibility: cheap. Contained entirely within the session manager's fan-out.
+
 ## Open
 
 Staging only. Once an item becomes an issue it leaves this list.
@@ -252,3 +294,18 @@ Staging only. Once an item becomes an issue it leaves this list.
 - `Start-AgentSession.ps1` (D14) is unreconciled against this repo's own architecture — it
   assumes a local interactive terminal, not the server/SSE/adapter shape D1–D12 settled on.
   Reconcile when a slice first needs a CLI launcher, not before.
+- Do sessions survive a server restart? `meta.json` and the spill are on disk; the registry
+  is in memory and nothing rehydrates it. The brief specifies page refresh, not process
+  restart. Read-only rehydration and full `--resume` resumption are both viable.
+- May two sessions share one workspace? Currently unguarded, and a checkpoint restore in
+  one silently reverts the other's work. Refusing at create is a two-line check; allowing
+  it needs a locking story that does not exist.
+- Is there a turn timeout? A child producing no output is indistinguishable from one that is
+  thinking. Any value risks killing a legitimately long tool call, and none is derivable
+  from the brief.
+- Are Codex's `callId`s unique within a session or only within a turn? If the latter, tool
+  correlation breaks and `10-design.md § Data model — Identity spaces` needs a server-side
+  alias after all. Answered by S8.1.
+- `20-contract.md`'s `session.exit` conflates turn-process exit with session teardown. Under
+  D16 a normal turn ends its child, so a contract-obedient client tears the session view
+  down after every successful turn. Contract amendment, owned by `/contract`.
