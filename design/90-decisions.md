@@ -236,19 +236,717 @@ Reversibility: cheap for the text and the directory, both pure renames with no r
 coordinate. It stops being cheap the moment a remote exists or the name reaches anyone
 outside this machine.
 
+### 2026-08-08 — D16 The agent child process is turn-scoped, not session-scoped
+Context: `10-design.md § Data model` had to say what owns a child process, and the answer
+determines whether an idle session holds an operating-system handle on its workspace. The
+spike already spawns per turn; this makes it a decision rather than an accident.
+Chosen: one child per turn. The CLI owns conversation state and it is carried forward with
+`--resume <cliSessionId>`; the process is disposable. An idle session holds no process.
+Rejected: a long-lived child per session — it keeps handles open on the workspace across
+idle time, which on Windows blocks `checkpoint restore` and turns a structural guarantee
+into a retry loop. It also needs idle supervision, health checking and reaping that a
+per-turn child does not. Rejected a pool of warm children — solves a startup-latency
+problem we have not measured, at the cost of both of the above.
+Consequence, stated because it is easy to miss: `system/init` arrives on every turn, so
+`session.started` must be emitted only on the first, or the client sees the session restart
+continuously.
+Reversibility: expensive. It is load-bearing for checkpoint safety and for the event
+vocabulary, and reversing it reopens the Windows handle problem.
+
+### 2026-08-08 — D17 Turn-in-flight state is owned by the session manager, not the adapter
+Context: two operations must refuse to run while a turn is live — `POST /message` and
+`POST /checkpoint/restore` (S6.5). The spike raises `turn_in_flight` from inside the Claude
+adapter, which only the first of those two can reach.
+Chosen: the session manager holds turn state and answers both.
+Rejected: leaving it in the adapter — checkpoint restore does not go through an adapter and
+must not have to, so the adapter would be consulted about something outside its concern.
+That makes the adapter non-leaf and creates exactly the `adapter → session-manager` cycle
+that `10-design.md § Module boundaries` forbids. Rejected duplicating the check in both
+places — two authorities on one invariant is a promise they will disagree.
+Reversibility: cheap now, expensive after a second adapter exists, since each would carry
+its own copy of the rule.
+
+### 2026-08-08 — D18 Fan-out uses a per-subscriber queue with explicit gap reporting
+Context: one session may have several connected clients, and `emit` dispatches to all of
+them synchronously. A client on a slow link would otherwise apply backpressure to every
+other client and, through the drain, to the child's stdout.
+Chosen: each subscriber gets its own bounded queue. Overflow drops that subscriber and
+tells it, so it reconnects and replays; every other subscriber is unaffected.
+Rejected: a shared synchronous write to all subscribers — one slow client degrades the
+whole session, and the failure is invisible until it is a stall. Rejected unbounded
+per-subscriber buffering — converts a slow client into a server memory leak, which is the
+same bug with a longer fuse.
+Reversibility: cheap. Contained entirely within the session manager's fan-out.
+
+### 2026-08-08 — D19 One live session per workspace path; the second is refused
+Context: two sessions rooted at the same resolved path get independent shadow git
+directories and no lock between them, so a checkpoint restore in one silently reverts the
+other's work. `10-design.md § Concurrency` had this as the single unresolved race, and the
+brief does not say whether workspace sharing is allowed.
+Chosen: session creation refuses with `409` when another live session already holds that
+resolved path. The check runs at create, immediately after the jail resolution that already
+produces the path it compares — so it costs a map lookup and no new machinery.
+Rejected: allowing it with a warning banner — the hazard is silent data loss, and a banner
+is not a lock; it informs an operator about a race they cannot then avoid. Rejected
+allowing it with checkpoints disabled on the second session — removes the hazard but costs
+that operator DoD #6, and requires the client to explain why a documented feature is
+missing for reasons outside their session. Rejected deferring to S6 — session creation
+ships in S2, so deferring means reopening the create path later to add a check that belongs
+in it from the first commit, which is the same argument D4 makes about the jail.
+Consequence: the refusal is on the **resolved real path** (D4), not the requested string,
+so two different spellings of one directory are correctly caught as the same workspace.
+Reversibility: cheap. Relaxing a refusal is additive; retrofitting one after operators have
+built habits around sharing is not.
+
+### 2026-08-08 — D20 Sessions rehydrate read-only after a restart
+Context: `meta.json` and `events.ndjson` are written per session, but the registry is a
+memory `Map` and nothing reloads it. A restart therefore lost every session while leaving
+its files on disk — unreachable, uncleanable, and invisible. The brief's DoD #5 specifies
+page refresh, not process restart, so this was genuinely unspecified rather than decided.
+Chosen: on boot, after reaping orphaned children and before accepting connections, load each
+`meta.json` into the registry marked ended. The transcript and the checkpoints stay
+browsable; no new turn may start.
+Rejected: full resumption via `--resume` — it depends on the vendor CLI still holding that
+`cliSessionId`, which is unverified, and its failure mode is silent: the CLI starts a fresh
+conversation the operator believes is continuous. That is worse than a session that plainly
+says it ended. It stays available later as a pure addition to this. Rejected deleting
+storage on boot — discards transcripts and checkpoints for work that may be hours old and
+weakens the audit trail S7 exists to provide. Rejected leaving today's behaviour deliberate
+— the storage root then grows without bound with sessions nothing can reach or clean up.
+Three consequences, each a real change rather than a restatement:
+- **`events.ndjson` becomes a read path.** It was write-only. A rehydrated session has an
+  empty ring buffer, so its transcript can only come from the spill.
+- **`meta.json` must round-trip `lastSeq`**, or a rehydrated session cannot bound its own
+  replay.
+- **D19's busy check must consider live sessions only.** An ended session still holding a
+  workspace path must not block a new session on it, or one restart makes a workspace
+  permanently unusable. This is the sharp edge of the two decisions meeting.
+Reversibility: cheap toward full resumption, which is additive. Expensive away from
+persistence entirely, since the read path and the `lastSeq` field become load-bearing.
+
+### 2026-08-08 — D21 No turn timeout; a stall indicator instead
+Context: a child producing no output is indistinguishable from one that is thinking, so an
+operator gets a spinner with no information and the failure table had a row reading "not
+detected". The brief yields no timeout value, and any value chosen would be arbitrary.
+Chosen: no server-side timer terminates a turn. The client tracks elapsed time since the
+last envelope and surfaces it — "no output for 6 min" — with interrupt always available.
+The operator judges; the console informs.
+Rejected: an idle timeout on silence — a long compile, test run or download emits nothing
+and is indistinguishable from a hang, so the legitimate case most likely to be killed is
+exactly the one this console exists to supervise. Rejected a hard cap on turn duration —
+same objection, less discriminating. Rejected shipping it configurable and defaulting off —
+adds a config surface and a kill path that is off by default and therefore never exercised,
+which is how a rarely-run code path becomes a bug discovered during an incident.
+This follows the threat model rather than departing from it: the operator is already the
+control against a confused agent, and that only works if they are given the information to
+act on. A timeout substitutes a guess for a judgement.
+Costs nothing on the wire. Envelopes already carry `ts`, and the SSE keepalive every 15 s
+lets a client distinguish a silent agent from a dead connection — so the indicator is
+purely client-side and needs no contract change.
+Reversibility: cheap. Adding a timeout later is additive and would arrive with evidence
+about real turn durations, which is the thing we do not have now.
+
+### 2026-08-08 — D22 Untruncated tool output is a per-session blob behind a session-scoped route
+Context: `10-design.md § Failure modes` promised "full output on disk" and `20-contract.md`
+exposes `GET /api/tool-output/:callId`, but no entity or file in the data model held it. Two
+things were wrong at once: the bytes had no home, and the route that served them sat outside
+`/api/sessions/:id`, so the ownership check every other session route performs did not apply.
+Chosen: truncate on the way in, before the envelope is constructed, so the envelope in the
+ring buffer and the envelope in the spill are the same bytes. Write the untruncated output to
+`<storage>/sessions/<sessionId>/tool-output/<callId>` and serve it from a session-scoped
+route.
+Rejected: the spill holding the full output while the wire carries the truncated one — no new
+files, but replay from disk and replay from memory would then return different transcripts,
+which falsifies the stated invariant that the ring buffer is a strict suffix of the spill and
+does it silently, with none of `replay_gap`'s reporting. Rejected dropping the fetch entirely
+— cheapest, removes the unowned route as a side effect, and it makes a large test log
+permanently unreadable through the console, which is a supervision tool refusing to show what
+happened. Rejected keeping the route keyed on `callId` alone — `callId` is vendor-minted and
+opaque, so a route keyed on it is reachable by any authenticated operator who observes or
+guesses one, and no care elsewhere compensates.
+Consequence: `20-contract.md` must move the route. That is `/contract`'s edit and is recorded
+as known drift, not made here.
+Reversibility: cheap in storage shape, expensive in the route — moving a public path after
+clients depend on it is a breaking change, which is why it is being fixed before any client
+exists.
+
+### 2026-08-08 — D23 Orphan reaping reads a server-wide `pids.ndjson` with a reuse guard
+Context: `10-design.md § Boot ordering` reaped "recorded child PIDs" and the failure table
+named a "PID file", but the persistence summary listed no such file and `Turn.child` was
+explicitly in-memory only. S7.5–S7.6 test the behaviour. The durable record the whole step
+depends on did not exist in the data model.
+Chosen: an append-only `<storage>/pids.ndjson`, one record per spawn carrying pid, session,
+turn, start time and process image, tombstoned with `exitedAt` when the child closes. Boot
+reaps an entry only when it has no `exitedAt`, its `startedAt` is later than the host's last
+boot, and the live process's image matches.
+Rejected: the pid inside each session's `meta.json` — no new file, but it turns `meta.json`
+into something written on every turn rather than once at create, and it makes reaping depend
+on rehydration having parsed that file, so a corrupt `meta.json` orphans its child instead of
+merely hiding its transcript. Rejected a Windows job object or Linux process group with no
+record at all — structurally the strongest answer, since the operating system reaps for you
+and the file disappears, but Node exposes neither natively, so it trades one append-only file
+for a native dependency on the exact platform pair the brief requires.
+The reuse guard is the point, not a detail: operating systems reuse process ids, so a pid
+recorded before a reboot may name something unrelated afterwards. Reaping it blind would kill
+an innocent process, potentially a privileged one. An entry that fails any guard condition is
+logged and tombstoned rather than killed — a stale record is bookkeeping, a wrong kill is an
+incident.
+Reversibility: cheap. The file is additive and the guard is local to boot.
+
+### 2026-08-08 — D24 Interrupt is the manager killing the turn's child, and it is an expected end
+Context: `POST /api/sessions/:id/interrupt` is in the contract, `interrupt` was an adapter
+method, and D21 leans on interrupt being available as the operator's alternative to a
+server-side timeout. It had no control-flow path, no failure row, no defined events, and no
+answer for Windows, where a child does not receive `SIGINT` the way the Unix path assumes.
+Chosen: the session manager owns interrupt semantics; the adapter exposes `kill` as mechanism
+only. Terminate-then-force with a grace period, on the process **tree**, since the agent's own
+children — a compiler, a test runner — are what hold the workspace open. Pending permissions
+resolve with `cancelled_process_exit`. `turn.ended` carries an interrupted stop reason and the
+session stays live and idle, so an operator who interrupts is not shown a crash. Interrupt on
+a session with no live turn is `{ok: true}` and emits nothing.
+Rejected: a graceful protocol-level interrupt over the CLI's own control channel — strictly
+better where it exists, preserves the CLI's session coherence, and it is unverified for both
+vendors and undefined when the child is blocked awaiting a permission response, which is
+exactly the state an operator most wants to escape. It stays available as a pure addition.
+Rejected refusing interrupt while a permission request is outstanding — a simpler state
+machine that withdraws the escape hatch in the one state where the turn is definitely not
+progressing.
+Consequence: `20-contract.md` needs a `stopReason` value for an interrupted turn, or the
+distinction between "the operator stopped it" and "it died" is unexpressible. Recorded as
+known drift.
+Note what interrupt deliberately does not do: it does not undo. Files already written stay
+written; the pre-turn checkpoint is what returns the workspace, and that is a separate action.
+Reversibility: cheap. Adding a graceful path later is additive; the kill remains the fallback.
+
+### 2026-08-08 — D25 Deleting a session removes its storage and never the audit log
+Context: `DELETE /api/sessions/:id` is in the contract and appeared nowhere in the design.
+What it did to the spill, the shadow git directory and the audit trail was undecided — and
+the audit log's server-wide placement was already justified by exactly this case.
+Chosen: delete removes `meta.json`, `events.ndjson`, `tool-output/`, `ckpt.git/` and the
+registry entry. It is refused with `409 turn_in_flight` while a turn is running. `audit.ndjson`
+is untouched.
+Rejected: a soft delete that hides the session and keeps the files — recoverable and
+audit-safe, and it adds a third lifecycle state beside live and ended plus a cleanup path
+someone must write, or the storage root grows without bound, which is the failure D20 was
+written to close. Rejected keeping `meta.json` as a tombstone while removing the bulk —
+introduces a rehydration case for a session whose transcript is gone, to record something the
+audit log already records.
+The audit exception is the substance of this decision rather than a caveat: a record an
+operator can delete along with the session it describes is not evidence, and that is the
+reason `audit.ndjson` was made server-wide in the first place.
+Reversibility: cheap toward soft delete, which is additive. Not reversible per session — a
+deleted checkpoint history is gone, and the operator should be told so before confirming.
+
+### 2026-08-08 — D26 The audit record is durable before the permission response reaches the child
+Context: `10-design.md § Control flow` path 2 wrote the audit record after `adapter.respond`
+had already put the `control_response` on the child's stdin. A crash in that window leaves a
+tool that ran with nothing recording who authorised it.
+Chosen: append the audit record durably, then respond.
+Rejected: responding first — the natural order, since the decision is freshest there, and it
+saves the operator a millisecond. It also puts the hole precisely where a crash is most
+consequential. Rejected a best-effort append with no stated ordering — the same hole, harder
+to notice, and it makes the guarantee untestable.
+The threat model calls this log the artifact that makes multi-operator use defensible. A log
+with a gap exactly where the process died is not that, and the cost of closing it is one
+durable append on the approval path, which is already the slowest path in the system because
+a human is in it.
+Reversibility: cheap, but it is the kind of ordering that is silently lost in a refactor, so
+it is stated as an ordering guarantee in the design rather than left to implementation order.
+
+### 2026-08-08 — D27 Codex's approval model was overstated; the asymmetry is one of verification
+Context: `10-design.md § The hard problem` presented Codex as setting tool policy only at
+launch, with whole-session granularity and no runtime approval concept. `codex/PROFILES.md`,
+in this repository, sets `approval_policy = "on-request"` in every profile — so Codex does
+prompt at runtime. The claim was wrong on a fact available locally.
+Chosen: correct the design's premise. Codex has a runtime approval concept; what is unverified
+is whether it is reachable over a programmatic stream rather than only inside its terminal UI,
+where a browser console cannot answer it. D5's decision is unchanged — the contract still
+models the interactive case and Codex may still under-deliver against it — but the reason is
+now "unverified over a programmatic transport", not "does not exist".
+Rejected: leaving the earlier wording. It read as a settled capability gap, and a settled gap
+is not something anyone runs an experiment against — it would have quietly retired the very
+question that could reverse D5.
+This is a correction to a premise, not a reversal of a decision. D5 stands. The open question
+it depends on is sharpened from "does Codex offer any runtime approval hook" to "is
+`on-request` reachable programmatically".
+Reversibility: not applicable; this is a factual correction.
+
+### 2026-08-08 — D28 The workspace jail is stated as a start-time control, not a sandbox
+Context: `10-design.md § Threat model` listed "a curious operator wandering outside their
+workspace" as in scope with "path jail" as the control. The jail decides where a session may
+start and pins `cwd` across turns (D4). It does nothing about where the child may reach once
+running — the agent has the server user's full filesystem access, so an approved read of a
+path outside every root succeeds. The row credited one control with the work of another.
+Chosen: split the row into the start-time control and the runtime one, and say outright that
+`workspaceRoot` is not a sandbox. Name what actually constrains a running agent per vendor:
+for Claude the permission prompt and nothing else, for Codex its own `sandbox_mode` enforced
+below us — the one place the vendor asymmetry runs in Codex's favour.
+Rejected: leaving the row as written. The brief's first non-goal already concedes that console
+access is equivalent to shell access, so the row was not *false* against the brief, and that
+is precisely the problem — a table cell reading "path jail" invites a reader to believe the
+agent is confined, and the concession is three sections away in a different document. Rejected
+adding a real sandbox instead — that is per-session containers, which the brief makes a binding
+non-goal.
+No behaviour changes. This is a claim being brought back in line with what the system does,
+which is why it is logged rather than left as a wording edit: the next reader who assumes
+containment will assume it from a document, and the record should show the assumption was
+considered and rejected.
+Reversibility: not applicable; this is a factual correction.
+
+### 2026-08-08 — D29 Cross-site request forgery is a named adversary, answered by an origin allow-list
+Context: the threat model had no row for a malicious page in an operator's browser, and every
+auth mode in D3 authenticates by something the browser attaches automatically. A page the
+operator visits can issue `POST /api/sessions/:id/message`, or `/permission
+{behavior:'allow'}`, at the console's address; the cookie rides along on a cross-origin POST
+and the response being unreadable is irrelevant, because the damage is the request. The
+*internet* row claimed coverage through the bind check and the auth check, and this path goes
+through an authenticated browser and around both. The audit log then records the operator as
+the approver, so the evidence misattributes the exploit.
+Chosen: every state-changing route — `POST` and `DELETE` under `/api/` — and the WebSocket
+handshake require `Origin`, or `Sec-Fetch-Site: same-origin` where sent, to match a configured
+allow-list. `403 bad_origin`, refused before identity is resolved. The fallback shared-secret
+cookie becomes `SameSite=Strict; HttpOnly; Path=/` as defence in depth. Read routes are not
+covered: a cross-origin `GET` cannot be read back by the attacking page, and covering it
+breaks a reverse proxy that rewrites `Origin`.
+Rejected: relying on `SameSite` alone. It governs *our* cookie, and the primary deployment is
+a reverse proxy authenticating by a cookie belonging to Authelia or oauth2-proxy that we do
+not set and cannot attribute — the proxy then injects `X-User-Id` onto the forged request
+itself. The exposure is not confined to the shared-secret mode, which is the thing that makes
+a cookie attribute the wrong control.
+Rejected: a double-submit CSRF token. The textbook answer, and it buys nothing the origin
+check does not, at the cost of token issuance, rotation, and a WebSocket handshake path that
+has to carry it too.
+Rejected: bearer-token-only auth, no cookies. Removes the attack class by construction, since
+browsers never attach an `Authorization` header cross-origin. It costs the bare-LAN fallback
+mode D3 assumes and complicates the Open WebUI proxy contract D11 consumes, both of which are
+cookie-shaped.
+The WebSocket case needs the check at the handshake rather than at first-message auth:
+browsers do not apply the same-origin policy to WebSocket connections, `Origin` is the only
+signal the handshake carries, and deferring it means the connection is already open and driven
+by whoever opened it.
+Reversibility: cheap. It is a property of the identity edge, designed once. Expensive later
+only in that it is invisible until exploited.
+
+### 2026-08-08 — D30 The workspace busy check tests overlap, not path equality
+Context: D19 admits one live session per workspace and the check compared resolved paths for
+equality. A session at `D:\work\repo` and one at `D:\work\repo\packages\api` have unequal
+resolved paths, so both are admitted — and the second is inside the first's work-tree, so
+session A's `add -A` checkpoints B's files and A's restore silently reverts B's work. That is
+the exact hazard D19 exists to close, under a design that asserts nothing downstream needs to
+consider a shared workspace because there cannot be one.
+Chosen: refuse when the resolved path equals, is an ancestor of, or is a descendant of any
+live session's `cwd`. One predicate in the create path. The refusal names the holding path and
+operator.
+Rejected: pathspec-scoping each session's checkpoints so overlapping sessions cannot overwrite
+each other. It preserves the monorepo case, and it makes restore partial by design and
+withdraws D19's guarantee — checkpoints, restore and reaping each have to re-reason about
+sharing, which is precisely the cost D19 paid a refusal to avoid.
+Rejected: accepting the nesting hazard with a documented risk. D19 already rejected the weaker
+form of this (a warning banner) on the grounds that the hazard is silent data loss and a
+banner is not a lock.
+The cost is real and is stated in the design rather than discovered: two operators cannot take
+different packages of one monorepo. That is the price of the guarantee, and D19's own rejected
+alternatives show the alternative prices.
+Reversibility: cheap while it is one predicate. Expensive after implementation, because
+everything downstream was built on the guarantee holding.
+
+### 2026-08-08 — D31 Restore removes files created after the target, behind a safety checkpoint
+Context: `git checkout <sha> -- .` writes the target tree over the work-tree and deletes
+nothing absent from it. Creating files is the common case for a coding agent, so restoring to
+a checkpoint before turn N reverted modified files and left every file turn N created —
+including the wrong migration or injected script the rollback was invoked to remove — while
+the console reported success. Brief DoD #6 promises the workspace rolled back to its state
+before an earlier message.
+Chosen: restore is three operations — `commit --allow-empty -m "before restore to <sha>"`,
+then `checkout <sha> -- .`, then `clean -fd`.
+Rejected: `checkout` alone, as the prior art does it. It is half a rollback reported as a
+whole one, and the half it omits is the half most rollbacks are for.
+Rejected: `clean` without the preceding safety commit. One fewer commit on the restore path,
+and an operator who restores to the wrong sha loses everything since it with nothing in the
+console offering a way back. The safety checkpoint makes the mistake itself recoverable.
+Rejected: narrowing DoD #6 to match the weaker behaviour. That is a brief change, and it guts
+the feature rather than fixing it.
+Two properties make `clean` safe enough not to need a warning dialog, and both are stated in
+the design: the safety checkpoint precedes it, and `add -A` reads the workspace's own
+`.gitignore` so ignored paths never enter the shadow repo — `clean -fd` without `-x` leaves
+exactly that same set alone. The pair is symmetric: clean can only remove what a checkpoint
+could have restored, so a restore never forces a dependency reinstall.
+Reversibility: cheap; restore semantics are contained in the checkpoints module and no code
+exists. Expensive later because operators will have relied on restores that were silently
+partial, with no record distinguishing them.
+
+### 2026-08-08 — D32 A guard is claimed in the same synchronous block that tests it
+Context: the concurrency section argued that no lock is needed because Node is
+single-threaded and `emit` is the serialisation point. That argument covers `emit`, which is
+synchronous. None of the request handlers are. As written, `POST /message` reads
+`check turn == null` → `await checkpoints.commit` (a git subprocess, seconds on a large tree)
+→ `set turn`, so two requests in one tick both pass the check and two children spawn for one
+session. `POST /sessions` has the identical shape around the busy check and `await mkdir`,
+defeating D19 and D30. The races table named "manager turn state" as the enforcer of both,
+which described an intention rather than a mechanism.
+Chosen: state one rule — no `await` may sit between a check and the mutation it protects — and
+apply it in both paths. The turn slot is occupied by a `Turn` in phase `starting` before the
+checkpoint is awaited; the workspace claim is registered before storage is touched; both are
+released on failure.
+Rejected: a per-session async mutex. It solves the same problem and makes "there is no mutex
+anywhere in this design" false, replacing one stated ordering with a primitive that has to be
+acquired correctly in five call sites.
+The rule keeps the ordering guarantee that a turn's checkpoint precedes its `turn.started`,
+because claiming the slot and emitting the event are deliberately separate: `turn.started`
+still follows the commit.
+Reversibility: cheap — it is an ordering statement in two paths. Expensive later because the
+failure is probabilistic and every downstream guarantee assumes it never happens.
+
+### 2026-08-08 — D33 The pending delete precedes the audit append, and a failed append denies
+Context: D26 fixed that the audit record is durable before the response reaches the child, and
+left two things unstated. Where the `pending` map delete sits relative to that append decides
+whether two clients answering one permission produce two `control_response`s on one child's
+stdin. And what happens when the append itself fails — disk full on `audit.ndjson` — was not
+chosen at all: fail-open sends an unaudited allow, fail-closed wedges a turn whose child is
+blocked forever.
+Chosen: `pending.delete(requestId)` synchronously at lookup, before anything is awaited; then
+the durable append; then the response. On append failure, send `control_response
+{behavior:'deny'}` carrying the storage failure as its reason, emit `permission.resolved` with
+that denial and a `session.notice / error`.
+Rejected: appending before the delete. Both requests then pass the lookup during the first
+one's append — two audit records, two responses, CLI behaviour undefined.
+Rejected: fail-open on an append failure. A tool runs with nothing recording who authorised
+it, which is the hole D26 exists to close, arriving by a different door.
+Rejected: wedging the turn on an append failure. It is fail-closed in the letter and it strands
+the child in the one state an operator most wants to escape.
+Delete-first is safe in the crash case precisely because of the ordering: a crash between the
+delete and the append loses the record of a decision that never reached the child, so nothing
+ran and nothing is unaccounted for. The reverse order puts the same window somewhere it costs
+evidence. Denial is the only decision safe to make without being able to record it.
+Reversibility: cheap — one stated ordering and one stated failure rule. Both failure shapes
+are silent, which is why they are stated rather than left to implementation order.
+
+### 2026-08-08 — D34 cliSessionId is last-write-wins from every system/init
+Context: the data model declared `cliSessionId` write-once-then-stable, and the Claude CLI is
+documented to mint a new session id on each `--resume`. Under write-once the server keeps
+resuming turns 3, 4 and onward with the id turn 1 reported: depending on CLI version that
+forks stale context — turn 3 resuming a conversation that never saw turn 2 — or fails. Also
+unhandled: a first child that dies before `system/init` leaves the cell null, and what turn 2
+does with a null resume id was unstated.
+Chosen: the manager stores the id from every `system/init` and resumes with the most recent.
+Where the cell is null, the next turn spawns without `--resume` and emits `session.notice /
+warn` saying the conversation context was not carried forward.
+Rejected: keeping write-once and pinning the first id. It is the current text, and it silently
+loses conversation memory mid-session while the transcript renders as continuous.
+Rejected: refusing a turn when `cliSessionId` is null after a first turn. It wedges a session
+over a recoverable condition.
+The notice is the substance, not a nicety: D20 rejected full resumption specifically because
+it fails by starting a fresh conversation the operator believes is continuous. That same
+failure was re-entering mid-session through a null resume id, unannounced.
+Reversibility: cheap — one mutability cell and one stated rule. Expensive later because
+`meta.json`'s shape, the adapter contract and the resume path all encode the stability
+assumption.
+
+### 2026-08-08 — D35 Standing approvals are held by this server, not handed to the CLI
+Context: the prior art expresses "always allow" by returning `updatedPermissions` on an allow,
+and the CLI persists it in its own settings — workspace- or user-scoped, outside this server's
+storage. Every later tool call matching that grant then runs without emitting `can_use_tool`
+at all: no `permission.request`, no `permission.resolved`, no audit append, in this session or
+in a later session on the same workspace owned by a different operator. Brief DoD #7 promises
+an audit record of *every* tool approval.
+Chosen: do not forward `updatedPermissions`. The manager records the standing rule in its own
+session-scoped state and auto-answers matching requests itself, emitting the full
+`permission.request` / `permission.resolved` pair with `scope: 'standing'` and appending an
+audit record every time.
+Rejected: forwarding it and accepting the gap, with DoD #7 narrowed from "every". Cheapest,
+and it makes the log show one grant then silence while tools execute for other operators under
+a scope decision the server can neither enumerate nor revoke. Retroactive attribution of
+unaudited runs is impossible, and the multi-operator defensibility claim rests on this log.
+Rejected: dropping "always allow" from the first cut so every call is prompted. The most
+defensible option and the one that makes an `npm run *` loop unusable, which is how operators
+end up wanting `--dangerously-skip-permissions`.
+The cost is that the matching grammar becomes ours. `permission_suggestions` is still where
+the shape comes from — the CLI proposing `npm run *` from a concrete command is the useful
+part — but we evaluate it, so open question 8 stops being a look-before-inventing note and
+becomes blocking for the slice that ships standing approvals.
+Reversibility: cheap to decide now. Expensive later in the one direction that matters: unaudited
+runs cannot be attributed after the fact.
+
+### 2026-08-08 — D36 An operator can end a session
+Context: `state` is `'live' | 'ended'` and one-way, and the only transitions into `ended` were
+a server restart (D20) and nothing else. An operator finishing work had two options: leave the
+session live, holding its workspace busy under D19 against every colleague, or delete it,
+which destroys the transcript, the checkpoints and the tool output. "Free the workspace" and
+"keep the record" were mutually exclusive.
+Chosen: `POST /api/sessions/:id/end`. Refused `409 turn_in_flight` while a turn runs; sets
+`state = 'ended'` and `endedAt`, emits `session.ended`, rewrites `meta.json`, releases the
+workspace claim. Everything on disk survives.
+Rejected: an idle timeout that ends a session automatically. D21 removed every server-side
+timer deliberately, and a session with no turn running is indistinguishable from one whose
+operator stepped away mid-task.
+Rejected: leaving it, on the grounds that delete already frees the workspace. The workaround
+operators would find is the record-destruction path, which is exactly the outcome D25's audit
+carve-out and D20's rehydration were written to avoid.
+Reversibility: cheap. The state machine already had both states; what was missing was one
+transition.
+
+### 2026-08-08 — D37 meta.json has a write protocol, and "durable" means fsync
+Context: `lastSeq` was declared persisted and changes on every emit, and no write protocol was
+stated. Either `meta.json` was rewritten per event — thousands of full-file rewrites per turn,
+with no atomic-rename discipline, so a crash mid-rewrite corrupts the one file rehydration
+needs — or it was written lazily, leaving `lastSeq` behind the spill's real tail so a
+rehydrated session mis-bounds its own replay. Separately, D26 rests on the word *durable*,
+which appeared nowhere with a definition: an append that reached the OS survives a process
+crash but not a host crash.
+Chosen: `meta.json` is written temp-then-atomic-rename, never in place, on exactly three
+occasions — create, a `state` transition, and a change to `cliSessionId`. Never per event.
+`lastSeq` is derived at boot from the tail of `events.ndjson`; the copy in `meta.json` is a
+diagnostic hint and the spill wins where they disagree. *Durable* means fsync of the data and,
+for a rename, the containing directory.
+Rejected: a per-event rewrite with atomic rename. Correct and unaffordable — a rename and an
+fsync per envelope, to keep a number that can be recovered by reading the file that already
+holds the answer.
+Rejected: leaving `lastSeq` authoritative in `meta.json` and writing it lazily. The cheap
+version of the same thing, with a self-inflicted inconsistency between the bookkeeping and the
+data.
+Ordinary spill appends are deliberately not fsync'd per line; the cost is unjustifiable at
+event rates and the loss window is bounded by OS writeback. Stating that difference is the
+point, so that one guarantee is not later read as the other.
+Reversibility: cheap now — a write-protocol paragraph. Expensive later because every store
+consumer will have encoded an assumption about it.
+
+### 2026-08-08 — D38 Reaping kills the process tree, and the spawn window is accepted
+Context: `pids.ndjson` records the CLI's pid, and boot reaped that pid. What holds a workspace
+open is what the CLI spawned — a compiler, a test runner — which the interrupt section already
+identifies. Killing the CLI alone orphans those to the OS: the rehydrated session is ended so
+the workspace is not busy, a new session starts, and its checkpoint restore fails on Windows
+because a process nothing tracks holds a handle. That is the exact platform failure D16's
+per-turn child claims to make impossible by construction.
+Chosen: reap the tree with the platform's own mechanism — `taskkill /PID <pid> /T /F` on
+Windows, which resolves the tree from the live process table at kill time; `detached: true` at
+spawn plus `process.kill(-pgid)` on POSIX, with `pgid` added to the process record. The reuse
+guard is unchanged and gates the group leader. This is the same mechanism interrupt already
+specifies, now used in both places.
+Rejected: continuing to kill the recorded pid alone. It is the current text and it leaves
+behind precisely the processes that matter.
+Rejected: a Job Object to make the tree a first-class handle. D23 rejected it for a dependency
+Node does not expose natively on the required platform pair, and that reasoning is unchanged —
+but note the rejection now costs less than it appeared to, because `taskkill /T` and process
+groups are built in and reach the same processes.
+The window between `spawn` returning and the `pids.ndjson` append landing is stated as an
+accepted exposure rather than designed around: a crash inside it leaves a child no record
+names, which boot cannot reap at all. Closing it needs a handle that exists before the process
+does, which is the Job Object above. The window is short and its consequence is one orphan an
+operator kills by hand.
+Reversibility: cheap now, while the record schema and kill discipline are on paper. Expensive
+after the store schema ships, because it touches spawn, record and boot together.
+
+### 2026-08-08 — D39 Boot closes a turn the crash left open
+Context: a server dying between `turn.started` and `turn.ended` — every crash during a turn —
+leaves the spill ending on an unpaired `turn.started`, possibly an unanswered
+`permission.request`, possibly a `tool.call` with no result. *Ordering guarantees* states
+without qualification that `turn.ended` follows all of a turn's events and that a
+`permission.request` is answered by exactly one `permission.resolved`. D20 made the spill the
+read path, so a rehydrated session serves that transcript to a client told it could rely on
+both.
+Chosen: during rehydration, for a session whose spill ends unterminated, append a
+`permission.resolved` carrying `cancelled_process_exit` for each outstanding request, then a
+`turn.ended` with a `server_restart` stop reason, at the next `seq` and durable before the
+session is served. Step 3 of boot, before listening.
+Rejected: qualifying the ordering guarantees and letting clients handle an unterminated turn.
+It pushes the case onto every renderer and every replay consumer permanently, and the failure
+without it is a client rendering an ended session as eternally mid-turn, or crashing on an
+invariant it was told was guaranteed.
+Rejected: reconstructing the closure at read time rather than writing it. It keeps the spill
+pristine and means every reader implements the same repair, which is the same defect one layer
+down.
+Reversibility: cheap — one boot step. It needs a second `stopReason` value on the contract, and
+that is recorded as drift alongside D24's.
+
+### 2026-08-08 — D40 The spill serves replay for live sessions, not only ended ones
+Context: the ring holds 2000 envelopes and the spill read path was specified for ended
+sessions. A turn emitting more than 2000 envelopes — a test run streaming tool results does it
+routinely — while an operator's laptop is asleep produces a reconnect whose `Last-Event-ID`
+predates the ring, answered with `replay_gap` and a client told to refetch from a read path
+that does not exist for a live session. Brief DoD #5 is "refresh the page mid-turn and lose
+nothing", and mid-turn is exactly where it failed. This was carried as an optional
+simplification in open questions; it was a brief conflict.
+Chosen: a too-old `Last-Event-ID` is served from `events.ndjson` for live and ended sessions
+alike, then the client joins the live stream. `replay_gap` survives only where the spill
+genuinely cannot serve — writes have failed (D41), or the tail is torn.
+Rejected: growing the ring. It moves the threshold and bounds nothing; the failing case is a
+single turn, so any fixed size has a turn that outruns it.
+Rejected: leaving it and accepting the DoD failure. The events are permanently unrenderable
+for the duration of the turn that produced them, which is the whole window an operator is
+watching.
+The machinery is D20's spill reader, already required; the change is which sessions may use
+it. It costs S3.3, whose assertion becomes "a gap is reported only when the spill cannot
+serve" — a slice change, recorded as one.
+Reversibility: cheap.
+
+### 2026-08-08 — D41 A spill write failure ends the session
+Context: the failure table said disk full on the spill was non-fatal and live streaming
+continues. The ring then holds envelopes the spill never will, so replay-from-memory and
+replay-from-disk diverge — the precise failure D22 calls the same as a gap with none of the
+reporting, introduced here by the design's own error handling. D40 then makes it worse by
+serving reads from the diverged file.
+Chosen: a spill write failure is fatal to that session. The live turn is interrupted through
+the D24 path with a `storage_failure` stop reason, the session is marked ended, and no new
+turn is accepted. The transcript ends at the last durable event and says so.
+Rejected: continuing to stream and marking the ring divergent, refusing replay from that point.
+It preserves the live view for currently-connected clients and sacrifices the invariant that
+makes the two tiers interchangeable, which D40 now depends on.
+Rejected: keeping it non-fatal as written. A post-restart transcript missing events an operator
+watched live, with no marker at the seam — invisible until a dispute needs the transcript.
+Reversibility: cheap — one stated rule for what the ring does when the spill is failing.
+
+### 2026-08-08 — D42 A failed pre-turn checkpoint warns; the turn proceeds
+Context: `checkpoints.commit` runs before every turn and the failure table had a row only for
+`ckpt.git` init failing at create. A crash mid-commit leaves `ckpt.git/index.lock`, which git
+does not clean up, so every subsequent pre-turn commit fails. Nothing said what that does to
+the message path — turn refused, proceeds checkpointless with a notice, or proceeds silently.
+Chosen: `session.notice / warn` naming the cause, and the turn proceeds with no restore point.
+The client marks that turn as not rollback-able, and the notice names `ckpt.git/index.lock`
+where that is the cause, because the operator cannot clear it from the console and needs to
+know what to clear.
+Rejected: refusing the turn with a `checkpoint_failed` error. It protects DoD #6 and wedges the
+session on a stale lock file, with every message refused and no in-console remedy.
+Rejected: proceeding silently. It is the failure the row exists to prevent — turns running
+without the rollback point DoD #6 depends on, with nothing saying so.
+This follows the precedent the init-failure row already sets: checkpoints are best-effort and
+DoD #6 degrades visibly rather than blocking work.
+Reversibility: cheap — one failure-table row.
+
+### 2026-08-08 — D43 The client's rendering rules are part of the design
+Context: the design calls the prior art's CSP disqualifying in a browser app that renders model
+output, and then specified no CSP, no sanitisation rule and no content-type discipline for its
+own client. The client renders model output, tool results, stderr and fetched untruncated
+blobs — all attacker-influenceable through prompt injection, which is the threat model's own
+confused-agent row. The blob route in particular could serve raw HTML that renders in the
+console's origin.
+Chosen: state the rules in *Security controls*. A strict CSP with no `unsafe-inline` and no
+`unsafe-eval`; no `innerHTML` for anything agent-derived, text nodes only, with diffs and code
+built into elements the client constructs; and the tool-output route serving `text/plain;
+charset=utf-8` with `X-Content-Type-Options: nosniff` and `Content-Disposition: attachment`.
+Rejected: leaving it to whoever writes the client. The consequence is specific rather than
+theoretical — script executing in the console's origin can issue exactly the POSTs the operator
+can, from a page D29's origin check trusts — and it is an XSS audit of a finished renderer
+instead of a paragraph.
+Rejected: sanitising agent output rather than never parsing it as markup. Sanitisers are a
+denylist maintained against browser parsing quirks; not parsing is a property.
+Reversibility: cheap now, as a stated rule. Expensive later, as a retrofit through a renderer
+built without it.
+
+### 2026-08-08 — D44 The event vocabulary is closed, and turn-scoped payloads carry `turnId`
+Context: `/contract` had to express the ten amendments `10-design.md § Open questions` item 9
+assigns to it. Three of the contract's fields were bare `string` — `TurnEnded.stopReason`,
+`ErrorEvent.kind`, and the notice text — which cannot be narrowed by a client and, worse,
+invited an adapter to pass a vendor's own stop reason through unchanged. That is a vendor
+string above the adapter layer arriving by the back door. Separately, only `MessageDelta`
+carried `turnId`, while the ordering rules tell a client to pick a rendering "by `turnId`"
+and D22's blob route requires `turnId` from the `tool.result` envelope that links to it.
+Chosen: `TurnStopReason`, `ErrorEventKind`, `SessionNoticeCode`, `ResolvedScope`,
+`PermissionResolvedReason` and `SessionEndReason` are closed unions enumerated from the
+design's failure tables and decision records; every turn-scoped payload carries `turnId`.
+Rejected: leaving them open strings — the client then branches on vendor text, and the two
+values D24, D39 and D41 need would be indistinguishable from a crash at the renderer.
+Rejected: an escape hatch value such as `other` — it is the open string again, with a
+narrower spelling.
+Reversibility: cheap. Adding a union member is a contract amendment and a renderer case;
+nothing persisted encodes the closure.
+
+### 2026-08-08 — D45 `session.exit` becomes `session.ended`, and `state` lives on the summary
+Context: amendment 1 of item 9. Under D16 a normal turn ends the child, so a contract-obedient
+client tore down the session view after every successful turn. Amendment 3 asked for `state`
+on both `SessionSummary` and `session.started`.
+Chosen: delete `session.exit`; turn-process exit is `turn.ended` with a `TurnStopReason`.
+Add `session.ended { reason }` covering the three ways into `ended` — D36 operator, D20
+restart, D41 storage failure. `state` goes on **both** `SessionSummary` and `session.started`,
+as amendment 3 asks.
+Known and retained: `SessionStarted.state` is the state at emission, and `session.started` is
+emitted once at creation and replayed forever — so the field is the constant `'live'` in every
+session that ever existed, including ended ones. The contract proposed putting `state` on the
+summary alone for that reason; the owner chose the amendment as written, and the staleness is
+recorded in `20-contract.md § Rules the renderer may rely on` instead of being designed away.
+The authority is `SessionSummary.state`, or a `session.ended` later in the stream; a renderer
+that reads the replayed field will show an enabled compose box for an ended session.
+Rejected: deriving `state` entirely from the stream, with boot appending
+`session.ended { reason: 'server_restart' }` — extends D39's boot writes, and the
+storage-failure path cannot append its own ending, so one of the three ways into `ended` would
+stay invisible to the stream.
+Rejected: keeping `session.exit` alongside, with a flag distinguishing the two — two names for
+one boundary, and the client must get the flag right to avoid the original bug.
+Reversibility: cheap, before any client exists.
+
+### 2026-08-08 — D46 The adapter's outbound channel is a notification union, not `emit`
+Context: the design gives adapters exactly one outbound channel (`emit`) and no dependency on
+`store`, and simultaneously requires three facts to reach the manager that are not normalised
+events: the `cliSessionId` from every `system/init` (D34, since the manager stores it and
+supplies `--resume`), the spawned child's pid, pgid and image (D23, since the manager appends
+`pids.ndjson`), and the child's exit. With `emit` carrying envelopes only, there is no
+signature for any of them, and the first implementer either adds an adapter→store edge the
+module graph forbids or smuggles the values through `raw`.
+Chosen: the adapter is given `notify(n: AdapterNotification)`, a four-member union — `event`,
+`cli-session`, `spawned`, `exited`. The adapter emits payloads without `seq`, `sessionId`, `ts`
+or `turnId`; the manager assigns all four. `spawn` is internal to `send`, matching *Control
+flow § 2* where the child is spawned inside the turn rather than at session creation, and the
+module table's four-word `spawn, send, respond, kill` is read as the loose summary of the two.
+Rejected: a second callback per fact — three parameters where one union does, and each new
+fact is a signature change at every call site.
+Rejected: the adapter writing `pids.ndjson` itself — makes it non-leaf and puts a storage
+dependency inside vendor code, which is what keeps a second vendor from becoming a second
+architecture.
+Reversibility: cheap. It is an internal interface with two implementations.
+
+### 2026-08-08 — D47 `attachments` is removed from `POST /message`
+Context: amendment 6. The route declared `attachments?: Attachment[]` against a type that was
+never defined, and no part of the design describes attachment handling — not the transport to
+the CLI, not storage, not the byte cap, not what an approved file reaching an agent means for
+the audit record.
+Chosen: remove the field; record the gap under `20-contract.md § Unresolved`.
+Rejected: defining `Attachment` here — it is a feature, not a type, and inventing one at the
+contract stage commits the implementer to a transport nobody chose.
+Rejected: leaving the field with an undefined type — a contract that does not compile is not a
+constraint.
+Reversibility: cheap. Adding a request field is backward-compatible.
+
+### 2026-08-08 — D48 Fallible boundaries return `Result`, never a thrown error
+Context: the contract must name an error type per public signature, and TypeScript has no
+`throws` clause — a thrown error is invisible in a signature and degenerates to `unknown` at
+the catch site, which is how string errors and bare exceptions get in.
+Chosen: `Result<T, E>` on every fallible signature crossing a module boundary, with a
+discriminated union error type per module and an explicit mapping from each variant to its HTTP
+code, its retryability and what the caller does.
+Rejected: typed exception classes — still invisible in the signature, and `instanceof` across
+module boundaries is the check nobody writes.
+Rejected: `Result` everywhere including internals — noise on paths where nothing can fail.
+Reversibility: expensive. It shapes every call site, which is the argument for settling it in
+the contract rather than in the third slice.
+
+### 2026-08-08 — D49 `meta.json` carries `schemaVersion`, and an unknown one is a corrupt file
+Context: `meta.json` is the file rehydration depends on and the design gives it a write
+protocol but no version. The contract must state a migration story per persisted file, and
+there is no story to state without a discriminator.
+Chosen: `{ schemaVersion: 1, session: SessionRecord }`. An unknown version is handled exactly as
+a parse failure already is — skip the session, log it, leave its files untouched, never abort
+boot. Append-only files carry no per-line version: readers ignore unknown fields, and a field
+removed or retyped is a `schemaVersion` bump plus a refusal to rehydrate older sessions.
+Rejected: no version — the first schema change then reads old data as though it were new, which
+is silent wrong state in the one file that decides what a session is.
+Rejected: a version per NDJSON line — a discriminator on every event to describe a shape that
+changes once a year.
+Reversibility: cheap now; the whole point is that it is expensive to add after data exists.
+
+### 2026-08-08 — D50 There is no per-operator vendor authorisation
+Context: the contract carried `403 if the caller may not use that vendor` on `POST /sessions`,
+and a `403 forbidden` code for "authenticated, not the session's owner" — which the same
+document contradicts two paragraphs later by returning `404` so that session existence cannot
+be probed.
+Chosen: remove both. Vendor choice is open to any authenticated operator, and non-ownership is
+always `404 no_such_session`.
+Rejected: keeping the vendor check — D3 chose delegated identity precisely so that no account
+state lives here, and *Data model § Operator* is `{ id }`, not persisted. There is nowhere to
+store a per-operator grant, so the check could only ever have been a constant.
+Rejected: keeping `403 forbidden` as a reserved code — a code no path emits is a code someone
+later emits by accident, defeating the probe defence.
+Reversibility: cheap for the vendor check, which would arrive with whatever introduces operator
+records. The `404` is load-bearing and should not be reversed.
+
 ## Open
 
 Staging only. Once an item becomes an issue it leaves this list.
-
-- Does `--include-partial-messages` yield usable token-level deltas on the Claude CLI, and
-  does `message.delta` survive contact with it? Cheap experiment, changes the renderer.
-- Does the Codex CLI expose a live NDJSON stream, and does it resemble the rollout schema?
-  Blocks the whole Codex adapter; see S5.
-- Does Codex offer any runtime approval hook? If yes, D5 is revisited.
-- Checkpoint restore when two operators share one workspace is undefined. Probably refuse
-  rather than resolve.
-- Whether `permission_suggestions` from the Claude CLI is a sufficient grammar for
-  "always allow", or whether a local rule language is needed. Look before inventing.
-- `Start-AgentSession.ps1` (D14) is unreconciled against this repo's own architecture — it
-  assumes a local interactive terminal, not the server/SSE/adapter shape D1–D12 settled on.
-  Reconcile when a slice first needs a CLI launcher, not before.
