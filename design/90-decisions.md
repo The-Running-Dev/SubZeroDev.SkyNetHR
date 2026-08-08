@@ -950,39 +950,3 @@ records. The `404` is load-bearing and should not be reversed.
 ## Open
 
 Staging only. Once an item becomes an issue it leaves this list.
-
-- Does `--include-partial-messages` yield usable token-level deltas on the Claude CLI, and
-  does `message.delta` survive contact with it? Cheap experiment, changes the renderer.
-- Does the Codex CLI expose a live NDJSON stream, and does it resemble the rollout schema?
-  Blocks the whole Codex adapter; answered by S8.1.
-- Is Codex's `approval_policy = "on-request"` reachable over a programmatic stream, or only
-  inside its terminal UI? D27 corrected the premise; if it is reachable, D5 is revisited.
-- Whether `permission_suggestions` from the Claude CLI is a sufficient grammar for
-  "always allow", or whether a local rule language is needed. **D35 makes this blocking for
-  the slice that ships standing approvals** — the server now does the matching, so it needs
-  a grammar it can evaluate, and "look before inventing" is no longer optional advice.
-- `Start-AgentSession.ps1` (D14) is unreconciled against this repo's own architecture — it
-  assumes a local interactive terminal, not the server/SSE/adapter shape D1–D12 settled on.
-  Reconcile when a slice first needs a CLI launcher, not before.
-- Are Codex's `callId`s unique within a session or only within a turn? If the latter, tool
-  correlation breaks and `10-design.md § Data model — Identity spaces` needs a server-side
-  alias after all. Answered by S8.1. The storage half is closed — the blob path carries
-  `turnId` — and correlation is not.
-- The spill has no index; a replay reads it from the start and skips to `after`. Fine at the
-  expected volume, and at 100× it opening an old session becomes a multi-second scan that
-  grows with the session's own history. An offset sidecar is the fix; the file format is what
-  it would constrain, so it is listed rather than designed.
-- Tool-output blobs (D22) have no retention rule. They are the only storage that grows with
-  tool volume rather than session count. Per-session byte budget, age-based sweep at boot, or
-  deleted only with their session — the last is what the design does today by omission.
-- Nothing prevents two server processes over one storage root. The no-lock argument in
-  `10-design.md § Concurrency` holds for one process and stops holding silently for two.
-  A lock file at the storage root is the obvious answer; whether an accidental double-start
-  is worth a startup failure mode is a deployment judgement, not an architectural one.
-- Attachments on `POST /message` are undesigned (D47). Nothing describes the transport to the
-  CLI, storage, the byte cap, or what an approved file reaching an agent means for the audit
-  record. The field is out of the contract until a design decision puts it back.
-- Who renders `ToolCall.summary` is unowned. The contract has the adapter produce it, which
-  makes vendor code responsible for a display string; moving it to the manager would put
-  tool-shape knowledge above the vendor boundary. Neither is comfortable and neither is
-  urgent.
