@@ -947,6 +947,585 @@ later emits by accident, defeating the probe defence.
 Reversibility: cheap for the vendor check, which would arrive with whatever introduces operator
 records. The `404` is load-bearing and should not be reversed.
 
+### 2026-08-08 — D51 The imported console prototype is a design input, not an authority
+Context: a Claude Design prototype (`design/prototype/`) was imported and initially declared a
+source of truth. Read against the brief, it describes a different product: an agent fleet
+console with payroll, performance reviews and an org chart, and none of the brief's seven
+definition-of-done items has a screen. Granting it authority would have overturned two binding
+non-goals without either being examined.
+Chosen: the prototype is a committed snapshot and a design input. `AGENTS.md § Source of truth`
+is unchanged and does not list it. Where it and the design disagree, the disagreement is
+adjudicated screen by screen — D52 to D58 are that adjudication.
+Rejected: normative standing — it would have silently overridden `Multi-agent orchestration`
+and `Hosting the model`, which is the reconciliation the source-of-truth rule exists to stop.
+Rejected: discarding it — half its surface maps onto real slices, and the visual language is
+work that would be redone from nothing.
+Reversibility: cheap. Nothing depends on the snapshot; it can be re-imported or dropped.
+
+### 2026-08-08 — D52 Operator-driven assignment is in scope; agent-spawned sub-agents are not
+Context: the brief's non-goal reads "Multi-agent orchestration. One session, one agent process.
+Fan-out is not in scope." The prototype's backlog drags a ticket onto an agent, and its org
+chart shows sub-agents spawned by a parent. Multiple concurrent sessions were never at issue —
+`10-design.md § What is actually concurrent` already lists them, and `GET /api/sessions` exists.
+Chosen: the non-goal bans *automated* routing. An operator dragging work onto a session is an
+operator action and stays. Agent-spawned sub-agents are cut: `POST /api/sessions` is an operator
+call, and a session started by a child has no caller identity, so the audit record required by
+definition-of-done item 7 has no answer for who approved it.
+Rejected: cutting the backlog too — it discards a gesture the human drives, on a reading of the
+non-goal that the design's own session list already contradicts.
+Rejected: keeping sub-agents — the audit-identity problem is unsolved, not merely unwritten.
+Reversibility: expensive. The backlog needs a persisted queue, which storage has no home for
+today; see the open item on what a dragged ticket becomes.
+
+### 2026-08-08 — D53 Payroll is retained in full, and the model-hosting non-goal narrows
+Context: the prototype's payroll screen shows weekly token burn, budget remaining, cost per
+shipped PR and paid idle time. The `Hosting the model` non-goal states that no inference happens
+here and no keys are held.
+Chosen: keep the screen whole. Three of the four tiles need no credential — token counts already
+arrive in the CLI stream the design parses, budgets are an operator-set `config` value, and idle
+time is derivable from session state transitions already recorded. The non-goal narrows to say
+that no inference is performed and no vendor credential is held, without claiming that reported
+usage is invisible.
+Rejected: cutting the screen — the owner ruled the full screen in after the conflict was stated.
+Rejected: a reduced usage-only panel — same ruling.
+Reversibility: expensive for cost per shipped PR, which has no source and is left open. Cheap
+for the other three, which are views over data already written.
+
+### 2026-08-08 — D54 The employee record keeps performance reviews and PIP status
+Context: the prototype's employee record mixes documented surfaces — session identity,
+permissions scope, the activity file — with a Q3 performance review, a rating scale, PIP status,
+a trailing-30-day metrics grid and a weekly timecard that no document mentions.
+Chosen: keep the whole screen. Reviews and PIP become first-class, which adds a persisted review
+entity with authorship and draft state, and the rating scale as a contract enum.
+Rejected: keeping metrics and the timecard while cutting the review — the aggregations are free
+and the review is net-new scope serving no stated operator outcome, but the owner ruled it in.
+Rejected: stripping to documented surfaces only.
+Reversibility: expensive. A persisted entity with authorship is not removed once written to.
+
+### 2026-08-08 — D55 Hiring, onboarding and incidents become real surfaces
+Context: none of the three has a counterpart in the brief, the contract or the eleven slices.
+Incidents is close to the audit record in a costume; hiring and onboarding are provisioning
+workflow around what `POST /api/sessions` already does in one step.
+Chosen: keep all three. Hiring becomes the session-creation flow with a requisition and an
+approval state, onboarding a per-session first-run checklist, incidents the audit view.
+Rejected: incidents only — the cheapest option, and the one that adds no entity.
+Rejected: hiring as a reskin of session creation with no requisition.
+Reversibility: expensive. The candidate entity and the requisition approval state are both new
+persisted shapes.
+
+### 2026-08-08 — D56 Termination and permissions scope are skins over S5 and S10
+Context: the prototype's termination screen maps onto S5's `DELETE /api/sessions/:id` but adds
+severance, a context purge, an exit-interview transcript stated never to be read, and a Clone
+action. Its permissions scope shows standing grants, which is S10's remembered decisions rather
+than S4's per-call approve and deny.
+Chosen: adopt both as presentation over existing slices. Severance renders real session state.
+`GRANTED / REQUEST / DENIED` is the remembered-decision list, where a `REQUEST` row is a rule
+that still prompts. Clone is cut — duplicating a session means forking CLI conversation state,
+which `Replacing the agent's own context management` puts out of reach. The exit interview is
+cut as fiction with no data behind it.
+Rejected: Clone as a real feature — it needs the context-management non-goal reopened before it
+can even be specified.
+Rejected: the exit interview as a final turn — implementable, but it stores a reply the screen
+itself says nobody reads.
+Reversibility: cheap. Both are presentation over endpoints that already exist.
+
+### 2026-08-08 — D57 The phone gets the prototype's shell plus the approval screen it omits
+Context: the brief makes mobile-first a non-goal but names approving a tool call from a phone as
+a real use, and S3 exists for it. The prototype draws three phone screens — backlog, staff,
+termination — and no approval screen.
+Chosen: take the phone chrome as S3's visual spec, and specify the approve and deny screen the
+prototype does not draw, since that is S3's reason to exist.
+Rejected: building the three drawn screens and deferring approval — S3 would close without
+delivering the phone's stated purpose.
+Rejected: deferring mobile entirely.
+Reversibility: cheap. No document changes; S3 gains a reference and one screen.
+
+### 2026-08-08 — D58 The four-theme switcher ships as a product feature
+Context: the prototype carries four complete visual systems — sterile enterprise, black-ops
+terminal, 1980s memo, modern SaaS — behind a runtime switcher, so "match the design" had no
+single referent.
+Chosen: all four ship, operator-selectable. This makes a design-token layer mandatory rather
+than optional, and adds a persisted per-operator preference.
+Rejected: picking one and discarding the rest — the cheapest option, and the recommendation;
+the owner ruled the switcher in as a feature.
+Rejected: a light and dark pair.
+Reversibility: expensive in practice. Every component must be built four ways from the start, and
+a component added later against one palette drifts the set without anything detecting it.
+
+### 2026-08-08 — D59 The definition of done becomes two tiers
+Context: D53 to D55 and D58 admitted payroll, performance reviews and PIP, hiring, onboarding,
+incidents and a four-theme switcher. The definition of done was still the seven console items,
+so the brief asserted this project is finished at a point where roughly half the admitted scope
+does not exist.
+Chosen: two tiers. Tier one is the seven console items and is finishable on its own; tier two
+carries the admitted surfaces as items 8 to 12, each stated as an operator outcome rather than a
+screen. Both tiers are binding.
+Rejected: one flat list of twelve — three of the four admitting decisions record expensive
+reversibility, and folding them in leaves no point at which anything is honestly finished.
+Rejected: leaving the definition at seven and holding the surfaces as scope only — the
+completion bar would permanently describe a smaller product than the one being built, which is
+the drift the source-of-truth rule exists to catch.
+Rejected: reopening D54 and D55 — signed off, and re-running the prototype adjudication to reach
+the same place buys nothing.
+Reversibility: cheap. Moving an item between tiers is an edit.
+
+### 2026-08-08 — D60 The theme preference is held by the browser, not by this server
+Context: D58 ships four operator-selectable themes with a persisted per-operator preference.
+`10-design.md § Data model § Operator` states an operator is `{ id }`, **not persisted**, with no
+profile and no preferences, because D3 chose delegated identity so that no account state lives
+here. A stored preference is account state.
+Chosen: the client holds the choice; it never reaches the server. `Operator` stays `{ id }`, and
+D3 and D58 both stand. The known cost is retained rather than solved: the theme follows the
+browser, not the person, so a new device or profile starts on the default and operators sharing
+a browser profile share a theme.
+Rejected: persisting an `Operator` record with preferences — the first account state on this
+server, reopening D3, and forcing an answer to what the record means once the upstream identity
+provider renames or removes that person. A persisted entity is not un-written.
+Rejected: one theme per deployment, set in configuration — no account state anywhere, but it
+reduces D58's product feature to an administrator setting.
+Reversibility: cheap. Making the choice travel later adds storage; it undoes nothing.
+
+### 2026-08-08 — D61 The model-hosting non-goal says reported usage stays visible
+Context: D53 records this non-goal narrowing so payroll's token burn and budget tiles are
+legitimate. Read literally, the previous wording — "No API keys are held by this server, no
+inference happens here" — never claimed usage was invisible. This was a misreading risk, not a
+contradiction.
+Chosen: state it anyway. No inference is performed and no vendor credential is held, and that
+does not make reported usage invisible.
+Rejected: leaving the wording untouched — a payroll screen sitting under a non-goal headed
+"Hosting the model" stops every future reader and every red-team pass, with nothing in the brief
+to point them at.
+Rejected: narrowing further to forbid pricing lookups — that pre-decides the open "cost per
+shipped PR has no source" item, which D53 deferred to `/contract`.
+Reversibility: cheap.
+
+### 2026-08-08 — D62 The orchestration non-goal bans agents starting agents, not concurrency
+Context: three defects in two sentences. The wording distinguished neither side of D52; "one
+session, one agent process" is untrue against D16's turn-scoped child; and "fan-out" meant
+distributing work across agents here while `10-design.md` uses it for one-to-many envelope
+delivery to subscribers (D18), which is in scope and built.
+Chosen: restate the body and keep the heading, so D51's and D52's references to it still resolve.
+The ban is on an agent starting another agent and on work moving between sessions without an
+operator action, with D52's audit-identity reason stated in the brief itself. Operator-driven
+assignment and concurrent sessions are named explicitly as *not* forbidden. The word "fan-out"
+leaves the brief, leaving the term solely to D18's meaning.
+Rejected: appending D52's carve-out and nothing else — leaves a sentence untrue against D16, and
+leaves the term collision for someone to rediscover.
+Rejected: renaming D18's concept so the brief could keep "fan-out" — churn across the design and
+the contract to protect a phrase the brief can simply stop using.
+Reversibility: cheap.
+
+### 2026-08-08 — D63 Codex is tier one, and its permission asymmetry is stated in the brief
+Context: definition-of-done item 2 promised "choosing Claude or Codex" while item 4 named Claude
+only and items 3 and 5 to 7 were silent about Codex. D5 makes Codex sessions `preauthorised`;
+D27 leaves it unverified whether Codex's `on-request` approval is reachable over a programmatic
+transport rather than only inside its terminal UI.
+Chosen: Codex stays in tier one. The brief now says which items a Codex session satisfies, that a
+launch-time policy with a sandbox banner stands in for item 4, and that D27's unverified question
+is explicitly not a blocker on done — D5's fallback is already the shipping answer if the
+experiment fails.
+Rejected: moving Codex to tier two — the four-layer vendor boundary would ship with a single
+implementation behind it, which is where such abstractions are usually found to be wrong.
+Rejected: requiring approval parity before tier one closes — reverses D5, and stakes "done" on
+an unverified vendor capability resolving favourably.
+Reversibility: cheap to move between tiers. The adapter is the cost either way.
+
+### 2026-08-08 — D64 Both platforms are gated, and the brief stops claiming a CI that does not exist
+Context: the constraint read "The primary host is Windows; CI is Linux". `.github/workflows/`
+does not exist — this repository has no CI at all. The only gates present are the Pester suites
+in `tools/` and `git diff --check`. A two-platform requirement was asserted and gated by nothing.
+Chosen: state both as supported targets held to the same definition of done and gated by an
+automated run, and say plainly that no such gate exists yet and that building it is tier-one work.
+Rejected: Windows supported with Linux best-effort — cheaper by one matrix leg, but a Linux
+operator finds the breakage instead of a gate, and the design already carries work for both.
+Rejected: correcting the false sentence without asserting a gate — that leaves the constraint
+unfalsifiable, which is the "do not claim a gate that did not run" failure promoted into the
+brief.
+Reversibility: cheap as text. The CI itself is ordinary work.
+
+### 2026-08-08 — D65 Tier two persists to append-only latest-wins files, not a database
+Context: D53 to D55 admitted two entities this system has no shape for — a review that is
+authored, mutable while draft and terminal once final, and a requisition with an approval
+state. Everything persisted to date is either append-only or a single atomic-rename file, and
+D7 deferred a database until "session listing needs querying beyond mine, recent". Two
+mutable, authored, cross-operator entities is the closest this project has come to that
+moment, so the deferral was re-examined rather than assumed to still hold.
+Chosen: two server-wide NDJSON logs, `reviews.ndjson` and `requisitions.ndjson`, append-only,
+latest line per id wins, loaded into in-memory registries at boot. This is the pattern
+`pids.ndjson` already uses for tombstones, generalised. The registries exist because the
+once-only requisition claim must be tested and taken in one synchronous block (D32), which a
+file read cannot be.
+Rejected: SQLite. The volumes are a handful of trusted operators' worth and every query is a
+full scan of a file measured in kilobytes, so it buys no query capability that is needed. It
+costs a dependency, a schema-migration story, and a second durability model beside the
+fsync-before-respond guarantee the audit log needs (D26) — or, if the audit log moves into it
+too, the append-only-file property that makes that log evidence.
+Rejected: a mutable JSON document per record with atomic rename. A second write protocol, a
+second torn-write failure row, and it discards the edit history an authored record should
+keep — a draft overwritten in place leaves no trace it existed.
+Known and retained: a dropped torn line in a latest-wins log reverts a record to its previous
+state rather than shortening a history, which is a different failure from the one the spill
+has. The sharpest case is a lost consumption line, which makes a spent approval spendable
+again and is the one way D68's once-only claim can be untrue; the resulting sessions still
+face the jail and the busy check, so it is a bookkeeping lie rather than a hazard. Stated in
+`10-design.md § Persistence summary` and accepted; `pids.ndjson` already carries the same
+shape, which is why D23 has a reuse guard. The alternative is refusing to boot over one bad
+line in a file unrelated to running a session.
+Reversibility: cheap while the volumes stay small — the files are a load-and-replay away from
+any other store. Expensive once an operator has years of reviews, which is the usual shape.
+
+### 2026-08-08 — D66 A review's subject is a session, not a person
+Context: D54 made performance reviews and PIP status first class, which reads as an employee
+record. `10-design.md § Data model § Operator` is `{ id }`, **not persisted**, because D3 chose
+delegated identity so that no account state lives on this server — the same tension D60 had to
+resolve for the theme preference. The brief's item 9 says "record a performance review against
+a session".
+Chosen: take the brief literally. `subject` is a `SessionId`; `author` is an `OperatorId`
+string on a record, exactly as `AuditRecord.operator` already is. There is no employee entity,
+no operator entity, and nothing here that an identity provider renaming someone invalidates.
+Rejected: an employee or operator entity with review history. It is the first account state on
+this server, it reopens D3, and it must answer what the row means when the upstream provider
+renames or removes that person — a question with no good answer and a persisted entity that is
+not un-written.
+Rejected: attaching a review to a workspace path. Paths are reused, so a review would silently
+accrue to whoever holds that directory next.
+Reversibility: expensive. A persisted authored record is not removed once written to, which is
+D54's own reversibility note applied to the shape rather than the feature.
+
+### 2026-08-08 — D67 Reviews and requisitions are server-wide and survive session deletion
+Context: D25 deletes a session's `meta.json`, spill, tool-output blobs and `ckpt.git`, and
+deliberately never touches `audit.ndjson`, because a log its subject can delete is not
+evidence. A review stored under the session it reviews has exactly that defect, with more
+claim to it than the audit log has. A requisition has the opposite problem: it exists before
+any session directory does.
+Chosen: both live beside `audit.ndjson` at the storage root. A review carries a
+`SessionSnapshot` — the session's `owner`, `vendor`, `cwd` and `createdAt`, denormalised at
+authorship — for the same reason `AuditRecord` copies `vendor` and `sandbox`: after D25 the
+`SessionId` resolves to nothing, and a review that can only say "session `9f2c…`" says nothing.
+Rejected: per-session storage for reviews. It hands the subject of a review the ability to
+destroy it by deleting the session, which is precisely what D25 refuses for audit.
+Rejected: keeping a session's `meta.json` alive as a tombstone so a review can resolve it. D25
+already rejected that exact tombstone, for the reason that it adds a rehydration case for a
+session whose transcript is gone in order to record something another log already records.
+Reversibility: cheap for the file location; expensive for the snapshot, since removing it later
+would strand every review written before the removal.
+
+### 2026-08-08 — D68 A requisition is an optional second path into session creation, never a gate
+Context: brief item 10 is "open a session through a requisition someone approved". Brief item 2
+is "start a session against a workspace directory", with no approver in it, and D59 makes tier
+one finishable on its own. If a requisition were required, item 2 would become an approval
+workflow and tier one would depend on tier two.
+Chosen: `requisitionId` is an optional field on `POST /api/sessions`. Supplied, it is claimed
+once and only from state `approved`, in the same synchronous block that tests it (D32).
+Absent, nothing in the creation path changes. The claim sits **after** the jail and workspace
+checks. The requisition stores the client's workspace **string**, unresolved.
+Rejected: requiring a requisition. It breaks D59's two tiers, and it imposes an approval policy
+the brief never asked for on a group the brief describes as trusted.
+Rejected: resolving the workspace at raise time. A requisition can sit unapproved for a day, so
+the stored path may no longer mean what it did; and a resolve-or-refuse at raise time leaks
+which directories exist to anyone who can raise one. An approval is permission to try, and
+`409 outside_workspace_root` at the moment of use is the correct place for that refusal.
+Rejected: claiming the requisition before the jail and busy checks. It burns the approval on a
+refusal that has nothing to do with it, leaving the operator holding an unspendable approval.
+Reversibility: cheap. The field is optional and additive in both directions.
+
+### 2026-08-08 — D69 Self-approval of a requisition is permitted and recorded
+Context: D68 gives a requisition an approval state. Whether `decidedBy` may equal `raisedBy`
+decides whether the feature is a control or a record.
+Chosen: permitted, and `decidedBy` is always written. The record is honest about who approved
+it and the deployment decides socially what that means.
+Rejected: forbidding self-approval. It wedges the single-operator deployment — which the brief
+explicitly contemplates, "a small group" including one — since no requisition could ever be
+spent. It also claims an enforcement the threat model already concedes is unavailable: a
+determined operator is out of scope and has shell access as the server's user, so a
+second-person rule this server enforces is a UI convention presented as a control.
+Rejected: making it configurable. A control that is off by default is never exercised, which
+D21 already rejected in this repository for the same reason.
+Reversibility: cheap. Adding the constraint later refuses future decisions and invalidates no
+stored record.
+
+### 2026-08-08 — D70 The audit log and both record logs are readable by every authenticated operator
+Context: brief item 1 is "authenticate, and see only their own sessions", and D50 returns
+`404 no_such_session` to a non-owner so session existence cannot be probed. Tier two needs a
+second operator to see a requisition in order to approve it (item 10), and brief item 7's
+audit read is a tier-one promise this design had specified no route for at all.
+Chosen: read is open across operators for `audit.ndjson`, `requisitions.ndjson` and every
+**final** review. Write stays attributed and constrained — only a review's author may append
+to it, only a session's owner may tick its checklist, and the ownership check on every session
+route is unchanged.
+One carve-out, and only one: a review in state `draft` is readable and writable by its author
+alone, and becomes visible to everyone when it is finalised. That is what a draft state is for
+— the purpose of drafting is not having published yet — and without it D54's draft state is a
+label rather than a state. The carve-out is bounded by being one-way: nothing here ever becomes
+less visible. A non-author reading a draft gets `404`, matching D50, and drafts do not appear
+in the list route at all.
+Known and retained: this narrows D50's justification rather than reversing it. Reviews and
+audit records name `SessionId`s, so from tier two onward session existence *is* discoverable
+through the record logs. The `404` stays and is still load-bearing, but what it buys is access
+control, not concealment. The `SessionSnapshot` on a review (D67) means a reader never needs to
+resolve the session, so nothing is later tempted to relax the `404` to make a screen render.
+Rejected: scoping each operator to their own records. The audit log is server-wide precisely
+because the question it answers, "who approved what", crosses sessions — scoped, it answers
+only "what did I approve", which needed no log; and a requisition cannot be approved by someone
+who cannot see it.
+Rejected: a reviewer or auditor role. The first account state on this server, which D3 refuses
+and D66 has just refused again.
+Reversibility: expensive in the direction that matters. Opening a read is easy to do and hard
+to take back once operators rely on seeing each other's records.
+
+### 2026-08-08 — D71 The onboarding checklist lives in the session's event stream
+Context: brief item 10's second half is a per-session first-run checklist. It is mutable
+per-session state, which the storage layout has exactly one existing shape for — `meta.json`,
+whose write protocol (D37) is deliberately restricted to three occasions and is not this.
+Chosen: a `checklist.item.completed { itemId, by }` envelope through the same `emit` as
+everything else; the checklist is the fold over the session's event log; the item template is a
+`config` value. Ticking is idempotent — a second tick emits nothing and returns `200`. It is
+not audited: brief item 7 promises a record of every *tool approval*, and diluting that log
+with provisioning clicks makes the artifact the threat model leans on harder to read.
+Rejected: a `checklist.json` per session. A second per-session mutable file needing its own
+write protocol, its own atomic-rename discipline and its own torn-write failure row, for a
+handful of booleans that already have a durable, ordered, replayable, fanned-out home.
+Rejected: a per-requisition or per-vendor template. That is a workflow engine, and nothing in
+the brief asks for one.
+Known and retained: the checklist dies with its session under D25. That is correct — it is
+first-run provisioning, not evidence — but it means a completed checklist is not recoverable
+after a delete, unlike the review of the same session.
+Reversibility: cheap to add a new event kind; expensive to move the data afterwards, since
+existing sessions' checklists would live only in their event logs.
+
+### 2026-08-08 — D72 PIP status is derived from the latest final review, and drafts do not set it
+Context: brief item 9 asks to "see whether a session is under a performance plan". D54 put PIP
+on the review. Whether it is also a field somewhere, and whether a draft counts, are both open
+in a way that shows up on other operators' screens.
+Chosen: derived. Fold the review log for that subject, take the most recent review in state
+`final`, read its `pip`. Drafts are excluded.
+Rejected: a stored flag on the session. Two places to be wrong, and it would have to survive
+D25 deleting the session while the review that justified it (D67) did not — leaving a flag with
+no evidence or evidence with no flag.
+Rejected: letting drafts set it. Under D70 a draft is invisible to everyone but its author, so
+a draft that set the badge would leak the draft's content in the one bit that matters most —
+and would do it while the author was still deciding. Worse than the badge arriving when they
+finish.
+Reversibility: cheap. It is a fold; changing the rule changes one function.
+
+### 2026-08-08 — D73 The audit log gets a bounded read route, and tier one always needed one
+Context: brief item 7 is a *read* — "read an audit record of every tool approval: who, what,
+when" — and it is tier one. `10-design.md § Security controls` specified the append in six
+paragraphs and the read in none, and `20-contract.md § HTTP routes` accordingly has no audit
+route. A route the design never states is one the contract cannot derive.
+Chosen: a bounded window with a cursor, newest first, readable by every authenticated operator
+(D70). Brief item 11's incident history is the same read with filters — denials, server-forced
+decisions, standing-rule auto-allows, grouped by session and operator — which is why that item
+costs no new storage.
+Rejected: leaving it unstated. This is the gap, not a design choice.
+Rejected: an unbounded read of the whole file. `audit.ndjson` is the only file in the system
+that grows for the deployment's lifetime — never truncated, and explicitly outliving every
+session it names (D25) — so a whole-file scan is a screen that degrades permanently.
+Rejected: building an offset index now. Open question 11 already carries that for the spill and
+now for this file; the bound is what makes it not yet necessary.
+Reversibility: cheap. It is a read route with no persisted consequence.
+
+### 2026-08-08 — D74 The no-`innerHTML` rule covers everything this codebase did not write
+Context: D43 wrote the rule as "no `innerHTML` for anything derived from an agent", which was
+the whole population of untrusted strings at the time. Tier two adds review bodies and
+requisition justifications — operator-authored, stored, and under D70 rendered in a *different*
+operator's browser. That is the first stored path from one operator's keyboard to another's.
+Chosen: widen the rule. Text nodes only for anything not a literal in this codebase.
+Rejected: adding a second clause for operator-authored text. "Is this string agent-derived?" is
+a question a renderer eventually answers wrong, and the answer is invisible at the call site;
+"did we write this literal?" is one it cannot get wrong.
+Known and retained: this does not defend against a determined operator, who has shell access
+already. It defends the ordinary case where operator-authored text is pasted from somewhere
+else, which is the same argument the confused-agent row makes for tool output.
+Reversibility: cheap. It is strictly stricter than what it replaces.
+
+### 2026-08-08 — D75 `usage` is normalised by the adapter; nothing above it does token arithmetic
+Context: brief item 8 wants "token burn to date". `10-design.md § Ordering guarantees` already
+warns that `usage` arrives per assistant record rather than per turn, and the Claude vendor
+mapping resets local token counters at a `compact_boundary` — behaviour consistent with
+per-context cumulative reporting, under which summing raw values double-counts input tokens.
+Codex's `token_count` is unverified for the same question.
+Chosen: the adapter emits `usage` in a form the contract defines as summable, and every
+consumer sums. Whether a vendor reports cumulative or incremental counts is vendor knowledge
+and stays below the boundary.
+Rejected: summing raw vendor numbers in the payroll view. A view performing that arithmetic is
+vendor knowledge above the adapter arriving by the back door — the same failure D44 describes
+for open-string stop reasons — and it is wrong under compaction.
+Rejected: displaying the latest raw `usage` instead of a total. Defensible and cheap, and it is
+not "burn to date", which is what the brief asks for.
+Known and retained: which of cumulative or incremental each vendor reports is unverified for
+both. Carried as `10-design.md § Open questions` item 14. This decision fixes *where* the
+answer is applied, not what it is.
+Reversibility: cheap. It is an internal normalisation with two implementations.
+
+### 2026-08-08 — D76 Derived idle time excludes any interval spanning a restart
+Context: brief item 8 includes paid idle time, derived from session state transitions. D39 has
+boot close a crashed turn by appending a `turn.ended` carrying the *boot* timestamp, so an
+outage of any length lands inside one interval of the derived timeline — either the turn or the
+idle gap after it, depending on where you cut.
+Chosen: drop any interval containing a `turn.ended` with `stopReason: 'server_restart'`, and
+report how many intervals were dropped.
+Rejected: counting it as idle. The payroll screen then bills an operator for the server being
+down.
+Rejected: counting it as turn time. The same wrong number, moved somewhere it is less obvious.
+Rejected: inferring the outage from the host's last boot time. That signal exists for the pid
+reuse guard (D23), it says nothing about how long the process was absent, and it is simply
+wrong on a host that did not reboot.
+Reversibility: cheap. It is a fold.
+
+### 2026-08-08 — D77 `records` is a twelfth module and does not depend on the session manager
+Context: tier two owns two lifecycles that are not sessions — a requisition exists before any
+session, a review outlives one (D67) — and neither touches turn state, `seq`, fan-out or child
+processes, which is `session-manager`'s entire ownership.
+Chosen: a `records` module depending on `config`, `store` and `contract`. `session-manager →
+records` exists for exactly one call, the once-only requisition claim during session creation.
+The review route needs a `SessionSnapshot`, and the **edge** composes it: it resolves the
+session through `session-manager`, applies the ownership check it already applies to every
+session route, and passes the snapshot to `records` as a parameter. The graph stays acyclic.
+Rejected: five more methods on `session-manager`. It already owns ownership, turn state, `seq`,
+fan-out and reaping; a second unrelated lifecycle is how a module becomes the place everything
+goes, and it would make tier two impossible to leave unbuilt cleanly.
+Rejected: `records → session-manager` for the snapshot. It makes the module designed to outlive
+sessions a client of the module that owns live ones.
+Reversibility: cheap. It is an internal module boundary with no persisted or wire consequence.
+
+### 2026-08-08 — D78 The four themes are CSS custom properties and a root attribute
+Context: D58 ships four operator-selectable visual systems and D60 puts the choice in the
+browser. D43's CSP is `style-src 'self'` with no `unsafe-inline`, and the obvious
+implementation of a runtime theme switcher writes a `<style>` block.
+Chosen: one stylesheet served from `'self'` holding four blocks of CSS custom properties; the
+switcher sets a `data-` attribute on the root element and nothing else. No style text is
+generated, injected or interpolated at runtime. The choice is read from and written to browser
+storage (D60) and never reaches the server.
+Rejected: generating or injecting style text. It needs `unsafe-inline`, which weakens the one
+CSP directive this design has standing to be strict about, having criticised the prior art's
+CSP by name.
+Rejected: four stylesheets swapped at runtime. A flash of unstyled content on every switch, and
+four files to keep in step instead of one block of variables — which is exactly the drift D58's
+reversibility note warns about.
+Reversibility: cheap.
+
+### 2026-08-08 — D79 The prototype's employment status is a client-side projection, not a field
+Context: staged in `## Open` — the prototype's `ON SHIFT / BLOCKED / IDLE / ON PIP / PROBATION /
+CLOCKED OUT` vocabulary overlaps `SessionSummary.state` without matching it, and the note
+recorded only that they are different concepts needing separate fields.
+Chosen: it is not a field at all. The badge is derived in the client from facts that already
+exist — `ended` is `CLOCKED OUT`; a live session with an outstanding `permission.request` is
+`BLOCKED`; a live session with a running turn is `ON SHIFT`; a live session with no turn is
+`IDLE`. `ON PIP` is orthogonal and comes from D72. `PROBATION` is **cut**: nothing in this
+system is a source for it, and keeping it would require inventing one.
+Rejected: a stored status field. It overlaps `state` without matching it, which is two fields
+that must agree and one that eventually does not — the drift the single-ownership rule exists
+to prevent.
+Rejected: extending `state`'s union with the prototype's vocabulary. `state` is what decides
+whether the compose box is enabled (D20, D45); putting presentation vocabulary into it means a
+renderer branching on six values to answer a two-value question.
+Reversibility: cheap. It is a projection in one component.
+
+### 2026-08-08 — D80 A requisition claim lost to a crash is a dead approval, and that is accepted
+Context: the red-team pass on `10-design.md` found that control flow 1 appends the `consumed`
+line to `requisitions.ndjson` before `store.mkdir` and the rest of session creation. A process
+death in that window leaves the requisition `consumed`, naming a `sessionId` that resolves to
+nothing. The in-process release path — `Failure modes § Records boundary`, "release the claim;
+requisition returns to `approved`" — cannot run after a crash, and `consumed` is terminal.
+Chosen: accept it and write it down. The approval is spent, the operator raises another, and the
+log honestly records a consumption that happened.
+Rejected: a two-phase claim, or a boot reconciliation that returns a `consumed` requisition with
+no resolvable session to `approved`. Both add a second write protocol and a new boot step to
+recover a state whose remedy is one form submission, and the boot version cannot distinguish a
+crashed creation from a session deleted under D25.
+Known and retained: this is the same shape as the accepted spawn→append window in
+`10-design.md § Data model § Process record` — a short window whose consequence is one item of
+bookkeeping an operator repairs by hand. It differs in being visible: the phantom `sessionId`
+stays on the record.
+Reversibility: cheap. Nothing persisted would have to change to add reconciliation later.
+
+### 2026-08-08 — D81 An approved requisition cannot be revoked, and that is accepted
+Context: the red-team pass observed that `open → approved → consumed` refuses every other
+transition and approvals carry no expiry, so an approval outlives the judgement behind it
+indefinitely — the approver changed their mind, circumstances moved, the raiser left.
+Chosen: no revocation and no expiry. An approval stays spendable until it is spent.
+Rejected: an `approved → revoked` transition. D69 already permits self-approval, and the threat
+model already concedes a determined operator has shell access as the server's user, so revocation
+is a control that cannot hold against the adversary it appears to address — it would read as one
+while enforcing nothing. Rejected an expiry window: it needs a duration nobody can source, and it
+fails an operator holding a legitimate approval over a weekend.
+Known and retained: this is an ordinary-case gap, not a security one. A requisition raised in
+error is answered by rejecting it before approval; after approval the remedy is that the session
+it opens is subject to the jail, the busy check and the audit log exactly as any other.
+Reversibility: cheap. Adding a state to a latest-wins log is an append and a union member.
+
+### 2026-08-08 — D82 `Rating` is a five-member token enum, not the prototype's display strings
+Context: D54 ruled the rating scale in as "a contract enum" and named no members. The only
+source anywhere for the scale is the imported prototype, which offers five labels — *Does not
+meet*, *Meets some*, *Meets*, *Exceeds expectations*, *Exceptional*. `10-design.md § Data model
+§ Review` types the field as `Rating | null` against a type nothing defines.
+Chosen: `'does_not_meet' | 'meets_some' | 'meets' | 'exceeds' | 'exceptional'`, with the wording
+an operator sees owned by the client.
+Rejected: persisting the prototype's display strings as the union members — self-describing on
+the wire and one less mapping to write, but it freezes product wording into an append-only
+employment record, so rewording the scale becomes either a migration of `reviews.ndjson` or two
+vocabularies on disk. Rejected a numeric 1–5 scale — it invites arithmetic on a judgement, and
+the five points are not evenly spaced. Rejected leaving `Rating` undefined — `Review` could not
+then be declared and the review slice could not be planned.
+Reversibility: expensive in the same way every persisted authored record is. Tokens are what
+make the *labels* cheap to change; the tokens themselves are written down forever.
+
+### 2026-08-08 — D83 The most recent final review is ordered by `updatedAt`, with no new field
+Context: D72 answers "is this session under a performance plan?" from the most recent **final**
+review, and nothing said what "most recent" is measured by. Creation time, file order and a
+finalisation timestamp that is never stored all give different answers, and file order rewinds
+under the accepted torn-tail reversion.
+Chosen: order finals by `updatedAt`, ties broken by the later line in `reviews.ndjson`. This
+works without a new field because `state: 'final'` is terminal — a final review refuses every
+further append — so `updatedAt` on the final line *is* its finalisation time.
+Rejected: adding `finalisedAt: IsoTimestamp | null`, non-null exactly when `state === 'final'`.
+More legible, and it gives the finalisation guard an explicit thing to hold — at the cost of a
+second timestamp on the same line that must always agree with the first, which is two fields
+that must agree and one that eventually does not.
+Known and retained: this settles the ordering key only. Whether finalisation is claimed under
+the single-writer invariant, and what stops a torn tail retracting a final review other
+operators have already seen, are unresolved and stay with `/design` (issues #35, #36).
+Reversibility: cheap. Adding an explicit timestamp later is an added optional field, which the
+record logs' forward rule already permits.
+
+### 2026-08-08 — D84 The contract declares the tier-two text caps and the audit window, and sets no values
+Context: nothing bounded a review body or a requisition's title and justification, while every
+edit re-appends the whole record and both logs are held wholly in memory at boot — which is the
+volume assumption D65 used to refuse a database. The audit read needs a bound for the same
+reason D73 gives.
+Chosen: `Caps.reviewBodyBytes`, `Caps.requisitionTextBytes` and `Caps.auditPageMax` are declared
+in `20-contract.md`; the numbers are a deployment's, set in configuration. Over-cap text is
+refused with `422 bad_request`, never silently truncated the way `tool.result` is.
+Rejected: picking numbers here — a capacity judgement with no measured basis, and `config`
+already owns every other cap. Rejected truncating instead of refusing — a review is an authored
+record and a silently shortened one misrepresents its author; truncation is right for tool
+output because nobody wrote it.
+Reversibility: cheap. A cap is a configured number and a validation branch.
+
+### 2026-08-08 — D85 The checklist fold is served by the server, not assembled in the client
+Context: D71 makes completion an event and the checklist the fold over it, and puts the item
+template in `config`. The client holds the events but has no way to read `config`, so as drawn
+nothing can render an item's label.
+Chosen: `GET /api/sessions/:id/checklist` returns the folded `ChecklistItemState[]` — template
+joined to completion — under the session's ownership check like every other session route.
+Rejected: shipping the template to the client in a bootstrap payload and folding there — it
+adds a second place the template exists and a second thing to be stale, to save one route over
+data the server already holds. Rejected returning the fold on the tick response only — a client
+that reconnects has no way to obtain it.
+Reversibility: cheap. A read route over derived data, persisting nothing.
+
+### 2026-08-08 — D86 The audit read's cursor is opaque and server-minted
+Context: D73 specifies a bounded window with a cursor, newest first, over a file whose records
+carry no identifier — an `AuditRecord` has a timestamp and nothing unique.
+Chosen: `AuditCursor`, a branded string the server mints and the caller only round-trips. No
+caller may parse one, and what it encodes is `store`'s business.
+Rejected: a byte offset or line number as the cursor — it publishes the file's physical layout
+as a public interface, which is exactly what an offset index would later change (open question
+11). Rejected `(ts, index)` pagination — timestamps collide at millisecond precision under a
+fast stream, which is the argument D2 already made against timestamps as a key.
+Reversibility: cheap, and cheap *because* it is opaque — that is the point of the choice.
+
 ## Open
 
 Staging only. Once an item becomes an issue it leaves this list.

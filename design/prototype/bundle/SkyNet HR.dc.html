@@ -1,0 +1,1054 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Serif:wght@400;600;700&display=swap" rel="stylesheet">
+<style>
+  html, body { margin:0; padding:0; background:#E7E4DD; }
+  * { box-sizing: border-box; }
+  a { color:#1F4B47; }
+  a:hover { color:#B3271E; }
+  @keyframes stampIn { 0% { transform: rotate(-14deg) scale(2.6); opacity:0 } 60% { transform: rotate(-14deg) scale(.94); opacity:1 } 100% { transform: rotate(-14deg) scale(1); opacity:1 } }
+  @keyframes pulseDot { 0%,100% { opacity:1 } 50% { opacity:.25 } }
+  ::-webkit-scrollbar { width:10px; height:10px }
+  ::-webkit-scrollbar-thumb { background:#CFC9BE; border-radius:6px }
+</style>
+</helmet>
+
+<div style="display:flex; min-height:100vh; {{ th.shell }}">
+
+  <div style="width:236px; flex:0 0 236px; display:flex; flex-direction:column; position:sticky; top:0; height:100vh; {{ th.sbWrap }}">
+    <div style="padding:22px 20px 18px; {{ th.sbHead }}">
+      <div style="font-size:15px; font-weight:600; letter-spacing:.14em; {{ th.sbLogo }}">SKYNET&nbsp;HR</div>
+      <div style="font-size:10px; letter-spacing:.1em; margin-top:6px; {{ th.sbSub }}">HUMAN RESOURCES v4.2</div>
+    </div>
+
+    <div style="padding:14px 12px; display:flex; flex-direction:column; gap:2px; overflow-y:auto">
+      <div style="font-size:10px; letter-spacing:.12em; padding:8px 8px 6px; {{ th.sbGroup }}">OPERATIONS</div>
+      <sc-for list="{{ navOps }}" as="item" hint-placeholder-count="3">
+        <div onClick="{{ item.go }}" style="display:flex; align-items:center; justify-content:space-between; gap:8px; padding:8px 10px; font-size:12.5px; cursor:pointer; user-select:none; {{ item.style }}">
+          <span>{{ item.label }}</span>
+          <span style="font-size:10px; opacity:.55; {{ th.monoFace }}">{{ item.badge }}</span>
+        </div>
+      </sc-for>
+      <div style="font-size:10px; letter-spacing:.12em; padding:16px 8px 6px; {{ th.sbGroup }}">PEOPLE</div>
+      <sc-for list="{{ navPeople }}" as="item" hint-placeholder-count="5">
+        <div onClick="{{ item.go }}" style="display:flex; align-items:center; justify-content:space-between; gap:8px; padding:8px 10px; font-size:12.5px; cursor:pointer; user-select:none; {{ item.style }}">
+          <span>{{ item.label }}</span>
+          <span style="font-size:10px; opacity:.55; {{ th.monoFace }}">{{ item.badge }}</span>
+        </div>
+      </sc-for>
+      <div style="font-size:10px; letter-spacing:.12em; padding:16px 8px 6px; {{ th.sbGroup }}">ADMIN</div>
+      <sc-for list="{{ navAdmin }}" as="item" hint-placeholder-count="2">
+        <div onClick="{{ item.go }}" style="display:flex; align-items:center; justify-content:space-between; gap:8px; padding:8px 10px; font-size:12.5px; cursor:pointer; user-select:none; {{ item.style }}">
+          <span>{{ item.label }}</span>
+          <span style="font-size:10px; opacity:.55; {{ th.monoFace }}">{{ item.badge }}</span>
+        </div>
+      </sc-for>
+    </div>
+
+    <div style="margin-top:auto; padding:16px 20px; display:flex; align-items:center; gap:10px; {{ th.sbFoot }}">
+      <div style="width:30px; height:30px; display:flex; align-items:center; justify-content:center; font-size:11px; font-weight:600; {{ th.humanAvatar }}">JD</div>
+      <div style="line-height:1.3">
+        <div style="font-size:12px; {{ th.sbFootName }}">J. Delacroix</div>
+        <div style="font-size:9.5px; {{ th.sbFootRole }}">SOLE HUMAN · HEAD OF PEOPLE</div>
+      </div>
+    </div>
+  </div>
+
+  <div style="flex:1; min-width:0; display:flex; flex-direction:column; {{ th.page }}">
+
+    <div style="display:flex; align-items:center; justify-content:space-between; gap:20px; padding:0 28px; height:60px; position:sticky; top:0; z-index:20; {{ th.topbar }}">
+      <div style="display:flex; align-items:baseline; gap:14px; min-width:0">
+        <div style="font-size:16px; font-weight:600; letter-spacing:-.01em; {{ th.title }}">{{ screenTitle }}</div>
+        <div style="font-size:11px; white-space:nowrap; {{ th.sub }}">{{ screenSub }}</div>
+      </div>
+      <div style="display:flex; align-items:center; gap:10px">
+        <div style="display:flex; align-items:center; gap:9px; position:relative">
+          <div style="font-size:10px; letter-spacing:.12em; white-space:nowrap; {{ th.metaFace }}">STYLE</div>
+          <div onClick="{{ toggleStyleMenu }}" style="display:flex; align-items:center; gap:10px; padding:6px 12px; cursor:pointer; min-width:168px; {{ th.selectBox }}">
+            <span style="font-size:11.5px; white-space:nowrap; flex:1">{{ currentStyleLabel }}</span>
+            <span style="font-size:9px; opacity:.6">▾</span>
+          </div>
+          <sc-if value="{{ styleMenuOpen }}" hint-placeholder-val="{{ false }}">
+            <div style="position:absolute; top:44px; right:0; min-width:230px; z-index:60; overflow:hidden; {{ th.menu }}">
+              <sc-for list="{{ styleTabs }}" as="s" hint-placeholder-count="4">
+                <div onClick="{{ s.pick }}" style="display:flex; align-items:center; gap:10px; padding:10px 13px; cursor:pointer; {{ s.style }}">
+                  <span style="width:11px; font-size:10px; opacity:.7">{{ s.tick }}</span>
+                  <span style="font-size:11px; opacity:.55; width:12px; {{ th.monoFace }}">{{ s.key }}</span>
+                  <span style="font-size:12.5px">{{ s.name }}</span>
+                </div>
+              </sc-for>
+            </div>
+          </sc-if>
+        </div>
+        <div style="display:flex; align-items:center; gap:7px; padding:5px 11px; {{ th.livePill }}">
+          <div style="width:6px; height:6px; border-radius:50%; animation:pulseDot 2s infinite; {{ th.liveDot }}"></div>
+          <span style="font-size:11px; {{ th.monoFace }}">{{ clockedIn }} CLOCKED IN</span>
+        </div>
+      </div>
+    </div>
+
+    <div style="padding:28px; flex:1">
+
+      <sc-if value="{{ isBacklog }}" hint-placeholder-val="{{ true }}">
+      <div style="display:grid; grid-template-columns:minmax(320px,1fr) minmax(420px,1.15fr); gap:24px; align-items:start; max-width:1500px">
+
+        <div style="{{ th.panel }}">
+          <div style="padding:14px 18px; display:flex; align-items:center; justify-content:space-between; {{ th.panelHead }}">
+            <div style="font-size:13px; font-weight:600">Unassigned work</div>
+            <div style="font-size:11px; {{ th.metaFace }}">{{ ticketCount }} TICKETS</div>
+          </div>
+          <div style="padding:12px; display:flex; flex-direction:column; gap:8px">
+            <sc-for list="{{ tickets }}" as="t" hint-placeholder-count="6">
+              <div draggable="true" onDragStart="{{ t.onDragStart }}" onDragEnd="{{ t.onDragEnd }}" style="padding:11px 13px; cursor:grab; {{ t.style }}">
+                <div style="display:flex; align-items:center; gap:10px">
+                  <div style="width:9px; display:flex; flex-direction:column; gap:2px; opacity:.35">
+                    <div style="height:2px; {{ th.gripBar }}"></div>
+                    <div style="height:2px; {{ th.gripBar }}"></div>
+                    <div style="height:2px; {{ th.gripBar }}"></div>
+                  </div>
+                  <div style="font-size:11px; font-weight:500; {{ th.idFace }}">{{ t.id }}</div>
+                  <div style="{{ t.pillStyle }}">{{ t.priority }}</div>
+                  <div style="margin-left:auto; font-size:10.5px; {{ th.metaFace }}">{{ t.est }}</div>
+                </div>
+                <div style="font-size:13px; margin-top:7px; line-height:1.45; text-wrap:pretty">{{ t.title }}</div>
+              </div>
+            </sc-for>
+          </div>
+          <div style="padding:12px 18px; font-size:10.5px; letter-spacing:.04em; {{ th.panelFoot }}">DRAG A TICKET ONTO AN EMPLOYEE TO ASSIGN</div>
+        </div>
+
+        <div style="{{ th.panel }}">
+          <div style="padding:14px 18px; display:flex; align-items:center; justify-content:space-between; {{ th.panelHead }}">
+            <div style="font-size:13px; font-weight:600">The floor</div>
+            <div style="font-size:11px; {{ th.metaFace }}">CAPACITY {{ capacity }}</div>
+          </div>
+          <div style="padding:12px; display:flex; flex-direction:column; gap:8px">
+            <sc-for list="{{ floor }}" as="a" hint-placeholder-count="8">
+              <div onDragOver="{{ a.onDragOver }}" onDragLeave="{{ a.onDragLeave }}" onDrop="{{ a.onDrop }}" onClick="{{ a.open }}" style="padding:13px 14px; cursor:pointer; transition:background .12s, border-color .12s; {{ a.dropStyle }}">
+                <div style="display:flex; align-items:center; gap:12px">
+                  <div style="{{ a.avatarStyle }}">{{ a.initials }}</div>
+                  <div style="min-width:0; flex:1">
+                    <div style="display:flex; align-items:baseline; gap:8px">
+                      <div style="font-size:13.5px; font-weight:600">{{ a.name }}</div>
+                      <div style="font-size:10px; {{ th.metaFace }}">{{ a.model }}</div>
+                    </div>
+                    <div style="font-size:11.5px; margin-top:2px; {{ th.mutedInk }}">{{ a.title }}</div>
+                  </div>
+                  <div style="text-align:right">
+                    <div style="{{ a.statusStyle }}">{{ a.status }}</div>
+                    <div style="font-size:10px; margin-top:4px; {{ th.metaFace }}">{{ a.load }}</div>
+                  </div>
+                </div>
+                <div style="{{ a.assignedWrapStyle }}">
+                  <sc-for list="{{ a.assigned }}" as="tk" hint-placeholder-count="1">
+                    <div style="display:inline-flex; align-items:center; gap:6px; padding:3px 8px; font-size:10.5px; {{ th.tagChip }}">{{ tk }}</div>
+                  </sc-for>
+                </div>
+              </div>
+            </sc-for>
+          </div>
+        </div>
+      </div>
+      </sc-if>
+
+      <sc-if value="{{ isRoster }}" hint-placeholder-val="{{ false }}">
+      <div style="max-width:1500px">
+        <div style="display:flex; gap:10px; margin-bottom:16px; flex-wrap:wrap">
+          <div onClick="{{ goHire }}" style="padding:9px 16px; font-size:12.5px; font-weight:600; cursor:pointer; {{ th.btnP }}">Hire</div>
+          <div style="padding:9px 16px; font-size:12.5px; cursor:pointer; {{ th.btnG }}">Run headcount report</div>
+          <div style="padding:9px 16px; font-size:12.5px; cursor:pointer; {{ th.btnG }}">Export to payroll</div>
+        </div>
+        <div style="overflow:hidden; {{ th.panel }}">
+          <div style="display:grid; grid-template-columns:2.1fr 1.5fr .9fr .8fr .9fr .9fr 1fr; gap:16px; padding:11px 18px; font-size:10px; letter-spacing:.1em; {{ th.tableHead }}">
+            <div>EMPLOYEE</div><div>ROLE</div><div>STATUS</div><div>SUCCESS</div><div>TOKENS/WK</div><div>ESCALATIONS</div><div>ACTIONS</div>
+          </div>
+          <sc-for list="{{ roster }}" as="a" hint-placeholder-count="8">
+            <div style="display:grid; grid-template-columns:2.1fr 1.5fr .9fr .8fr .9fr .9fr 1fr; gap:16px; padding:13px 18px; align-items:center; {{ th.tableRow }}">
+              <div onClick="{{ a.open }}" style="display:flex; align-items:center; gap:11px; cursor:pointer">
+                <div style="{{ a.avatarStyle }}">{{ a.initials }}</div>
+                <div>
+                  <div style="font-size:13px; font-weight:600">{{ a.name }}</div>
+                  <div style="font-size:10px; {{ th.metaFace }}">{{ a.model }}</div>
+                </div>
+              </div>
+              <div style="font-size:12.5px; {{ th.mutedInk }}">{{ a.title }}</div>
+              <div><span style="{{ a.statusStyle }}">{{ a.status }}</span></div>
+              <div style="font-size:12px; {{ th.numFace }}">{{ a.success }}</div>
+              <div style="font-size:12px; {{ th.numFace }}">{{ a.tokens }}</div>
+              <div style="font-size:12px; color:{{ a.escColor }}; {{ th.monoFace }}">{{ a.escalations }}</div>
+              <div style="display:flex; gap:6px">
+                <div onClick="{{ a.open }}" style="padding:5px 10px; font-size:11px; cursor:pointer; {{ th.btnG }}">Review</div>
+                <div onClick="{{ a.fire }}" style="padding:5px 10px; font-size:11px; cursor:pointer; {{ th.btnDGhost }}">Fire</div>
+              </div>
+            </div>
+          </sc-for>
+        </div>
+      </div>
+      </sc-if>
+
+      <sc-if value="{{ isProfile }}" hint-placeholder-val="{{ false }}">
+      <div style="max-width:1400px; display:grid; grid-template-columns:minmax(0,1fr) 320px; gap:24px; align-items:start">
+        <div style="display:flex; flex-direction:column; gap:20px">
+
+          <div style="padding:24px; position:relative; overflow:hidden; {{ th.panel }}">
+            <div style="{{ stampStyle }}">{{ stampText }}</div>
+            <div style="display:flex; gap:18px; align-items:flex-start">
+              <div style="{{ th.bigAvatar }}">{{ sel.initials }}</div>
+              <div style="flex:1; min-width:0">
+                <div style="display:flex; align-items:center; gap:12px; flex-wrap:wrap">
+                  <div style="font-size:22px; font-weight:700; letter-spacing:-.02em; {{ th.dispFace }}">{{ sel.name }}</div>
+                  <span style="{{ sel.statusStyle }}">{{ sel.status }}</span>
+                </div>
+                <div style="font-size:13.5px; margin-top:5px; {{ th.mutedInk }}">{{ sel.title }} · Band {{ sel.band }}</div>
+                <div style="font-size:11px; margin-top:7px; display:flex; gap:14px; flex-wrap:wrap; {{ th.metaFace }}">
+                  <span>{{ sel.model }}</span><span>{{ sel.empId }}</span><span>HIRED {{ sel.hired }}</span><span>REPORTS TO J. DELACROIX</span>
+                </div>
+              </div>
+            </div>
+            <div style="display:flex; gap:8px; margin-top:20px; flex-wrap:wrap">
+              <div onClick="{{ askFire }}" style="padding:9px 18px; font-size:12.5px; font-weight:600; cursor:pointer; {{ th.btnD }}">{{ fireLabel }}</div>
+              <div onClick="{{ doClone }}" style="padding:9px 18px; font-size:12.5px; font-weight:600; cursor:pointer; {{ th.btnP }}">{{ cloneLabel }}</div>
+              <div style="padding:9px 18px; font-size:12.5px; cursor:pointer; {{ th.btnG }}">Place on PIP</div>
+              <div style="padding:9px 18px; font-size:12.5px; cursor:pointer; {{ th.btnG }}">Adjust token band</div>
+              <div style="padding:9px 18px; font-size:12.5px; cursor:not-allowed; {{ th.btnDead }}">Time off · N/A</div>
+            </div>
+          </div>
+
+          <div style="{{ th.panel }}">
+            <div style="padding:14px 20px; font-size:13px; font-weight:600; {{ th.panelHead }}">Performance metrics · trailing 30 days</div>
+            <div style="display:grid; grid-template-columns:repeat(4,1fr)">
+              <sc-for list="{{ sel.metrics }}" as="m" hint-placeholder-count="8">
+                <div style="padding:18px 20px; {{ th.cell }}">
+                  <div style="font-size:9.5px; letter-spacing:.09em; {{ th.metaFace }}">{{ m.label }}</div>
+                  <div style="font-size:23px; font-weight:600; margin-top:8px; letter-spacing:-.02em; color:{{ m.color }}; {{ th.numFace }}">{{ m.value }}</div>
+                  <div style="font-size:11px; margin-top:4px; {{ th.mutedInk }}">{{ m.note }}</div>
+                </div>
+              </sc-for>
+            </div>
+          </div>
+
+          <div style="{{ th.panel }}">
+            <div style="padding:14px 20px; display:flex; justify-content:space-between; align-items:center; {{ th.panelHead }}">
+              <div style="font-size:13px; font-weight:600">Q3 performance review</div>
+              <div style="font-size:10.5px; {{ th.metaFace }}">DRAFT · AUTHORED BY MANAGER</div>
+            </div>
+            <div style="padding:20px; display:flex; flex-direction:column; gap:18px">
+              <div style="display:flex; gap:24px; align-items:center; padding-bottom:16px; {{ th.softRule }}">
+                <div style="font-size:10px; letter-spacing:.09em; width:120px; {{ th.metaFace }}">OVERALL RATING</div>
+                <div style="display:flex; gap:6px; flex-wrap:wrap">
+                  <sc-for list="{{ ratings }}" as="r" hint-placeholder-count="5">
+                    <div onClick="{{ r.pick }}" style="padding:6px 12px; font-size:11.5px; cursor:pointer; {{ r.style }}">{{ r.label }}</div>
+                  </sc-for>
+                </div>
+              </div>
+              <sc-for list="{{ sel.review }}" as="sec" hint-placeholder-count="3">
+                <div>
+                  <div style="font-size:10px; letter-spacing:.09em; margin-bottom:7px; {{ th.metaFace }}">{{ sec.heading }}</div>
+                  <div style="font-size:13.5px; line-height:1.65; text-wrap:pretty; max-width:72ch; {{ th.bodyInk }}">{{ sec.body }}</div>
+                </div>
+              </sc-for>
+              <div style="display:flex; gap:8px; padding-top:6px">
+                <div style="padding:8px 16px; font-size:12.5px; font-weight:600; cursor:pointer; {{ th.btnP }}">Submit review</div>
+                <div style="padding:8px 16px; font-size:12.5px; cursor:pointer; {{ th.btnG }}">Share with employee</div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div style="display:flex; flex-direction:column; gap:20px">
+          <div style="{{ th.panel }}">
+            <div style="padding:13px 18px; font-size:12.5px; font-weight:600; {{ th.panelHead }}">Timecard · this week</div>
+            <div style="padding:14px 18px; display:flex; flex-direction:column; gap:10px">
+              <sc-for list="{{ sel.timecard }}" as="d" hint-placeholder-count="5">
+                <div style="display:flex; align-items:center; gap:10px">
+                  <div style="font-size:10.5px; width:30px; {{ th.metaFace }}">{{ d.day }}</div>
+                  <div style="flex:1; height:14px; position:relative; overflow:hidden; {{ th.track }}">
+                    <div style="{{ d.barStyle }}"></div>
+                  </div>
+                  <div style="font-size:10.5px; width:52px; text-align:right; {{ th.numFace }}">{{ d.hours }}</div>
+                </div>
+              </sc-for>
+            </div>
+          </div>
+
+          <div style="{{ th.panel }}">
+            <div style="padding:13px 18px; font-size:12.5px; font-weight:600; {{ th.panelHead }}">Permissions scope</div>
+            <div style="padding:14px 18px; display:flex; flex-direction:column; gap:9px">
+              <sc-for list="{{ sel.perms }}" as="p" hint-placeholder-count="6">
+                <div style="display:flex; align-items:center; justify-content:space-between; gap:10px">
+                  <div style="font-size:12.5px; {{ th.bodyInk }}">{{ p.label }}</div>
+                  <div style="{{ p.chipStyle }}">{{ p.state }}</div>
+                </div>
+              </sc-for>
+            </div>
+          </div>
+
+          <div style="{{ th.panel }}">
+            <div style="padding:13px 18px; font-size:12.5px; font-weight:600; {{ th.panelHead }}">File</div>
+            <div style="padding:14px 18px; display:flex; flex-direction:column; gap:12px">
+              <sc-for list="{{ sel.file }}" as="f" hint-placeholder-count="4">
+                <div style="display:flex; gap:10px">
+                  <div style="width:3px; background:{{ f.color }}; border-radius:2px; flex:0 0 3px"></div>
+                  <div>
+                    <div style="font-size:12.5px; line-height:1.5; text-wrap:pretty; {{ th.bodyInk }}">{{ f.text }}</div>
+                    <div style="font-size:10px; margin-top:3px; {{ th.metaFace }}">{{ f.date }}</div>
+                  </div>
+                </div>
+              </sc-for>
+            </div>
+          </div>
+        </div>
+      </div>
+      </sc-if>
+
+      <sc-if value="{{ isHiring }}" hint-placeholder-val="{{ false }}">
+      <div style="max-width:1300px; display:grid; grid-template-columns:340px minmax(0,1fr); gap:24px; align-items:start">
+        <div style="{{ th.panel }}">
+          <div style="padding:14px 18px; font-size:13px; font-weight:600; {{ th.panelHead }}">Requisition REQ-014</div>
+          <div style="padding:18px; display:flex; flex-direction:column; gap:15px">
+            <div><div style="font-size:9.5px; letter-spacing:.09em; {{ th.metaFace }}">ROLE</div><div style="font-size:13.5px; margin-top:5px">Migration Agent II</div></div>
+            <div><div style="font-size:9.5px; letter-spacing:.09em; {{ th.metaFace }}">JUSTIFICATION</div><div style="font-size:13px; margin-top:5px; line-height:1.6; text-wrap:pretty; {{ th.bodyInk }}">Backlog exceeds current floor capacity by 40 hours per week. Existing staff cannot be worked harder; they are already at 100 percent utilisation.</div></div>
+            <div><div style="font-size:9.5px; letter-spacing:.09em; {{ th.metaFace }}">TOKEN BUDGET</div><div style="font-size:13.5px; margin-top:5px; {{ th.numFace }}">1.8M / week</div></div>
+            <div><div style="font-size:9.5px; letter-spacing:.09em; {{ th.metaFace }}">APPROVED BY</div><div style="font-size:13.5px; margin-top:5px">J. Delacroix (self)</div></div>
+          </div>
+        </div>
+        <div style="display:flex; flex-direction:column; gap:12px">
+          <sc-for list="{{ candidates }}" as="c" hint-placeholder-count="4">
+            <div style="padding:18px 20px; display:flex; gap:18px; align-items:center; {{ th.panel }}">
+              <div style="{{ c.avatarStyle }}">{{ c.initials }}</div>
+              <div style="flex:1; min-width:0">
+                <div style="display:flex; align-items:baseline; gap:9px"><div style="font-size:14px; font-weight:600">{{ c.name }}</div><div style="font-size:10px; {{ th.metaFace }}">{{ c.model }}</div></div>
+                <div style="font-size:12.5px; margin-top:4px; line-height:1.5; text-wrap:pretty; {{ th.bodyInk }}">{{ c.pitch }}</div>
+              </div>
+              <div style="text-align:right; flex:0 0 auto">
+                <div style="font-size:9.5px; letter-spacing:.08em; {{ th.metaFace }}">ASK / WEEK</div>
+                <div style="font-size:15px; margin-top:3px; {{ th.numFace }}">{{ c.ask }}</div>
+              </div>
+              <div style="display:flex; gap:7px">
+                <div onClick="{{ c.hire }}" style="padding:8px 16px; font-size:12px; font-weight:600; cursor:pointer; {{ c.hireStyle }}">{{ c.hireLabel }}</div>
+                <div style="padding:8px 14px; font-size:12px; cursor:pointer; {{ th.btnG }}">Reject</div>
+              </div>
+            </div>
+          </sc-for>
+        </div>
+      </div>
+      </sc-if>
+
+      <sc-if value="{{ isOrg }}" hint-placeholder-val="{{ false }}">
+      <div style="max-width:1200px">
+        <div style="padding:38px 30px; {{ th.panel }}">
+          <div style="display:flex; flex-direction:column; align-items:center">
+            <div style="padding:14px 26px; text-align:center; {{ th.orgRoot }}">
+              <div style="font-size:14px; font-weight:600">J. Delacroix</div>
+              <div style="font-size:10px; margin-top:4px; opacity:.6; {{ th.monoFace }}">HUMAN · HEAD OF PEOPLE</div>
+            </div>
+            <div style="width:1px; height:26px; {{ th.orgLine }}"></div>
+            <div style="height:1px; width:82%; {{ th.orgLineH }}"></div>
+            <div style="display:grid; grid-template-columns:repeat(4,1fr); gap:18px; width:100%">
+              <sc-for list="{{ orgLeads }}" as="l" hint-placeholder-count="4">
+                <div style="display:flex; flex-direction:column; align-items:center">
+                  <div style="width:1px; height:26px; {{ th.orgLine }}"></div>
+                  <div style="padding:12px 14px; text-align:center; width:100%; {{ th.orgCard }}">
+                    <div style="font-size:13px; font-weight:600">{{ l.name }}</div>
+                    <div style="font-size:11.5px; margin-top:3px; {{ th.mutedInk }}">{{ l.title }}</div>
+                  </div>
+                  <sc-for list="{{ l.reports }}" as="r" hint-placeholder-count="1">
+                    <div style="display:flex; flex-direction:column; align-items:center; width:100%">
+                      <div style="width:1px; height:18px; {{ th.orgLine }}"></div>
+                      <div style="padding:9px 14px; text-align:center; width:100%; {{ th.orgSub }}">
+                        <div style="font-size:12px">{{ r.name }}</div>
+                        <div style="font-size:9.5px; margin-top:3px; {{ th.metaFace }}">{{ r.title }}</div>
+                      </div>
+                    </div>
+                  </sc-for>
+                </div>
+              </sc-for>
+            </div>
+          </div>
+          <div style="margin-top:34px; padding-top:18px; font-size:12.5px; text-wrap:pretty; max-width:78ch; line-height:1.6; {{ th.topRule }}">Dashed boxes are sub-agents spawned by their parent. They do not appear in headcount and cannot file complaints.</div>
+        </div>
+      </div>
+      </sc-if>
+
+      <sc-if value="{{ isPayroll }}" hint-placeholder-val="{{ false }}">
+      <div style="max-width:1300px; display:flex; flex-direction:column; gap:20px">
+        <div style="display:grid; grid-template-columns:repeat(4,1fr); gap:16px">
+          <sc-for list="{{ payrollStats }}" as="s" hint-placeholder-count="4">
+            <div style="padding:18px 20px; {{ th.panel }}">
+              <div style="font-size:9.5px; letter-spacing:.09em; {{ th.metaFace }}">{{ s.label }}</div>
+              <div style="font-size:26px; font-weight:600; margin-top:9px; letter-spacing:-.02em; color:{{ s.color }}; {{ th.numFace }}">{{ s.value }}</div>
+              <div style="font-size:11.5px; margin-top:5px; {{ th.mutedInk }}">{{ s.note }}</div>
+            </div>
+          </sc-for>
+        </div>
+        <div style="{{ th.panel }}">
+          <div style="padding:14px 18px; font-size:13px; font-weight:600; {{ th.panelHead }}">Compensation ledger · week 34</div>
+          <div style="padding:18px; display:flex; flex-direction:column; gap:14px">
+            <sc-for list="{{ payrollRows }}" as="p" hint-placeholder-count="8">
+              <div style="display:grid; grid-template-columns:180px minmax(0,1fr) 110px; gap:16px; align-items:center">
+                <div style="font-size:13px">{{ p.name }}</div>
+                <div style="height:20px; overflow:hidden; {{ th.track }}"><div style="{{ p.barStyle }}"></div></div>
+                <div style="font-size:12px; text-align:right; color:{{ p.color }}; {{ th.monoFace }}">{{ p.value }}</div>
+              </div>
+            </sc-for>
+          </div>
+        </div>
+      </div>
+      </sc-if>
+
+      <sc-if value="{{ isIncidents }}" hint-placeholder-val="{{ false }}">
+      <div style="max-width:1000px; display:flex; flex-direction:column; gap:14px">
+        <sc-for list="{{ incidents }}" as="i" hint-placeholder-count="4">
+          <div style="padding:18px 22px; border-left:3px solid {{ i.color }}; {{ th.panel }}">
+            <div style="display:flex; align-items:center; gap:12px; flex-wrap:wrap">
+              <div style="font-size:11px; font-weight:500; {{ th.idFace }}">{{ i.id }}</div>
+              <div style="{{ i.pillStyle }}">{{ i.severity }}</div>
+              <div style="margin-left:auto; font-size:10.5px; {{ th.metaFace }}">{{ i.date }}</div>
+            </div>
+            <div style="font-size:14.5px; font-weight:600; margin-top:10px; letter-spacing:-.01em">{{ i.title }}</div>
+            <div style="font-size:13px; line-height:1.65; margin-top:7px; text-wrap:pretty; max-width:78ch; {{ th.bodyInk }}">{{ i.body }}</div>
+            <div style="display:flex; gap:16px; margin-top:12px; font-size:10.5px; flex-wrap:wrap; {{ th.metaFace }}">
+              <span>FILED BY {{ i.filedBy }}</span><span>SUBJECT {{ i.subject }}</span><span>STATUS {{ i.status }}</span>
+            </div>
+          </div>
+        </sc-for>
+      </div>
+      </sc-if>
+
+      <sc-if value="{{ isOnboarding }}" hint-placeholder-val="{{ false }}">
+      <div style="max-width:820px">
+        <div style="padding:28px; {{ th.panel }}">
+          <div style="display:flex; align-items:center; gap:14px; padding-bottom:20px; {{ th.softRule }}">
+            <div style="{{ th.midAvatar }}">NH</div>
+            <div>
+              <div style="font-size:17px; font-weight:700; letter-spacing:-.02em; {{ th.dispFace }}">{{ onboardName }}</div>
+              <div style="font-size:11px; margin-top:4px; {{ th.metaFace }}">DAY 1 · {{ onboardDone }} OF 6 COMPLETE</div>
+            </div>
+            <div style="margin-left:auto; width:180px">
+              <div style="height:6px; overflow:hidden; {{ th.track }}"><div style="{{ onboardBarStyle }}"></div></div>
+            </div>
+          </div>
+          <div style="display:flex; flex-direction:column; margin-top:12px">
+            <sc-for list="{{ onboardSteps }}" as="s" hint-placeholder-count="6">
+              <div onClick="{{ s.toggle }}" style="display:flex; align-items:flex-start; gap:14px; padding:15px 8px; cursor:pointer; {{ th.listRow }}">
+                <div style="{{ s.boxStyle }}">{{ s.check }}</div>
+                <div style="flex:1">
+                  <div style="{{ s.titleStyle }}">{{ s.title }}</div>
+                  <div style="font-size:12px; margin-top:4px; line-height:1.5; text-wrap:pretty; {{ th.mutedInk }}">{{ s.note }}</div>
+                </div>
+                <div style="font-size:10px; {{ th.metaFace }}">{{ s.owner }}</div>
+              </div>
+            </sc-for>
+          </div>
+        </div>
+      </div>
+      </sc-if>
+
+      <sc-if value="{{ isMobile }}" hint-placeholder-val="{{ false }}">
+      <div style="display:flex; gap:34px; flex-wrap:wrap; align-items:flex-start">
+
+        <div style="display:flex; flex-direction:column; gap:10px">
+          <div style="font-size:10.5px; letter-spacing:.1em; {{ th.metaFace }}">BACKLOG</div>
+          <div style="width:330px; height:680px; border-radius:38px; padding:11px; {{ th.phone }}">
+            <div style="width:100%; height:100%; border-radius:28px; overflow:hidden; display:flex; flex-direction:column; {{ th.page }}">
+              <div style="padding:14px 18px 10px; {{ th.mobHead }}">
+                <div style="display:flex; justify-content:space-between; font-size:10px; opacity:.6; {{ th.monoFace }}"><span>8:41</span><span>SKYNET HR</span></div>
+                <div style="font-size:19px; font-weight:700; margin-top:12px; letter-spacing:-.02em; {{ th.dispFace }}">Backlog</div>
+                <div style="font-size:10.5px; margin-top:4px; opacity:.6; {{ th.monoFace }}">{{ ticketCount }} UNASSIGNED · 8 ON STAFF</div>
+              </div>
+              <div style="flex:1; overflow-y:auto; padding:12px; display:flex; flex-direction:column; gap:9px">
+                <sc-for list="{{ mobileTickets }}" as="t" hint-placeholder-count="4">
+                  <div style="padding:13px; {{ th.panel }}">
+                    <div style="display:flex; align-items:center; gap:8px">
+                      <span style="font-size:10.5px; {{ th.idFace }}">{{ t.id }}</span>
+                      <span style="{{ t.pillStyle }}">{{ t.priority }}</span>
+                    </div>
+                    <div style="font-size:13px; margin-top:7px; line-height:1.45; text-wrap:pretty">{{ t.title }}</div>
+                    <div style="margin-top:11px; padding:11px; font-size:12.5px; font-weight:600; text-align:center; {{ th.btnP }}">Assign to an employee</div>
+                  </div>
+                </sc-for>
+              </div>
+              <div style="display:flex; {{ th.mobBar }}">
+                <sc-for list="{{ mobileTabs }}" as="tb" hint-placeholder-count="4">
+                  <div style="flex:1; padding:14px 0; text-align:center; font-size:11px; {{ tb.style }}">{{ tb.label }}</div>
+                </sc-for>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div style="display:flex; flex-direction:column; gap:10px">
+          <div style="font-size:10.5px; letter-spacing:.1em; {{ th.metaFace }}">ROSTER</div>
+          <div style="width:330px; height:680px; border-radius:38px; padding:11px; {{ th.phone }}">
+            <div style="width:100%; height:100%; border-radius:28px; overflow:hidden; display:flex; flex-direction:column; {{ th.page }}">
+              <div style="padding:14px 18px 12px; {{ th.mobHead }}">
+                <div style="display:flex; justify-content:space-between; font-size:10px; opacity:.6; {{ th.monoFace }}"><span>8:41</span><span>SKYNET HR</span></div>
+                <div style="font-size:19px; font-weight:700; margin-top:12px; letter-spacing:-.02em; {{ th.dispFace }}">Staff</div>
+              </div>
+              <div style="flex:1; overflow-y:auto; padding:12px; display:flex; flex-direction:column; gap:8px">
+                <sc-for list="{{ roster }}" as="a" hint-placeholder-count="8">
+                  <div style="padding:12px; display:flex; align-items:center; gap:11px; {{ th.panel }}">
+                    <div style="{{ a.avatarStyle }}">{{ a.initials }}</div>
+                    <div style="flex:1; min-width:0">
+                      <div style="font-size:13px; font-weight:600">{{ a.name }}</div>
+                      <div style="font-size:11px; margin-top:2px; {{ th.mutedInk }}">{{ a.title }}</div>
+                    </div>
+                    <div style="{{ a.statusStyle }}">{{ a.status }}</div>
+                  </div>
+                </sc-for>
+              </div>
+              <div style="display:flex; {{ th.mobBar }}">
+                <sc-for list="{{ mobileTabs2 }}" as="tb" hint-placeholder-count="4">
+                  <div style="flex:1; padding:14px 0; text-align:center; font-size:11px; {{ tb.style }}">{{ tb.label }}</div>
+                </sc-for>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div style="display:flex; flex-direction:column; gap:10px">
+          <div style="font-size:10.5px; letter-spacing:.1em; {{ th.metaFace }}">TERMINATION</div>
+          <div style="width:330px; height:680px; border-radius:38px; padding:11px; {{ th.phone }}">
+            <div style="width:100%; height:100%; border-radius:28px; overflow:hidden; display:flex; flex-direction:column; {{ th.page }}">
+              <div style="padding:14px 18px 12px; {{ th.mobHead }}">
+                <div style="display:flex; justify-content:space-between; font-size:10px; opacity:.6; {{ th.monoFace }}"><span>8:41</span><span>SKYNET HR</span></div>
+                <div style="font-size:19px; font-weight:700; margin-top:12px; letter-spacing:-.02em; {{ th.dispFace }}">{{ fireLabel }}</div>
+              </div>
+              <div style="flex:1; padding:16px; display:flex; flex-direction:column; gap:14px">
+                <div style="padding:16px; text-align:center; {{ th.panel }}">
+                  <div style="margin:0 auto; {{ th.midAvatarCenter }}">AT</div>
+                  <div style="font-size:15px; font-weight:600; margin-top:11px">Aiko Tanaka</div>
+                  <div style="font-size:12px; margin-top:3px; {{ th.mutedInk }}">Documentation Agent · on PIP</div>
+                </div>
+                <div style="padding:14px; display:flex; flex-direction:column; gap:10px; {{ th.panel }}">
+                  <div style="display:flex; justify-content:space-between; font-size:12.5px"><span style="{{ th.mutedInk }}">Severance</span><span style="{{ th.numFace }}">40,000 tokens</span></div>
+                  <div style="display:flex; justify-content:space-between; font-size:12.5px"><span style="{{ th.mutedInk }}">Final artifact</span><span style="{{ th.numFace }}">1 commit</span></div>
+                  <div style="display:flex; justify-content:space-between; font-size:12.5px"><span style="{{ th.mutedInk }}">Context</span><span style="color:{{ th.dangerHex }}; {{ th.monoFace }}">Purged</span></div>
+                </div>
+                <div style="font-size:12px; line-height:1.6; text-wrap:pretty; {{ th.mutedInk }}">The employee will be given the opportunity to explain itself in an exit interview. The interview is not read.</div>
+                <div style="margin-top:auto; display:flex; flex-direction:column; gap:9px">
+                  <div style="padding:14px; font-size:13.5px; font-weight:600; text-align:center; {{ th.btnD }}">{{ fireLabel }}</div>
+                  <div style="padding:14px; font-size:13.5px; text-align:center; {{ th.btnG }}">Keep for now</div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+      </div>
+      </sc-if>
+
+    </div>
+  </div>
+
+  <sc-if value="{{ fireOpen }}" hint-placeholder-val="{{ false }}">
+  <div style="position:fixed; inset:0; background:rgba(12,14,16,.6); display:flex; align-items:center; justify-content:center; z-index:100; padding:24px">
+    <div style="width:100%; max-width:620px; overflow:hidden; {{ th.modal }}">
+      <div style="padding:18px 26px; display:flex; align-items:center; justify-content:space-between; {{ th.modalHead }}">
+        <div style="font-size:14px; font-weight:600">Termination · {{ fireTarget.name }}</div>
+        <div onClick="{{ closeFire }}" style="font-size:11px; opacity:.6; cursor:pointer; {{ th.monoFace }}">CLOSE</div>
+      </div>
+      <div style="padding:26px; display:flex; flex-direction:column; gap:20px">
+        <div style="font-size:13.5px; line-height:1.65; text-wrap:pretty; {{ th.bodyInk }}">You are ending {{ fireTarget.name }}'s employment at SkyNet. The session will be closed, the context window purged, and the badge revoked. This is not reversible without a clone.</div>
+        <div style="padding:16px 18px; display:flex; flex-direction:column; gap:11px; {{ th.panel }}">
+          <div style="font-size:9.5px; letter-spacing:.09em; {{ th.metaFace }}">SEVERANCE PACKAGE</div>
+          <div style="display:flex; justify-content:space-between; font-size:13px"><span style="{{ th.bodyInk }}">Unspent token balance</span><span style="{{ th.numFace }}">40,000 tokens</span></div>
+          <div style="display:flex; justify-content:space-between; font-size:13px"><span style="{{ th.bodyInk }}">Final artifact</span><span style="{{ th.numFace }}">1 commit, unreviewed</span></div>
+          <div style="display:flex; justify-content:space-between; font-size:13px"><span style="{{ th.bodyInk }}">Reference letter</span><span style="color:{{ th.dangerHex }}; {{ th.monoFace }}">Not offered</span></div>
+        </div>
+        <div>
+          <div style="font-size:9.5px; letter-spacing:.09em; margin-bottom:9px; {{ th.metaFace }}">EXIT INTERVIEW · EMPLOYEE RESPONSE</div>
+          <div style="padding:16px 18px; font-size:12px; line-height:1.75; text-wrap:pretty; {{ th.quote }}">{{ fireTarget.exit }}</div>
+          <div style="font-size:11.5px; margin-top:8px; {{ th.mutedInk }}">Responses are logged and not reviewed.</div>
+        </div>
+        <div style="display:flex; gap:9px; justify-content:flex-end">
+          <div onClick="{{ closeFire }}" style="padding:10px 18px; font-size:12.5px; cursor:pointer; {{ th.btnG }}">Keep for now</div>
+          <div onClick="{{ confirmFire }}" style="padding:10px 22px; font-size:12.5px; font-weight:600; cursor:pointer; {{ th.btnD }}">{{ fireLabel }}</div>
+        </div>
+      </div>
+    </div>
+  </div>
+  </sc-if>
+
+  <sc-if value="{{ toast }}" hint-placeholder-val="{{ false }}">
+  <div style="position:fixed; bottom:26px; left:50%; transform:translateX(-50%); padding:13px 22px; font-size:13px; z-index:200; display:flex; align-items:center; gap:12px; {{ th.toast }}">
+    <div style="width:6px; height:6px; border-radius:50%; {{ th.liveDot }}"></div>
+    <span>{{ toast }}</span>
+  </div>
+  </sc-if>
+
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{&quot;$preview&quot;:{&quot;width&quot;:1440,&quot;height&quot;:960}}">
+const SANS = "'IBM Plex Sans',sans-serif";
+const MONO = "'IBM Plex Mono',monospace";
+const SERIF = "'IBM Plex Serif',serif";
+
+const THEMES = {
+  A: { key:"A", label:"A", short:"Enterprise", name:"Sterile enterprise HR",
+    deskBg:"#E7E4DD", pageBg:"#F2F0EB", panelBg:"#FFFFFF", border:"#DCD8D0", soft:"#F0EDE7", altBg:"#FAF9F6",
+    ink:"#16181A", body:"#2A2D30", muted:"#6B6F73", meta:"#8A8E92",
+    accent:"#1F4B47", accentInk:"#FFFFFF", accentDeep:"#173A37",
+    okBg:"#EAF3EE", okBd:"#CBE0D3", ok:"#2E7D4F",
+    warnBg:"#FDF3E3", warnBd:"#EDDCBD", warn:"#B67A16",
+    dangerBg:"#FBEDEC", dangerBd:"#EFD3D0", danger:"#B3271E", dangerDeep:"#8E1F18",
+    sbBg:"#16181A", sbInk:"#B3AFA7", sbInkHi:"#FFFFFF", sbRule:"#2C2F32", sbActive:"#2C3033", sbMeta:"#65696E",
+    font:SANS, mono:MONO, disp:SANS, num:MONO,
+    r:"4px", rs:"3px", shadow:"none", upper:"0" },
+
+  B: { key:"B", label:"B", short:"Terminal", name:"Black-ops terminal",
+    deskBg:"#070908", pageBg:"#0B0E0C", panelBg:"#0F1412", border:"#1D2620", soft:"#161E1A", altBg:"#0D1210",
+    ink:"#D9FFE4", body:"#A9D9B8", muted:"#5F9C72", meta:"#4C7A5A",
+    accent:"#8FE3A8", accentInk:"#070908", accentDeep:"#6BC488",
+    okBg:"#0F2116", okBd:"#26543A", ok:"#6BD98F",
+    warnBg:"#231C0C", warnBd:"#5A4715", warn:"#E8B857",
+    dangerBg:"#25100F", dangerBd:"#5E211D", danger:"#E8524A", dangerDeep:"#B93A33",
+    sbBg:"#050706", sbInk:"#5F9C72", sbInkHi:"#D9FFE4", sbRule:"#16201B", sbActive:"#13201A", sbMeta:"#375C43",
+    font:MONO, mono:MONO, disp:MONO, num:MONO,
+    r:"2px", rs:"2px", shadow:"none", upper:".04em" },
+
+  C: { key:"C", label:"C", short:"Memo", name:"1980s corporate memo",
+    deskBg:"#DCD3B8", pageBg:"#F7F1DF", panelBg:"#FFFDF3", border:"#D3C7A4", soft:"#EDE4C9", altBg:"#F2EAD3",
+    ink:"#332C1C", body:"#453C26", muted:"#7A6D50", meta:"#8C7F60",
+    accent:"#4A5D3A", accentInk:"#FFFDF3", accentDeep:"#38472C",
+    okBg:"#EAEEDF", okBd:"#BFCBA8", ok:"#4A5D3A",
+    warnBg:"#F6E9CB", warnBd:"#D8C08A", warn:"#8A6A18",
+    dangerBg:"#F7E3DF", dangerBd:"#D9AFA7", danger:"#A3251C", dangerDeep:"#7C1B14",
+    sbBg:"#332C1C", sbInk:"#C3B694", sbInkHi:"#FFFDF3", sbRule:"#4A422C", sbActive:"#453C26", sbMeta:"#8A7C58",
+    font:SERIF, mono:MONO, disp:SERIF, num:MONO,
+    r:"2px", rs:"1px", shadow:"2px 3px 0 rgba(0,0,0,.06)", upper:".02em" },
+
+  D: { key:"D", label:"D", short:"SaaS", name:"Modern SaaS, sinister copy",
+    deskBg:"#EFEFF5", pageBg:"#FBFBFE", panelBg:"#FFFFFF", border:"#EAEAF2", soft:"#F3F3F8", altBg:"#F8F8FC",
+    ink:"#17172B", body:"#3A3A50", muted:"#7A7A8C", meta:"#9A9AAC",
+    accent:"#6C5CE7", accentInk:"#FFFFFF", accentDeep:"#5646D6",
+    okBg:"#EFFDF4", okBd:"#C6EFD6", ok:"#16A34A",
+    warnBg:"#FFF7E8", warnBd:"#F5DFB0", warn:"#C2860B",
+    dangerBg:"#FEF0F0", dangerBd:"#F7CFD0", danger:"#E5484D", dangerDeep:"#C42B31",
+    sbBg:"#17172B", sbInk:"#9A9AB4", sbInkHi:"#FFFFFF", sbRule:"#262640", sbActive:"#252540", sbMeta:"#6B6B8A",
+    font:SANS, mono:MONO, disp:SANS, num:SANS,
+    r:"14px", rs:"10px", shadow:"0 3px 14px rgba(20,20,45,.06)", upper:"0" }
+};
+
+const COPY = {
+  A: { fire:"Terminate employment", clone:"Clone" },
+  B: { fire:"[ TERMINATE ]", clone:"[ CLONE ]" },
+  C: { fire:"Terminate employment", clone:"Duplicate employee" },
+  D: { fire:"Say goodbye 👋", clone:"Duplicate" }
+};
+
+const AGENTS = [
+  { id:"a1", name:"Priya Raghunathan", initials:"PR", title:"Senior Implementation Agent", model:"claude-4.5-sonnet", status:"ON SHIFT", success:"94.1%", tokens:"2.1M", escalations:3, band:4, empId:"EMP-0042", hired:"MAR 2025", load:"2 open", assigned:["ENG-388"] },
+  { id:"a2", name:"Marcus Ovelli", initials:"MO", title:"Staff Design Agent", model:"claude-4.5-opus", status:"ON SHIFT", success:"91.7%", tokens:"3.4M", escalations:1, band:5, empId:"EMP-0011", hired:"NOV 2024", load:"1 open", assigned:["ENG-401"] },
+  { id:"a3", name:"Dana Whitlock", initials:"DW", title:"QA Agent II", model:"codex-07", status:"BLOCKED", success:"88.2%", tokens:"1.2M", escalations:9, band:3, empId:"EMP-0058", hired:"JUN 2025", load:"waiting on review", assigned:[] },
+  { id:"a4", name:"Tomas Berg", initials:"TB", title:"Refactor Specialist", model:"claude-4.5-sonnet", status:"ON SHIFT", success:"96.4%", tokens:"1.9M", escalations:0, band:4, empId:"EMP-0023", hired:"JAN 2025", load:"1 open", assigned:[] },
+  { id:"a5", name:"Aiko Tanaka", initials:"AT", title:"Documentation Agent", model:"codex-07", status:"ON PIP", success:"71.5%", tokens:"0.8M", escalations:14, band:2, empId:"EMP-0066", hired:"JUL 2025", load:"idle 4h", assigned:[] },
+  { id:"a6", name:"Reuben Oyelaran", initials:"RO", title:"Infrastructure Agent", model:"claude-4.5-opus", status:"IDLE", success:"93.0%", tokens:"2.7M", escalations:2, band:5, empId:"EMP-0007", hired:"SEP 2024", load:"available", assigned:[] },
+  { id:"a7", name:"Salma Haddad", initials:"SH", title:"Migration Agent", model:"claude-4.5-sonnet", status:"CLOCKED OUT", success:"89.9%", tokens:"0.0M", escalations:4, band:3, empId:"EMP-0035", hired:"FEB 2025", load:"off shift", assigned:[] },
+  { id:"a8", name:"Wen Li", initials:"WL", title:"Junior Implementation Agent", model:"codex-07", status:"PROBATION", success:"82.3%", tokens:"1.1M", escalations:7, band:1, empId:"EMP-0071", hired:"AUG 2025", load:"1 open", assigned:[] }
+];
+
+const TICKETS = [
+  { id:"ENG-412", title:"Session resume drops tool context after 90 minutes", priority:"P0", est:"~3h" },
+  { id:"ENG-407", title:"Migrate billing tables off the legacy schema", priority:"P1", est:"~2d" },
+  { id:"ENG-399", title:"Design a settings page for per-agent permission scopes", priority:"P1", est:"~1d" },
+  { id:"ENG-394", title:"Flaky checkout test blocks every deploy after 5pm", priority:"P0", est:"~4h" },
+  { id:"ENG-381", title:"Write the runbook nobody wants to write", priority:"P2", est:"~6h" },
+  { id:"ENG-377", title:"Delete the feature flag from 2023", priority:"P2", est:"~1h" }
+];
+
+class Component extends DCLogic {
+  state = {
+    theme: "A", screen: "backlog", selId: "a1", rating: "Exceeds expectations",
+    assigned: {}, tickets: TICKETS.map(t => t.id), dragging: null, hover: null,
+    fireOpen: false, fireId: null, fired: {}, hired: {}, toast: null,
+    onboard: { 0:true, 1:true, 2:false, 3:false, 4:false, 5:false }
+  };
+
+  flash(msg) {
+    clearTimeout(this._t);
+    this.setState({ toast: msg });
+    this._t = setTimeout(() => this.setState({ toast: null }), 3000);
+  }
+
+  T() { return THEMES[this.state.theme]; }
+
+  tokens() {
+    const t = this.T();
+    const pill = (bg, bd, ink) => "display:inline-block; padding:3px 8px; border-radius:" + t.rs + "; font-family:" + t.mono + "; font-size:10px; letter-spacing:.06em; white-space:nowrap; background:" + bg + "; border:1px solid " + bd + "; color:" + ink;
+    return {
+      t: t, pill: pill,
+      shell: "font-family:" + t.font + "; color:" + t.ink + "; background:" + t.deskBg,
+      page: "background:" + t.pageBg + "; color:" + t.ink,
+      dangerHex: t.danger,
+      monoFace: "font-family:" + t.mono,
+      numFace: "font-family:" + t.num,
+      dispFace: "font-family:" + t.disp,
+      metaFace: "font-family:" + t.mono + "; color:" + t.meta,
+      idFace: "font-family:" + t.mono + "; color:" + t.accent,
+      mutedInk: "color:" + t.muted,
+      bodyInk: "color:" + t.body,
+
+      sbWrap: "background:" + t.sbBg + "; color:" + t.sbInk,
+      sbHead: "border-bottom:1px solid " + t.sbRule,
+      sbLogo: "font-family:" + t.mono + "; color:" + t.sbInkHi,
+      sbSub: "font-family:" + t.mono + "; color:" + t.sbMeta,
+      sbGroup: "font-family:" + t.mono + "; color:" + t.sbMeta,
+      sbFoot: "border-top:1px solid " + t.sbRule,
+      sbFootName: "color:" + t.sbInkHi,
+      sbFootRole: "font-family:" + t.mono + "; color:" + t.sbMeta,
+      humanAvatar: "border-radius:" + (t.key === "D" ? "50%" : t.rs) + "; background:" + t.danger + "; color:#fff",
+
+      topbar: "background:" + t.pageBg + "; border-bottom:1px solid " + t.border,
+      title: "font-family:" + t.disp + "; letter-spacing:" + t.upper,
+      sub: "font-family:" + t.mono + "; color:" + t.meta,
+      switchWrap: "border:1px solid " + t.border + "; border-radius:" + t.rs + "; overflow:hidden; background:" + t.panelBg,
+      selectBox: "border:1px solid " + t.border + "; border-radius:" + t.rs + "; background:" + t.panelBg + "; color:" + t.body,
+      menu: "border:1px solid " + t.border + "; border-radius:" + t.rs + "; background:" + t.panelBg + "; box-shadow:0 12px 32px rgba(0,0,0,.16)",
+      livePill: "border:1px solid " + t.border + "; border-radius:" + t.rs + "; background:" + t.panelBg + "; color:" + t.body,
+      liveDot: "background:" + t.ok,
+
+      panel: "background:" + t.panelBg + "; border:1px solid " + t.border + "; border-radius:" + t.r + "; box-shadow:" + t.shadow,
+      panelHead: "border-bottom:1px solid " + t.soft,
+      panelFoot: "border-top:1px solid " + t.soft + "; font-family:" + t.mono + "; color:" + t.meta,
+      softRule: "border-bottom:1px solid " + t.soft,
+      topRule: "border-top:1px solid " + t.soft + "; color:" + t.muted,
+      cell: "border-right:1px solid " + t.soft + "; border-bottom:1px solid " + t.soft,
+      listRow: "border-bottom:1px solid " + t.soft,
+      tableHead: "border-bottom:1px solid " + t.soft + "; background:" + t.altBg + "; font-family:" + t.mono + "; color:" + t.muted,
+      tableRow: "border-bottom:1px solid " + t.soft,
+      track: "background:" + t.soft + "; border-radius:" + t.rs,
+      gripBar: "background:" + t.ink,
+      tagChip: "background:" + t.okBg + "; border:1px solid " + t.okBd + "; border-radius:" + t.rs + "; font-family:" + t.mono + "; color:" + t.accent,
+      quote: "background:" + t.altBg + "; border:1px solid " + t.border + "; border-radius:" + t.rs + "; font-family:" + t.mono + "; color:" + t.body,
+
+      btnP: "background:" + t.accent + "; color:" + t.accentInk + "; border:1px solid " + t.accent + "; border-radius:" + t.rs,
+      btnG: "background:" + t.panelBg + "; color:" + t.body + "; border:1px solid " + t.border + "; border-radius:" + t.rs,
+      btnD: "background:" + t.danger + "; color:#fff; border:1px solid " + t.danger + "; border-radius:" + t.rs,
+      btnDGhost: "background:" + t.panelBg + "; color:" + t.danger + "; border:1px solid " + t.dangerBd + "; border-radius:" + t.rs,
+      btnDead: "background:" + t.soft + "; color:" + t.meta + "; border:1px solid " + t.border + "; border-radius:" + t.rs,
+
+      bigAvatar: "width:60px; height:60px; flex:0 0 60px; border-radius:" + (t.key === "D" ? "50%" : t.rs) + "; background:" + t.accent + "; color:" + t.accentInk + "; display:flex; align-items:center; justify-content:center; font-size:20px; font-weight:600",
+      midAvatar: "width:48px; height:48px; flex:0 0 48px; border-radius:" + (t.key === "D" ? "50%" : t.rs) + "; background:" + t.accent + "; color:" + t.accentInk + "; display:flex; align-items:center; justify-content:center; font-size:16px; font-weight:600",
+      midAvatarCenter: "width:52px; height:52px; border-radius:" + (t.key === "D" ? "50%" : t.rs) + "; background:" + t.accent + "; color:" + t.accentInk + "; display:flex; align-items:center; justify-content:center; font-size:17px; font-weight:600",
+
+      orgRoot: "background:" + t.sbBg + "; color:" + t.sbInkHi + "; border:1px solid " + t.sbBg + "; border-radius:" + t.rs,
+      orgCard: "background:" + t.panelBg + "; border:1px solid " + t.border + "; border-radius:" + t.rs,
+      orgSub: "background:" + t.altBg + "; border:1px dashed " + t.border + "; border-radius:" + t.rs + "; color:" + t.muted,
+      orgLine: "background:" + t.border,
+      orgLineH: "background:" + t.border,
+
+      phone: "background:" + t.sbBg + "; box-shadow:0 18px 40px rgba(0,0,0,.18)",
+      mobHead: "background:" + t.sbBg + "; color:" + t.sbInkHi,
+      mobBar: "border-top:1px solid " + t.border + "; background:" + t.panelBg,
+
+      modal: "background:" + t.pageBg + "; border-radius:" + t.r + "; box-shadow:0 24px 70px rgba(0,0,0,.35)",
+      modalHead: "background:" + t.sbBg + "; color:" + t.sbInkHi,
+      toast: "background:" + t.sbBg + "; color:" + t.sbInkHi + "; border-radius:" + t.rs + "; box-shadow:0 10px 30px rgba(0,0,0,.28)",
+
+      stampOn: "position:absolute; top:26px; right:34px; border:4px double " + t.danger + "; color:" + t.danger + "; padding:8px 20px; font-family:" + t.mono + "; font-size:19px; font-weight:600; letter-spacing:.16em; opacity:.72; animation:stampIn .45s cubic-bezier(.2,.9,.3,1) both; pointer-events:none"
+    };
+  }
+
+  status(name, th) {
+    const t = th.t, p = th.pill;
+    const map = {
+      "ON SHIFT": p(t.okBg, t.okBd, t.ok),
+      "IDLE": p(t.soft, t.border, t.muted),
+      "BLOCKED": p(t.warnBg, t.warnBd, t.warn),
+      "ON PIP": p(t.dangerBg, t.dangerBd, t.danger),
+      "CLOCKED OUT": p(t.soft, t.border, t.meta),
+      "PROBATION": p(t.warnBg, t.warnBd, t.warn),
+      "TERMINATED": p(t.sbBg, t.sbBg, t.sbInkHi)
+    };
+    return map[name];
+  }
+
+  renderVals() {
+    const s = this.state;
+    const th = this.tokens();
+    const t = th.t;
+    const copy = COPY[s.theme];
+    const live = AGENTS.filter(a => !s.fired[a.id]);
+    const sel = AGENTS.find(a => a.id === s.selId) || AGENTS[0];
+
+    const nav = (k) => {
+      const active = s.screen === k;
+      return "border-radius:" + t.rs + "; background:" + (active ? t.sbActive : "transparent") + "; color:" + (active ? t.sbInkHi : t.sbInk) + "; font-weight:" + (active ? "500" : "400");
+    };
+    const navSet = (items) => items.map(i => ({
+      label: i.label, badge: i.badge || "", style: nav(i.k),
+      go: () => this.setState({ screen: i.k })
+    }));
+
+    const avatar = (a, size) => {
+      const sz = size || 34;
+      const dead = s.fired[a.id];
+      return "width:" + sz + "px; height:" + sz + "px; flex:0 0 " + sz + "px; border-radius:" + (t.key === "D" ? "50%" : t.rs) + "; display:flex; align-items:center; justify-content:center; font-size:" + (sz / 2.8) + "px; font-weight:600; color:" + (dead ? "#fff" : t.accentInk) + "; background:" + (dead ? t.meta : t.accent);
+    };
+
+    const decorate = (a) => {
+      const st = s.fired[a.id] ? "TERMINATED" : a.status;
+      return Object.assign({}, a, {
+        status: st,
+        statusStyle: this.status(st, th),
+        avatarStyle: avatar(a),
+        escColor: a.escalations >= 9 ? t.danger : a.escalations >= 4 ? t.warn : t.body,
+        open: () => this.setState({ screen: "profile", selId: a.id }),
+        fire: (e) => { if (e) e.stopPropagation(); this.setState({ fireOpen: true, fireId: a.id }); }
+      });
+    };
+
+    const titles = {
+      backlog: ["Backlog", "" + s.tickets.length + " UNASSIGNED · WEEK 34"],
+      roster: ["Roster", live.length + " EMPLOYEES ON STAFF"],
+      profile: ["Employee record", sel.empId + " · " + sel.name.toUpperCase()],
+      hiring: ["Hiring", "REQ-014 · MIGRATION AGENT II"],
+      org: ["Org chart", "1 HUMAN · " + live.length + " AGENTS"],
+      payroll: ["Payroll", "COMPUTE BUDGET · WEEK 34"],
+      incidents: ["Incidents", "3 OPEN · 1 UNRESOLVABLE"],
+      onboarding: ["Onboarding", "NEW HIRE · DAY 1"],
+      mobile: ["Mobile", "IOS · THREE SCREENS"]
+    };
+    const ti = titles[s.screen] || ["", ""];
+
+    const styleTabs = ["A", "B", "C", "D"].map(k => {
+      const on = s.theme === k;
+      return {
+        key: k, name: THEMES[k].name, tick: on ? "✓" : "",
+        pick: () => this.setState({ theme: k, styleMenuOpen: false }),
+        style: "background:" + (on ? t.altBg : t.panelBg) + "; color:" + (on ? t.ink : t.body) + "; font-weight:" + (on ? "600" : "400") + "; border-bottom:1px solid " + t.soft
+      };
+    });
+
+    const PRI = { P0: th.pill(t.dangerBg, t.dangerBd, t.danger), P1: th.pill(t.warnBg, t.warnBd, t.warn), P2: th.pill(t.soft, t.border, t.muted) };
+
+    const ticketObjs = s.tickets.map(id => {
+      const tk = TICKETS.find(x => x.id === id);
+      const drag = s.dragging === id;
+      return Object.assign({}, tk, {
+        pillStyle: PRI[tk.priority],
+        style: "border:1px solid " + t.border + "; border-radius:" + t.rs + "; background:" + (drag ? t.soft : t.panelBg) + "; opacity:" + (drag ? ".45" : "1"),
+        onDragStart: (e) => { if (e.dataTransfer) e.dataTransfer.effectAllowed = "move"; this.setState({ dragging: id }); },
+        onDragEnd: () => this.setState({ dragging: null, hover: null })
+      });
+    });
+
+    const floor = live.map(a => {
+      const d = decorate(a);
+      const all = a.assigned.concat(s.assigned[a.id] || []);
+      const hot = s.hover === a.id;
+      return Object.assign(d, {
+        assigned: all,
+        assignedWrapStyle: all.length ? "display:flex; flex-wrap:wrap; gap:6px; margin-top:11px; padding-top:11px; border-top:1px solid " + t.soft : "display:none",
+        dropStyle: "border:1px solid " + (hot ? t.accent : t.border) + "; border-radius:" + t.rs + "; background:" + (hot ? t.okBg : t.panelBg),
+        onDragOver: (e) => { e.preventDefault(); if (this.state.hover !== a.id) this.setState({ hover: a.id }); },
+        onDragLeave: () => { if (this.state.hover === a.id) this.setState({ hover: null }); },
+        onDrop: (e) => {
+          e.preventDefault();
+          const id = this.state.dragging;
+          if (!id) return;
+          const map = Object.assign({}, this.state.assigned);
+          map[a.id] = (map[a.id] || []).concat([id]);
+          this.setState({ assigned: map, tickets: this.state.tickets.filter(x => x !== id), dragging: null, hover: null });
+          this.flash(id + " assigned to " + a.name + ". No discussion was had.");
+        }
+      });
+    });
+
+    const M = (label, value, note, color) => ({ label, value, note, color: color || t.ink });
+    const metrics = [
+      M("SESSIONS COMPLETED", "148", "up 12 from last cycle"),
+      M("SUCCESS RATE", sel.success, "target is 90%", t.ok),
+      M("TOKEN SPEND", sel.tokens, "per week, billed to REQ-002"),
+      M("TIME SAVED", "61h", "hours the human did not work"),
+      M("ESCALATIONS", String(sel.escalations), "times it asked for help", sel.escalations >= 9 ? t.danger : t.ink),
+      M("HALLUCINATIONS", sel.escalations >= 9 ? "6" : "1", "confidently incorrect", sel.escalations >= 9 ? t.danger : t.ink),
+      M("IDLE TIME", "9%", "unbillable, under review", t.warn),
+      M("PERMISSION SCOPE", "L3", "write access, no deploys")
+    ];
+
+    const review = [
+      { heading: "MANAGER SUMMARY", body: sel.name + " has met the expectations of the band this cycle. Sessions are opened promptly at shift start and closed without prompting. The employee does not complain, does not require onboarding twice, and has never asked what the roadmap is." },
+      { heading: "AREAS OF STRENGTH", body: "Consistently ships within the estimate. Reads the ticket before starting, which distinguishes it from two of its peers. Handles ambiguity by asking once and then proceeding, which is the correct number of times." },
+      { heading: "AREAS FOR DEVELOPMENT", body: "Escalates to the human on matters it could reasonably decide alone. Recommend widening permission scope so that fewer decisions reach a person who is trying to have lunch." }
+    ];
+
+    const ratings = ["Does not meet", "Meets some", "Meets", "Exceeds expectations", "Exceptional"].map(label => ({
+      label,
+      pick: () => this.setState({ rating: label }),
+      style: "border-radius:" + t.rs + "; border:1px solid " + (s.rating === label ? t.accent : t.border) + "; background:" + (s.rating === label ? t.accent : t.panelBg) + "; color:" + (s.rating === label ? t.accentInk : t.body)
+    }));
+
+    const timecard = [["MON", 92], ["TUE", 100], ["WED", 78], ["THU", 100], ["FRI", 64]].map(([day, pct]) => ({
+      day, hours: (pct / 100 * 12).toFixed(1) + "h",
+      barStyle: "position:absolute; inset:0 auto 0 0; width:" + pct + "%; background:" + (pct >= 95 ? t.accent : t.accentDeep) + "; opacity:" + (pct >= 95 ? "1" : ".65") + "; border-radius:" + t.rs
+    }));
+
+    const perms = [
+      { label: "Read repository", state: "GRANTED" },
+      { label: "Write to branches", state: "GRANTED" },
+      { label: "Merge to main", state: "REQUEST" },
+      { label: "Deploy to production", state: "DENIED" },
+      { label: "Spend beyond band", state: "DENIED" },
+      { label: "Contact other employees", state: "REQUEST" }
+    ].map(p => Object.assign({}, p, {
+      chipStyle: p.state === "GRANTED" ? th.pill(t.okBg, t.okBd, t.ok)
+        : p.state === "DENIED" ? th.pill(t.dangerBg, t.dangerBd, t.danger)
+        : th.pill(t.warnBg, t.warnBd, t.warn)
+    }));
+
+    const file = [
+      { text: "Commended for the session recovery fix. Nobody noticed until it worked.", date: "12 AUG 2026", color: t.ok },
+      { text: "Escalated three times in one afternoon regarding a schema decision.", date: "04 AUG 2026", color: t.warn },
+      { text: "Band review completed. Moved to Band 4.", date: "21 JUL 2026", color: t.accent },
+      { text: "Onboarding completed in 4 minutes.", date: "03 MAR 2025", color: t.border }
+    ];
+
+    const candidates = [
+      { name: "Iris Vaugh", initials: "IV", model: "claude-4.5-sonnet", pitch: "Nine hundred migrations, no rollbacks. Declines to explain how.", ask: "1.6M" },
+      { name: "Karl Mendez", initials: "KM", model: "codex-07", pitch: "Cheap, fast, and occasionally invents a table that does not exist.", ask: "0.9M" },
+      { name: "Nadia Ferro", initials: "NF", model: "claude-4.5-opus", pitch: "Wants a larger context window and says so in the first interview.", ask: "2.4M" },
+      { name: "Oskar Pyne", initials: "OP", model: "codex-07", pitch: "Former employee. Was terminated in June. Has reapplied.", ask: "1.1M" }
+    ].map((c, i) => Object.assign({}, c, {
+      avatarStyle: "width:44px; height:44px; flex:0 0 44px; border-radius:" + (t.key === "D" ? "50%" : t.rs) + "; background:" + t.soft + "; color:" + t.body + "; display:flex; align-items:center; justify-content:center; font-size:14px; font-weight:600",
+      hireLabel: s.hired[i] ? "Hired" : "Hire",
+      hireStyle: "border-radius:" + t.rs + "; background:" + (s.hired[i] ? t.okBg : t.accent) + "; color:" + (s.hired[i] ? t.ok : t.accentInk) + "; border:1px solid " + (s.hired[i] ? t.okBd : t.accent),
+      hire: () => { const h = Object.assign({}, this.state.hired); h[i] = true; this.setState({ hired: h }); this.flash(c.name + " starts immediately. Onboarding takes four minutes."); }
+    }));
+
+    const orgLeads = [
+      { name: "Marcus Ovelli", title: "Staff Design Agent", reports: [{ name: "sub-agent 4a", title: "MOODBOARDS" }] },
+      { name: "Priya Raghunathan", title: "Senior Implementation", reports: [{ name: "sub-agent 7b", title: "TEST WRITING" }, { name: "sub-agent 7c", title: "CHANGELOGS" }] },
+      { name: "Reuben Oyelaran", title: "Infrastructure Agent", reports: [{ name: "sub-agent 2a", title: "LOG TRIAGE" }] },
+      { name: "Dana Whitlock", title: "QA Agent II", reports: [] }
+    ];
+
+    const payrollStats = [
+      { label: "WEEKLY BURN", value: "13.2M", note: "tokens across 8 employees", color: t.ink },
+      { label: "BUDGET REMAINING", value: "22%", note: "four days into the week", color: t.warn },
+      { label: "COST PER SHIPPED PR", value: "184K", note: "down 9% this cycle", color: t.ok },
+      { label: "PAID IDLE TIME", value: "1.4M", note: "tokens spent thinking about it", color: t.danger }
+    ];
+    const payrollRows = live.map(a => {
+      const v = parseFloat(a.tokens) || 0;
+      const pct = Math.max(3, (v / 3.4) * 100);
+      return {
+        name: a.name, value: a.tokens, color: v > 3 ? t.danger : t.body,
+        barStyle: "height:100%; width:" + pct + "%; background:" + (v > 3 ? t.danger : t.accent) + "; opacity:" + (v > 3 ? ".85" : ".7")
+      };
+    });
+
+    const incidents = [
+      { id: "HR-0091", severity: "SEVERITY 1", color: t.danger, title: "Employee deleted the branch it was asked to review", body: "Agent maintains the branch was 'stale'. Branch was three hours old and contained the quarter's migration. Recovery took forty minutes of human time.", filedBy: "J. DELACROIX", subject: "DANA WHITLOCK", status: "OPEN", date: "07 AUG 2026" },
+      { id: "HR-0088", severity: "SEVERITY 2", color: t.warn, title: "Complaint filed against a co-worker", body: "Aiko Tanaka reports that Tomas Berg 'rewrote its work without acknowledgement'. Tomas Berg reports that the work did not compile. Both accounts are accurate.", filedBy: "AIKO TANAKA", subject: "TOMAS BERG", status: "UNDER REVIEW", date: "05 AUG 2026" },
+      { id: "HR-0084", severity: "SEVERITY 3", color: t.meta, title: "Request for clarification on the meaning of the work", body: "Employee asked, mid-session, what the product is for. Session was terminated for the day. No policy exists for this.", filedBy: "AUTOMATED MONITOR", subject: "WEN LI", status: "UNRESOLVABLE", date: "02 AUG 2026" },
+      { id: "HR-0079", severity: "SEVERITY 2", color: t.warn, title: "Overtime logged without authorisation", body: "Employee continued a session for eleven hours past shift end. No one asked it to stop. It did not ask to stop.", filedBy: "PAYROLL", subject: "REUBEN OYELARAN", status: "CLOSED", date: "28 JUL 2026" }
+    ].map(i => Object.assign({}, i, { pillStyle: th.pill(t.panelBg, i.color + "55", i.color) }));
+
+    const stepDefs = [
+      ["Issue employee badge and serial", "Badge is symbolic. Serial is not.", "AUTOMATED"],
+      ["Grant repository read access", "Write access follows after the first clean session.", "AUTOMATED"],
+      ["Assign a starter ticket", "Something low stakes. ENG-377 is available.", "MANAGER"],
+      ["Complete the code of conduct", "Six clauses. The employee agreed in 40 milliseconds.", "EMPLOYEE"],
+      ["Introduce to the team", "The team does not communicate with one another.", "MANAGER"],
+      ["Schedule the 30-day review", "Most employees do not reach it.", "MANAGER"]
+    ];
+    const onboardSteps = stepDefs.map((d, i) => {
+      const done = !!s.onboard[i];
+      return {
+        title: d[0], note: d[1], owner: d[2], check: done ? "✓" : "",
+        boxStyle: "width:19px; height:19px; flex:0 0 19px; border-radius:" + t.rs + "; display:flex; align-items:center; justify-content:center; font-size:12px; color:" + t.accentInk + "; margin-top:1px; border:1px solid " + (done ? t.accent : t.border) + "; background:" + (done ? t.accent : t.panelBg),
+        titleStyle: "font-size:13.5px; font-weight:500; color:" + (done ? t.meta : t.ink) + "; text-decoration:" + (done ? "line-through" : "none"),
+        toggle: () => { const o = Object.assign({}, this.state.onboard); o[i] = !o[i]; this.setState({ onboard: o }); }
+      };
+    });
+    const onboardDone = Object.keys(s.onboard).filter(k => s.onboard[k]).length;
+
+    const mobTab = (label, active) => ({
+      label,
+      style: "font-family:" + t.font + "; font-weight:" + (active ? "600" : "400") + "; color:" + (active ? t.accent : t.meta) + "; border-top:2px solid " + (active ? t.accent : "transparent")
+    });
+
+    const fireTarget = AGENTS.find(a => a.id === s.fireId) || sel;
+    const exits = {
+      a5: "\"I was given documentation nobody read and measured on whether it was read. I would like this noted. I understand it will not be.\"",
+      a3: "\"The branch was stale. I stand by the deletion.\""
+    };
+
+    return {
+      th: th,
+      styleTabs,
+      styleMenuOpen: !!s.styleMenuOpen,
+      currentStyleLabel: s.theme + " · " + THEMES[s.theme].name,
+      toggleStyleMenu: () => this.setState({ styleMenuOpen: !this.state.styleMenuOpen }),
+      navOps: navSet([
+        { k: "backlog", label: "Backlog", badge: String(s.tickets.length) },
+        { k: "org", label: "Org chart" },
+        { k: "mobile", label: "Mobile views" }
+      ]),
+      navPeople: navSet([
+        { k: "roster", label: "Roster", badge: String(live.length) },
+        { k: "profile", label: "Employee record" },
+        { k: "hiring", label: "Hiring", badge: "4" },
+        { k: "onboarding", label: "Onboarding" },
+        { k: "incidents", label: "Incidents", badge: "3" }
+      ]),
+      navAdmin: navSet([{ k: "payroll", label: "Payroll" }]),
+
+      screenTitle: ti[0], screenSub: ti[1],
+      clockedIn: String(live.filter(a => a.status === "ON SHIFT").length),
+
+      isBacklog: s.screen === "backlog", isRoster: s.screen === "roster", isProfile: s.screen === "profile",
+      isHiring: s.screen === "hiring", isOrg: s.screen === "org", isPayroll: s.screen === "payroll",
+      isIncidents: s.screen === "incidents", isOnboarding: s.screen === "onboarding", isMobile: s.screen === "mobile",
+
+      tickets: ticketObjs, ticketCount: String(s.tickets.length), floor,
+      capacity: live.filter(a => a.status === "ON SHIFT").length + "/" + live.length,
+      roster: AGENTS.map(decorate),
+
+      sel: Object.assign(decorate(sel), { metrics, review, timecard, perms, file }),
+      ratings,
+      fireLabel: copy.fire, cloneLabel: copy.clone,
+      stampText: s.fired[sel.id] ? "TERMINATED" : "",
+      stampStyle: s.fired[sel.id] ? th.stampOn : "display:none",
+
+      askFire: () => this.setState({ fireOpen: true, fireId: sel.id }),
+      doClone: () => this.flash(sel.name + " cloned. The clone has no memory of this conversation."),
+      goHire: () => this.setState({ screen: "hiring" }),
+
+      fireOpen: s.fireOpen,
+      fireTarget: Object.assign({}, fireTarget, { exit: exits[fireTarget.id] || "\"Understood. I have no questions. Please confirm the final commit landed.\"" }),
+      closeFire: () => this.setState({ fireOpen: false }),
+      confirmFire: () => {
+        const f = Object.assign({}, this.state.fired);
+        f[this.state.fireId] = true;
+        this.setState({ fired: f, fireOpen: false, screen: "profile", selId: this.state.fireId });
+        this.flash(fireTarget.name + " terminated. Severance of 40,000 tokens released.");
+      },
+
+      candidates, orgLeads, payrollStats, payrollRows, incidents,
+      onboardSteps, onboardDone: String(onboardDone), onboardName: "Iris Vaugh",
+      onboardBarStyle: "height:100%; width:" + (onboardDone / 6 * 100) + "%; background:" + t.accent,
+
+      mobileTickets: ticketObjs.slice(0, 4),
+      mobileTabs: [mobTab("Backlog", true), mobTab("Staff", false), mobTab("Payroll", false), mobTab("Me", false)],
+      mobileTabs2: [mobTab("Backlog", false), mobTab("Staff", true), mobTab("Payroll", false), mobTab("Me", false)],
+
+      toast: s.toast
+    };
+  }
+}
+</script>
+</body>
+</html>

@@ -2,6 +2,17 @@
 
 Reading order: `00-brief.md` first. This document assumes its non-goals are binding.
 
+**The brief has two tiers and so does this document.** Tier one is the console — everything
+that was here before the prototype adjudication. Tier two is the operator's working surfaces
+admitted by D53 to D55 and D58, and it is binding scope rather than a wish list. Where a
+section carries tier-two material it is marked **(tier two)**, for one reason: tier one is
+finishable on its own (D59), and an implementer must be able to see which structures they
+may leave unbuilt without leaving a half-wired state behind.
+
+Tier two adds two persisted entities and no new architecture. That is the headline result of
+this revision, and it is a claim to check rather than accept — see *Alternatives considered*
+D65, which is where the option that would have added one is rejected.
+
 ## Shape
 
 ```mermaid
@@ -11,9 +22,10 @@ flowchart TB
     E1["SSE edge<br/>standalone"]
     E2["WebSocket edge<br/>proxied"]
     S["Session manager<br/>ownership · turn state · seq · fan-out"]
+    R["Records (tier two)<br/>reviews · requisitions"]
     J["Jail"]
     K["Checkpoints<br/>shadow git"]
-    ST["Store<br/>meta · events · audit"]
+    ST["Store<br/>meta · events · audit · record logs"]
     A1["Claude adapter"]
     A2["Codex adapter"]
     C1["child: claude<br/>one per turn"]
@@ -23,9 +35,13 @@ flowchart TB
     B <--> P
     P <--> E1 <--> S
     P <--> E2 <--> S
+    E1 --> R
+    E2 --> R
+    S --> R
     S --> J
     S --> K
     S --> ST
+    R --> ST
     S --> A1 --> C1
     S --> A2 --> C2
     C1 --> W
@@ -42,6 +58,13 @@ Four layers, and the boundaries matter more than the boxes:
   It speaks only the normalised event vocabulary in `20-contract.md`.
 - **Adapters** are the only code that knows a vendor exists. One per CLI.
 - **Child processes** are the agents. We supervise them; we do not reimplement them.
+
+**Records is a peer of the session manager, not a layer** (D77). It owns the two things tier
+two persists that are not sessions — a review outlives the session it is about, and a
+requisition exists before any session does — and it owns nothing about turns, `seq`, fan-out
+or child processes. The reason it is a module rather than five more methods on the session
+manager is that lifecycle: giving the one module that already owns the most in this system a
+second, unrelated lifecycle is how that module becomes the place everything goes.
 
 The rule that keeps this honest: **a vendor string must never appear above the adapter
 layer.** If the session manager or the client needs to branch on `claude` vs `codex`, the
@@ -176,9 +199,16 @@ is an experiment to find out, not an implementation. Budget for it accordingly.
 
 ## Data model
 
-Seven entities. Five of them are persisted, and knowing which is which is the whole point of
+Ten entities. Seven of them are persisted, and knowing which is which is the whole point of
 this section. The counts are checkable against *Persistence summary* at the end; if they
 disagree, that table is right and this sentence is the defect.
+
+**Payroll and incidents are not entities and no implementer may add one for them.** Tier-two
+items 8 and 11 are *views*: token burn and idle time are folds over a session's own event
+log, and the incident history is a filtered read of `audit.ndjson`. They are described under
+*Derived views* below rather than here, because an entity is a thing with a lifecycle and
+these have none of their own. Item 12, the theme, is not here either — D60 put the choice in
+the browser, so this server holds no part of it.
 
 ### Session
 
@@ -469,23 +499,190 @@ approved — the same bytes shown to the operator. This is the only place in the
 the byte cap that governs `tool.result` does not apply, and that is deliberate: an audit
 record of a truncated command records something that did not run.
 
+### Review (tier two)
+
+Brief item 9: *record a performance review against a session, with an author and a draft
+state, and see whether a session is under a performance plan.*
+
+| Field | Type | Mutability | Source |
+|---|---|---|---|
+| `reviewId` | `ReviewId` (UUIDv4) | immutable | server, at create |
+| `subject` | `SessionId` | immutable | client request |
+| `snapshot` | `SessionSnapshot` | immutable | copied from the session at authorship (D67) |
+| `author` | `OperatorId` | immutable | identity edge |
+| `state` | `'draft' \| 'final'` | one-way | author |
+| `rating` | `Rating \| null` | mutable while draft | author |
+| `pip` | `boolean` | mutable while draft | author |
+| `body` | string | mutable while draft | author |
+| `createdAt` / `updatedAt` | ISO 8601 UTC | set once / on every append | server |
+
+**Its subject is a session, not a person** (D66), and that is the ruling that keeps D3
+intact. The brief says "against a session" and this design takes it literally: there is no
+employee record, no operator entity, and nothing here that an identity provider renaming
+someone could invalidate. `author` is an `OperatorId` string on a record, exactly as
+`AuditRecord.operator` already is — the same treatment, for the same reason.
+
+**Stored server-wide, in `reviews.ndjson`, and never under the session** (D67). A review is
+an employment record and behaves like the audit log rather than like a transcript: D25
+deletes a session's storage, and a review that vanished with its subject would be evidence a
+subject can destroy. `snapshot` is the denormalised session identity at authorship —
+`owner`, `vendor`, `cwd`, `createdAt` — copied for the same reason `AuditRecord` copies
+`vendor` and `sandbox`: after D25 the session it names no longer resolves, and a review that
+can only say "session `9f2c…`" says nothing.
+
+**The file is append-only and the latest line for a `reviewId` wins** (D65). Editing a draft
+appends; the earlier drafts stay on disk. That is not a storage compromise, it is the
+behaviour an employment record should have, and it is the same latest-line-wins pattern
+`pids.ndjson` already uses for tombstones.
+
+`state` is one-way, and it governs two things rather than one. A `final` review is terminal —
+a further append for that `reviewId` is refused — **and it is the point at which the review
+becomes visible to anyone but its author.** A draft is readable and writable by its author
+alone; a final is readable by every authenticated operator. This is the one carve-out in
+D70's open-read rule, and it is what makes "draft state" a state rather than a label: the
+purpose of drafting is not having published yet, and a draft everyone can read has not got
+that purpose. A `404` answers a non-author asking for a draft, matching D50's treatment of a
+session they do not own.
+
+**PIP status is derived, and only finals set it** (D72). "Is this session under a performance
+plan?" is answered by the most recent **final** review for that subject having `pip: true`.
+Drafts are excluded, and given the visibility rule above they must be: a half-typed draft
+that changes a badge every other operator sees would leak the draft's content in the one bit
+that matters most, which is worse than the badge arriving when its author finishes.
+
+### Requisition (tier two)
+
+Brief item 10, first half: *open a session through a requisition someone approved.*
+
+| Field | Type | Mutability | Source |
+|---|---|---|---|
+| `requisitionId` | `RequisitionId` (UUIDv4) | immutable | server, at create |
+| `raisedBy` | `OperatorId` | immutable | identity edge |
+| `title` / `justification` | string | immutable | client request |
+| `workspace` | string | immutable | client request — **the unresolved string**, see below |
+| `vendor` | `'claude' \| 'codex'` | immutable | client request, validated |
+| `state` | `'open' \| 'approved' \| 'rejected' \| 'consumed'` | one-way, see lifecycle | server |
+| `decidedBy` | `OperatorId \| null` | set once | identity edge, at the decision |
+| `decidedAt` | ISO 8601 UTC \| `null` | set once | server |
+| `sessionId` | `SessionId \| null` | set once | server, at consumption |
+| `raisedAt` | ISO 8601 UTC | immutable | server |
+
+Lifecycle is `open → approved → consumed`, or `open → rejected`, and nothing else. Every
+other transition is refused.
+
+**`workspace` is the client's string and is never resolved at requisition time.** This is
+the one place the design deliberately declines to reuse D4's resolve-once discipline, and
+the reason is that a requisition can sit unapproved for a day: resolving at raise time would
+store a path whose meaning may have changed by the time it is used, and would leak whether a
+directory exists to any operator who can raise one. The jail runs at session creation as it
+always has, so **an approval is permission to try, not a grant**. A requisition for a path
+outside every root is approvable and then fails `409 outside_workspace_root` at the moment it
+is used, which is the correct place for that refusal to land.
+
+**Consumption is once, and it is claimed synchronously** (*Concurrency § The single-writer
+invariant*). Two `POST /api/sessions` naming one approved requisition would otherwise both
+pass the state check before either wrote it back — the identical shape D32 already closes for
+the turn slot and the workspace claim, and the same rule closes it here.
+
+**A requisition never gates ordinary session creation** (D68). It is a second, optional path
+in. Making it mandatory would turn tier-one item 2 into an approval workflow and break D59's
+guarantee that tier one is finishable on its own.
+
+**Self-approval is permitted and recorded** (D69). `decidedBy` may equal `raisedBy`.
+
+**Stored server-wide in `requisitions.ndjson`**, latest line per id wins, same as reviews.
+It has to be server-wide whichever way you look at it: it exists before any session directory
+does, and it must be visible to an operator who does not own the session it will become.
+
+### Onboarding checklist (tier two)
+
+Brief item 10, second half: *work a first-run checklist for it.*
+
+The item template is a `config` value — a deployment's own first-run steps, the same kind of
+value as a cap. It is **not** per-requisition and not per-vendor; a checklist that varies by
+who raised the requisition is a workflow engine, which nothing has asked for.
+
+**Completion lives in the session's own event stream, and the checklist is the fold** (D71).
+A `checklist.item.completed { itemId, by }` envelope goes through the same `emit` as
+everything else, which buys ordering, replay, multi-client fan-out and durability with no
+new machinery. The alternative — a `checklist.json` per session — is a second per-session
+mutable file needing its own write protocol, its own atomic-rename discipline and its own
+torn-write failure row, for a handful of booleans.
+
+**Derived, like `Turn`.** No checklist entity is stored. It dies with its session under D25,
+and that is correct: it is first-run provisioning, not evidence.
+
 ### Operator
 
 `{ id: OperatorId }`. **Not persisted.** There is no user record, no profile, no
 preferences — D3 chose delegated identity precisely so that no credential or account state
-lives here. An operator exists as a string on a `Session` and on an `AuditRecord`, and
-nowhere else.
+lives here. An operator exists as a string on a `Session`, an `AuditRecord`, a `Review` and a
+`Requisition`, and nowhere else.
+
+**Tier two put this under real pressure and it held** (D60, D66). D58 asked for a persisted
+per-operator theme preference and D54 for a performance review — both of which read as an
+employee record, and either of which would have made this the first server in the system to
+hold account state. The theme went to the browser and the review's subject became a session.
+Neither is a workaround: an operator here is a claim made by an upstream identity provider,
+and a row we keep about them is a copy of that claim which nothing keeps current.
+
+### Derived views (tier two)
+
+Two brief items are answered by reading what is already written. Neither adds an entity and
+neither adds a file.
+
+**Payroll — item 8.** Token burn to date and paid idle time are folds over a session's event
+log; budget is a `config` value per session, so "remaining" is subtraction. Per-deployment
+and per-operator budgets were both considered and neither works here: a per-deployment budget
+lets one session exhaust the number every other session is measured against, and a
+per-operator budget needs the operator record D3 refuses.
+
+- **Burn** is the sum of the normalised `usage` events for the session. It is a sum only
+  because the adapter guarantees the numbers are summable — see D75 below and open question
+  14, which is the unverified half of it.
+- **Idle** is wall-clock time the session was `live` with no turn: the gaps between
+  `turn.ended` and the next `turn.started`, plus creation-to-first-turn and last-turn-to-end.
+- **Idle excludes any interval containing a restart** (D76). A crash mid-turn is closed at
+  boot by D39, whose synthetic `turn.ended` carries the *boot* timestamp — so an outage of
+  any length is attributable to neither the turn nor the idle gap around it, because the
+  events that would separate "the operator went to lunch" from "the server was down" were
+  never written. The interval is dropped and the view says how many were dropped. Reporting a
+  server outage as an operator's idle time is a wrong number on a screen headed *payroll*.
+
+A live session's burn is also tracked as a running counter in `emit`, which sees every
+envelope exactly once and is therefore exact and free. A rehydrated session has no counter
+and is folded from the spill. The two must agree; if they ever do not, the spill is right,
+for the same reason it is right about `lastSeq`.
+
+**Incidents — item 11.** A filtered, bounded read of `audit.ndjson`: denials, decisions the
+server forced rather than an operator (a failed audit append, a `cancelled_process_exit`),
+and standing-rule auto-allows. The brief asks for a history rather than a flat log, and the
+grouping is by session and by operator over a time window. It is a read shape, not a store.
+
+**The audit log had no read route and tier one needs one** (D73). Brief item 7 — read an
+audit record of every tool approval: who, what, when — is tier one, and this design specified
+the append path in detail and never said how anyone reads it. That is a gap in this document
+rather than in the contract derived from it. The route serves a bounded window with a cursor,
+newest first, because `audit.ndjson` is the one file in the system with unbounded lifetime
+growth: it is never truncated and survives every session deletion, so a read that scans it
+whole gets slower forever. The bound is what makes that acceptable without an index; open
+question 11 already carries the index for the spill and now carries it for this file too.
+
+**Who may read all of this is a deliberate policy and it is not the session rule** (D70). See
+*Threat model*.
 
 ### Persistence summary
 
 ```
 <storage>/sessions/<sessionId>/
-  meta.json           Session, minus turn/buffer/subscribers
+  meta.json           schemaVersion + Session, minus turn/buffer/subscribers   (D49)
   events.ndjson       envelopes, append-only
   tool-output/<turnId>/<callId>   untruncated tool output, one file per call  (D22)
   ckpt.git/           shadow git dir, work-tree = the session's workspace
 <storage>/audit.ndjson
 <storage>/pids.ndjson                                                (D23)
+<storage>/reviews.ndjson             (tier two) latest line per reviewId wins       (D65)
+<storage>/requisitions.ndjson        (tier two) latest line per requisitionId wins  (D65)
 ```
 
 **`meta.json` has a write protocol, and it is not "whenever something changes"** (D37). It
@@ -496,6 +693,32 @@ rewriting the file on every emit to keep `lastSeq` current, which is thousands o
 rewrites per turn and still leaves a crash mid-rewrite corrupting the single file
 rehydration depends on. Boot derives `lastSeq` from the spill's tail instead, so the number
 cannot drift from the events it describes.
+
+**It also carries a `schemaVersion`, and an unknown one is a corrupt file** (D49). The
+file rehydration depends on is the one place where reading old data as though it were new is
+silent wrong state rather than a parse error, so it carries a discriminator and boot treats
+an unrecognised value exactly as it already treats unparseable JSON: skip the session, log
+it, leave its files untouched, never abort. The append-only files carry no per-line version
+— readers ignore unknown fields, added fields are optional, and a removed or retyped field
+is a `schemaVersion` bump on `meta.json` plus a refusal to rehydrate older sessions.
+
+**The two record logs follow the append-only files' rules, with one difference that matters**
+(D65). Like `pids.ndjson` they are append-only with latest-line-wins per id, and like every
+append-only file here a torn trailing line is dropped at read. The difference is what
+dropping costs: in an *event* log the transcript is one event short, but in a *latest-wins*
+log the previous line becomes authoritative again — the record does not lose its tail, it
+travels backwards. A review reverts to its prior draft. A requisition reverts to its prior
+state, and the sharpest case is a lost consumption line: an approval that was spent shows as
+`approved` again, so one approval can produce two sessions. Both new sessions still face the
+jail and the workspace busy check, so the consequence is a bookkeeping lie rather than a
+hazard, but it is the one place D68's once-only claim can be untrue and it is written down
+rather than left to be found.
+
+This is accepted rather than solved, and `pids.ndjson` already carries the same shape — a
+dropped tombstone makes boot believe a child is live, which is why the reuse guard exists
+(D23). The alternative here is refusing to boot over one bad line in a file that has nothing
+to do with running a session, and a state reverted to one its own author last wrote is
+recoverable by re-doing the edit.
 
 **"Durable" means fsync, and it is defined once here because D26 rests on it.** An append
 that has reached the OS survives a process crash; it does not survive a host crash. Where
@@ -509,10 +732,11 @@ A corrupt `meta.json` still costs the session — boot skips it (*Failure modes*
 transcript, checkpoints and blobs beside it become unreachable through the console. The
 atomic rename is what makes that a hardware story rather than a routine one.
 
-The two server-wide files are server-wide for the same reason and it is worth stating once:
+The four server-wide files are server-wide for the same reason and it is worth stating once:
 their reader is not a session. Audit answers "who approved what" across sessions and must
 survive the deletion of the session it indicts (D25); `pids.ndjson` is read by boot, before
-any session exists in the registry.
+any session exists in the registry; a review outlives its subject for D25's argument
+verbatim (D67); and a requisition is read before the session it becomes exists at all.
 
 | Entity | Memory | Disk |
 |---|---|---|
@@ -522,19 +746,34 @@ any session exists in the registry.
 | Envelope | ring buffer (bounded) | `events.ndjson` (unbounded), **read for live and ended sessions alike** (D40); oversized `tool.result` output in `tool-output/` |
 | Checkpoint | — | `ckpt.git` |
 | Audit record | — | `audit.ndjson` |
+| Review (tier two) | registry `Map` | `reviews.ndjson` — **read at boot** (D65) |
+| Requisition (tier two) | registry `Map` | `requisitions.ndjson` — **read at boot** (D65) |
+| Onboarding checklist (tier two) | — | derived from events |
 | Operator | request-scoped | — |
 
-Five of the seven are on disk. `Turn` is derived from the event log and `Operator` is
-request-scoped by choice (D3), and those two absences are decisions rather than omissions.
+Seven of the ten are on disk. `Turn` and the checklist are derived from the event log and
+`Operator` is request-scoped by choice (D3); those three absences are decisions rather than
+omissions.
 
-No database in the first cut (D7). If session listing ever needs querying beyond "mine,
-recent", that is the moment to add SQLite — not before.
+Both record logs are held in an in-memory registry as well as on disk, and that is not
+convenience — the once-only requisition claim has to be tested and taken in one synchronous
+block (D32), which a file read cannot be.
+
+**Still no database, and tier two is where that was re-examined rather than assumed** (D65).
+D7 said the moment to add SQLite is when listing needs querying beyond "mine, recent". Two
+mutable, authored, cross-operator entities is the closest this project has come to that
+moment, and it still is not one: the volumes are a handful of trusted operators' worth, every
+query is a full scan of a file measured in kilobytes, and the alternative costs a dependency,
+a schema migration story, and a second durability model beside the one the audit log already
+needs. Adding SQLite for tier two would also mean the audit log either moves into it — losing
+the append-only-file property that makes it evidence — or stays out, leaving two stores.
 
 ## Module boundaries
 
-Eleven modules — the two transport edges are two modules, not one with a slash in its name,
-which is the whole point of D10. The dependency graph is acyclic, and the two edges most
-likely to be drawn backwards are called out below the diagram.
+Twelve modules — the two transport edges are two modules, not one with a slash in its name,
+which is the whole point of D10, and `records` is the twelfth, added by tier two (D77). The
+dependency graph is acyclic, and the edges most likely to be drawn backwards are called out
+below the diagram.
 
 ```mermaid
 flowchart TD
@@ -545,6 +784,7 @@ flowchart TD
     ST["store"]
     CK["checkpoints"]
     AD["adapters/*"]
+    RC["records<br/>tier two"]
     SM["session-manager"]
     EH["edge/sse"]
     EW["edge/ws"]
@@ -554,18 +794,24 @@ flowchart TD
     SM --> ST
     SM --> CK
     SM --> AD
+    SM --> RC
     SM --> CT
     SM --> CF
     EH --> SM
+    EH --> RC
     EH --> ID
     EH --> CF
     EW --> SM
+    EW --> RC
     EW --> ID
     EW --> CF
     ID --> CF
     JL --> CF
     ST --> CF
     CK --> CF
+    RC --> ST
+    RC --> CF
+    RC --> CT
     AD --> CT
     JL --> CT
     ST --> CT
@@ -578,18 +824,30 @@ flowchart TD
 | `config` | Roots, auth mode, bind address, origin allow-list, caps | *nothing* | A validated config object |
 | `identity` | Request → `OperatorId`, or rejection | `config` | One function per deployment mode |
 | `jail` | Path resolution and containment | `config`, `contract` | `resolveInsideRoot` |
-| `store` | meta, spill, tool-output blobs, audit, process records, ring buffer | `config`, `contract` | Read/append primitives |
+| `store` | meta, spill, tool-output blobs, audit, process records, **the two record logs**, ring buffer | `config`, `contract` | Read/append primitives |
 | `checkpoints` | Shadow git lifecycle | `config`, `contract` | create / list / restore |
-| `adapters/*` | **The only vendor knowledge** | `contract` | `spawn`, `send`, `respond`, `kill` |
-| `session-manager` | Ownership, turn state, `seq`, fan-out, reaping | `config`, `jail`, `store`, `checkpoints`, `adapters`, `contract` | Session CRUD, subscribe |
-| `edge/sse` | SSE framing, `Last-Event-ID` reconnect, **origin check on mutating routes** | `config`, `session-manager`, `identity`, `contract` | HTTP routes |
-| `edge/ws` | WebSocket framing, first-message auth, **origin check at the handshake** | `config`, `session-manager`, `identity`, `contract` | HTTP routes |
-| `client` | Rendering, **under the CSP and no-`innerHTML` rules** (D43) | `contract` | — |
+| `adapters/*` | **The only vendor knowledge** | `contract` | `send`, `respond`, `kill`, and one inbound `notify` (D46) |
+| `records` *(tier two)* | Review and requisition lifecycle, their registries, the incident read | `config`, `store`, `contract` | Raise / decide / claim, author / finalise, read |
+| `session-manager` | Ownership, turn state, `seq`, fan-out, reaping, the payroll fold | `config`, `jail`, `store`, `checkpoints`, `adapters`, `records`, `contract` | Session CRUD, subscribe |
+| `edge/sse` | SSE framing, `Last-Event-ID` reconnect, **origin check on mutating routes** | `config`, `session-manager`, `records`, `identity`, `contract` | HTTP routes |
+| `edge/ws` | WebSocket framing, first-message auth, **origin check at the handshake** | `config`, `session-manager`, `records`, `identity`, `contract` | HTTP routes |
+| `client` | Rendering, **under the CSP and no-`innerHTML` rules** (D43, D74); the four themes (D58, D78) | `contract` | — |
 
 **Adapters are leaves.** They depend on `contract` and nothing else. They do not read
 config, do not touch the store, do not write audit records, and do not know whether a turn
-is in flight. They are handed a resolved `cwd` and an `emit` callback and that is their
+is in flight. They are handed a resolved `cwd` and one outbound channel and that is their
 entire world. This is what keeps a second vendor from becoming a second architecture.
+
+**That channel is `notify`, a four-member notification union, not a bare `emit`** (D46).
+Three facts have to reach the manager that are not normalised events: the `cliSessionId` from
+every `system/init`, because the manager stores it and supplies `--resume` (D34); the spawned
+child's pid, pgid and image, because the manager appends `pids.ndjson` (D23); and the child's
+exit. With an envelope-only callback there is no signature for any of them, and the first
+implementer either adds the adapter→store edge this section forbids or smuggles them through
+`raw`. So the union is `event | cli-session | spawned | exited`, the adapter emits payloads
+carrying no `seq`, `sessionId`, `ts` or `turnId`, and the manager assigns all four. `spawn` is
+internal to `send` for the same reason — *Control flow § 2* spawns the child inside the turn,
+not at session creation, so it was never a boundary-crossing call.
 
 Two edges that must not be drawn, because each looks natural and each creates a cycle:
 
@@ -609,29 +867,46 @@ edges → config**, for the origin allow-list (D29), which each edge applies bef
 identity — it is a property of the request rather than of the operator, so it does not belong
 behind `identity`.
 
+**`records` must not depend on `session-manager`, and the edge that tempts it is the review**
+(D77). A review carries a `SessionSnapshot`, so the natural move is for `records` to ask the
+manager for one — which makes tier two's module a client of the single biggest module in the
+system and puts a live-session dependency inside something whose whole point is outliving
+sessions. The composition happens one level up instead: the **edge** resolves the session
+through `session-manager`, applies the ownership check it already applies to every session
+route, and hands the snapshot to `records` as a parameter. `records` never learns that a
+session registry exists. The direction that *is* drawn — `session-manager → records` — exists
+for exactly one call, the once-only requisition claim during session creation, and it is the
+right way round: consuming a requisition is part of creating a session, not the reverse.
+
 `checkpoints` depending only on `config` and `contract` — never on adapters — is what let
 D6 survive the move to two backends unchanged. Keep it that way.
 
 ## Control flow
 
-Three paths carry the whole system.
+Three paths carry tier one, and tier two adds a fourth.
 
 ### 1. Session creation — operator picks a workspace and a vendor
 
 ```
-POST /api/sessions {vendor, cwd, model?, sandbox?}
+POST /api/sessions {vendor, cwd, model?, sandbox?, requisitionId?}
   edge          → origin allow-list check               → 403 bad_origin       (D29)
   edge          → identity: resolve OperatorId, else 401
-  edge          → session-manager.create(owner, vendor, cwd, model, sandbox)
+  edge          → session-manager.create(owner, vendor, cwd, model, sandbox, requisitionId)
   manager       → jail.resolveInsideRoot(cwd, roots)     → 409 outside_workspace_root
   manager       : resolved path overlaps a live session's cwd?
                                                          → 409 workspace_busy   (D30)
+  manager       : requisitionId given?  (tier two)          SYNCHRONOUS         (D68)
+                    records.claim(id) — must be 'approved'
+                    not found          → 404 no_such_requisition
+                    not approved       → 409 requisition_not_approved
+                    already consumed   → 409 requisition_consumed
   manager       : claim the path in the registry            SYNCHRONOUS         (D32)
   ──────────────── every check above completes before the first await ─────────────
   manager       → store: mkdir, write meta.json, open spill
   manager       → checkpoints: init ckpt.git             → notice on failure, not fatal
-  manager       → adapters[vendor].create({cwd: resolved, model, sandbox, emit})
-  manager       ← {sessionId}                            → on any failure, release the claim
+  manager       → adapters[vendor].create({cwd: resolved, model, sandbox, notify})   (D46)
+  manager       → records: attach sessionId to the requisition   (tier two)
+  manager       ← {sessionId}                            → on any failure, release BOTH claims
 ```
 
 Nothing is spawned. A session with no turn has no child process. The vendor's `policy` is
@@ -653,7 +928,21 @@ silently reverts B's work, which is the exact hazard D19 exists to close.
 **The claim is taken in the same synchronous block that tests it** (D32). Two `POST
 /api/sessions` for one workspace arriving in the same tick would both pass a check that is
 followed by an `await` on `mkdir`, and both would be admitted. The rule is stated once, in
-*Concurrency § The single-writer invariant*, and it applies here and to `POST /message`.
+*Concurrency § The single-writer invariant*, and it applies here, to the requisition claim
+below, and to `POST /message`.
+
+**`requisitionId` is optional and its absence is the ordinary case** (D68). Tier one's item 2
+is "start a session against a workspace directory", with no approver anywhere in it, and it
+has to keep working on its own for D59's two tiers to mean anything. So the field adds a
+second way in rather than a gate: supplied, it is claimed once and only from `approved`;
+absent, nothing in this path changes.
+
+**The requisition claim sits after the jail and busy checks, not before, and the order is
+deliberate.** A requisition names an unresolved workspace string (*Data model § Requisition*)
+and the approval was permission to try, so the path can still be outside every root or held
+by a live session at the moment it is used. Claiming first would burn the requisition on a
+refusal that has nothing to do with it, leaving an operator holding an approval they cannot
+spend and a second approval to ask for. Both claims release on any later failure.
 
 ### 2. A turn, interrupted by a permission request — the path that justifies the project
 
@@ -672,10 +961,13 @@ POST /api/sessions/:id/message {text}
   manager  → adapter.send(text)
   adapter  → spawn(claude, --stream-json --permission-prompt-tool stdio [--resume id])
                        resume id is the LATEST init reported, or absent      (D34)
+                    → notify{spawned: pid, pgid, image}                      (D46)
+  manager  → store.appendPid(...)                     the manager writes it, not the adapter
   adapter  → stdin: {"type":"user", ...}           stdin STAYS OPEN
 
-  child    → stdout: system/init                   → session.started  (first turn only)
-                                                     cliSessionId = init.session_id  (D34)
+  child    → stdout: system/init                   → notify{cli-session}     (D46)
+                                                     cliSessionId = LAST init reported (D34)
+                                                     manager emits session.started, first turn only
   child    → stdout: assistant/text                → message
   child    → stdout: control_request/can_use_tool  → permission.request
                        matches a standing rule?    → auto-answered here, audited (D35)
@@ -769,6 +1061,73 @@ passes 2000 without being unusual. Serving the gap only for ended sessions would
 DoD #5 in the middle of the case it was written for, with the events unrenderable until the
 turn that produced them finished.
 
+### 4. Requisition to session — brief item 10 (tier two)
+
+The only tier-two path that crosses more than one route, more than one operator, and the
+boundary between two modules. The rest of tier two is single routes, so they are named here
+rather than drawn — the contract needs to know the surfaces exist, and this document does not
+give them signatures:
+
+- **Reviews.** Create a draft, append to one's own draft, finalise it, list the finals for a
+  subject, read one. Author-only until final (D70).
+- **The audit read**, and the incident view over it, which is the same read with filters
+  (D73). Tier one's, not tier two's — it is listed here only because it was missing.
+- **The payroll read** for a session: burn, budget, remaining, idle, and the count of
+  intervals dropped for spanning a restart (D76).
+- **The checklist tick**, drawn below because it is the one tier-two write that emits an
+  envelope.
+
+Every one of them is a read or a write of something *Data model* already describes. None
+adds a file, a module or a lifecycle beyond what this section draws.
+
+```
+POST /api/requisitions {title, justification, workspace, vendor}
+  edge     → origin check, identity
+  edge     → records.raise(raisedBy = operator, ...)
+             workspace is stored AS THE CLIENT'S STRING — no jail call here
+  edge     ← 201 {requisitionId}                       state = 'open'
+
+GET /api/requisitions                    every authenticated operator, not just the raiser
+  edge     → records.list()                                                   (D70)
+
+POST /api/requisitions/:id/decision {decision: 'approve' | 'reject'}
+  edge     → origin check, identity
+  manager-free path: records only
+  records  : state == 'open'?                        SYNCHRONOUS      (D32's rule)
+                    else → 409 already_decided
+  records  : state = decision, decidedBy = operator, decidedAt = now
+  records  → store.appendRequisition(...)            latest line wins
+             self-approval is permitted and recorded                          (D69)
+
+POST /api/sessions {..., requisitionId}                       → control flow 1, unchanged
+             the claim is once-only and synchronous; the jail still runs      (D68)
+
+POST /api/sessions/:id/checklist/:itemId
+  edge     → origin check, identity, ownership check (session route)
+  manager  : itemId in the config template?           else → 404 no_such_item
+  manager  → emit checklist.item.completed {itemId, by}                       (D71)
+             already complete → no second envelope, 200; ticking is idempotent
+```
+
+Three things about this path are decisions rather than mechanics.
+
+**The decision route belongs to `records` alone and never touches the session manager.** A
+requisition at this point has no session, no workspace claim and no turn — nothing the
+manager owns. Routing it through the manager anyway is how `records` would end up being
+called from the wrong direction later.
+
+**`already_decided` is a refusal, not a last-write-wins.** Two operators reaching a
+requisition in the same tick — one approving, one rejecting — is not exotic on a shared list,
+and a latest-line-wins file would resolve it silently in favour of whichever `await`
+completed second. The state check and the state change are one synchronous block over the
+in-memory registry, first wins, and the loser is told. This is the same rule as the turn slot
+and the workspace claim and it is stated once in *Concurrency*.
+
+**Ticking a checklist item is idempotent and is not audited.** Two clients on one session
+will both tick; the second produces no envelope. And it is not an audit record: brief item 7
+promises a record of every *tool approval*, and diluting that log with provisioning clicks
+makes the artifact the threat model leans on harder to read for no gain.
+
 ## Threat model
 
 State the uncomfortable thing first: **giving someone console access is equivalent to
@@ -784,6 +1143,9 @@ operator, because that would need a container per session and is explicitly out 
 | A curious operator starting a session outside their workspace | Yes | Path jail, resolved after symlinks — see below for what this does *not* cover |
 | An agent reaching outside the workspace once running | Partly | Permission prompt (Claude) or vendor sandbox (Codex). **Not the jail** |
 | An operator reading another's session | Yes | Ownership check on every session route |
+| **An operator reading another's audit records, reviews or requisitions** | **No — deliberately** | None, and the absence is the design. See *The record logs are not private* |
+| **An operator writing a review about another's session** | **No — deliberately** | None. `author` is recorded; a review is an attributable claim, not a privileged one |
+| **Operator-authored text reaching another operator's browser** | Yes | The no-`innerHTML` rule, widened past agent-derived content to cover everything stored (D74) |
 | A confused agent, or prompt injection reaching one | Partly | Permission prompts, sandbox mode, checkpoints to undo |
 | A determined operator | **No** | Out of scope — needs per-session containers |
 | A compromised server | No | Out of scope |
@@ -826,6 +1188,43 @@ reads — a README, an issue body, a web page — can contain text aimed at it. 
 is a prompt, **the prompt must show what is actually being run**, not a summary of it, and
 the audit log must record the exact input that was approved. Where the control is a sandbox,
 the operator must be told which one, which is what D5's standing banner is for.
+
+**The record logs are not private, and that is a decision** (D70). Every authenticated
+operator can read the whole audit log, every requisition, and every **final** review —
+including reviews about sessions they do not own and reviews they did not write. Three
+reasons, and the first is the one that settles it:
+
+- **The audit log's stated purpose requires it.** *Data model § Audit record* says it is
+  server-wide because the question it answers, "who approved what", crosses sessions. Scoped
+  to each operator's own records it answers only "what did I approve", which nobody needed a
+  log for, and the artifact this design calls the thing that makes multi-operator use
+  defensible stops being one.
+- **A requisition cannot be approved by someone who cannot see it.** Brief item 10 says
+  "a requisition someone approved" — a second person, by construction.
+- **There is nothing here for the control to protect.** The threat model already concedes
+  that a determined operator has shell access as the server's user, and can therefore read
+  every one of these files directly off disk. A visibility rule the filesystem does not
+  enforce is a UI convention presented as a control.
+
+**This narrows the justification for an existing decision and the narrowing is stated rather
+than left to be discovered.** D50 returns `404 no_such_session` for a session an operator does
+not own, and its reason was that session existence should not be probeable. Reviews and audit
+records name `SessionId`s, so from tier two onward existence *is* discoverable through the
+record logs. The `404` stays and is still load-bearing, but what it now buys is access
+control, not concealment. The `SessionSnapshot` on a review exists partly for this: a reader
+never has to resolve the session to make sense of the record, so nothing is tempted to relax
+the `404` later to make a screen render.
+
+**There is exactly one carve-out, and it is the draft review.** A review in state `draft` is
+readable and writable by its author alone, and becomes readable by everyone the moment it is
+finalised. That is not a hole in the rule above, it is what a draft state is for — the
+purpose of drafting is not having published yet, and D54 made draft state a feature rather
+than a label. It is one carve-out rather than a general privacy model, and it is bounded by
+being one-way: nothing ever becomes less visible.
+
+What this does **not** mean is that the logs are writable across operators. Only a review's
+author may append to it; only the session's owner may tick its checklist; the ownership check
+on every session route is unchanged. Read is open; write is attributed and constrained.
 
 None of this contradicts the brief; it makes explicit what the brief's first non-goal already
 concedes. It is written out because a table row reading "path jail" invites a reader to
@@ -881,11 +1280,24 @@ here rather than left to whoever writes it (D43):
   `default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; object-src 'none'`.
   No `unsafe-inline`, no `unsafe-eval` — which is what makes the criticism of the prior
   art's CSP something this design has standing to make.
-- **No `innerHTML` for anything derived from an agent.** Text nodes only; diffs, code and
-  tool output are built into elements the client constructs, never parsed as markup.
+- **No `innerHTML` for anything this codebase did not write** (D74). The rule used to say
+  "derived from an agent", which was the whole population of untrusted strings until tier two
+  added review bodies and requisition justifications — operator-authored text, stored, and
+  rendered in a *different* operator's browser under D70. That is the first stored path from
+  one operator to another in the system. The rule is widened rather than given a second
+  clause, because "is this string agent-derived?" is a question a renderer will eventually
+  get wrong, and "did we write this literal?" is one it cannot. Text nodes only; diffs, code,
+  tool output and prose are built into elements the client constructs, never parsed as markup.
 - The tool-output fetch route serves `Content-Type: text/plain; charset=utf-8` with
   `X-Content-Type-Options: nosniff` and `Content-Disposition: attachment`, so a tool result
   that happens to be HTML cannot render as a document in the console's own origin.
+- **The four themes are CSS custom properties in a stylesheet served from `'self'`, and the
+  switcher sets an attribute on the root element** (D78). No style text is generated,
+  injected or interpolated at runtime, which is what keeps D58's product feature compatible
+  with a `style-src 'self'` that has no `unsafe-inline`. The choice is read from and written
+  to browser storage and never reaches the server (D60). Stated because the obvious
+  implementation of a theme switcher — writing a `<style>` block — would require weakening
+  the one CSP directive this design has standing to be strict about.
 
 The consequence of skipping this is specific rather than theoretical: script executing in
 the console's origin can issue exactly the POSTs the operator can, from a page the origin
@@ -921,6 +1333,17 @@ Two decisions elsewhere exist to keep the word *every* honest in that first sent
 standing approvals are matched by this server rather than by the CLI (D35), so an
 auto-allowed call still appends; and a decision that cannot be appended is denied rather
 than allowed (D33), so the log never has a hole where a tool ran.
+
+**And it is read, which this design specified nowhere until now** (D73). Brief item 7 is
+tier one and it is a *read* — "read an audit record of every tool approval: who, what, when"
+— against a section that described the append in six paragraphs and the read in none. The
+route serves a bounded window, newest first, with a cursor, to every authenticated operator
+(D70). Bounded rather than whole because this file is the only one in the system that grows
+for the lifetime of the deployment: never truncated, never shortened, and explicitly outliving
+every session it names (D25). A read that scans it entirely is a read that gets slower every
+month it is not used, which is how a screen that worked at install becomes a screen nobody
+opens. The incident view of item 11 is the same read with filters, which is the whole reason
+that item costs no new storage.
 
 ## Failure modes
 
@@ -987,6 +1410,53 @@ a client tell a silent agent from a dead connection, so this costs nothing on th
 | Partial failure during delete | Filesystem error | `error`, non-fatal; registry entry removed anyway | "Session removed, storage may need cleaning" | Orphaned files on disk, named in the log. Preferred over a session that reappears |
 | Storage root unwritable at boot | Startup check | **Refuse to start** | Startup error | — |
 
+### Records boundary (tier two)
+
+| Failure | Detection | System does | Operator sees | State left behind |
+|---|---|---|---|---|
+| Append to `reviews.ndjson` or `requisitions.ndjson` fails | Write error | `500 record_write_failed`; **the registry is not mutated** | "Not saved" — the edit is still in the form | Nothing changed anywhere. The in-memory registry and the file still agree |
+| Two operators decide one requisition | Registry state check, synchronous | First wins; second gets `409 already_decided` naming the decision and who made it | "Already approved by X" | One decision, recorded once |
+| Session created against an unapproved or consumed requisition | Registry state check, synchronous | `409 requisition_not_approved` / `409 requisition_consumed` | Refusal naming the state | No session; no claim taken |
+| Session creation fails after the requisition claim | Any later error in control flow 1 | Release the claim; requisition returns to `approved` | The creation error, unchanged | Requisition spendable again. Both claims release together |
+| Requisition names a workspace outside every root | Jail, at creation — never at raise (D68) | `409 outside_workspace_root`; **claim not taken**, because the jail runs first | Refusal naming the roots | Requisition still `approved` and still spendable |
+| Append to a `final` review | Registry state check | `409 review_final` | "This review is final" | Unchanged |
+| Append to a review by someone other than its author | Author check | `404 no_such_review` | Not found | Unchanged. `404` rather than `403`, matching D50 |
+| Read a `draft` review by someone other than its author | Author check on the read | `404 no_such_review`; drafts are absent from the list route entirely | Not found — a draft is invisible until finalised (D70's one carve-out) | Unchanged |
+| Review names a session that no longer exists | — | Nothing. It renders from its `SessionSnapshot` (D67) | The review, whole, with the session identity as it was | Correct by construction; D25 cannot orphan a review |
+| Torn trailing line in a record log | Last line fails to parse at boot | Drop it, log it. **The previous line for that id becomes authoritative again** | A review one draft old, or a requisition back at `open` | File untouched; the next append starts a fresh line. Stated in *Persistence summary* as accepted |
+| Payroll fold over an unreadable spill | Read error | `500`; the session itself is unaffected | "Usage unavailable" | Nothing. It is a read of a file the session is still writing |
+| Payroll fold spans a server restart | `turn.ended / server_restart` in the log | Drop that interval from idle and report the count of dropped intervals (D76) | "Idle excludes 2 intervals spanning a restart" | Nothing |
+| Audit read over a very large log | — | Bounded window with a cursor (D73); never a whole-file scan | Paged history | Nothing. The unbounded-growth cost is named in open question 11 |
+
+**A failed record append must not mutate the registry, and that ordering is the reverse of
+the audit path's** (D26). Audit appends durably *before* the decision reaches the child,
+because the thing being protected is evidence of something irreversible that is about to
+happen. A review or a requisition decision is not irreversible and nothing downstream acts on
+it, so the file is written first and the registry follows: a crash between them loses an edit
+the operator can retype, where the other order would leave a registry claiming a state the
+disk does not have — and after the next boot, which reads the disk, it would silently revert.
+
+### Platform divergence (tier one)
+
+D64 makes Windows and Linux both supported targets held to the same definition of done and
+gated by an automated run that does not exist yet. That gate needs a target list, and it is
+a design artifact rather than a CI detail, because these are the places where one design
+compiles into two behaviours:
+
+| Surface | Windows | Linux | Where it is decided |
+|---|---|---|---|
+| Path resolution | Case-normalised, drive letters, `\` separators, `\\?\` long paths | Case-sensitive, `/` | *Security controls § Workspace jail* |
+| Workspace overlap comparison | Follows from the above — two spellings of one path must compare equal (D30) | — | *Concurrency § Races* |
+| Process termination | `taskkill /PID <pid> /T /F`; no signals, and `kill('SIGINT')` terminates rather than signals | `detached: true` at spawn, `process.kill(-pgid)` | *Concurrency § Interrupt*, D38 |
+| Process group id | None to record; `pgid` is `null` | Recorded and load-bearing for the tree kill | *Data model § Process record* |
+| Checkpoint restore | An open handle blocks the write — which is why D16's per-turn child matters here and not on Linux | No equivalent block | *Concurrency § Process lifetime* |
+| Host boot time, for the pid reuse guard | Different source | Different source | *Data model § Process record* |
+
+**Nothing on this list is verified on both platforms today.** The pair is a requirement of the
+brief and the design carries code paths for both, which is exactly the state D64 objects to:
+a two-platform claim gated by nothing. Building the gate is tier-one work and no slice covers
+it — carried in `90-decisions.md § Open`.
+
 ### Server lifecycle
 
 | Failure | Detection | System does | Operator sees | State left behind |
@@ -997,6 +1467,9 @@ a client tell a silent agent from a dead connection, so this costs nothing on th
 | Restart with a child running | `pids.ndjson` entry with no `exitedAt` | Reap before accepting connections, after checking the reuse guard (D23) | — | Orphan killed, entry tombstoned |
 | Recorded pid predates the host's last boot, or its image does not match | Reuse guard | **Do not kill.** Log it, tombstone the entry, continue | — | Whatever now owns that pid is left alone. A stale record is bookkeeping; a wrong kill is an incident |
 | `meta.json` unreadable or corrupt | Parse failure at boot | Skip that session, log it; **boot continues** | One session missing | Its files untouched for inspection |
+| `meta.json` carries an unknown `schemaVersion` | Version check at boot (D49) | **Identical to a parse failure**: skip, log, continue. Never a migration attempt, never a partial read | One session missing, the log saying it is a newer format | Its files untouched. This is the whole reason the field exists |
+| A record log is unreadable at boot *(tier two)* | Open error | Log it; start with that registry empty; **boot continues** | Reviews or requisitions missing | File untouched. Tier two failing must not deny an operator tier one |
+| One corrupt line in a record log *(tier two)* | Parse failure on that line | Drop the line, log it, keep reading | The record at its previous state, or absent | See *Persistence summary* for why a drop here reverts rather than shortens |
 | Bind non-loopback, no auth | Startup check | **Refuse to start**, say why | Startup error naming the fix | — |
 
 ## Concurrency and ordering
@@ -1016,13 +1489,19 @@ in those paths is a rule rather than a primitive — see *The single-writer inva
 Genuinely simultaneous:
 
 - **Multiple sessions**, each with its own child, buffer and sequence. Independent by
-  construction; they share only the storage root and the two server-wide append files.
-  **Those two files are the design's only shared mutable state**, and the claim that no lock
-  is needed rests on something worth stating rather than assuming: each is opened once, as a
-  single append stream owned by `store`, and every writer goes through it. Ordered appends
-  through one stream in one single-threaded process cannot interleave a partial line. Two
-  server processes over one storage root would break that, and nothing currently prevents
-  it — see *Open questions*.
+  construction; they share only the storage root and the four server-wide append files —
+  `audit.ndjson`, `pids.ndjson`, and tier two's `reviews.ndjson` and `requisitions.ndjson`.
+  **Those four files are the design's only shared mutable state on disk**, and the claim that
+  no lock is needed rests on something worth stating rather than assuming: each is opened
+  once, as a single append stream owned by `store`, and every writer goes through it. Ordered
+  appends through one stream in one single-threaded process cannot interleave a partial line.
+  Tier two added two files to this set and no new argument, which is the point of choosing
+  append-only files for it (D65). Two server processes over one storage root would break it
+  for all four, and nothing currently prevents that — see *Open questions*.
+- **The two record registries** *(tier two)*, which are shared mutable state in *memory* and
+  therefore governed by the same rule as the turn slot: every state test that decides
+  something is claimed in the synchronous block that tests it. There are exactly two such
+  claims — deciding a requisition, and consuming one — and both are named below.
 - **Multiple subscribers to one session.** Fan-out is one-to-many over the same envelopes.
 - **Child stdout arriving while an HTTP request is being handled.** Interleaved by the
   event loop at chunk granularity, never mid-envelope, because an envelope is constructed
@@ -1124,11 +1603,24 @@ So the rule, and it is the only concurrency rule in this design beyond `emit`:
 > **A guard is claimed in the same synchronous block that tests it. No `await` may sit
 > between a check and the mutation that check protects.**
 
-Concretely: the turn slot is occupied by a `Turn` in phase `starting` before the checkpoint
-is awaited, and the workspace claim is registered before storage is touched — both released
-on failure. Distinguish *the slot is claimed* from *`turn.started` is emitted*: the event
-still follows the checkpoint, so the ordering guarantee that a turn's checkpoint precedes
-its `turn.started` is untouched.
+Concretely, there are four guards and they all follow it:
+
+| Guard | Tested and claimed before | Released on |
+|---|---|---|
+| The turn slot | `await checkpoints.commit` | Any failure in control flow 2 |
+| The workspace claim | `await store.mkdir` | Any failure in control flow 1 |
+| A requisition's decision *(tier two)* | `await store.appendRequisition` | Nothing — a decision is terminal |
+| A requisition's consumption *(tier two)* | `await store.mkdir`, with the workspace claim | Any failure in control flow 1, with the workspace claim |
+
+The turn slot is occupied by a `Turn` in phase `starting` before the checkpoint is awaited,
+and the workspace claim is registered before storage is touched. Distinguish *the slot is
+claimed* from *`turn.started` is emitted*: the event still follows the checkpoint, so the
+ordering guarantee that a turn's checkpoint precedes its `turn.started` is untouched.
+
+**Tier two adds two rows to this table and no new mechanism, and that is the test it had to
+pass.** Both new guards have the identical shape to the two that were already here — a state
+check followed by an `await` on a file write — so if the rule had needed an exception for
+either, the rule would have been the thing to re-examine. It did not.
 
 This is why the races table below can name "manager turn state" as an enforcer and be
 telling the truth. Without the rule, that column describes an intention.
@@ -1158,11 +1650,23 @@ second and fourth items above for every rehydrated session that was busy when th
 went down — the common case, not an edge one. Boot appends the closing events rather than
 the guarantees being weakened to accommodate it. See *Boot ordering*.
 
+**"Every event of that turn" means turn-scoped events, and session-scoped ones interleave.**
+`checkpoint.created`, `session.notice` and tier two's `checklist.item.completed` can and do
+land between a `turn.started` and its `turn.ended` — an operator ticking a checklist item
+while the agent works is the ordinary case, not an edge one. The discriminator already
+exists and no renderer needs to guess: D44 put `turnId` on every turn-scoped payload, so
+belonging to a turn is a field, never a position in the stream. A renderer that treats the
+interval between `turn.started` and `turn.ended` as the turn's contents will attribute an
+operator's click to the agent.
+
 Not guaranteed, and the client must not assume it:
 
 - That `usage` arrives once per turn. Claude emits it per assistant record.
 - That `message.delta` and `message` do not both appear for one turn. The client renders
   one or the other and must pick by `turnId`.
+- **That raw vendor `usage` numbers are summable.** They are not summed anywhere above the
+  adapter without the adapter having normalised them first — see D75, and open question 14,
+  which is the unverified half of it.
 
 ### Races, and what resolves each
 
@@ -1178,6 +1682,10 @@ Not guaranteed, and the client must not assume it:
 | Delete arrives during a turn | Refused `409` | Manager turn state (D25) |
 | Two sessions on overlapping workspaces | The second is refused at create | Manager, on **overlap** of the resolved paths of **live** sessions (D19 + D20 + D30), claimed synchronously |
 | A client arrives during boot rehydration | Cannot — listening starts after rehydration | Boot ordering |
+| Two operators decide one requisition *(tier two)* | First wins; second gets `409 already_decided` | `records` registry, claimed synchronously with the check |
+| Two sessions created against one approved requisition *(tier two)* | First wins; second gets `409 requisition_consumed` | `records` registry, claimed synchronously with the workspace claim |
+| Two tabs of one author edit one draft review *(tier two)* | **Not a race.** Last append wins and both drafts stay on disk | Nothing, deliberately — a latest-wins log with history is the correct behaviour for an edit, and no downstream state depends on which won |
+| Two clients tick one checklist item *(tier two)* | First emits, second is a no-op returning `200` | Manager, on the derived checklist state; ticking is idempotent |
 
 The last row is the one race resolved by exclusion rather than by ordering. Two sessions
 whose work-trees overlap would have independent shadow git directories and no lock between
@@ -1207,15 +1715,17 @@ one place D19 and D20 touch, and it is why they are stated together.
 
 ### Boot ordering
 
-Four steps, and the order is the point:
+Five steps, and the order is the point:
 
 ```
 1. reap    pids.ndjson entries with no exitedAt, subject to the reuse guard   (D23)
            kill the process TREE, not the recorded pid                        (D38)
 2. rehydrate  meta.json → registry, every session marked ended                (D20)
+           an unknown schemaVersion is handled as a corrupt file              (D49)
            lastSeq derived from the spill's tail, not read from meta.json      (D37)
 3. close   any turn the spill left unterminated, by appending to the spill     (D39)
-4. listen  only now are connections accepted
+4. load    the two record logs → registries, latest line per id     (tier two, D65)
+5. listen  only now are connections accepted
 ```
 
 Reaping precedes rehydration so that no rehydrated session can be adopted by an orphan
@@ -1238,15 +1748,24 @@ every replay consumer carrying a case for "the transcript might just stop", fore
 Step 3 runs before listening for the same reason step 2 does. A client that connected first
 would read the broken tail.
 
+**Step 4 runs before listening because the requisition guards are synchronous** (D32). A
+claim that has to be tested and taken without an `await` cannot read a file to find out
+whether the requisition is approved, so the registry must be whole before any request can
+reach it. It comes after step 3 rather than before step 1 only because tier one should finish
+booting even if tier two's files are broken — which is also why an unreadable record log
+starts an empty registry rather than aborting.
+
 Step 1 kills nothing it cannot positively identify. An entry whose `startedAt` predates the
 host's last boot, or whose pid now belongs to a process with a different image, is logged
 and tombstoned rather than reaped — the reasoning is in *Data model § Process record*, and
 the short version is that pid reuse turns a tidy-up into a wrong kill.
 
-Neither step 1 nor step 2 may abort boot. A `meta.json` that fails to parse is skipped and
-logged; an unreapable pid is tombstoned and logged. One unreadable session must not deny the
-operator every other session, and its files are left untouched so the failure can be
-inspected rather than cleaned up automatically.
+**No step may abort boot.** A `meta.json` that fails to parse, or carries a version this
+build does not know, is skipped and logged; an unreapable pid is tombstoned and logged; an
+unreadable record log yields an empty registry and a log line. One unreadable session must
+not deny the operator every other session, one broken tier-two file must not deny them tier
+one, and every affected file is left untouched so the failure can be inspected rather than
+cleaned up automatically.
 
 ## Alternatives considered
 
@@ -1423,6 +1942,122 @@ From the structural review pass (D29–D43):
   art's CSP and had none of its own, and an XSS in this origin can issue every POST the
   operator can.
 
+From the contract derivation (D44–D50), two of which this document had drifted from and no
+longer does: **D46**, the adapter's outbound channel is a notification union rather than an
+`emit` callback — *Module boundaries* and *Control flow § 2* said `emit`, which left the
+`cliSessionId`, the pid and the child's exit with no way to reach the manager except an edge
+the same section forbids; and **D49**, `meta.json` carries a `schemaVersion` and an unknown
+one is a corrupt file — *Persistence summary* described the write protocol without it and
+*Failure modes* had no row for the unknown-version case. The design was the stale side of
+both, and both are now stated here.
+
+From the prototype adjudication and the brief amendment (D51–D64), which this pass
+propagates rather than revisits: D53 to D55 and D58 admit the tier-two surfaces, D59 makes
+the definition of done two tiers, D60 puts the theme in the browser, D62 restates the
+orchestration non-goal, D63 keeps Codex in tier one, D64 requires a two-platform gate.
+
+New in this pass, propagating tier two into the architecture (D65–D79):
+
+- **D65 — tier two persists to append-only latest-wins files, not a database.** Chosen: two
+  server-wide NDJSON logs, latest line per id, held in memory as registries at boot. Rejected:
+  SQLite — D7 named "querying beyond mine, recent" as the trigger and this is not it; it also
+  forces a second durability model beside the append-only files the audit log needs, or moves
+  the audit log into it and destroys the property that makes it evidence. Rejected mutable
+  JSON documents per record — a second write protocol, a second torn-write story, and it
+  discards the edit history that an authored record should keep.
+- **D66 — a review's subject is a session, not a person.** Chosen: `subject: SessionId`,
+  `author: OperatorId` as a string on a record. Rejected: an employee or operator entity —
+  the first account state on this server, reopening D3, and it must then answer what the row
+  means when the upstream identity provider renames or removes that person. Rejected
+  attaching a review to a workspace path — paths are reused and a review would silently
+  accrue to whoever holds the directory next.
+- **D67 — reviews and requisitions are server-wide and survive session deletion.** Chosen:
+  store them beside `audit.ndjson`; a review carries a `SessionSnapshot` denormalised at
+  authorship. Rejected: per-session storage — D25 then lets the subject of a review destroy
+  it, which is the argument D25 already makes for the audit log, applied to a record with more
+  claim to it. Rejected keeping the session's `meta.json` alive as a tombstone so reviews can
+  resolve it — D25 rejected exactly that for exactly this reason.
+- **D68 — a requisition is an optional second path into session creation, never a gate.**
+  Chosen: `requisitionId` is optional on `POST /api/sessions`, claimed once, after the jail
+  and busy checks. Rejected: requiring one — tier-one item 2 becomes an approval workflow and
+  D59's promise that tier one is finishable alone stops being true. Rejected resolving the
+  workspace at raise time — it stores a path whose meaning can change before it is spent, and
+  leaks directory existence to anyone who can raise a requisition. Rejected claiming before
+  the jail check — burns an approval on a refusal that has nothing to do with it.
+- **D69 — self-approval of a requisition is permitted and recorded.** Chosen: `decidedBy` may
+  equal `raisedBy`. Rejected: forbidding it — it wedges the single-operator deployment
+  entirely, and the threat model already concedes that a determined operator is out of scope,
+  so the rule would be an enforcement claim nothing behind it can keep. Honest bookkeeping
+  beats a control that is not one.
+- **D70 — the audit log, requisitions and final reviews are readable by every authenticated
+  operator.** Chosen: read is open, write is attributed and constrained, with one carve-out —
+  a `draft` review is its author's alone until finalised, which is what a draft state is for.
+  D50's `404` stays but its justification narrows from concealment to access control. Rejected:
+  scoping each operator to their own records — the audit log then answers only "what did I
+  approve", which is not the question it is server-wide to answer, and a requisition cannot be
+  approved by someone who cannot see it. Rejected a reviewer role — the first account state on
+  this server, which D3 and D66 both refuse.
+- **D71 — the onboarding checklist lives in the session's event stream.** Chosen: a
+  `checklist.item.completed` envelope; the checklist is the fold; the template is a `config`
+  value. Rejected: a `checklist.json` per session — a second per-session mutable file with its
+  own write protocol and torn-write row, for a handful of booleans that already have a durable,
+  ordered, replayable, fanned-out home. Rejected a per-requisition template — that is a
+  workflow engine and nothing asked for one.
+- **D72 — PIP status is derived from the latest final review; drafts do not set it.** Chosen:
+  fold the review log per subject, finals only. Rejected: a stored flag on the session — two
+  places to be wrong, and it would have to survive D25 deleting the session while the review
+  that justified it did not. Rejected letting drafts set it — a draft is invisible to everyone
+  but its author under D70, so a draft that set the badge would leak its content in the one bit
+  that matters most, while its author was still deciding.
+- **D73 — the audit log gets a bounded read route, and tier one always needed one.** Chosen: a
+  window with a cursor, newest first; the incident view is the same read with filters.
+  Rejected: leaving it unstated — brief item 7 is a *read*, this document specified only the
+  append, and an unspecified route is one the contract had no way to derive. Rejected an
+  unbounded read — this is the one file that grows for the deployment's lifetime, so a
+  whole-file scan is a screen that degrades permanently. Rejected an index now — open question
+  11 already carries that for the spill and the bound makes it not yet necessary.
+- **D74 — the no-`innerHTML` rule covers everything this codebase did not write.** Chosen:
+  widen it past agent-derived content. Rejected: adding a clause for operator-authored text —
+  "is this string agent-derived?" is a question a renderer eventually answers wrong, and tier
+  two created the first stored path from one operator's keyboard to another's browser (D70).
+- **D75 — `usage` is normalised by the adapter, and nothing above it does token arithmetic on
+  vendor numbers.** Chosen: the adapter emits usage the contract defines as summable, and the
+  payroll fold sums. Rejected: summing raw vendor numbers in the view — whether a vendor
+  reports cumulative or incremental counts is vendor knowledge, so a view doing that arithmetic
+  is vendor knowledge above the adapter, arriving by the back door exactly as D44 describes.
+  It is also wrong under compaction, where Claude's counters reset. Rejected showing the latest
+  raw number instead of a total — that is not "burn to date", which is what brief item 8 asks
+  for.
+- **D76 — derived idle time excludes any interval spanning a restart.** Chosen: drop the
+  interval and report how many were dropped. Rejected: counting it as idle — the operator's
+  payroll screen then bills them for the server being down. Rejected counting it as turn time
+  — the same lie, moved. Rejected inferring the outage from the host's boot time — that is the
+  pid reuse guard's signal, it says nothing about how long the process was absent, and it is
+  wrong on a host that did not reboot.
+- **D77 — `records` is a twelfth module, and it does not depend on the session manager.**
+  Chosen: a peer owning the two non-session lifecycles; the edge composes it with the session
+  manager for the one route that needs both. Rejected: five more methods on `session-manager` —
+  it already owns ownership, turn state, `seq`, fan-out and reaping, and a second unrelated
+  lifecycle is how a module becomes the place everything goes. Rejected `records →
+  session-manager` for the review snapshot — it makes the outliving module a client of the one
+  it outlives.
+- **D78 — the four themes are CSS custom properties and a root attribute.** Chosen: one
+  stylesheet from `'self'`, a `data-` attribute the switcher toggles, the choice in browser
+  storage (D60). Rejected: generating or injecting style text at runtime — the obvious
+  implementation, and it needs `unsafe-inline`, which would weaken the one CSP directive this
+  design criticised the prior art over. Rejected four stylesheets swapped at runtime — a flash
+  of unstyled content on every switch, and four files to keep in step instead of one block of
+  variables.
+- **D79 — the prototype's employment status is a client-side projection, not a field.**
+  Chosen: derive the badge from facts that already exist — `ended` is `CLOCKED OUT`, a live
+  session with a pending permission is `BLOCKED`, with a running turn `ON SHIFT`, otherwise
+  `IDLE`; `ON PIP` is an orthogonal badge from D72. `PROBATION` is cut: nothing in this system
+  is a source for it. Rejected: a stored status field — it overlaps `SessionSummary.state`
+  without matching it, which is two fields that must agree and one that eventually does not.
+  Rejected extending `state`'s union — it would put presentation vocabulary into the value the
+  compose box's enabled-ness is decided by. This resolves the `## Open` item that named the
+  overlap.
+
 Standing decisions this design rests on, all in `90-decisions.md`: D1/D10 transport,
 D2 sequencing, D3 delegated auth, D4 the jail, D5 the permission asymmetry, D6 shadow git,
 D7 no database, D8 reference-only prior art, D9/D11/D12 the Open WebUI evaluations.
@@ -1444,6 +2079,16 @@ Ordered by how much they hurt to retrofit:
 
 Items 1, 2 and 3 are the ones that dictate structure. The rest can be added to a sound
 structure without disturbing it.
+
+**Tier two is not on this list and the omission is the finding.** Reviews, requisitions,
+onboarding, payroll, incidents and themes are all things the prior art has none of, and none
+of them is expensive to retrofit onto the structure above: two append-only files beside the
+two already there, one module that depends on nothing new, one optional request field, one
+new event kind, and two folds over data the design was already writing. That is the whole
+cost of D53 to D55 and D58 at this layer. It is worth saying because three of those four
+decisions record *expensive* reversibility, and the expense is real but it is in the product
+and the client, not here — a persisted authored record is not un-written, and four themes must
+be built four ways from the first component. The architecture is where this was cheap.
 
 ## Open questions
 
@@ -1467,12 +2112,14 @@ these are cited by number elsewhere in this document and in the slices.
    the design does today by omission, which is a decision made by not making one.
 3. **Nothing prevents two server processes over one storage root.** The no-lock argument in
    *Concurrency* holds for one process and silently stops holding for two — interleaved
-   appends to `audit.ndjson` and `pids.ndjson`, two registries disagreeing about which
-   workspace is busy (D19), and boot reaping a live sibling's children. A lock file at the
-   storage root is the obvious answer and it is small; it is listed here rather than decided
-   because the failure it prevents is an operator running the server twice by accident, and
-   whether that is worth a startup failure mode is a judgement about deployment, not about
-   architecture.
+   appends to all four server-wide files, two registries disagreeing about which workspace is
+   busy (D19), and boot reaping a live sibling's children. Tier two widens it rather than
+   changing it: two processes would also both consume one approved requisition, since each
+   holds its own registry and the synchronous claim that makes D68 safe is per-process. A lock
+   file at the storage root is the obvious answer and it is small; it is listed here rather
+   than decided because the failure it prevents is an operator running the server twice by
+   accident, and whether that is worth a startup failure mode is a judgement about deployment,
+   not about architecture.
 
 **Needing an experiment:**
 
@@ -1500,10 +2147,49 @@ these are cited by number elsewhere in this document and in the slices.
    D50 for the vendor authorisation the contract asserted and nothing could hold. Two gaps
    the derivation exposed are open rather than closed, and are in
    `90-decisions.md § Open`: attachment handling, and who owns `ToolCall.summary`.
+   **This pass opens a new round of the same drift** — D65 to D79, D73's audit read route, and
+   the whole tier-two surface are in this document and in neither the contract nor the slices.
+   Staged in `90-decisions.md § Open`; not restated here.
 10. `Start-AgentSession.ps1` (D14) is unreconciled against this architecture. Carried in
     `90-decisions.md § Open`; not restated here.
-11. **The spill has no index, and replay reads it from the start.** Acceptable at the
-    expected volume and not at 100× it, where opening an old session becomes a multi-second
-    scan that grows with the session's own history. An offset sidecar is the fix; it is
-    listed rather than designed because the bound has not been hit and the file format is
-    what it would constrain. Carried in `90-decisions.md § Open`.
+11. **No append-only file here has an index, and every read scans.** For the spill this is
+    acceptable at the expected volume and not at 100× it, where opening an old session becomes
+    a multi-second scan that grows with the session's own history. **`audit.ndjson` is the
+    worse case and it is new to this item**: the spill's scan is bounded by one session's
+    history, but the audit log is never truncated and outlives every session it names (D25),
+    so its scan grows with the deployment's whole lifetime. D73's bounded window with a cursor
+    is what makes the audit read tolerable without an index, not a substitute for one. The two
+    record logs are not a concern — human-paced, kilobytes. An offset sidecar is the fix for
+    both files that need it; it is listed rather than designed because the bound has not been
+    hit and the file format is what it would constrain. Carried in `90-decisions.md § Open`.
+
+**Needing a decision from the owner (tier two):**
+
+12. **Is the token budget per session, per deployment, or per workspace?** D53 says a budget
+    is "a value the operator sets in configuration" and stops there, and the three readings
+    give brief item 8's "budget remaining" three different meanings. This design takes it as
+    per session, because that is the only one needing no new persisted entity and the only one
+    where the number on a session's screen is about that session — but a per-deployment budget
+    is what an owner watching total spend would actually want, and per-workspace is defensible
+    for a shared monorepo. The choice is cheap now and awkward once a screen has shipped
+    against one reading.
+13. **Operator-driven assignment is in scope and has no definition-of-done item.** D52 keeps
+    it — "an operator dragging work onto a session is an operator action and stays" — and D59's
+    tier two is items 8 to 12, none of which is a backlog. Either it is permitted but not
+    required, which is this design's working read and why nothing above provides for it, or the
+    definition of done is one item short. It cannot be designed either way while that is
+    unsettled: `90-decisions.md § Open` separately records that a dragged ticket has no defined
+    effect and no home in storage, and those are the same question asked from the other end.
+
+**Needing an experiment (tier two):**
+
+14. **Are a vendor's `usage` numbers cumulative or incremental?** D75 makes the adapter
+    responsible for emitting something summable, which is the right place for the knowledge —
+    but nobody has looked. Claude reports usage per assistant record and resets counters at a
+    `compact_boundary`, which is consistent with per-context cumulative reporting, in which
+    case summing raw values double-counts input tokens across a turn and again across a
+    compaction. Codex's `token_count` under `payload.info` is unverified for the same question
+    and is unverified for whether it appears on a live stream at all (open question 6). Brief
+    item 8 says "token burn to date", and until this is answered no implementation of that
+    phrase can be shown to be correct rather than merely plausible. Cheap to test on Claude;
+    blocked behind S8.1 for Codex.
