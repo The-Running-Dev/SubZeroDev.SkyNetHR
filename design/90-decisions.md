@@ -278,6 +278,26 @@ per-subscriber buffering — converts a slow client into a server memory leak, w
 same bug with a longer fuse.
 Reversibility: cheap. Contained entirely within the session manager's fan-out.
 
+### 2026-08-08 — D19 One live session per workspace path; the second is refused
+Context: two sessions rooted at the same resolved path get independent shadow git
+directories and no lock between them, so a checkpoint restore in one silently reverts the
+other's work. `10-design.md § Concurrency` had this as the single unresolved race, and the
+brief does not say whether workspace sharing is allowed.
+Chosen: session creation refuses with `409` when another live session already holds that
+resolved path. The check runs at create, immediately after the jail resolution that already
+produces the path it compares — so it costs a map lookup and no new machinery.
+Rejected: allowing it with a warning banner — the hazard is silent data loss, and a banner
+is not a lock; it informs an operator about a race they cannot then avoid. Rejected
+allowing it with checkpoints disabled on the second session — removes the hazard but costs
+that operator DoD #6, and requires the client to explain why a documented feature is
+missing for reasons outside their session. Rejected deferring to S6 — session creation
+ships in S2, so deferring means reopening the create path later to add a check that belongs
+in it from the first commit, which is the same argument D4 makes about the jail.
+Consequence: the refusal is on the **resolved real path** (D4), not the requested string,
+so two different spellings of one directory are correctly caught as the same workspace.
+Reversibility: cheap. Relaxing a refusal is additive; retrofitting one after operators have
+built habits around sharing is not.
+
 ## Open
 
 Staging only. Once an item becomes an issue it leaves this list.
@@ -297,15 +317,13 @@ Staging only. Once an item becomes an issue it leaves this list.
 - Do sessions survive a server restart? `meta.json` and the spill are on disk; the registry
   is in memory and nothing rehydrates it. The brief specifies page refresh, not process
   restart. Read-only rehydration and full `--resume` resumption are both viable.
-- May two sessions share one workspace? Currently unguarded, and a checkpoint restore in
-  one silently reverts the other's work. Refusing at create is a two-line check; allowing
-  it needs a locking story that does not exist.
 - Is there a turn timeout? A child producing no output is indistinguishable from one that is
   thinking. Any value risks killing a legitimately long tool call, and none is derivable
   from the brief.
 - Are Codex's `callId`s unique within a session or only within a turn? If the latter, tool
   correlation breaks and `10-design.md § Data model — Identity spaces` needs a server-side
   alias after all. Answered by S8.1.
-- `20-contract.md`'s `session.exit` conflates turn-process exit with session teardown. Under
-  D16 a normal turn ends its child, so a contract-obedient client tears the session view
-  down after every successful turn. Contract amendment, owned by `/contract`.
+- `20-contract.md` needs two amendments, both owned by `/contract`. Its `session.exit`
+  conflates turn-process exit with session teardown — under D16 a normal turn ends its
+  child, so a contract-obedient client tears the session view down after every successful
+  turn. And `workspace_busy`, which D19 requires, has no entry in its error table.

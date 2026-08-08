@@ -378,6 +378,8 @@ POST /api/sessions {vendor, cwd, model?, sandbox?}
   edge          → identity: resolve OperatorId, else 401
   edge          → session-manager.create(owner, vendor, cwd, model)
   manager       → jail.resolveInsideRoot(cwd, roots)     → 409 outside_workspace_root
+  manager       : resolved path already held by a live session?
+                                                         → 409 workspace_busy   (D19)
   manager       → store: mkdir, write meta.json, open spill
   manager       → checkpoints: init ckpt.git             → notice on failure, not fatal
   manager       → adapters[vendor].create({cwd: resolved, model, emit})
@@ -389,7 +391,8 @@ determined here, from adapter capability, and is what the client renders as eith
 will be asked" or a standing sandbox banner.
 
 The jail check is the second step and never later. Every subsequent use of `cwd` reads the
-stored resolution.
+stored resolution — including the D19 busy check, which compares resolved paths so that two
+spellings of one directory cannot slip past as two workspaces.
 
 ### 2. A turn, interrupted by a permission request — the path that justifies the project
 
@@ -528,6 +531,7 @@ thinking. Fail loudly, never degrade quietly.
 | Failure | Detection | System does | Operator sees | State left behind |
 |---|---|---|---|---|
 | `cwd` outside every root | Jail check | `409 outside_workspace_root` | Refusal naming the roots | No session created |
+| Workspace already has a live session | Registry lookup on the resolved path | `409 workspace_busy` (D19) | Refusal naming the holding operator | No session created; the existing one is untouched |
 | Workspace is not a git repo | — | Nothing; shadow git needs no repo in the workspace | Checkpoints work normally | — |
 | `ckpt.git` init fails | git exit code | `session.notice / warn`; session proceeds **without** checkpoints | Banner: no checkpoints | Session usable, DoD #6 unavailable |
 | Restore while a turn is in flight | Manager turn state | `409 turn_in_flight` | "Finish or interrupt first" | Workspace untouched |
@@ -623,11 +627,17 @@ Not guaranteed, and the client must not assume it:
 | Restore during a turn | Refused `409` | Manager turn state |
 | Child emits while a client reconnects | Buffer is appended before fan-out; replay reads the buffer | Synchronous `emit` |
 | A slow subscriber | Per-subscriber queue; drop that one, gap it, keep the rest | Fan-out; logged as D18 |
-| **Two sessions on one workspace** | **Unresolved** — see *Open questions* | Nothing |
+| Two sessions on one workspace | The second is refused at create | Manager, on the resolved path (D19) |
 
-The last row is the one real hazard in the table. Two sessions rooted at the same directory
-have independent shadow git directories and no lock between them, so a restore in one
-silently reverts the other's work. The brief does not say whether that is allowed.
+The last row is the one race resolved by exclusion rather than by ordering. Two sessions
+rooted at the same directory would have independent shadow git directories and no lock
+between them, so a restore in one silently reverts the other's work. Rather than build a
+locking story to make that safe, **a workspace admits one live session at a time** and the
+second `POST /api/sessions` is refused. The comparison is on the resolved real path, so two
+spellings of one directory are correctly caught as the same workspace.
+
+That refusal is the whole mechanism. Nothing downstream — checkpoints, restore, the
+adapters — needs to consider a shared workspace, because there cannot be one.
 
 ## Alternatives considered
 
@@ -653,6 +663,13 @@ New in this pass:
   Rejected: a shared synchronous write to every subscriber — one slow client applies
   backpressure to every other client and to the child's stdout drain. Rejected unbounded
   per-subscriber buffering — turns a slow client into a server memory leak.
+- **D19 — a workspace admits one live session at a time.** Chosen: refuse the second with
+  `409 workspace_busy`, compared on the resolved real path. Rejected: allowing it with a
+  warning banner — the hazard is silent data loss and a banner is not a lock, so it tells an
+  operator about a race they cannot avoid. Rejected allowing it with checkpoints disabled on
+  the second session — removes the hazard but costs that operator DoD #6 for reasons outside
+  their own session. Rejected deferring to S6 — creation ships in S2, and this is the same
+  argument D4 makes about the jail belonging in the create path from the first commit.
 
 Standing decisions this design rests on, all in `90-decisions.md`: D1/D10 transport,
 D2 sequencing, D3 delegated auth, D4 the jail, D5 the permission asymmetry, D6 shadow git,
@@ -688,33 +705,31 @@ Questions this design cannot answer without information it was not given. Carrie
    process restart, so this is genuinely unspecified. Rehydrating read-only (transcript
    visible, no new turns) is cheap; full resumption via `--resume` is not much harder but
    changes what `endedAt` means.
-2. **May two sessions share one workspace?** Currently unguarded, and a restore in one
-   silently reverts the other. Refusing a second session on an already-active path is a
-   two-line check at create; allowing it needs a locking story that does not exist.
-3. **Is there a turn timeout?** A child that produces no output is currently indistinguishable
+2. **Is there a turn timeout?** A child that produces no output is currently indistinguishable
    from one that is thinking, forever. Any timeout risks killing a legitimately long tool
    call, and no value is derivable from the brief.
 
 **Needing an experiment:**
 
-4. Does `--include-partial-messages` give usable token-level deltas, and does it change the
+3. Does `--include-partial-messages` give usable token-level deltas, and does it change the
    event contract? Cheap to test, and the answer changes the renderer.
-5. Does the Codex CLI expose a live NDJSON stream at all, and does it match the rollout
+4. Does the Codex CLI expose a live NDJSON stream at all, and does it match the rollout
    schema? First Codex slice answers this (S8.1).
-6. Does Codex offer any runtime approval hook, or is `approval_policy` genuinely the whole
+5. Does Codex offer any runtime approval hook, or is `approval_policy` genuinely the whole
    story? If there is a hook, D5 gets revisited.
-7. Are Codex's `callId`s unique within a session, or only within a turn? If the latter,
+6. Are Codex's `callId`s unique within a session, or only within a turn? If the latter,
    tool correlation breaks and *Data model § Identity spaces* needs a server-side alias
    after all.
-8. Whether `permission_suggestions` from the Claude CLI is a sufficient grammar for
+7. Whether `permission_suggestions` from the Claude CLI is a sufficient grammar for
    "always allow", or whether a local rule language is needed. Look before inventing.
 
 **Known drift, not a question:**
 
-9. `20-contract.md`'s `session.exit` conflates turn-process exit with session teardown.
-   Under D16 a normal turn ends the child, so a contract-obedient client tears down the
-   session view after every successful turn. The contract is the wrong side; the amendment
-   belongs to `/contract`.
-10. `Start-AgentSession.ps1` (D14) is unreconciled against this architecture — it assumes a
-    local interactive terminal, not the server/edge/adapter shape. Reconcile when a slice
-    first needs a CLI launcher, not before.
+8. `20-contract.md` needs two amendments this design implies, both `/contract`'s to make.
+   **`session.exit` conflates turn-process exit with session teardown** — under D16 a normal
+   turn ends the child, so a contract-obedient client tears down the session view after
+   every successful turn. And **`workspace_busy` is a new error code** with no entry in the
+   error table; D19 requires it, and this document deliberately did not add it here.
+9. `Start-AgentSession.ps1` (D14) is unreconciled against this architecture — it assumes a
+   local interactive terminal, not the server/edge/adapter shape. Reconcile when a slice
+   first needs a CLI launcher, not before.
