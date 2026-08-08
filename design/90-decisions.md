@@ -1530,9 +1530,13 @@ Reversibility: cheap, and cheap *because* it is opaque — that is the point of 
 
 Staging only. Once an item becomes an issue it leaves this list.
 
-- **`30-slices.md` does not yet carry D51 to D86.** The contract half of this closed when
-  `/contract` ran against the revised design: two new persisted entities, the `records` module,
-  the audit read route (D73), the requisition and review route sets, the checklist and payroll
-  reads, and the tier-two error and invariant sets are all in `20-contract.md`. No slice covers
-  any of it, and no slice covers the audit read that tier one always needed. It closes when
-  `/slices` runs against the revised design and the revised contract.
+- **`reviews.ndjson` and `requisitions.ndjson` have no migration rule for a removed or retyped
+  field.** Every other persisted shape gates on `meta.json`'s `schemaVersion` and these two are
+  not under it, so there is no discriminator to hang a rule on. Adding a field is safe today;
+  removing or retyping one has no stated rule. It is `20-contract.md § Unresolved` 11 and the
+  only item in that list with no issue behind it.
+- **The prototype's trailing-30-day metrics grid and weekly timecard have no home and no
+  source.** D54 kept the employee record whole; D59 then recast tier two as brief items 8 to 12,
+  and none of them names either aggregation. S16 covers the part with a source — token burn and
+  idle time folded from a session's own event log. Whether the rest is in scope, and computed
+  from what, is unanswered.

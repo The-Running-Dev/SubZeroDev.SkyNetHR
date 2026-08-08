@@ -3,18 +3,29 @@
 Derived from `10-design.md` and `20-contract.md`. Each slice ends runnable. Criteria carry
 stable ids; drift is compared on ids, never prose.
 
+**Two tiers, matching the brief.** S1 to S12 are tier one — the console, finishable on its
+own (D59). S13 to S18 are tier two, the operator's working surfaces of brief items 8 to 12.
+Tier two is binding scope and it is later, not optional. **S12 is tier one despite sorting
+last among them**: it is the read half of brief item 7, which no earlier revision specified
+(D73), and slice numbers append rather than insert.
+
 **This supersedes the pre-contract slice set.** The previous version was written before
 `20-contract.md` existed and asserted things the contract has since removed — a
 `session.exit` event (retired by D45), a tool-output fetch keyed on `callId` alone (retired
 by D22), and `scope: 'always'` forwarding the vendor's own suggestion (retired by D35). Its
-ids are not carried forward. No GitHub issue exists yet, so no checkbox refers to any of
-them; `/track` has not run.
+ids are not carried forward.
 
-Four ids are cited from other documents and are deliberately preserved against the same
-topics: **S3.3** (replay gap, cited by D40 and `90-decisions.md § Open`), **S6.5** (restore
-refused during a turn, cited by `10-design.md § The single-writer invariant`), and **S8.1**
-(the Codex experiment, cited by `10-design.md § Identity spaces`, § Open questions 6, and
-`90-decisions.md § Open`).
+**S1 to S11 and every criterion under them are frozen.** `/track` has run: issues #2 to #12
+carry those slices and their `Done when` checkboxes refer to these ids. This pass adds
+criteria to S2, S3, S4 and S10 at the next free id in each, and adds no criterion in a gap.
+Nothing is renumbered and nothing is removed.
+
+Five ids are cited from other documents and are deliberately preserved against the same
+topics: **S3.3** (replay gap, cited by D40, D41 and `10-design.md § Event envelope`),
+**S6.5** (restore refused during a turn, cited by D17 and
+`10-design.md § The single-writer invariant`), **S7.5** and **S7.6** (the pid reuse guard,
+cited by D23), and **S8.1** (the Codex experiment, cited by
+`10-design.md § Identity spaces`, § Open questions 6, and `20-contract.md § Unresolved` 3).
 
 ## Ordering, and why
 
@@ -32,11 +43,27 @@ The design's riskiest bets, and where each is exercised:
 | The ring buffer is a strict suffix of the spill, so replay can be served from either | S3 |
 | A child's whole process tree can be terminated on Windows and on Linux | S5, and S7 reuses the same mechanism |
 | Codex exposes a live stream resembling its rollout schema | S8.1 |
+| `audit.ndjson` can be read newest-first, bounded, with no index (D73) | S12 |
+| Tier two adds two append-only files and one module and no new architecture (D65, D77) | S13, then S15 |
 
 S8 sits eighth because everything after S8.1 needs the adapter interface and the policy
 banner to exist. **S8.1 itself needs neither and is cheap — run it early, out of order, and
 report.** A negative answer is already absorbed by D5, so this is bounded risk rather than
 deferred risk.
+
+**Numbering appends; it is not the execution order.** Ids are never renumbered, so a slice
+added later sorts after slices it must be built after *and* after some it need not. The order
+to build in is the `Depends on` line, and only that. Tier one reads S1 → S2 → {S3, S4} → S5 →
+S6 → S7 → S8 → S9 → S10 → S11, with S12 reachable as soon as S4 and S5 have landed. In tier
+two, S13 comes before S15 because it builds `records`; S14 and S16 depend on neither and can be
+taken in any order; **S17 and S18 are last because each waits on a tier-one slice** — S17 on
+S12's route and S18 on S10's held rules.
+
+**Seven slices open with a stop rather than with code.** S8.1, S10.1, S12.1, S13.1, S14.1,
+S15.1 and S16.2 — one each, in seven slices — name a question the design or the contract has
+not answered, and each says the slice stops until it does. That is the shape an unresolved
+input has to take here: a criterion that is checkable, because the amendment either landed or
+it did not, rather than an implementer's guess wearing the amendment's clothes.
 
 `spike/` covers parts of S1 and S2 as throwaway proof. It is not the implementation; see
 `spike/README.md § What this is not`. `spike/.data` is deleted rather than migrated
@@ -137,10 +164,18 @@ Acceptance:
   - S2.13 The negative authentication cases are each rejected and the counts stated in the
     slice report: no identity, a forged header from a peer outside `trustProxy`, a wrong
     shared secret, and a disallowed origin.
+  - S2.14 Every colour, spacing, radius and type value the client renders with is a CSS
+    custom property declared in one stylesheet; no component style carries a literal colour.
+    Asserted by searching the built client's styles for hex literals, `rgb(`, `hsl(` and CSS
+    named colours, and finding them only inside the custom-property declarations themselves.
+    D58 requires every component to be built four ways from the first one, and the token layer
+    is the half of that which cannot be retrofitted — the four palettes and the switcher are
+    S18's.
 
 Out of scope: the WebSocket edge (S11), the permission prompt (S4), reconnect and replay
-(S3), checkpoints, interrupt, mobile layout beyond not breaking,
-`--include-partial-messages` and `message.delta` (carried in `90-decisions.md § Open`).
+(S3), checkpoints, interrupt, mobile layout beyond not breaking, the other three palettes and
+the theme switcher (S18 — S2.14 ships the token layer and one palette),
+`--include-partial-messages` and `message.delta` (#13).
 
 ## S3 — Close the laptop, open the phone
 
@@ -151,7 +186,7 @@ agent keeps working the whole time.
 
 Touches: `store` (`readEventsAfter`, `readLastSeq`, ring buffer), `session-manager`
 (`subscribe`, replay), `edge/sse` (`Last-Event-ID`), `config` (`caps.ringCapacity`,
-`caps.subscriberQueueHighWater`).
+`caps.subscriberQueueHighWater`), `client` (the phone layout).
 
 Depends on: S1, S2.
 
@@ -176,9 +211,16 @@ Acceptance:
     the run.
   - S3.8 A disconnected client does not reach the child: the emitted `seq` range and the
     envelope sequence across a disconnect are identical to the same run with no disconnect.
+  - S3.9 The console is usable on the phone, against `design/prototype/`'s phone chrome as the
+    visual spec (D57): at 390 px wide the transcript, the session list and the compose box
+    render with no horizontal scrolling, and a reconnect served from the spill renders the same
+    envelope sequence on the phone layout as on the desktop one.
 
-Out of scope: an offset index for the spill (carried in `90-decisions.md § Open`); the
-WebSocket reconnect path (S11); truncation of large results (S9).
+Out of scope: an offset index for the spill (#19); the WebSocket reconnect path (S11);
+truncation of large results (S9); the phone approve-and-deny screen (S4.14 — D57 names it as
+this slice's reason to exist, and it is built where the permission route is); the torn-tail
+defect where one `seq` could name two different events (#33 — a design question S3.6 does not
+answer).
 
 ## S4 — Ask before you run it, and write down who said yes
 
@@ -228,10 +270,19 @@ Acceptance:
     input containing HTML appears as text.
   - S4.12 `scope: 'always'` is refused with `422 bad_request` naming the field, until S10
     ships a grammar. `rule` is likewise rejected when present.
+  - S4.13 The permission route resolves identity and applies the ownership check like every
+    other session route: another operator answering a prompt on a session they do not own gets
+    `404 no_such_session` and writes no audit record, and `AuditRecord.operator` is the id
+    resolved from the request, never one carried in the body (#38, I23).
+  - S4.14 The approve-and-deny screen works on the phone (D57): at 390 px wide the exact tool
+    input is legible without horizontal scrolling, and allow and deny each round-trip to a real
+    child from that layout. The prototype draws no approval screen, so this one is specified
+    here rather than taken from it.
 
-Out of scope: standing rules and `scope: 'always'` (S10, blocked on open question 8);
-forwarding `updatedPermissions` to the CLI (D35 rejects it); Codex permissions (S8);
-per-operator vendor authorisation (there is no operator record to hold one, D50).
+Out of scope: standing rules and `scope: 'always'` (S10, blocked on #16); forwarding
+`updatedPermissions` to the CLI (D35 rejects it); Codex permissions (S8); per-operator vendor
+authorisation (there is no operator record to hold one, D50); the audit *read* — brief item 7's
+other half is S12.
 
 ## S5 — Stop it, close it, remove it
 
@@ -462,8 +513,11 @@ requires.
 
 ## S10 — Stop asking me about this one
 
-**Blocked on open question 8.** D35 made the grammar this slice needs a prerequisite rather
-than a nice-to-know, because the matching now happens in this server rather than in the CLI.
+**Blocked on open question 8 (#16), and on #37.** D35 made the grammar this slice needs a
+prerequisite rather than a nice-to-know, because the matching now happens in this server
+rather than in the CLI — and the design describes the behaviour while giving the rule no home:
+no entity, no field, no file, and no statement of its lifetime across session end or restart
+(`20-contract.md § Unresolved` 2).
 
 Delivers: An operator who has approved the same kind of command five times can say "always
 allow this" once and stop being asked — while every one of those automatic approvals still
@@ -526,22 +580,423 @@ Acceptance:
 Out of scope: replacing SSE; running both edges simultaneously; a WebSocket-specific event
 shape — the envelope is the same one.
 
+## S12 — Read the record of who approved what
+
+**Tier one.** Brief item 7 is a read — "read an audit record of every tool approval: who, what,
+when" — and until D73 no document specified one. S4 built the append; this builds the read, and
+tier one is not finished without it.
+
+Delivers: An operator can open the record of tool approvals and read back who allowed what,
+when, and in which workspace — including approvals made on sessions that are not theirs and on
+sessions that have since been removed. They page back through it without landing on a screen
+that gets slower every month the deployment runs.
+
+Touches: `store` (`readAuditPage`, minting `AuditCursor`), the module that serves the route
+(see S12.1), `edge/sse` (`GET /api/audit`), `client` (the audit screen), `config`
+(`caps.auditPageMax`).
+
+Depends on: S2, S4, S5 (S12.8 needs `DELETE`).
+
+Acceptance:
+  - S12.1 The module that serves `GET /api/audit` is named in `20-contract.md`. As drawn,
+    `10-design.md § Module boundaries` gives the audit read to `records`, which is tier two, so
+    tier one cannot serve brief item 7 without building part of tier two; `Store.readAuditPage`
+    exists and an edge may not call `store` directly, so the missing piece is one method on one
+    module (`Unresolved` 5, #34). That is a contract amendment at `/contract`'s tier. **This
+    slice stops until it lands** and may not add a signature the contract does not carry.
+  - S12.2 `GET /api/audit` returns `200 AuditPage` with `records` newest first, and
+    `nextCursor` null exactly when the window reached the oldest record.
+  - S12.3 A `limit` above `caps.auditPageMax` is clamped to the cap rather than refused, and
+    the served count is asserted against a log of at least three times `auditPageMax` records.
+  - S12.4 Paging by `nextCursor` visits every record exactly once: the pages concatenated over
+    a log of at least 500 records equal the file read newest-first, line for line, with no
+    duplicate and no omission.
+  - S12.5 The cursor is opaque and server-minted (D86): a cursor the caller has altered is
+    refused `422 bad_request`, and a search of the client sources finds no code that parses,
+    decodes or constructs one.
+  - S12.6 Each filter narrows and they combine: `sessionId`, `operator`, `since`, `until`.
+    Asserted against a fixture spanning two sessions, two operators and a known timestamp
+    boundary, with the count matched for each filter and for the combination.
+  - S12.7 The read is open to every authenticated operator and is not scoped to the caller's
+    own sessions: operator B reads operator A's records in full (D70). An unauthenticated
+    request is `401 unauthenticated`.
+  - S12.8 Records for a session removed by `DELETE /api/sessions/:id` are still readable, with
+    `vendor` and `sandbox` intact — which is the reason the record copies them rather than
+    referencing the session (D25, I13).
+  - S12.9 No read scans the whole file: the bytes read to serve one page do not grow with the
+    file, asserted by instrumenting the read against logs of 10 000 and 100 000 records and
+    stating both figures with the elapsed time for the first page and the deepest page (I39).
+  - S12.10 The screen renders `operator`, `tool`, `input`, `decision` and `ts` as text nodes: a
+    recorded tool input containing `<img src=x onerror=alert(1)>` appears as literal characters
+    and executes nothing (I26).
+
+Out of scope: the incident filters and grouping (S17 — the same read with `incidentsOnly`); an
+offset index for `audit.ndjson` (#19, which now carries this file as well as the spill); any
+retention, rotation or truncation rule — I13 forbids shortening this file, and the bounded
+window is what makes that survivable.
+
+## S13 — Hiring: open a session through a requisition someone approved
+
+**Tier two**, brief item 10, first half. This is the slice that builds the `records` module and
+the first of its two append-only logs, so it carries tier two's structural risk: if D65's
+"append-only latest-wins files, not a database" is wrong, it is wrong here.
+
+Delivers: An operator can ask for a workspace before they have it, writing down what they want
+to work on and why, and somebody else can approve or reject the request. Once it is approved
+the requester starts a session straight from it, and the request is spent. Everyone can see
+every request and what happened to it.
+
+Touches: `records` (new module — the requisition registry, `boot`, `raise`,
+`listRequisitions`, `getRequisition`, `decide`, `claim`, `attachSession`, `release`), `store`
+(`appendRequisition`, `readAllRequisitions`), `session-manager` (`create` with
+`requisitionId`), `edge/sse` (the three requisition routes), `client`, `config`
+(`caps.requisitionTextBytes`).
+
+Depends on: S2, S5 (the workspace claim), S7 (boot ordering).
+
+Acceptance:
+  - S13.1 The write-protocol ordering for record-log mutations is settled in the design.
+    `10-design.md` states both that the registry is claimed synchronously before the append and
+    that the append lands before any registry mutation, and the two cannot both hold
+    (`Unresolved` 7, #31). This slice is the first code that would implement one of them.
+    **It stops until the design says which**, at `/design`'s tier.
+  - S13.2 `POST /api/requisitions` returns `201` in state `open`, storing `workspace` as the
+    client's string: a requisition naming a path outside every root is raised successfully, with
+    no jail call made and no refusal (D68, I34).
+  - S13.3 `GET /api/requisitions` returns every requisition to every authenticated operator,
+    not only the caller's (D70) — a requisition cannot be approved by someone who cannot see it.
+  - S13.4 `POST /api/requisitions/:id/decision` moves `open → approved` or `open → rejected`
+    and records `decidedBy` and `decidedAt`. A second decision is `409 already_decided` naming
+    the decider and the state, and two decisions dispatched in the same tick yield exactly one
+    `200` and one `409` (I5, I32).
+  - S13.5 Self-approval succeeds and is recorded: `decidedBy` equal to `raisedBy` is accepted
+    and appears on the record (D69).
+  - S13.6 `POST /api/sessions` naming an approved requisition creates the session and moves the
+    requisition to `consumed` carrying that `sessionId`. A second create naming the same id is
+    `409 requisition_consumed`, and two dispatched in the same tick yield exactly one `201`
+    (I33, I5).
+  - S13.7 A claim against the wrong state takes nothing: `open` and `rejected` each give
+    `409 requisition_not_approved`, and an unknown id gives `404 no_such_requisition`.
+  - S13.8 The jail and busy checks run before the claim: a create naming an approved
+    requisition whose workspace is outside every root is `409 outside_workspace_root`, and the
+    requisition is still `approved` and still spendable afterwards (D68).
+  - S13.9 A creation that fails after the claim releases both claims together: the requisition
+    reads `approved` again, the workspace is free, and a retry succeeds.
+  - S13.10 `POST /api/sessions` with no `requisitionId` behaves exactly as it did in S2 —
+    asserted by re-running S2.1's cases unchanged. A requisition is a second way in, never a
+    gate (D68, D59).
+  - S13.11 A `title` or `justification` over `caps.requisitionTextBytes` is refused
+    `422 bad_request` naming the field, with nothing appended and nothing truncated (D84).
+  - S13.12 A failed append returns `500 record_write_failed` and leaves the registry and the
+    file agreeing, with the requisition at its prior state (I37).
+  - S13.13 Boot loads `requisitions.ndjson` into the registry, latest line per id winning,
+    before any connection is accepted; an unreadable file yields an empty registry, a log line,
+    and a server that still serves every tier-one route (I18, I38).
+  - S13.14 A torn trailing line is dropped at boot and the previous line for that id becomes
+    authoritative — asserted with a truncated `consumed` line, after which the requisition reads
+    `approved` and can be spent a second time. This is accepted behaviour, recorded, not fixed
+    (`10-design.md § Persistence summary`).
+  - S13.15 A `justification` containing HTML renders as literal characters in a *different*
+    operator's browser (I26, D74).
+  - S13.16 There is no revocation route and no expiry: the only transitions are I32's four, and
+    a request for any other is refused (D81).
+
+Out of scope: reconciling a `consumed` requisition whose session never materialised — D80
+accepts that as a dead approval and the remedy is raising another; a candidate entity or
+anything else from the prototype's hiring screen beyond the requisition itself; resolving
+`workspace` at raise time (D68 rejects it).
+
+## S14 — Onboarding: work the first-run checklist
+
+**Tier two**, brief item 10, second half.
+
+Delivers: An operator starting work in a new workspace is shown the deployment's own first-run
+steps and ticks them off as they go. What they have ticked survives a reload, shows up for
+anyone else watching the same session, and sits in the transcript at the point it happened.
+
+Touches: `session-manager` (`checklist`, `tickChecklistItem`, the fold), `edge/sse` (the two
+checklist routes), `client`, `config` (`checklist`).
+
+Depends on: S2, S3 (the replay path S14.7 asserts).
+
+Acceptance:
+  - S14.1 Two rules are stated in the design: whether a tick on an ended session is refused,
+    and whether every session has a checklist or only one opened through a requisition
+    (`Unresolved` 9, #41). The route as drawn lists no `409 session_ended`, and that omission is
+    the open question rather than a ruling. **This slice stops until both are answered**, because
+    either answer is behaviour a criterion has to assert.
+  - S14.2 `POST /api/sessions/:id/checklist/:itemId` emits one `checklist.item.completed
+    { itemId, by }` through the same `emit` as every other event, at a `seq` contiguous with the
+    session's stream (D71, I1).
+  - S14.3 The envelope carries no `turnId` and is accepted mid-turn: a tick during a live turn
+    lands between that turn's `turn.started` and `turn.ended`, and the renderer attributes it to
+    the operator rather than to the agent (`20-contract.md § Rules the renderer may rely on`).
+  - S14.4 Ticking is idempotent: a second tick for the same item returns `200 { ok: true }` and
+    emits no second envelope, so at most one exists per `(sessionId, itemId)` (I36).
+  - S14.5 An `itemId` absent from the configured template is `404 no_such_item`.
+  - S14.6 `GET /api/sessions/:id/checklist` returns the fold — the template's label joined to
+    `completedBy` and `completedAt` taken from the envelope's `by` and `ts` — for every item,
+    complete or not. The client does not hold the template (D85).
+  - S14.7 The fold survives a reload and a reconnect: after a replay served from the spill, the
+    client shows the same ticked set the route reports.
+  - S14.8 An empty `config.checklist` disables the surface: the read returns an empty list and
+    the client shows no checklist rather than an empty panel.
+  - S14.9 Both routes carry the ownership check: another operator gets `404 no_such_session` for
+    the read and for the tick (I23).
+  - S14.10 A tick appends nothing to `audit.ndjson`: the file is byte-identical across a run of
+    at least five ticks. That log records tool approvals, and diluting it with provisioning
+    clicks makes the artifact the threat model leans on harder to read (D71).
+
+Out of scope: a per-requisition or per-vendor template (D71 rejects it — that is a workflow
+engine); unticking, or any transition out of complete; ordering or dependencies between items;
+persisting a checklist anywhere — it is derived and it dies with its session under D25.
+
+## S15 — Performance reviews, and the plan badge over them
+
+**Tier two**, brief item 9.
+
+Delivers: An operator can write up how a session went, keep it to themselves while it is a
+draft, and publish it when it is ready. Published reviews are readable by everyone and outlive
+the session they are about, so removing a session never removes the record of it. Where the most
+recent published review puts a session on a performance plan, everybody sees that on the
+session.
+
+Touches: `records` (the review registry, `createReview`, `appendReview`, `finaliseReview`,
+`getReview`, `listReviews`, `isUnderPip`), `store` (`appendReview`, `readAllReviews`),
+`edge/sse` (the five review routes, and the `SessionSnapshot` composition D77 puts at the edge),
+`client`, `config` (`caps.reviewBodyBytes`).
+
+Depends on: S13 (the `records` module and its boot path), S2, S5, S7.
+
+Acceptance:
+  - S15.1 Two prerequisites are settled in the design before any code, and #31 from S13.1 applies
+    here unchanged: how the edge obtains a `SessionSnapshot` for a review about a session the
+    author does not own, when the only route to a session is an ownership check that answers
+    `404` to a non-owner (`Unresolved` 6, #32); and what claims finalisation, plus what stops the
+    accepted torn-tail reversion retracting a final review other operators have already seen and
+    that may already have raised a badge (`Unresolved` 10, #35, #36). Both are `/design`'s at its
+    own tier. **This slice stops until they land.**
+  - S15.2 `POST /api/reviews` returns `201` in state `draft`, with the `SessionSnapshot` copied
+    at authorship and `author` taken from the identity edge. A `CreateReviewInput.subject` that
+    disagrees with the snapshot's `sessionId` is `422 bad_request`.
+  - S15.3 A draft is its author's alone: another operator reading it by id gets
+    `404 no_such_review`, and appending to it gets `404` — never `403`, and never distinguishing
+    "no such id" from "not yours" (I31, D50).
+  - S15.4 `GET /api/reviews?subject=` returns finals only, for every caller including a draft's
+    own author; an author reaches their own draft by `GET /api/reviews/:id` with the id that
+    `POST` returned (I31).
+  - S15.5 Editing a draft appends a new line for the same `reviewId` and leaves the earlier line
+    on disk; the latest line wins on read and the file is never rewritten (D65).
+  - S15.6 `POST /api/reviews/:id/finalise` moves `draft → final` once. A further append or a
+    second finalise is `409 review_final`, and the same change makes the review readable by every
+    authenticated operator (I29, I31).
+  - S15.7 `Rating` accepts exactly the five tokens in `20-contract.md` and no display string; an
+    unknown token is `422 bad_request` (D82).
+  - S15.8 A `body` over `caps.reviewBodyBytes` is refused `422 bad_request` with nothing appended
+    and nothing shortened — a silently truncated review misrepresents its author, which is why
+    the rule differs from `tool.result`'s (D84).
+  - S15.9 The plan badge is derived and never stored: it is the `pip` of the final review for
+    that subject with the greatest `updatedAt`, ties broken by the later line, drafts excluded.
+    Asserted with a draft carrying `pip: true` that changes no badge, and a later final that does
+    (I35, D72, D83).
+  - S15.10 A review survives `DELETE /api/sessions/:id`: it reads back whole, renders from its
+    `snapshot`, and no read of it resolves its `subject` (I30, D67).
+  - S15.11 A failed append returns `500 record_write_failed` with the registry and the file still
+    agreeing, and the operator's text still in their form (I37).
+  - S15.12 Boot loads `reviews.ndjson`, latest line per id, before listening; an unreadable file
+    yields an empty registry and a log line, and tier one still serves (I18, I38).
+  - S15.13 A review `body` containing HTML renders as literal characters in a different
+    operator's browser. This is the first stored path from one operator's keyboard to another's,
+    and it is the reason I26 was widened past agent-derived content (D74).
+
+Out of scope: an employee or operator entity, and any per-operator record (D3 and D66 refuse
+both); a reviewer role, or any read restriction beyond the draft carve-out (D70); attaching a
+review to a person or a workspace path (D66 — paths are reused); the trailing-30-day metrics
+grid and the weekly timecard the prototype draws beside the review — no document names a source
+for either, and neither is in brief items 8 to 12.
+
+## S16 — Payroll: what a session has cost
+
+**Tier two**, brief item 8.
+
+Delivers: An operator can see what a session has spent — tokens used so far, how much of its
+budget is left, and how long it sat open doing nothing — and is told plainly when part of that
+idle time could not be accounted for because the server was down.
+
+Touches: `session-manager` (`payroll`, the running burn counter, the fold over the spill),
+`adapters/*` (usage normalisation), `edge/sse` (`GET /api/sessions/:id/payroll`), `client`,
+`config` (`sessionTokenBudget`).
+
+Depends on: S1, S2, S7 (S16.7 needs a restart-closed turn).
+
+Acceptance:
+  - S16.1 A written finding, committed before the fold, on whether Claude's reported `usage` is
+    cumulative within a context and what it does at a `compact_boundary`, citing the records
+    observed. The adapter's normalisation to a delta is written against that observation rather
+    than an assumption (D75, open question 14, #30). Codex's half is blocked behind S8.1 and is
+    recorded as blocked, not failed.
+  - S16.2 What `remainingTokens` subtracts is stated in the contract, and the budget's scope in
+    the design: brief item 8's "budget remaining" needs one scalar and nothing says whether cache
+    reads and cache creation count against a budget, and the scope is an owner's decision between
+    per session, per deployment and per workspace (`Unresolved` 8, #29). **This slice stops until
+    both land** — a screen shipped against one reading is what makes the other two awkward.
+  - S16.3 `usage` is incremental and summable at the point it is emitted: over a turn with at
+    least three `usage` events and one compaction, the component-wise sum equals the total
+    computed independently from the raw records, and no module above `adapters/*` does arithmetic
+    on a vendor's own numbers — asserted by searching `session-manager` and `client` for any read
+    of `raw` (I28).
+  - S16.4 `GET /api/sessions/:id/payroll` returns `burn` as the component-wise sum of every
+    `usage` event of the session, `budgetTokens` from configuration, and `remainingTokens` null
+    exactly when `budgetTokens` is null.
+  - S16.5 The live counter and the fold agree: the payroll read for a live session equals the
+    same read after a restart has rehydrated it, where the spill is the only source
+    (`10-design.md § Derived views`). Where they disagree the spill is right, and the test asserts
+    the counter against it, not the reverse.
+  - S16.6 `idleMs` is the wall clock the session was live with no turn — creation to first turn,
+    each `turn.ended` to the next `turn.started`, and last turn to `endedAt` — asserted to the
+    millisecond against a fixture with known gaps.
+  - S16.7 An idle interval containing a restart is dropped and counted, never billed: a session
+    whose log carries `turn.ended { stopReason: 'server_restart' }` excludes that interval from
+    `idleMs`, reports it in `droppedIntervals`, and the client says how many were dropped (D76).
+  - S16.8 A payroll read whose spill cannot be read is `500 payroll_unavailable`, and the session
+    is unaffected — the next message still starts a turn.
+  - S16.9 The route carries the ownership check: another operator gets `404 no_such_session`
+    (I23).
+
+Out of scope: cost in currency, and cost per shipped PR — neither has a source (#27); a
+per-deployment or per-operator budget until #29 says otherwise, and a per-operator one needs the
+operator record D3 refuses; pricing lookups (D61 declines to pre-decide them); storing any of
+this — every number here is a fold over what the session already wrote.
+
+## S17 — Incidents: the audit log as a history
+
+**Tier two**, brief item 11. It adds no storage: it is S12's read with a filter.
+
+Delivers: Instead of a flat log, an operator can look at what went wrong — denials, decisions the
+server made on nobody's behalf, and approvals that happened automatically under a standing rule —
+grouped by session and by operator over a window of time.
+
+Touches: `store` (`readAuditPage` with `incidentsOnly`), the module serving `GET /api/audit`
+(S12.1), `client` (the incident view).
+
+Depends on: S12. S10 for S17.4's row to be reachable at all.
+
+Acceptance:
+  - S17.1 `incidentsOnly: true` returns exactly the union of three sets and nothing else:
+    `decision === 'deny'`, `operator === null`, and `scope === 'standing'`. Asserted against a
+    fixture holding all three plus ordinary allows, with the count stated for each set and for
+    the union.
+  - S17.2 It is the same route and the same read as S12: clamping, cursor, paging and the four
+    filters behave identically with the flag set, asserted by re-running S12.4's paging assertion
+    with `incidentsOnly: true` (D73).
+  - S17.3 A decision the server forced appears as an incident: a permission denied because the
+    audit append failed, and one resolved `cancelled_process_exit` because the child died, are
+    both present with `operator: null` and the cause in `reason`.
+  - S17.4 A standing auto-allow appears with `scope: 'standing'` and `operator: null`, asserted
+    against S10's auto-answer path. Until S10 ships, this criterion is recorded as unreachable
+    rather than as passing.
+  - S17.5 Grouping is the reader's: the server returns records and the client groups the window
+    by session and by operator. No grouped shape is added to the contract.
+  - S17.6 The view reads records for sessions the caller does not own and for sessions that have
+    been deleted (D70, D25).
+
+Out of scope: an incident entity, an incident status, or an acknowledgement workflow — nothing in
+storage is an incident and nothing may be added for one (`10-design.md § Data model`); alerting or
+notification; anything that would make this a second read shape rather than the same one.
+
+## S18 — Four visual systems, and the badges over them
+
+**Tier two**, brief item 12. Client only: no route, no field, no stored value.
+
+Delivers: An operator chooses which of the four looks the console presents, and the choice sticks
+in that browser. Whichever they pick, a session reads the same in plain language — clocked out,
+blocked waiting on them, on shift, or idle — with a separate mark when it is under a performance
+plan.
+
+Touches: `client`.
+
+Depends on: S2 (S2.14's token layer), S4 (`BLOCKED` needs an outstanding request), S5
+(`CLOCKED OUT` needs `end`), S15 (`ON PIP`), S10 (S18.9's second screen).
+
+Acceptance:
+  - S18.1 All four systems are CSS custom properties in one stylesheet served from `'self'`,
+    selected by a `data-` attribute on the root element. No style text is generated, injected or
+    interpolated at runtime, and the document's CSP is still S2.12's — `style-src 'self'` with no
+    `unsafe-inline` (D78).
+  - S18.2 Switching changes no markup and issues no request: across four switches the network log
+    shows zero requests and the rendered DOM is element-for-element identical.
+  - S18.3 The choice is held in browser storage and never reaches the server: no route carries
+    it, and a search of the server sources for the storage key returns nothing (D60).
+  - S18.4 The choice survives a reload with no flash of an unthemed document — the attribute is
+    set before first paint, asserted on a cold load.
+  - S18.5 Every component renders correctly under all four: a screenshot pass over each screen in
+    each theme, with the count of screens times themes stated in the slice report. A component
+    that reads a literal colour instead of a token is an S2.14 failure, not this slice's.
+  - S18.6 The status badge is a projection with no field behind it: `CLOCKED OUT` is
+    `state === 'ended'`, `BLOCKED` is a live session with an unresolved `permission.request`,
+    `ON SHIFT` is a live turn, `IDLE` is the remainder. Asserted by driving one session through
+    all four and reading the badge at each point (D79).
+  - S18.7 `ON PIP` is orthogonal and comes from the review fold, never from the session: it can
+    appear alongside any of the four states, and no session field carries it (D72, D79).
+  - S18.8 `PROBATION` exists nowhere in the client: a search of the sources returns nothing.
+    Nothing in this system is a source for it (D79).
+  - S18.9 The termination and permissions-scope screens are presentation over endpoints that
+    already exist: the first renders real session state from `GET /api/sessions` and `DELETE`, the
+    second renders S10's held rules with a still-prompting rule shown as a request, and neither
+    introduces a route, a field or a stored value (D56).
+  - S18.10 Neither a `Clone` action nor an exit-interview transcript exists anywhere in the
+    client (D56 cuts both — Clone needs the context-management non-goal reopened before it can be
+    specified, and the interview stores a reply its own screen says nobody reads).
+
+Out of scope: a per-operator stored preference (D60 put the choice in the browser, and the known
+cost — the theme follows the browser rather than the person — is retained, not solved); a fifth
+theme, or a light and dark pair; severance figures, and anything else on the termination screen
+that is not real session state.
+
 ---
 
 ## What no slice covers
 
-Stated so it is a decision rather than an omission. Each is carried in
-`90-decisions.md § Open`; `/track` is what turns them into issues.
+Stated so it is a decision rather than an omission. Every item below is already a GitHub issue
+except the last two, which nothing tracks yet.
 
-- **Token-level streaming.** Whether `--include-partial-messages` yields usable deltas, and
-  whether `message.delta` survives contact with it. Cheap to test, changes the renderer.
-- **A retention rule for tool-output blobs** (open question 2).
-- **A lock file preventing two server processes over one storage root** (open question 3).
-- **An offset index for the spill** (open question 11).
+**Tier-one work with no slice, and the criteria it blocks:**
+
+- **The two-platform gate** (#28, D64). The brief says tier one is not done until both
+  supported platforms are proven by an automated run, and `.github/workflows/` does not exist.
+  It is not sliced because it is not a vertical path from an entry point to persistence — but
+  four existing criteria cannot be checked without it: **S1.6** (Windows case variation and 8.3
+  short names), **S5.2** (tree termination enumerated on both platforms), and **S7.5** with
+  **S7.6** (the pid reuse guard against a host boot time whose source differs per platform).
+  `10-design.md § Platform divergence` carries the target list the gate needs.
+
+**Questions, each already an issue:**
+
+- **Token-level streaming** — whether `--include-partial-messages` yields usable deltas and
+  whether `message.delta` survives contact with it (#13).
+- **A retention rule for tool-output blobs** (#20).
+- **A lock file preventing two server processes over one storage root** (#21), which tier two
+  widens: two processes would each consume the same approved requisition.
+- **An offset index** for the spill and now for `audit.ndjson` (#19).
 - **Attachments on `POST /message`** — undesigned, and out of the contract until a design
-  decision puts them back (D47).
-- **Who renders `ToolCall.summary`** — unowned between the adapter and the manager.
-- **`Start-AgentSession.ps1`** (D14), unreconciled against this architecture.
+  decision puts them back (#22).
+- **Who renders `ToolCall.summary`** — unowned between the adapter and the manager (#23).
+- **`Start-AgentSession.ps1`** (#17), unreconciled against this architecture.
+- **What a dragged ticket does**, and whether operator-driven assignment needs a
+  definition-of-done item (#26). D52 keeps the gesture; no tier-two item is a backlog, so
+  nothing here provides for it.
+- **Cost per shipped PR** (#27) — a prototype payroll tile with no source. S16 excludes it.
 
-Next: run `/track` in a fresh session to open the issues and the milestone for this set.
-`/slices` does not write to GitHub.
+**Untracked, found while writing this set:**
+
+- **How a removed or retyped field in `reviews.ndjson` or `requisitions.ndjson` is migrated**
+  (`20-contract.md § Unresolved` 11). Every other persisted shape gates on `meta.json`'s
+  `schemaVersion`; these two files are not under it and have no discriminator to hang a rule on.
+  Adding fields is safe today. It is the only `Unresolved` item with no issue behind it.
+- **The prototype's trailing-30-day metrics grid and weekly timecard.** D54 kept the employee
+  record whole, and D59 then recast tier two as brief items 8 to 12, none of which names either
+  aggregation. S16 covers the part with a source — burn and idle over a session's own event log.
+  Whether the rest is in scope, and from what data, is unanswered.
+
+Next: run `/track` in a fresh session to open the issues for S12 to S18 and to sync the
+existing ones. `/slices` does not write to GitHub.
