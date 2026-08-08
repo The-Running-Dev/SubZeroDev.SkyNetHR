@@ -1,4 +1,4 @@
-# Decisions — Agent Console
+# Decisions — SkyNet HR
 
 Append-only. The rejected alternatives are the point; without them the next session
 relitigates the same choice.
@@ -172,6 +172,70 @@ consume it — is a pattern worth copying, and independently corroborates D11's
 backing-service shape.
 Reversibility: not applicable; this is an evaluation, not a commitment.
 
+### 2026-08-08 — D13 SubZeroDev.AgentKit installed: AGENTS.md direction, codex/PROFILES.md, and Measure-Session.ps1 hooks
+Context: `/install SubZeroDev.AgentConsole` run from the kit against this repository, a
+first install (no prior `.claude/kit.json`). Three forks needed sign-off; the rest of the
+kit's artifacts were plain Absent-creates.
+Chosen: `AGENTS.md` holds the contract with a Project identity section (derived from
+`README.md`) prepended; `CLAUDE.md` is a pointer. `codex/PROFILES.md` installed despite the
+kit's skip-by-default, because this repo's own design docs already commit to a Codex
+adapter (S8, and the hypothesis in `20-contract.md`) — that is the evidence the kit's rule
+asks for. `tools/Measure-Session.ps1` wired as `SessionEnd`/`UserPromptSubmit` hooks in a
+freshly created `.claude/settings.json`, identical to the kit's own wiring; `pwsh` confirmed
+on `PATH` first. `agent.md` installed unpruned — none of its lessons are demonstrably
+inapplicable to a Node/TypeScript project on the same Windows host holding the same
+`design/` discipline. `design/` itself was left untouched: this repository's docs already
+hold real, fully-authored content at the exact path the kit's template seed would occupy,
+so the seed step was a no-op rather than a merge.
+Rejected: flipping `AGENTS.md`/`CLAUDE.md` to match some other arrangement — moot, neither
+existed yet, so there was nothing to preserve a direction against. Rejected skipping
+`codex/PROFILES.md` per the kit's default — the default exists to avoid installing
+Codex-specific material into a repo with no evidence of Codex use, which does not describe
+this repo. Rejected pruning `agent.md` speculatively — a lesson removed on a guess is a
+lesson relearned the hard way a second time.
+Reversibility: cheap. Every file here is kit-owned and re-syncable; nothing here touches
+`spike/` or the console's own design content.
+
+### 2026-08-08 — D14 `Start-AgentSession.ps1` relocated from AgentKit's spike PR #19
+Context: AgentKit's `spike/agent-session-orchestrator` branch (PR #19, unmerged) held a
+local PowerShell launcher that routes AgentKit's own slash commands to the right
+vendor/model/effort and resumes session chains — session orchestration, but for AgentKit's
+own command set, not for driving arbitrary coding-agent CLIs from a browser.
+Chosen: relocate it wholesale (`tools/Start-AgentSession.ps1`,
+`tools/Start-AgentSession.Tests.ps1`, 1150 lines) into this repo's `tools/`, and remove it
+from AgentKit's PR #19 (commit `0ab7f23`, pushed) rather than leaving a duplicate behind.
+Its subject — supervising agent sessions — is this repo's concern, not the kit's; keeping it
+in AgentKit would have meant two places claiming to own session orchestration.
+Rejected: copying without removing — leaves two copies to drift, and PR #19 would keep
+proposing a tool whose actual home is here. Rejected leaving it in AgentKit unmodified —
+it never fit that repo's own scope (routing AgentKit's *own* commands) as cleanly as it
+fits this one's need to launch and manage agent CLI sessions.
+Reversibility: cheap — pure move, both repos' git history retains the original content.
+Not yet reconciled against this repo's own architecture (D1–D12): the script assumes a
+local interactive terminal, not the server/SSE/adapter shape decided here. That reconciliation
+is unstarted and belongs to whichever slice first needs a CLI launcher, not to this move.
+
+### 2026-08-08 — D15 Renamed to SkyNet HR
+Context: the project was named Agent Console, which described the surface (a console) rather
+than the subject (supervising a set of agent workers). Requested rename, applied before any
+implementation exists and before a remote repository was created — the cheapest moment it
+will ever be.
+Chosen: `SkyNet HR` in prose, headings and the project-identity paragraph; `SubZeroDev.SkyNetHR`
+as the directory and repository identifier; `skynet-hr-spike` as the spike's package name and
+`skynet-hr` in its startup log. Thirteen occurrences across README, `AGENTS.md`, the five
+`design/` titles, and three `spike/` files. The historical reference inside D13
+(`/install SubZeroDev.AgentConsole`) was left verbatim: this log is append-only, and that
+command genuinely ran against that path — rewriting it would make the record false to
+tidy the spelling.
+Rejected: renaming the directory only and leaving the product as Agent Console — a repository
+whose name and subject disagree costs a sentence of explanation to every reader, forever.
+Rejected `SkyNetHR` unspaced in prose — identifiers want no space, sentences do; the split
+matches how `Agent Console` read against `SubZeroDev.AgentConsole` before it. Rejected
+rewriting D13's historical path for consistency, per above.
+Reversibility: cheap for the text and the directory, both pure renames with no remote to
+coordinate. It stops being cheap the moment a remote exists or the name reaches anyone
+outside this machine.
+
 ## Open
 
 Staging only. Once an item becomes an issue it leaves this list.
@@ -185,3 +249,6 @@ Staging only. Once an item becomes an issue it leaves this list.
   rather than resolve.
 - Whether `permission_suggestions` from the Claude CLI is a sufficient grammar for
   "always allow", or whether a local rule language is needed. Look before inventing.
+- `Start-AgentSession.ps1` (D14) is unreconciled against this repo's own architecture — it
+  assumes a local interactive terminal, not the server/SSE/adapter shape D1–D12 settled on.
+  Reconcile when a slice first needs a CLI launcher, not before.

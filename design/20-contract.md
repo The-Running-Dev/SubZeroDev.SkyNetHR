@@ -1,4 +1,4 @@
-# Contract — Agent Console
+# Contract — SkyNet HR
 
 Derived from `10-design.md`. Where this document and the code disagree, one of them is a
 defect — say which, do not reconcile silently.

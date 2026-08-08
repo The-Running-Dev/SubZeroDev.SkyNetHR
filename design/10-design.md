@@ -1,4 +1,4 @@
-# Design — Agent Console
+# Design — SkyNet HR
 
 Reading order: `00-brief.md` first. This document assumes its non-goals are binding.
 

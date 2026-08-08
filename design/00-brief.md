@@ -1,4 +1,4 @@
-# Brief — Agent Console
+# Brief — SkyNet HR
 
 ## Problem
 

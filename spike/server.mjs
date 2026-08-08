@@ -1,5 +1,5 @@
 /**
- * Agent Console — spike server.
+ * SkyNet HR — spike server.
  *
  * Zero dependencies. `node server.mjs`.
  *
@@ -177,7 +177,7 @@ const server = http.createServer(async (req, res) => {
 server.listen(CONFIG.port, CONFIG.host, () => {
   const mode = CONFIG.trustHeader ? `proxy header '${CONFIG.trustHeader}'`
     : CONFIG.secret ? 'shared secret' : 'none (loopback only)';
-  console.log(`agent-console spike  http://${CONFIG.host}:${CONFIG.port}`);
+  console.log(`skynet-hr spike  http://${CONFIG.host}:${CONFIG.port}`);
   console.log(`  auth:  ${mode}`);
   console.log(`  roots: ${CONFIG.roots.join(', ')}`);
 });
