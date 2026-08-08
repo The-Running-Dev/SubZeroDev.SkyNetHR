@@ -832,6 +832,114 @@ denylist maintained against browser parsing quirks; not parsing is a property.
 Reversibility: cheap now, as a stated rule. Expensive later, as a retrofit through a renderer
 built without it.
 
+### 2026-08-08 — D44 The event vocabulary is closed, and turn-scoped payloads carry `turnId`
+Context: `/contract` had to express the ten amendments `10-design.md § Open questions` item 9
+assigns to it. Three of the contract's fields were bare `string` — `TurnEnded.stopReason`,
+`ErrorEvent.kind`, and the notice text — which cannot be narrowed by a client and, worse,
+invited an adapter to pass a vendor's own stop reason through unchanged. That is a vendor
+string above the adapter layer arriving by the back door. Separately, only `MessageDelta`
+carried `turnId`, while the ordering rules tell a client to pick a rendering "by `turnId`"
+and D22's blob route requires `turnId` from the `tool.result` envelope that links to it.
+Chosen: `TurnStopReason`, `ErrorEventKind`, `SessionNoticeCode`, `ResolvedScope`,
+`PermissionResolvedReason` and `SessionEndReason` are closed unions enumerated from the
+design's failure tables and decision records; every turn-scoped payload carries `turnId`.
+Rejected: leaving them open strings — the client then branches on vendor text, and the two
+values D24, D39 and D41 need would be indistinguishable from a crash at the renderer.
+Rejected: an escape hatch value such as `other` — it is the open string again, with a
+narrower spelling.
+Reversibility: cheap. Adding a union member is a contract amendment and a renderer case;
+nothing persisted encodes the closure.
+
+### 2026-08-08 — D45 `session.exit` becomes `session.ended`, and `state` lives on the summary
+Context: amendment 1 of item 9. Under D16 a normal turn ends the child, so a contract-obedient
+client tore down the session view after every successful turn. Amendment 3 asked for `state`
+on both `SessionSummary` and `session.started`.
+Chosen: delete `session.exit`; turn-process exit is `turn.ended` with a `TurnStopReason`.
+Add `session.ended { reason }` covering the three ways into `ended` — D36 operator, D20
+restart, D41 storage failure. `state` goes on `SessionSummary` only.
+Rejected: `state` on `session.started`, as amendment 3 literally asks. `session.started` is
+emitted once, at creation, and is replayed forever; its `state` would be the constant `'live'`
+in every session that ever existed, which is a field that answers the client's question wrongly
+rather than not at all. The client reads `state` from `GET /api/sessions`, and the stream
+carries the transition as `session.ended`.
+Rejected: keeping `session.exit` alongside, with a flag distinguishing the two — two names for
+one boundary, and the client must get the flag right to avoid the original bug.
+Reversibility: cheap, before any client exists.
+
+### 2026-08-08 — D46 The adapter's outbound channel is a notification union, not `emit`
+Context: the design gives adapters exactly one outbound channel (`emit`) and no dependency on
+`store`, and simultaneously requires three facts to reach the manager that are not normalised
+events: the `cliSessionId` from every `system/init` (D34, since the manager stores it and
+supplies `--resume`), the spawned child's pid, pgid and image (D23, since the manager appends
+`pids.ndjson`), and the child's exit. With `emit` carrying envelopes only, there is no
+signature for any of them, and the first implementer either adds an adapter→store edge the
+module graph forbids or smuggles the values through `raw`.
+Chosen: the adapter is given `notify(n: AdapterNotification)`, a four-member union — `event`,
+`cli-session`, `spawned`, `exited`. The adapter emits payloads without `seq`, `sessionId`, `ts`
+or `turnId`; the manager assigns all four. `spawn` is internal to `send`, matching *Control
+flow § 2* where the child is spawned inside the turn rather than at session creation, and the
+module table's four-word `spawn, send, respond, kill` is read as the loose summary of the two.
+Rejected: a second callback per fact — three parameters where one union does, and each new
+fact is a signature change at every call site.
+Rejected: the adapter writing `pids.ndjson` itself — makes it non-leaf and puts a storage
+dependency inside vendor code, which is what keeps a second vendor from becoming a second
+architecture.
+Reversibility: cheap. It is an internal interface with two implementations.
+
+### 2026-08-08 — D47 `attachments` is removed from `POST /message`
+Context: amendment 6. The route declared `attachments?: Attachment[]` against a type that was
+never defined, and no part of the design describes attachment handling — not the transport to
+the CLI, not storage, not the byte cap, not what an approved file reaching an agent means for
+the audit record.
+Chosen: remove the field; record the gap under `20-contract.md § Unresolved`.
+Rejected: defining `Attachment` here — it is a feature, not a type, and inventing one at the
+contract stage commits the implementer to a transport nobody chose.
+Rejected: leaving the field with an undefined type — a contract that does not compile is not a
+constraint.
+Reversibility: cheap. Adding a request field is backward-compatible.
+
+### 2026-08-08 — D48 Fallible boundaries return `Result`, never a thrown error
+Context: the contract must name an error type per public signature, and TypeScript has no
+`throws` clause — a thrown error is invisible in a signature and degenerates to `unknown` at
+the catch site, which is how string errors and bare exceptions get in.
+Chosen: `Result<T, E>` on every fallible signature crossing a module boundary, with a
+discriminated union error type per module and an explicit mapping from each variant to its HTTP
+code, its retryability and what the caller does.
+Rejected: typed exception classes — still invisible in the signature, and `instanceof` across
+module boundaries is the check nobody writes.
+Rejected: `Result` everywhere including internals — noise on paths where nothing can fail.
+Reversibility: expensive. It shapes every call site, which is the argument for settling it in
+the contract rather than in the third slice.
+
+### 2026-08-08 — D49 `meta.json` carries `schemaVersion`, and an unknown one is a corrupt file
+Context: `meta.json` is the file rehydration depends on and the design gives it a write
+protocol but no version. The contract must state a migration story per persisted file, and
+there is no story to state without a discriminator.
+Chosen: `{ schemaVersion: 1, session: SessionRecord }`. An unknown version is handled exactly as
+a parse failure already is — skip the session, log it, leave its files untouched, never abort
+boot. Append-only files carry no per-line version: readers ignore unknown fields, and a field
+removed or retyped is a `schemaVersion` bump plus a refusal to rehydrate older sessions.
+Rejected: no version — the first schema change then reads old data as though it were new, which
+is silent wrong state in the one file that decides what a session is.
+Rejected: a version per NDJSON line — a discriminator on every event to describe a shape that
+changes once a year.
+Reversibility: cheap now; the whole point is that it is expensive to add after data exists.
+
+### 2026-08-08 — D50 There is no per-operator vendor authorisation
+Context: the contract carried `403 if the caller may not use that vendor` on `POST /sessions`,
+and a `403 forbidden` code for "authenticated, not the session's owner" — which the same
+document contradicts two paragraphs later by returning `404` so that session existence cannot
+be probed.
+Chosen: remove both. Vendor choice is open to any authenticated operator, and non-ownership is
+always `404 no_such_session`.
+Rejected: keeping the vendor check — D3 chose delegated identity precisely so that no account
+state lives here, and *Data model § Operator* is `{ id }`, not persisted. There is nowhere to
+store a per-operator grant, so the check could only ever have been a constant.
+Rejected: keeping `403 forbidden` as a reserved code — a code no path emits is a code someone
+later emits by accident, defeating the probe defence.
+Reversibility: cheap for the vendor check, which would arrive with whatever introduces operator
+records. The `404` is load-bearing and should not be reversed.
+
 ## Open
 
 Staging only. Once an item becomes an issue it leaves this list.
@@ -867,5 +975,10 @@ Staging only. Once an item becomes an issue it leaves this list.
   `10-design.md § Concurrency` holds for one process and stops holding silently for two.
   A lock file at the storage root is the obvious answer; whether an accidental double-start
   is worth a startup failure mode is a deployment judgement, not an architectural one.
-- `20-contract.md` needs ten amendments, all owned by `/contract` and enumerated in
-  `10-design.md § Open questions` item 9. Not restated here; that list is canonical.
+- Attachments on `POST /message` are undesigned (D47). Nothing describes the transport to the
+  CLI, storage, the byte cap, or what an approved file reaching an agent means for the audit
+  record. The field is out of the contract until a design decision puts it back.
+- Who renders `ToolCall.summary` is unowned. The contract has the adapter produce it, which
+  makes vendor code responsible for a display string; moving it to the manager would put
+  tool-shape knowledge above the vendor boundary. Neither is comfortable and neither is
+  urgent.
