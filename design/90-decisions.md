@@ -1422,9 +1422,109 @@ whether the compose box is enabled (D20, D45); putting presentation vocabulary i
 renderer branching on six values to answer a two-value question.
 Reversibility: cheap. It is a projection in one component.
 
+### 2026-08-08 — D80 A requisition claim lost to a crash is a dead approval, and that is accepted
+Context: the red-team pass on `10-design.md` found that control flow 1 appends the `consumed`
+line to `requisitions.ndjson` before `store.mkdir` and the rest of session creation. A process
+death in that window leaves the requisition `consumed`, naming a `sessionId` that resolves to
+nothing. The in-process release path — `Failure modes § Records boundary`, "release the claim;
+requisition returns to `approved`" — cannot run after a crash, and `consumed` is terminal.
+Chosen: accept it and write it down. The approval is spent, the operator raises another, and the
+log honestly records a consumption that happened.
+Rejected: a two-phase claim, or a boot reconciliation that returns a `consumed` requisition with
+no resolvable session to `approved`. Both add a second write protocol and a new boot step to
+recover a state whose remedy is one form submission, and the boot version cannot distinguish a
+crashed creation from a session deleted under D25.
+Known and retained: this is the same shape as the accepted spawn→append window in
+`10-design.md § Data model § Process record` — a short window whose consequence is one item of
+bookkeeping an operator repairs by hand. It differs in being visible: the phantom `sessionId`
+stays on the record.
+Reversibility: cheap. Nothing persisted would have to change to add reconciliation later.
+
+### 2026-08-08 — D81 An approved requisition cannot be revoked, and that is accepted
+Context: the red-team pass observed that `open → approved → consumed` refuses every other
+transition and approvals carry no expiry, so an approval outlives the judgement behind it
+indefinitely — the approver changed their mind, circumstances moved, the raiser left.
+Chosen: no revocation and no expiry. An approval stays spendable until it is spent.
+Rejected: an `approved → revoked` transition. D69 already permits self-approval, and the threat
+model already concedes a determined operator has shell access as the server's user, so revocation
+is a control that cannot hold against the adversary it appears to address — it would read as one
+while enforcing nothing. Rejected an expiry window: it needs a duration nobody can source, and it
+fails an operator holding a legitimate approval over a weekend.
+Known and retained: this is an ordinary-case gap, not a security one. A requisition raised in
+error is answered by rejecting it before approval; after approval the remedy is that the session
+it opens is subject to the jail, the busy check and the audit log exactly as any other.
+Reversibility: cheap. Adding a state to a latest-wins log is an append and a union member.
+
 ## Open
 
 Staging only. Once an item becomes an issue it leaves this list.
+
+Twelve items below are red-team findings adjudicated on 2026-08-08 and classified **defect**.
+None is fixed here: each is a contradiction or an omission in `10-design.md`, and repairing one
+belongs to `/design` or `/contract` rather than to the pass that found it.
+
+- **The record-log write protocol is specified twice, in opposite orders.** `Concurrency § The
+  single-writer invariant` claims the requisition decision before `await
+  store.appendRequisition` and releases it on nothing; `Failure modes § Records boundary` says a
+  failed append leaves the registry unmutated, and its closing paragraph says the file is written
+  first and the registry follows. Claim-first makes a failed append a permanent `409` over a
+  decision the disk never took, which reverts at the next boot. File-first breaks D32's rule and
+  reopens the two-decider race. An implementer cannot satisfy both. Adjudicated BLOCKING.
+- **Review authorship is open and gated at the same time.** `Threat model` lists an operator
+  writing a review about another's session as deliberately uncontrolled; D77 has the edge resolve
+  the `SessionSnapshot` through the ownership check, which under D50 answers `404` to a
+  non-owner. The uncontrolled path the threat model describes is unreachable as drawn.
+- **A torn spill tail lets one `seq` name two different events.** Envelope N is fanned out to
+  clients synchronously in `emit` before its spill append lands. If the process dies in that
+  window the torn line is dropped, D37 derives `lastSeq` as N−1, and D39 appends its synthetic
+  closing events at N. A client that rendered N reconnects with `Last-Event-ID: N` and never sees
+  the durable N, which is now a different event. `(sessionId, seq)` is described as the primary
+  key of the entire system; this makes it not one across a crash.
+- **Tier one's audit read route has no owner tier one may build.** D73 states the route is tier
+  one's; `Module boundaries` assigns the incident read — the same read with filters — to
+  `records`, marked *(tier two)*, and gives the audit read to no other module. Boot deliberately
+  tolerates a broken record log so that tier two cannot deny tier one, which makes the placement
+  contradictory rather than merely untidy. Brief item 7 is a read and is tier one.
+- **A review's finalise is outside the guard rule.** `The single-writer invariant` states the
+  record registries carry exactly two claims, both requisition-side. A concurrent draft append
+  and finalise from one author both pass their state checks and race on file order, so the
+  registry can hold `final` while the disk's latest line is a draft — silently flipping at the
+  next boot. `Races` calls two-tab editing "not a race... no downstream state depends on which
+  won", but final-ness gates cross-operator visibility (D70) and the PIP badge (D72).
+- **A torn tail can un-finalise a review, and D70's one-way claim is false as written.** The
+  latest-wins reversion documented in `Persistence summary` applies to `reviews.ndjson`: dropping
+  a trailing line can return a `final` review to `draft`, retracting a record every operator
+  could read and clearing a PIP badge others may have acted on. The summary names the
+  requisition-consumption case as the sharpest reversion and misses this one, which is the only
+  place the visibility rule can run backwards.
+- **Standing approvals appear in control flow and nowhere in the data model.** D35 has the
+  manager hold the rule "in its own session-scoped state", enumerable and revocable, but no
+  entity, field, file or route carries it; `Persistence summary` does not mention it; its
+  lifetime across session end and restart is unstated; and the audit record for an auto-answered
+  match has an `operator` field with no stated source. This is on the path that makes DoD #7's
+  "every tool approval: who" literally true.
+- **The permission route as drawn resolves no identity.** `Control flow § 2` shows origin check →
+  `pending.delete` → audit → respond, with no identity or ownership step, unlike `POST /message`
+  immediately above it — on the one route that authorises tool execution and whose audit record
+  requires an operator. Read literally it authorises on an origin check and a guessed
+  `requestId`.
+- **Record fields are uncapped and every edit re-appends the whole record.** No cap governs a
+  review `body`, a requisition `title` or its `justification`; the `tool.result` byte cap
+  explicitly does not reach outside envelopes. An autosaving client grows `reviews.ndjson` as
+  edits × body size, and both registries are held whole in memory at boot — which is the
+  "kilobytes, full scan" assumption D65 rejected SQLite on.
+- **"The most recent final review" has no ordering key.** Any number of finals may name one
+  subject and finals are terminal, so D72's PIP fold needs a comparison the design does not give:
+  `createdAt`, a finalisation time that is not stored (`updatedAt` stops at the last draft
+  append), or file order, which the torn-tail rule can rewind. The one derived bit every operator
+  sees is decided by an unspecified key.
+- **The checklist route states neither a session-state nor an eligibility rule.** `Control flow
+  § 4` checks ownership and `itemId` only: a tick against an `ended` session is not refused,
+  where every other session write answers `409 session_ended`, and emitting into a closed
+  session's spill is undefined — its `endedAt` would precede events in its own transcript, which
+  the payroll idle fold then reads. Separately, brief item 10 ties the checklist to a session
+  opened through a requisition while the design's template is global config and the route is on
+  every session; whether that widening is intended is unstated.
 
 - **A dragged ticket has no defined effect, and operator-driven assignment has no
   definition-of-done item.** D52 keeps it in scope without saying whether dropping a ticket on
@@ -1445,7 +1545,12 @@ Staging only. Once an item becomes an issue it leaves this list.
   configuration" and stops there. Per session, per deployment and per workspace each give brief
   item 8's "budget remaining" a different meaning. `10-design.md` takes it as per session and
   says so; it is cheap to change now and awkward once a screen has shipped. See
-  `10-design.md § Open questions` item 12.
+  `10-design.md § Open questions` item 12. **The red-team pass adds that the scope is not the
+  only gap: under every reading there is no mechanism.** `Derived views` calls a budget "a
+  `config` value per session", but `config` is a static validated deployment object and a
+  `SessionId` is minted at runtime, so no configuration file can name one — and no `Session`
+  field, no `POST /api/sessions` parameter and no route carries a budget. "Remaining" is
+  subtraction from a number nothing supplies. Classified **defect** with the eleven above.
 - **Whether a vendor's `usage` numbers are cumulative or incremental is unverified.** D75 puts
   the normalisation in the adapter, which is where the knowledge belongs, but nobody has looked
   at either vendor. Until it is answered no implementation of "token burn to date" can be shown
