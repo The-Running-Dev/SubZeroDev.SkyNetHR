@@ -947,6 +947,123 @@ later emits by accident, defeating the probe defence.
 Reversibility: cheap for the vendor check, which would arrive with whatever introduces operator
 records. The `404` is load-bearing and should not be reversed.
 
+### 2026-08-08 — D51 The imported console prototype is a design input, not an authority
+Context: a Claude Design prototype (`design/prototype/`) was imported and initially declared a
+source of truth. Read against the brief, it describes a different product: an agent fleet
+console with payroll, performance reviews and an org chart, and none of the brief's seven
+definition-of-done items has a screen. Granting it authority would have overturned two binding
+non-goals without either being examined.
+Chosen: the prototype is a committed snapshot and a design input. `AGENTS.md § Source of truth`
+is unchanged and does not list it. Where it and the design disagree, the disagreement is
+adjudicated screen by screen — D52 to D58 are that adjudication.
+Rejected: normative standing — it would have silently overridden `Multi-agent orchestration`
+and `Hosting the model`, which is the reconciliation the source-of-truth rule exists to stop.
+Rejected: discarding it — half its surface maps onto real slices, and the visual language is
+work that would be redone from nothing.
+Reversibility: cheap. Nothing depends on the snapshot; it can be re-imported or dropped.
+
+### 2026-08-08 — D52 Operator-driven assignment is in scope; agent-spawned sub-agents are not
+Context: the brief's non-goal reads "Multi-agent orchestration. One session, one agent process.
+Fan-out is not in scope." The prototype's backlog drags a ticket onto an agent, and its org
+chart shows sub-agents spawned by a parent. Multiple concurrent sessions were never at issue —
+`10-design.md § What is actually concurrent` already lists them, and `GET /api/sessions` exists.
+Chosen: the non-goal bans *automated* routing. An operator dragging work onto a session is an
+operator action and stays. Agent-spawned sub-agents are cut: `POST /api/sessions` is an operator
+call, and a session started by a child has no caller identity, so the audit record required by
+definition-of-done item 7 has no answer for who approved it.
+Rejected: cutting the backlog too — it discards a gesture the human drives, on a reading of the
+non-goal that the design's own session list already contradicts.
+Rejected: keeping sub-agents — the audit-identity problem is unsolved, not merely unwritten.
+Reversibility: expensive. The backlog needs a persisted queue, which storage has no home for
+today; see the open item on what a dragged ticket becomes.
+
+### 2026-08-08 — D53 Payroll is retained in full, and the model-hosting non-goal narrows
+Context: the prototype's payroll screen shows weekly token burn, budget remaining, cost per
+shipped PR and paid idle time. The `Hosting the model` non-goal states that no inference happens
+here and no keys are held.
+Chosen: keep the screen whole. Three of the four tiles need no credential — token counts already
+arrive in the CLI stream the design parses, budgets are an operator-set `config` value, and idle
+time is derivable from session state transitions already recorded. The non-goal narrows to say
+that no inference is performed and no vendor credential is held, without claiming that reported
+usage is invisible.
+Rejected: cutting the screen — the owner ruled the full screen in after the conflict was stated.
+Rejected: a reduced usage-only panel — same ruling.
+Reversibility: expensive for cost per shipped PR, which has no source and is left open. Cheap
+for the other three, which are views over data already written.
+
+### 2026-08-08 — D54 The employee record keeps performance reviews and PIP status
+Context: the prototype's employee record mixes documented surfaces — session identity,
+permissions scope, the activity file — with a Q3 performance review, a rating scale, PIP status,
+a trailing-30-day metrics grid and a weekly timecard that no document mentions.
+Chosen: keep the whole screen. Reviews and PIP become first-class, which adds a persisted review
+entity with authorship and draft state, and the rating scale as a contract enum.
+Rejected: keeping metrics and the timecard while cutting the review — the aggregations are free
+and the review is net-new scope serving no stated operator outcome, but the owner ruled it in.
+Rejected: stripping to documented surfaces only.
+Reversibility: expensive. A persisted entity with authorship is not removed once written to.
+
+### 2026-08-08 — D55 Hiring, onboarding and incidents become real surfaces
+Context: none of the three has a counterpart in the brief, the contract or the eleven slices.
+Incidents is close to the audit record in a costume; hiring and onboarding are provisioning
+workflow around what `POST /api/sessions` already does in one step.
+Chosen: keep all three. Hiring becomes the session-creation flow with a requisition and an
+approval state, onboarding a per-session first-run checklist, incidents the audit view.
+Rejected: incidents only — the cheapest option, and the one that adds no entity.
+Rejected: hiring as a reskin of session creation with no requisition.
+Reversibility: expensive. The candidate entity and the requisition approval state are both new
+persisted shapes.
+
+### 2026-08-08 — D56 Termination and permissions scope are skins over S5 and S10
+Context: the prototype's termination screen maps onto S5's `DELETE /api/sessions/:id` but adds
+severance, a context purge, an exit-interview transcript stated never to be read, and a Clone
+action. Its permissions scope shows standing grants, which is S10's remembered decisions rather
+than S4's per-call approve and deny.
+Chosen: adopt both as presentation over existing slices. Severance renders real session state.
+`GRANTED / REQUEST / DENIED` is the remembered-decision list, where a `REQUEST` row is a rule
+that still prompts. Clone is cut — duplicating a session means forking CLI conversation state,
+which `Replacing the agent's own context management` puts out of reach. The exit interview is
+cut as fiction with no data behind it.
+Rejected: Clone as a real feature — it needs the context-management non-goal reopened before it
+can even be specified.
+Rejected: the exit interview as a final turn — implementable, but it stores a reply the screen
+itself says nobody reads.
+Reversibility: cheap. Both are presentation over endpoints that already exist.
+
+### 2026-08-08 — D57 The phone gets the prototype's shell plus the approval screen it omits
+Context: the brief makes mobile-first a non-goal but names approving a tool call from a phone as
+a real use, and S3 exists for it. The prototype draws three phone screens — backlog, staff,
+termination — and no approval screen.
+Chosen: take the phone chrome as S3's visual spec, and specify the approve and deny screen the
+prototype does not draw, since that is S3's reason to exist.
+Rejected: building the three drawn screens and deferring approval — S3 would close without
+delivering the phone's stated purpose.
+Rejected: deferring mobile entirely.
+Reversibility: cheap. No document changes; S3 gains a reference and one screen.
+
+### 2026-08-08 — D58 The four-theme switcher ships as a product feature
+Context: the prototype carries four complete visual systems — sterile enterprise, black-ops
+terminal, 1980s memo, modern SaaS — behind a runtime switcher, so "match the design" had no
+single referent.
+Chosen: all four ship, operator-selectable. This makes a design-token layer mandatory rather
+than optional, and adds a persisted per-operator preference.
+Rejected: picking one and discarding the rest — the cheapest option, and the recommendation;
+the owner ruled the switcher in as a feature.
+Rejected: a light and dark pair.
+Reversibility: expensive in practice. Every component must be built four ways from the start, and
+a component added later against one palette drifts the set without anything detecting it.
+
 ## Open
 
 Staging only. Once an item becomes an issue it leaves this list.
+
+- **"Fan-out" means two different things.** `00-brief.md` uses it for distributing work across
+  agents; `10-design.md` uses it for one-to-many delivery of envelopes to several subscribers of
+  one session (D18), which is in scope and built. One term, two meanings, two documents.
+- **Employment status and process state are one field in the prototype.** Its vocabulary
+  (`ON SHIFT / BLOCKED / IDLE / ON PIP / PROBATION / CLOCKED OUT`) overlaps `SessionSummary.state`
+  without matching it. They are different concepts and need separate fields.
+- **A dragged ticket has no defined effect.** D52 keeps operator-driven assignment without saying
+  whether dropping a ticket on a session sends it as a message or labels the session alongside
+  one. Those are different features, and the queue has no home in storage either way.
+- **Cost per shipped PR has no source.** D53 keeps the tile; the server has no "shipped PR"
+  signal and no way to get one without reaching outside itself. Deferred to `/contract`.
