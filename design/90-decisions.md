@@ -1052,13 +1052,101 @@ Rejected: a light and dark pair.
 Reversibility: expensive in practice. Every component must be built four ways from the start, and
 a component added later against one palette drifts the set without anything detecting it.
 
+### 2026-08-08 — D59 The definition of done becomes two tiers
+Context: D53 to D55 and D58 admitted payroll, performance reviews and PIP, hiring, onboarding,
+incidents and a four-theme switcher. The definition of done was still the seven console items,
+so the brief asserted this project is finished at a point where roughly half the admitted scope
+does not exist.
+Chosen: two tiers. Tier one is the seven console items and is finishable on its own; tier two
+carries the admitted surfaces as items 8 to 12, each stated as an operator outcome rather than a
+screen. Both tiers are binding.
+Rejected: one flat list of twelve — three of the four admitting decisions record expensive
+reversibility, and folding them in leaves no point at which anything is honestly finished.
+Rejected: leaving the definition at seven and holding the surfaces as scope only — the
+completion bar would permanently describe a smaller product than the one being built, which is
+the drift the source-of-truth rule exists to catch.
+Rejected: reopening D54 and D55 — signed off, and re-running the prototype adjudication to reach
+the same place buys nothing.
+Reversibility: cheap. Moving an item between tiers is an edit.
+
+### 2026-08-08 — D60 The theme preference is held by the browser, not by this server
+Context: D58 ships four operator-selectable themes with a persisted per-operator preference.
+`10-design.md § Data model § Operator` states an operator is `{ id }`, **not persisted**, with no
+profile and no preferences, because D3 chose delegated identity so that no account state lives
+here. A stored preference is account state.
+Chosen: the client holds the choice; it never reaches the server. `Operator` stays `{ id }`, and
+D3 and D58 both stand. The known cost is retained rather than solved: the theme follows the
+browser, not the person, so a new device or profile starts on the default and operators sharing
+a browser profile share a theme.
+Rejected: persisting an `Operator` record with preferences — the first account state on this
+server, reopening D3, and forcing an answer to what the record means once the upstream identity
+provider renames or removes that person. A persisted entity is not un-written.
+Rejected: one theme per deployment, set in configuration — no account state anywhere, but it
+reduces D58's product feature to an administrator setting.
+Reversibility: cheap. Making the choice travel later adds storage; it undoes nothing.
+
+### 2026-08-08 — D61 The model-hosting non-goal says reported usage stays visible
+Context: D53 records this non-goal narrowing so payroll's token burn and budget tiles are
+legitimate. Read literally, the previous wording — "No API keys are held by this server, no
+inference happens here" — never claimed usage was invisible. This was a misreading risk, not a
+contradiction.
+Chosen: state it anyway. No inference is performed and no vendor credential is held, and that
+does not make reported usage invisible.
+Rejected: leaving the wording untouched — a payroll screen sitting under a non-goal headed
+"Hosting the model" stops every future reader and every red-team pass, with nothing in the brief
+to point them at.
+Rejected: narrowing further to forbid pricing lookups — that pre-decides the open "cost per
+shipped PR has no source" item, which D53 deferred to `/contract`.
+Reversibility: cheap.
+
+### 2026-08-08 — D62 The orchestration non-goal bans agents starting agents, not concurrency
+Context: three defects in two sentences. The wording distinguished neither side of D52; "one
+session, one agent process" is untrue against D16's turn-scoped child; and "fan-out" meant
+distributing work across agents here while `10-design.md` uses it for one-to-many envelope
+delivery to subscribers (D18), which is in scope and built.
+Chosen: restate the body and keep the heading, so D51's and D52's references to it still resolve.
+The ban is on an agent starting another agent and on work moving between sessions without an
+operator action, with D52's audit-identity reason stated in the brief itself. Operator-driven
+assignment and concurrent sessions are named explicitly as *not* forbidden. The word "fan-out"
+leaves the brief, leaving the term solely to D18's meaning.
+Rejected: appending D52's carve-out and nothing else — leaves a sentence untrue against D16, and
+leaves the term collision for someone to rediscover.
+Rejected: renaming D18's concept so the brief could keep "fan-out" — churn across the design and
+the contract to protect a phrase the brief can simply stop using.
+Reversibility: cheap.
+
+### 2026-08-08 — D63 Codex is tier one, and its permission asymmetry is stated in the brief
+Context: definition-of-done item 2 promised "choosing Claude or Codex" while item 4 named Claude
+only and items 3 and 5 to 7 were silent about Codex. D5 makes Codex sessions `preauthorised`;
+D27 leaves it unverified whether Codex's `on-request` approval is reachable over a programmatic
+transport rather than only inside its terminal UI.
+Chosen: Codex stays in tier one. The brief now says which items a Codex session satisfies, that a
+launch-time policy with a sandbox banner stands in for item 4, and that D27's unverified question
+is explicitly not a blocker on done — D5's fallback is already the shipping answer if the
+experiment fails.
+Rejected: moving Codex to tier two — the four-layer vendor boundary would ship with a single
+implementation behind it, which is where such abstractions are usually found to be wrong.
+Rejected: requiring approval parity before tier one closes — reverses D5, and stakes "done" on
+an unverified vendor capability resolving favourably.
+Reversibility: cheap to move between tiers. The adapter is the cost either way.
+
+### 2026-08-08 — D64 Both platforms are gated, and the brief stops claiming a CI that does not exist
+Context: the constraint read "The primary host is Windows; CI is Linux". `.github/workflows/`
+does not exist — this repository has no CI at all. The only gates present are the Pester suites
+in `tools/` and `git diff --check`. A two-platform requirement was asserted and gated by nothing.
+Chosen: state both as supported targets held to the same definition of done and gated by an
+automated run, and say plainly that no such gate exists yet and that building it is tier-one work.
+Rejected: Windows supported with Linux best-effort — cheaper by one matrix leg, but a Linux
+operator finds the breakage instead of a gate, and the design already carries work for both.
+Rejected: correcting the false sentence without asserting a gate — that leaves the constraint
+unfalsifiable, which is the "do not claim a gate that did not run" failure promoted into the
+brief.
+Reversibility: cheap as text. The CI itself is ordinary work.
+
 ## Open
 
 Staging only. Once an item becomes an issue it leaves this list.
 
-- **"Fan-out" means two different things.** `00-brief.md` uses it for distributing work across
-  agents; `10-design.md` uses it for one-to-many delivery of envelopes to several subscribers of
-  one session (D18), which is in scope and built. One term, two meanings, two documents.
 - **Employment status and process state are one field in the prototype.** Its vocabulary
   (`ON SHIFT / BLOCKED / IDLE / ON PIP / PROBATION / CLOCKED OUT`) overlaps `SessionSummary.state`
   without matching it. They are different concepts and need separate fields.
@@ -1067,11 +1155,9 @@ Staging only. Once an item becomes an issue it leaves this list.
   one. Those are different features, and the queue has no home in storage either way.
 - **Cost per shipped PR has no source.** D53 keeps the tile; the server has no "shipped PR"
   signal and no way to get one without reaching outside itself. Deferred to `/contract`.
-- **D58's persisted theme preference contradicts the `Operator` entity.** `10-design.md § Data
-  model § Operator` states that an operator is `{ id }`, **not persisted**, with no profile and
-  no preferences, because D3 chose delegated identity so that no account state lives here. A
-  per-operator theme choice is account state. One of the two gives, and which one is an owner
-  decision rather than an editorial fix — carried into the brief amendment.
+- **The two-platform gate D64 requires has no slice.** `/slices` derives from the contract, and
+  a CI matrix is not a contract surface, so nothing in the pipeline will produce it. Tier one
+  cannot close without it.
 - **`10-design.md` is stale against D46 and D49.** The module-boundaries section still hands
   adapters an `emit` callback, which D46 replaced with a notification union; and neither the
   `meta.json` write protocol nor the corrupt-`meta.json` failure row mentions the
