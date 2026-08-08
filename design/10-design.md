@@ -1494,32 +1494,12 @@ these are cited by number elsewhere in this document and in the slices.
 
 **Known drift, not a question:**
 
-9. `20-contract.md` needs amendments this design implies, all `/contract`'s to make and
-   deliberately not made here:
-   - **`session.exit` conflates turn-process exit with session teardown.** Under D16 a
-     normal turn ends the child, so a contract-obedient client tears down the session view
-     after every successful turn.
-   - **`workspace_busy` and `session_ended` are new error codes** with no entry in the error
-     table. D19 and D20 respectively require them.
-   - **`SessionSummary` and `session.started` carry no `state`.** D20 makes `live` vs
-     `ended` the field a client reads to decide whether the compose box is enabled, and it
-     is currently unexpressible.
-   - **`GET /api/tool-output/:callId` must become
-     `GET /api/sessions/:id/tool-output/:turnId/:callId`.** Moving it under the session is
-     the security half of D22 rather than a tidy-up; the `:turnId` segment is the
-     collision half.
-   - **`TurnEnded.stopReason` needs three values it does not have.** D24's operator
-     interrupt, or an operator-requested end renders as a crash; D39's `server_restart`, for
-     a turn boot had to close; D41's `storage_failure`.
-   - **`Attachment` is referenced by `POST /message` and never defined.** Pre-existing, not
-     introduced here, and nothing in this design describes attachment handling.
-   - **`POST /api/sessions/:id/end` does not exist.** D36 needs the route, and
-     `409 turn_in_flight` as its refusal.
-   - **`POST /api/sessions/:id/interrupt` takes no body.** It needs `{turnId}`, required, so
-     a late interrupt cannot kill the turn that replaced its target.
-   - **`403 bad_origin` is a new error code.** D29.
-   - **`Session` and `SessionSummary` carry no `sandbox`.** The standing banner and the
-     after-the-fact question both need it.
+9. **Resolved.** All ten amendments this design implied for `20-contract.md` are made, in
+   that document, at commit `0535303`. Three needed decisions of their own and carry them:
+   D45 for `session.exit` and where `state` lives, D47 for the undefined `Attachment`, and
+   D50 for the vendor authorisation the contract asserted and nothing could hold. Two gaps
+   the derivation exposed are open rather than closed, and are in
+   `90-decisions.md § Open`: attachment handling, and who owns `ToolCall.summary`.
 10. `Start-AgentSession.ps1` (D14) is unreconciled against this architecture. Carried in
     `90-decisions.md § Open`; not restated here.
 11. **The spill has no index, and replay reads it from the start.** Acceptable at the
