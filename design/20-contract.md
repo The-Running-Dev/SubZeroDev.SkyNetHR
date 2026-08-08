@@ -176,6 +176,7 @@ interface SessionStarted {
   readonly cwd: ResolvedPath;
   readonly model: string | null;
   readonly policy: PermissionPolicy;
+  readonly state: SessionState;     // the state at emission, and therefore always 'live'
   readonly createdAt: IsoTimestamp;
 }
 
@@ -336,6 +337,11 @@ interface ErrorEvent {
   must not read as a stalled turn.
 - `session.started` is emitted once per session, on the first turn only, even though the CLI
   reports `system/init` on every turn.
+- **`SessionStarted.state` is the state at emission and is therefore always `'live'`.** The
+  authoritative current state is `SessionSummary.state` from `GET /api/sessions`, or the
+  presence of a `session.ended` later in the stream. A client that reads `state` off a
+  replayed `session.started` will show an enabled compose box for an ended session. The field
+  is retained knowingly (D45).
 - The untruncated bytes behind a `tool.result` with `truncated: true` are at
   `GET /api/sessions/:id/tool-output/:turnId/:callId`. Both segments come from the same
   envelope.

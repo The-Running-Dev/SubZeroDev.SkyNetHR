@@ -856,12 +856,19 @@ client tore down the session view after every successful turn. Amendment 3 asked
 on both `SessionSummary` and `session.started`.
 Chosen: delete `session.exit`; turn-process exit is `turn.ended` with a `TurnStopReason`.
 Add `session.ended { reason }` covering the three ways into `ended` — D36 operator, D20
-restart, D41 storage failure. `state` goes on `SessionSummary` only.
-Rejected: `state` on `session.started`, as amendment 3 literally asks. `session.started` is
-emitted once, at creation, and is replayed forever; its `state` would be the constant `'live'`
-in every session that ever existed, which is a field that answers the client's question wrongly
-rather than not at all. The client reads `state` from `GET /api/sessions`, and the stream
-carries the transition as `session.ended`.
+restart, D41 storage failure. `state` goes on **both** `SessionSummary` and `session.started`,
+as amendment 3 asks.
+Known and retained: `SessionStarted.state` is the state at emission, and `session.started` is
+emitted once at creation and replayed forever — so the field is the constant `'live'` in every
+session that ever existed, including ended ones. The contract proposed putting `state` on the
+summary alone for that reason; the owner chose the amendment as written, and the staleness is
+recorded in `20-contract.md § Rules the renderer may rely on` instead of being designed away.
+The authority is `SessionSummary.state`, or a `session.ended` later in the stream; a renderer
+that reads the replayed field will show an enabled compose box for an ended session.
+Rejected: deriving `state` entirely from the stream, with boot appending
+`session.ended { reason: 'server_restart' }` — extends D39's boot writes, and the
+storage-failure path cannot append its own ending, so one of the three ways into `ended` would
+stay invisible to the stream.
 Rejected: keeping `session.exit` alongside, with a flag distinguishing the two — two names for
 one boundary, and the client must get the flag right to avoid the original bug.
 Reversibility: cheap, before any client exists.
