@@ -1,4 +1,4 @@
-# Agent Console
+# SkyNet HR
 
 A browser console for driving a coding agent CLI that runs on the machine holding the code.
 Self-hosted, for a small group of trusted operators.

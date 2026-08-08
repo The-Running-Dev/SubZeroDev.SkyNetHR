@@ -1,9 +1,9 @@
 {
-  "name": "agent-console-spike",
+  "name": "skynet-hr-spike",
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "description": "Throwaway proof of the agent-console transport, replay and permission handshake",
+  "description": "Throwaway proof of the SkyNet HR transport, replay and permission handshake",
   "engines": { "node": ">=20.6" },
   "scripts": {
     "start": "node server.mjs",

@@ -1,4 +1,4 @@
-# Slices — Agent Console
+# Slices — SkyNet HR
 
 Each slice ends runnable. Criteria carry stable ids; drift is compared on ids, never prose.
 
