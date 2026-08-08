@@ -171,8 +171,17 @@ The unit of ownership. Everything else hangs off one.
 | `policy` | `PermissionPolicy` | immutable | adapter capability, at create |
 | `cliSessionId` | `string \| null` | write-once-then-stable | **vendor**, from first `system/init` |
 | `lastSeq` | `number` | monotonic | server, on every emit |
-| `turn` | `Turn \| null` | mutable | server; `null` means idle |
+| `state` | `'live' \| 'ended'` | one-way | server |
+| `turn` | `Turn \| null` | mutable | server; `null` means idle. Always `null` when ended |
 | `createdAt` / `endedAt` | ISO 8601 UTC | set once each | server |
+
+`state` distinguishes the two ways a session has no turn running. A **live, idle** session
+accepts a new message; an **ended** session does not, and answers `409 session_ended`. A
+session rehydrated after a restart is always ended (D20), so `state` is what a client reads
+to know whether the compose box should be enabled.
+
+`lastSeq` is persisted, not merely held. A rehydrated session has an empty ring buffer and
+must still be able to bound its own replay, which it cannot do from memory it no longer has.
 
 `cwd` deserves its own sentence: it is the **resolved real path** and it is resolved
 exactly once, at session creation. Every later spawn reuses the stored resolution rather
@@ -212,12 +221,18 @@ Two storage tiers, and they are not the same data:
 - **Ring buffer**, in memory, bounded (currently 2000 envelopes). Serves live replay after
   a reconnect. Losing the tail of it is a *reportable* condition, not a silent one — the
   server answers a too-old `Last-Event-ID` with `error / kind: 'replay_gap'`.
-- **Spill file**, `events.ndjson`, append-only, unbounded. The durable transcript. Not
-  currently read back; it exists so that "what did the agent do" survives a restart and so
-  that S9.3 can bound memory without losing history.
+- **Spill file**, `events.ndjson`, append-only, unbounded. The durable transcript, and
+  **a read path as well as a write one** (D20): a session rehydrated after a restart has an
+  empty ring buffer, so the spill is the only place its transcript exists.
 
 The ring buffer is a strict suffix of the spill. If that ever stops being true, replay is
 lying.
+
+That invariant is what makes the two tiers interchangeable for reads, and it is worth
+noticing that a spill reader could therefore serve a too-old `Last-Event-ID` from disk
+instead of answering `replay_gap`. That is not decided here — S3.3 tests for `replay_gap`
+existing, so removing it is a slice change, not a free simplification. Recorded in
+`90-decisions.md § Open`.
 
 ### Identity spaces
 
@@ -287,11 +302,15 @@ nowhere else.
 <storage>/audit.ndjson
 ```
 
+`meta.json` is what boot reads back, so it carries `lastSeq` and `state` as well as the
+immutable fields — a rehydrated session that cannot state its own last sequence cannot
+serve a replay.
+
 | Entity | Memory | Disk |
 |---|---|---|
-| Session | registry `Map` | `meta.json` |
+| Session | registry `Map` | `meta.json` — **read at boot** (D20) |
 | Turn | live object | derived from events |
-| Envelope | ring buffer (bounded) | `events.ndjson` (unbounded) |
+| Envelope | ring buffer (bounded) | `events.ndjson` (unbounded), read for ended sessions |
 | Checkpoint | — | `ckpt.git` |
 | Audit record | — | `audit.ndjson` |
 | Operator | request-scoped | — |
@@ -378,7 +397,7 @@ POST /api/sessions {vendor, cwd, model?, sandbox?}
   edge          → identity: resolve OperatorId, else 401
   edge          → session-manager.create(owner, vendor, cwd, model)
   manager       → jail.resolveInsideRoot(cwd, roots)     → 409 outside_workspace_root
-  manager       : resolved path already held by a live session?
+  manager       : resolved path held by a session with state == 'live'?
                                                          → 409 workspace_busy   (D19)
   manager       → store: mkdir, write meta.json, open spill
   manager       → checkpoints: init ckpt.git             → notice on failure, not fatal
@@ -543,8 +562,10 @@ thinking. Fail loudly, never degrade quietly.
 
 | Failure | Detection | System does | Operator sees | State left behind |
 |---|---|---|---|---|
-| Restart with sessions live | — | **Open question** — see below | Undefined | `meta.json` and spills on disk; registry empty |
+| Restart with sessions live | Boot rehydration | Load `meta.json`, mark ended (D20) | Transcript and checkpoints browsable; compose box disabled | Sessions readable, not resumable |
+| Message to a rehydrated session | `state == 'ended'` | `409 session_ended` | "This session ended when the server restarted" | Nothing started |
 | Restart with a child running | PID file on boot | Reap recorded PIDs before accepting connections | — | Orphan killed |
+| `meta.json` unreadable or corrupt | Parse failure at boot | Skip that session, log it; **boot continues** | One session missing | Its files untouched for inspection |
 | Bind non-loopback, no auth | Startup check | **Refuse to start**, say why | Startup error naming the fix | — |
 
 ## Concurrency and ordering
@@ -627,7 +648,8 @@ Not guaranteed, and the client must not assume it:
 | Restore during a turn | Refused `409` | Manager turn state |
 | Child emits while a client reconnects | Buffer is appended before fan-out; replay reads the buffer | Synchronous `emit` |
 | A slow subscriber | Per-subscriber queue; drop that one, gap it, keep the rest | Fan-out; logged as D18 |
-| Two sessions on one workspace | The second is refused at create | Manager, on the resolved path (D19) |
+| Two sessions on one workspace | The second is refused at create | Manager, on the resolved path of **live** sessions (D19 + D20) |
+| A client arrives during boot rehydration | Cannot — listening starts after rehydration | Boot ordering |
 
 The last row is the one race resolved by exclusion rather than by ordering. Two sessions
 rooted at the same directory would have independent shadow git directories and no lock
@@ -638,6 +660,31 @@ spellings of one directory are correctly caught as the same workspace.
 
 That refusal is the whole mechanism. Nothing downstream — checkpoints, restore, the
 adapters — needs to consider a shared workspace, because there cannot be one.
+
+**The check tests `state == 'live'`, and that qualifier is load-bearing.** Rehydrated
+sessions are ended (D20) but still hold their `cwd`. A busy check that ignored `state`
+would let one restart make a workspace permanently unusable, with the only remedy being to
+delete storage — two individually correct decisions combining into a defect. This is the
+one place D19 and D20 touch, and it is why they are stated together.
+
+### Boot ordering
+
+Three steps, and the order is the point:
+
+```
+1. reap    recorded child PIDs from the previous run
+2. rehydrate  meta.json → registry, every session marked ended
+3. listen  only now are connections accepted
+```
+
+Reaping precedes rehydration so that no rehydrated session can be adopted by an orphan
+still holding its workspace. Listening comes last so that no client can observe a registry
+that is half-loaded — a `GET /api/sessions` answered mid-rehydration would report a partial
+list as though it were complete, which is a wrong answer rather than a slow one.
+
+A `meta.json` that fails to parse is skipped and logged; boot continues. One unreadable
+session must not deny the operator every other session, and its files are left untouched so
+the failure can be inspected rather than cleaned up automatically.
 
 ## Alternatives considered
 
@@ -670,6 +717,13 @@ New in this pass:
   the second session — removes the hazard but costs that operator DoD #6 for reasons outside
   their own session. Rejected deferring to S6 — creation ships in S2, and this is the same
   argument D4 makes about the jail belonging in the create path from the first commit.
+- **D20 — sessions rehydrate read-only after a restart.** Chosen: load `meta.json` at boot,
+  mark every session ended; transcript and checkpoints browsable, no new turns. Rejected:
+  full resumption via `--resume` — it assumes the vendor CLI still holds that
+  `cliSessionId`, which is unverified, and it fails *silently* by starting a fresh
+  conversation the operator believes is continuous. Rejected deleting storage on boot —
+  discards hours-old transcripts and weakens the audit trail S7 exists for. Rejected keeping
+  today's behaviour — the storage root grows without bound with sessions nothing can reach.
 
 Standing decisions this design rests on, all in `90-decisions.md`: D1/D10 transport,
 D2 sequencing, D3 delegated auth, D4 the jail, D5 the permission asymmetry, D6 shadow git,
@@ -700,14 +754,12 @@ Questions this design cannot answer without information it was not given. Carrie
 
 **Needing a decision from the owner:**
 
-1. **Do sessions survive a server restart?** `meta.json` and the spill are on disk, but the
-   registry is in memory and nothing rehydrates it. The brief's DoD #5 is page refresh, not
-   process restart, so this is genuinely unspecified. Rehydrating read-only (transcript
-   visible, no new turns) is cheap; full resumption via `--resume` is not much harder but
-   changes what `endedAt` means.
-2. **Is there a turn timeout?** A child that produces no output is currently indistinguishable
+1. **Is there a turn timeout?** A child that produces no output is currently indistinguishable
    from one that is thinking, forever. Any timeout risks killing a legitimately long tool
    call, and no value is derivable from the brief.
+2. Once D20's spill reader exists, a too-old `Last-Event-ID` could be served from disk
+   rather than answered with `replay_gap`. That removes a failure mode, but S3.3 tests for
+   `replay_gap` existing — so it is a slice change, not a free simplification.
 
 **Needing an experiment:**
 
@@ -725,11 +777,16 @@ Questions this design cannot answer without information it was not given. Carrie
 
 **Known drift, not a question:**
 
-8. `20-contract.md` needs two amendments this design implies, both `/contract`'s to make.
-   **`session.exit` conflates turn-process exit with session teardown** — under D16 a normal
-   turn ends the child, so a contract-obedient client tears down the session view after
-   every successful turn. And **`workspace_busy` is a new error code** with no entry in the
-   error table; D19 requires it, and this document deliberately did not add it here.
+8. `20-contract.md` needs amendments this design implies, all `/contract`'s to make and
+   deliberately not made here:
+   - **`session.exit` conflates turn-process exit with session teardown.** Under D16 a
+     normal turn ends the child, so a contract-obedient client tears down the session view
+     after every successful turn.
+   - **`workspace_busy` and `session_ended` are new error codes** with no entry in the error
+     table. D19 and D20 respectively require them.
+   - **`SessionSummary` and `session.started` carry no `state`.** D20 makes `live` vs
+     `ended` the field a client reads to decide whether the compose box is enabled, and it
+     is currently unexpressible.
 9. `Start-AgentSession.ps1` (D14) is unreconciled against this architecture — it assumes a
    local interactive terminal, not the server/edge/adapter shape. Reconcile when a slice
    first needs a CLI launcher, not before.

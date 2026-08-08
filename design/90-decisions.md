@@ -298,6 +298,32 @@ so two different spellings of one directory are correctly caught as the same wor
 Reversibility: cheap. Relaxing a refusal is additive; retrofitting one after operators have
 built habits around sharing is not.
 
+### 2026-08-08 — D20 Sessions rehydrate read-only after a restart
+Context: `meta.json` and `events.ndjson` are written per session, but the registry is a
+memory `Map` and nothing reloads it. A restart therefore lost every session while leaving
+its files on disk — unreachable, uncleanable, and invisible. The brief's DoD #5 specifies
+page refresh, not process restart, so this was genuinely unspecified rather than decided.
+Chosen: on boot, after reaping orphaned children and before accepting connections, load each
+`meta.json` into the registry marked ended. The transcript and the checkpoints stay
+browsable; no new turn may start.
+Rejected: full resumption via `--resume` — it depends on the vendor CLI still holding that
+`cliSessionId`, which is unverified, and its failure mode is silent: the CLI starts a fresh
+conversation the operator believes is continuous. That is worse than a session that plainly
+says it ended. It stays available later as a pure addition to this. Rejected deleting
+storage on boot — discards transcripts and checkpoints for work that may be hours old and
+weakens the audit trail S7 exists to provide. Rejected leaving today's behaviour deliberate
+— the storage root then grows without bound with sessions nothing can reach or clean up.
+Three consequences, each a real change rather than a restatement:
+- **`events.ndjson` becomes a read path.** It was write-only. A rehydrated session has an
+  empty ring buffer, so its transcript can only come from the spill.
+- **`meta.json` must round-trip `lastSeq`**, or a rehydrated session cannot bound its own
+  replay.
+- **D19's busy check must consider live sessions only.** An ended session still holding a
+  workspace path must not block a new session on it, or one restart makes a workspace
+  permanently unusable. This is the sharp edge of the two decisions meeting.
+Reversibility: cheap toward full resumption, which is additive. Expensive away from
+persistence entirely, since the read path and the `lastSeq` field become load-bearing.
+
 ## Open
 
 Staging only. Once an item becomes an issue it leaves this list.
@@ -314,9 +340,9 @@ Staging only. Once an item becomes an issue it leaves this list.
 - `Start-AgentSession.ps1` (D14) is unreconciled against this repo's own architecture — it
   assumes a local interactive terminal, not the server/SSE/adapter shape D1–D12 settled on.
   Reconcile when a slice first needs a CLI launcher, not before.
-- Do sessions survive a server restart? `meta.json` and the spill are on disk; the registry
-  is in memory and nothing rehydrates it. The brief specifies page refresh, not process
-  restart. Read-only rehydration and full `--resume` resumption are both viable.
+- Once a spill reader exists (D20), a too-old `Last-Event-ID` could be served from disk
+  rather than answered with `replay_gap`. That would remove a failure mode, but S3.3 tests
+  for `replay_gap`'s existence, so it is a slice change and not a free simplification.
 - Is there a turn timeout? A child producing no output is indistinguishable from one that is
   thinking. Any value risks killing a legitimately long tool call, and none is derivable
   from the brief.
