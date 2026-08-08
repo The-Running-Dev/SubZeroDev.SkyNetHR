@@ -1455,14 +1455,84 @@ error is answered by rejecting it before approval; after approval the remedy is 
 it opens is subject to the jail, the busy check and the audit log exactly as any other.
 Reversibility: cheap. Adding a state to a latest-wins log is an append and a union member.
 
+### 2026-08-08 — D82 `Rating` is a five-member token enum, not the prototype's display strings
+Context: D54 ruled the rating scale in as "a contract enum" and named no members. The only
+source anywhere for the scale is the imported prototype, which offers five labels — *Does not
+meet*, *Meets some*, *Meets*, *Exceeds expectations*, *Exceptional*. `10-design.md § Data model
+§ Review` types the field as `Rating | null` against a type nothing defines.
+Chosen: `'does_not_meet' | 'meets_some' | 'meets' | 'exceeds' | 'exceptional'`, with the wording
+an operator sees owned by the client.
+Rejected: persisting the prototype's display strings as the union members — self-describing on
+the wire and one less mapping to write, but it freezes product wording into an append-only
+employment record, so rewording the scale becomes either a migration of `reviews.ndjson` or two
+vocabularies on disk. Rejected a numeric 1–5 scale — it invites arithmetic on a judgement, and
+the five points are not evenly spaced. Rejected leaving `Rating` undefined — `Review` could not
+then be declared and the review slice could not be planned.
+Reversibility: expensive in the same way every persisted authored record is. Tokens are what
+make the *labels* cheap to change; the tokens themselves are written down forever.
+
+### 2026-08-08 — D83 The most recent final review is ordered by `updatedAt`, with no new field
+Context: D72 answers "is this session under a performance plan?" from the most recent **final**
+review, and nothing said what "most recent" is measured by. Creation time, file order and a
+finalisation timestamp that is never stored all give different answers, and file order rewinds
+under the accepted torn-tail reversion.
+Chosen: order finals by `updatedAt`, ties broken by the later line in `reviews.ndjson`. This
+works without a new field because `state: 'final'` is terminal — a final review refuses every
+further append — so `updatedAt` on the final line *is* its finalisation time.
+Rejected: adding `finalisedAt: IsoTimestamp | null`, non-null exactly when `state === 'final'`.
+More legible, and it gives the finalisation guard an explicit thing to hold — at the cost of a
+second timestamp on the same line that must always agree with the first, which is two fields
+that must agree and one that eventually does not.
+Known and retained: this settles the ordering key only. Whether finalisation is claimed under
+the single-writer invariant, and what stops a torn tail retracting a final review other
+operators have already seen, are unresolved and stay with `/design` (issues #35, #36).
+Reversibility: cheap. Adding an explicit timestamp later is an added optional field, which the
+record logs' forward rule already permits.
+
+### 2026-08-08 — D84 The contract declares the tier-two text caps and the audit window, and sets no values
+Context: nothing bounded a review body or a requisition's title and justification, while every
+edit re-appends the whole record and both logs are held wholly in memory at boot — which is the
+volume assumption D65 used to refuse a database. The audit read needs a bound for the same
+reason D73 gives.
+Chosen: `Caps.reviewBodyBytes`, `Caps.requisitionTextBytes` and `Caps.auditPageMax` are declared
+in `20-contract.md`; the numbers are a deployment's, set in configuration. Over-cap text is
+refused with `422 bad_request`, never silently truncated the way `tool.result` is.
+Rejected: picking numbers here — a capacity judgement with no measured basis, and `config`
+already owns every other cap. Rejected truncating instead of refusing — a review is an authored
+record and a silently shortened one misrepresents its author; truncation is right for tool
+output because nobody wrote it.
+Reversibility: cheap. A cap is a configured number and a validation branch.
+
+### 2026-08-08 — D85 The checklist fold is served by the server, not assembled in the client
+Context: D71 makes completion an event and the checklist the fold over it, and puts the item
+template in `config`. The client holds the events but has no way to read `config`, so as drawn
+nothing can render an item's label.
+Chosen: `GET /api/sessions/:id/checklist` returns the folded `ChecklistItemState[]` — template
+joined to completion — under the session's ownership check like every other session route.
+Rejected: shipping the template to the client in a bootstrap payload and folding there — it
+adds a second place the template exists and a second thing to be stale, to save one route over
+data the server already holds. Rejected returning the fold on the tick response only — a client
+that reconnects has no way to obtain it.
+Reversibility: cheap. A read route over derived data, persisting nothing.
+
+### 2026-08-08 — D86 The audit read's cursor is opaque and server-minted
+Context: D73 specifies a bounded window with a cursor, newest first, over a file whose records
+carry no identifier — an `AuditRecord` has a timestamp and nothing unique.
+Chosen: `AuditCursor`, a branded string the server mints and the caller only round-trips. No
+caller may parse one, and what it encodes is `store`'s business.
+Rejected: a byte offset or line number as the cursor — it publishes the file's physical layout
+as a public interface, which is exactly what an offset index would later change (open question
+11). Rejected `(ts, index)` pagination — timestamps collide at millisecond precision under a
+fast stream, which is the argument D2 already made against timestamps as a key.
+Reversibility: cheap, and cheap *because* it is opaque — that is the point of the choice.
+
 ## Open
 
 Staging only. Once an item becomes an issue it leaves this list.
 
-- **`20-contract.md` and `30-slices.md` do not yet carry D51 to D79.** The design now holds two
-  new persisted entities, a twelfth module, a fourth control-flow path, a new event kind, an
-  optional request field, an audit read route that tier one always needed (D73), and a
-  requisition route set. None of it is in the contract, and no slice covers any of it. This is
-  the same drift the prototype adjudication produced one stage earlier, moved one stage along —
-  it is expected at this point rather than a defect, and it closes when `/contract` and
-  `/slices` run against the revised design.
+- **`30-slices.md` does not yet carry D51 to D86.** The contract half of this closed when
+  `/contract` ran against the revised design: two new persisted entities, the `records` module,
+  the audit read route (D73), the requisition and review route sets, the checklist and payroll
+  reads, and the tier-two error and invariant sets are all in `20-contract.md`. No slice covers
+  any of it, and no slice covers the audit read that tier one always needed. It closes when
+  `/slices` runs against the revised design and the revised contract.
