@@ -128,34 +128,44 @@ implementation starts rather than discovered in it.
 
 | | Claude CLI | Codex CLI |
 |---|---|---|
-| When policy is set | Per tool call, at runtime | At launch |
-| Mechanism | `control_request` / `control_response` over stdio | `approval_policy`, `sandbox_mode` in config |
-| Granularity | This command, this path, now | Whole session |
-| Operator sees | A prompt they answer | A sandbox they chose in advance |
-| Source | Verified — read from the fork | `codex/PROFILES.md` in SubZeroDev.AgentKit |
+| When policy is set | Per tool call, at runtime | `sandbox_mode` at launch; `approval_policy` decides whether it *also* asks at runtime |
+| Mechanism | `control_request` / `control_response` over stdio | `approval_policy`, `sandbox_mode` in config. The channel a runtime prompt arrives on is **unverified** |
+| Granularity | This command, this path, now | The sandbox is whole-session. An `on-request` prompt would be per call, if it is reachable at all |
+| Operator sees | A prompt they answer | A sandbox chosen in advance, plus whatever `on-request` surfaces |
+| Source | Verified — read from the fork | `codex/PROFILES.md` in this repository; live behaviour unverified |
 
-These are not two spellings of one idea. Claude's model is a conversation; Codex's is a
-policy. A lowest-common-denominator design — launch-time policy only — throws away the
-single most valuable thing the console offers, which is approving a tool call from
-somewhere that is not the server's terminal.
+**Codex has a runtime approval concept of its own.** Every profile in `codex/PROFILES.md`
+carries `approval_policy = "on-request"`. What is unverified is whether that prompt is
+reachable over a programmatic stream, or exists only inside its terminal UI where a browser
+console cannot answer it (D27).
+
+So the asymmetry is one of **verification, not of capability**. Claude's runtime approval is
+observed on the wire; Codex's is documented in config and unobserved. A
+lowest-common-denominator design — launch-time policy only — would throw away the single
+most valuable thing the console offers, which is approving a tool call from somewhere that
+is not the server's terminal, and it would do so on the strength of an assumption nobody has
+tested.
 
 **Decision: model the interactive case as the contract, and let Codex under-deliver
-against it, visibly.** See `90-decisions.md` D5. A Codex session launches with an explicit
-`sandbox_mode`, surfaces that mode in the UI as a standing banner, and emits no
-`permission.request` events. The client must therefore treat "no permission events" as a
-normal state for a session, not as a stuck turn.
+against it, visibly.** See `90-decisions.md` D5, and D27 for the corrected premise above.
+Until an experiment says otherwise, a Codex session launches with an explicit `sandbox_mode`,
+surfaces that mode in the UI as a standing banner, and emits no `permission.request` events.
+The client must therefore treat "no permission events" as a normal state for a session, not
+as a stuck turn. If `on-request` turns out to be reachable programmatically, D5 is revisited
+and Codex stops under-delivering — that is the shape open question 4 is looking for.
 
 **Stated as plainly as it deserves: Codex's live stdio protocol is unverified.** What is
 verified is its *on-disk rollout schema* — `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`,
 records wrapped in `payload`, opening with `session_meta`, usage as `token_count` events
-under `payload.info` (`SubZeroDev.AgentKit/tools/Measure-Session.ps1:158,454`). Whether the
+under `payload.info` (`tools/Measure-Session.ps1:28-29,181,454`). Whether the
 live stream matches that schema is an assumption, and the first slice of the Codex adapter
 is an experiment to find out, not an implementation. Budget for it accordingly.
 
 ## Data model
 
-Six entities. Only three of them are persisted, and knowing which is which is the whole
-point of this section.
+Seven entities. Five of them are persisted, and knowing which is which is the whole point of
+this section. The counts are checkable against *Persistence summary* at the end; if they
+disagree, that table is right and this sentence is the defect.
 
 ### Session
 
@@ -208,6 +218,31 @@ At most one live per session. **The turn owns the child process** — see *Concu
 reconstructible from its event log by pairing `turn.started` with `turn.ended`, and that
 reconstruction is the only durable record. The live `Turn` object is scheduling state.
 
+### Process record
+
+The one part of a `Turn` that must outlive it, because the thing it describes can outlive
+the server (D23). Boot reaps orphaned children, and it cannot reap what it cannot name.
+
+| Field | Type | Notes |
+|---|---|---|
+| `pid` | `number` | OS process id, at spawn |
+| `sessionId` / `turnId` | ids | Which turn owned it |
+| `startedAt` | ISO 8601 UTC | **Load-bearing** — see the reuse guard below |
+| `image` | string | Executable name the child was spawned as |
+| `exitedAt` | ISO 8601 UTC \| `null` | Tombstone, written when the child closes |
+
+Append-only, server-wide, `pids.ndjson`. Server-wide rather than per-session for the same
+reason the audit log is: the reader is boot, which has no session in hand yet and would
+otherwise have to walk every session directory before it is allowed to accept a connection.
+
+**A bare pid is not safe to kill and this is the trap the record exists to avoid.** Operating
+systems reuse process ids, so a pid recorded before a reboot may name something entirely
+unrelated afterwards — reaping it would kill an innocent process, as root on some hosts.
+Boot therefore reaps an entry only when it has no `exitedAt`, its `startedAt` is later than
+the host's last boot time, **and** the live process's image matches. An entry failing any of
+those is not reaped; it is logged and tombstoned, because a stale record is a bookkeeping
+problem and a wrong kill is an incident.
+
 ### Event envelope
 
 `(sessionId, seq)` is the primary key of the entire system. Everything replayable is keyed
@@ -228,6 +263,18 @@ Two storage tiers, and they are not the same data:
 The ring buffer is a strict suffix of the spill. If that ever stops being true, replay is
 lying.
 
+**Truncation happens before the envelope exists, and that is what protects the invariant**
+(D22). A `tool.result` above the byte cap is truncated once, on the way in; the envelope
+that reaches the ring buffer and the envelope appended to the spill are the same bytes. The
+untruncated output is written separately, to
+`<storage>/sessions/<sessionId>/tool-output/<callId>`, and is reachable only through a
+session-scoped route so the ownership check applies to it like every other session route. A
+design where the spill held the full output and the wire held the truncated one would make
+replay-from-disk and replay-from-memory return different transcripts, which is the same
+failure as a gap with none of the reporting.
+
+These blobs are the one part of storage with no stated retention rule — see *Open questions*.
+
 That invariant is what makes the two tiers interchangeable for reads, and it is worth
 noticing that a spill reader could therefore serve a too-old `Last-Event-ID` from disk
 instead of answering `replay_gap`. That is not decided here — S3.3 tests for `replay_gap`
@@ -236,7 +283,7 @@ existing, so removing it is a slice change, not a free simplification. Recorded 
 
 ### Identity spaces
 
-Five identifier namespaces coexist, three ours and two the vendor's. Conflating them is the
+Six identifier namespaces coexist, three ours and three the vendor's. Conflating them is the
 most likely source of a subtle cross-vendor bug, so they are enumerated:
 
 | Id | Minted by | Unique within | Opaque to |
@@ -296,32 +343,44 @@ nowhere else.
 
 ```
 <storage>/sessions/<sessionId>/
-  meta.json        Session, minus turn/buffer/subscribers
-  events.ndjson    envelopes, append-only
-  ckpt.git/        shadow git dir, work-tree = the session's workspace
+  meta.json           Session, minus turn/buffer/subscribers
+  events.ndjson       envelopes, append-only
+  tool-output/<callId>  untruncated tool output, one file per call   (D22)
+  ckpt.git/           shadow git dir, work-tree = the session's workspace
 <storage>/audit.ndjson
+<storage>/pids.ndjson                                                (D23)
 ```
 
 `meta.json` is what boot reads back, so it carries `lastSeq` and `state` as well as the
 immutable fields — a rehydrated session that cannot state its own last sequence cannot
 serve a replay.
 
+The two server-wide files are server-wide for the same reason and it is worth stating once:
+their reader is not a session. Audit answers "who approved what" across sessions and must
+survive the deletion of the session it indicts (D25); `pids.ndjson` is read by boot, before
+any session exists in the registry.
+
 | Entity | Memory | Disk |
 |---|---|---|
 | Session | registry `Map` | `meta.json` — **read at boot** (D20) |
 | Turn | live object | derived from events |
-| Envelope | ring buffer (bounded) | `events.ndjson` (unbounded), read for ended sessions |
+| Process record | the live child handle | `pids.ndjson` — **read at boot** (D23) |
+| Envelope | ring buffer (bounded) | `events.ndjson` (unbounded), read for ended sessions; oversized `tool.result` output in `tool-output/` |
 | Checkpoint | — | `ckpt.git` |
 | Audit record | — | `audit.ndjson` |
 | Operator | request-scoped | — |
+
+Five of the seven are on disk. `Turn` is derived from the event log and `Operator` is
+request-scoped by choice (D3), and those two absences are decisions rather than omissions.
 
 No database in the first cut (D7). If session listing ever needs querying beyond "mine,
 recent", that is the moment to add SQLite — not before.
 
 ## Module boundaries
 
-Ten modules. The dependency graph is acyclic, and the two edges most likely to be drawn
-backwards are called out below the diagram.
+Eleven modules — the two transport edges are two modules, not one with a slash in its name,
+which is the whole point of D10. The dependency graph is acyclic, and the two edges most
+likely to be drawn backwards are called out below the diagram.
 
 ```mermaid
 flowchart TD
@@ -362,11 +421,12 @@ flowchart TD
 | `config` | Roots, auth mode, bind address, caps | *nothing* | A validated config object |
 | `identity` | Request → `OperatorId`, or rejection | `config` | One function per deployment mode |
 | `jail` | Path resolution and containment | `config`, `contract` | `resolveInsideRoot` |
-| `store` | meta, spill, audit, ring buffer | `config`, `contract` | Read/append primitives |
+| `store` | meta, spill, tool-output blobs, audit, process records, ring buffer | `config`, `contract` | Read/append primitives |
 | `checkpoints` | Shadow git lifecycle | `config`, `contract` | create / list / restore |
-| `adapters/*` | **The only vendor knowledge** | `contract` | `spawn`, `send`, `respond`, `interrupt` |
-| `session-manager` | Ownership, turn state, `seq`, fan-out | `jail`, `store`, `checkpoints`, `adapters`, `contract` | Session CRUD, subscribe |
-| `edge/sse`, `edge/ws` | Transport, framing, reconnect | `session-manager`, `identity`, `contract` | HTTP routes |
+| `adapters/*` | **The only vendor knowledge** | `contract` | `spawn`, `send`, `respond`, `kill` |
+| `session-manager` | Ownership, turn state, `seq`, fan-out, reaping | `jail`, `store`, `checkpoints`, `adapters`, `contract` | Session CRUD, subscribe |
+| `edge/sse` | SSE framing, `Last-Event-ID` reconnect | `session-manager`, `identity`, `contract` | HTTP routes |
+| `edge/ws` | WebSocket framing, first-message auth | `session-manager`, `identity`, `contract` | HTTP routes |
 | `client` | Rendering | `contract` | — |
 
 **Adapters are leaves.** They depend on `contract` and nothing else. They do not read
@@ -432,8 +492,9 @@ POST /api/sessions/:id/message {text}
 
 POST /api/sessions/:id/permission {requestId, decision, scope}
   manager  : first answer wins; second → {accepted:false}
+  manager  → store.audit(...)      DURABLE FIRST                  (D26)
   manager  → adapter.respond(...)  → stdin: control_response
-  manager  → store.audit(...)                      → permission.resolved
+  manager                                          → permission.resolved
 
   child    → stdout: user/tool_result              → tool.result
   child    → stdout: result                        → turn.ended; adapter closes stdin
@@ -441,10 +502,20 @@ POST /api/sessions/:id/permission {requestId, decision, scope}
   manager  : turn = null
 ```
 
-The two things that are easy to get wrong and expensive to discover late: **stdin stays
-open across the permission round trip** (closing it after the prompt forecloses the feature
-entirely), and **the checkpoint is committed before the turn**, not after, because the
-state worth returning to is the one before the agent touched anything.
+Three things here are easy to get wrong and expensive to discover late.
+
+**stdin stays open across the permission round trip.** Closing it after the prompt
+forecloses the feature entirely, and it is the obvious first implementation.
+
+**The checkpoint is committed before the turn**, not after, because the state worth
+returning to is the one before the agent touched anything.
+
+**The audit record is durable before the response reaches the CLI** (D26). Writing it after
+is the natural order — the decision is freshest there, and the operator waits a millisecond
+less — but a crash in that window leaves a tool that ran with no record of who let it. The
+threat model calls this log the artifact that makes multi-operator use defensible, and a log
+with a hole exactly where the process died is not that. The cost is one durable append on
+the approval path.
 
 The child exits at the end of a normal turn. That is the design, not a failure — see
 *Concurrency § Process lifetime*.
@@ -510,9 +581,18 @@ working directory is accepted only if its **fully resolved real path** — symli
 `..` collapsed, case-normalised on Windows — is inside a root. The check runs at session
 creation and the resolved path, never the client's string, is what gets passed as `cwd`.
 
+**Every route that reads session data is under `/api/sessions/:id`.** Not a style
+preference — it is what makes "ownership check on every session route" a true statement
+rather than an aspiration. A route keyed on a vendor-minted identifier instead, such as
+fetching untruncated tool output by `callId` alone, is reachable by any authenticated
+operator who can guess or observe one, and no amount of care elsewhere fixes it. D22 puts
+the tool-output fetch under the session for this reason and no other.
+
 **Audit trail.** Every permission decision appends `{ts, operator, sessionId, tool, input,
-decision, scope}` to an append-only log. This is the artifact that makes multi-operator use
-defensible, and it is cheap. It is also the thing nobody adds later.
+decision, scope}` to an append-only log, **durably, before the decision reaches the CLI**
+(D26). This is the artifact that makes multi-operator use defensible, and it is cheap. It is
+also the thing nobody adds later. It is server-wide and survives the deletion of the session
+it describes (D25) — a log a subject can delete is not evidence.
 
 ## Failure modes
 
@@ -525,6 +605,8 @@ Grouped by boundary, because that is where the handling lives.
 | CLI not installed | `spawn` `ENOENT` | `error / agent_unavailable`, `fatal`; turn cleared | "Agent unavailable" | Session live, no turn. Retryable |
 | Child dies mid-turn | `close` with non-zero or signal | Resolve every pending permission with `cancelled_process_exit`; `turn.ended` | Turn ended abnormally, stderr shown | Session live. Checkpoint from before the turn is intact |
 | Child exits normally | `result` then `close(0)` | `turn.ended`, clear turn | Turn complete | Session idle |
+| **Operator interrupts a turn** | `POST /interrupt` | Manager kills the child, resolves pending permissions with `cancelled_process_exit`, emits `turn.ended` with an interrupted stop reason (D24) | "Turn interrupted" — not an error | Session live and idle. Checkpoint from before the turn is intact; partial file writes are **not** rolled back |
+| Interrupt of a turn that has already ended | No live child | `{ok: true}`, nothing emitted | Nothing | Idle, unchanged |
 | Child hangs with no output | Client-side elapsed-since-last-envelope | **Nothing is killed** (D21); the client shows "no output for N min" | Elapsed time, and interrupt | Turn continues until the operator acts |
 | Unrecognised record kind | `default` in the mapper | `error / adapter_unknown_record`, non-fatal, record preserved in `raw` | A diagnostic line | Stream continues |
 | Malformed JSON line | Splitter parse failure | `error / adapter_bad_line`, non-fatal | A diagnostic line | Stream continues |
@@ -551,7 +633,8 @@ a client tell a silent agent from a dead connection, so this costs nothing on th
 | Reconnect past buffer | `Last-Event-ID` older than the ring | One `error / replay_gap` | Brief reload | Client refetches |
 | Two clients answer one permission | Second lookup misses `pending` | `{accepted: false}` — **not an error** | "Already answered" | One response reached the CLI |
 | Slow client stalls the stream | Per-subscriber queue high-water | Drop that subscriber, report a gap to it only | That client reloads | Other clients unaffected |
-| Huge tool result | Byte cap on `tool.result` | Truncate, set `truncated`, real `bytes`; remainder by `callId` | "Output truncated" with a fetch link | Full output on disk |
+| Huge tool result | Byte cap on `tool.result` | Truncate **before the envelope is built**, set `truncated` and the real `bytes` (D22) | "Output truncated" with a fetch link | Full output at `sessions/<id>/tool-output/<callId>`; envelope identical in buffer and spill |
+| Tool-output blob missing or unreadable | Read error on fetch | `404` on the fetch route; the truncated envelope is unaffected | "Full output no longer available" | Transcript intact |
 
 ### Filesystem and storage boundary
 
@@ -564,6 +647,10 @@ a client tell a silent agent from a dead connection, so this costs nothing on th
 | Restore while a turn is in flight | Manager turn state | `409 turn_in_flight` | "Finish or interrupt first" | Workspace untouched |
 | Restore fails part-way | git exit code | `error`, non-fatal | Failure named | **Workspace is partially restored.** Git's `checkout -- .` is not atomic; this is a known and accepted exposure |
 | Disk full on spill | Write error | `error`, non-fatal; live streaming continues | Warning | Transcript incomplete from that point |
+| Torn trailing line in `events.ndjson` | Last line fails to parse at read | Drop it, log it, serve the rest (D20 made the spill a read path, so this is now reachable) | Transcript one event short | File untouched; the next append starts a fresh line |
+| Delete while a turn is in flight | Manager turn state | `409 turn_in_flight` | "Finish or interrupt first" | Nothing deleted |
+| Delete a live idle or ended session | — | Remove `meta.json`, `events.ndjson`, `tool-output/`, `ckpt.git/` and the registry entry. **`audit.ndjson` untouched** (D25) | Session gone from the list | Audit history intact; checkpoints unrecoverable |
+| Partial failure during delete | Filesystem error | `error`, non-fatal; registry entry removed anyway | "Session removed, storage may need cleaning" | Orphaned files on disk, named in the log. Preferred over a session that reappears |
 | Storage root unwritable at boot | Startup check | **Refuse to start** | Startup error | — |
 
 ### Server lifecycle
@@ -572,7 +659,8 @@ a client tell a silent agent from a dead connection, so this costs nothing on th
 |---|---|---|---|---|
 | Restart with sessions live | Boot rehydration | Load `meta.json`, mark ended (D20) | Transcript and checkpoints browsable; compose box disabled | Sessions readable, not resumable |
 | Message to a rehydrated session | `state == 'ended'` | `409 session_ended` | "This session ended when the server restarted" | Nothing started |
-| Restart with a child running | PID file on boot | Reap recorded PIDs before accepting connections | — | Orphan killed |
+| Restart with a child running | `pids.ndjson` entry with no `exitedAt` | Reap before accepting connections, after checking the reuse guard (D23) | — | Orphan killed, entry tombstoned |
+| Recorded pid predates the host's last boot, or its image does not match | Reuse guard | **Do not kill.** Log it, tombstone the entry, continue | — | Whatever now owns that pid is left alone. A stale record is bookkeeping; a wrong kill is an incident |
 | `meta.json` unreadable or corrupt | Parse failure at boot | Skip that session, log it; **boot continues** | One session missing | Its files untouched for inspection |
 | Bind non-loopback, no auth | Startup check | **Refuse to start**, say why | Startup error naming the fix | — |
 
@@ -589,7 +677,13 @@ built wrong.
 Genuinely simultaneous:
 
 - **Multiple sessions**, each with its own child, buffer and sequence. Independent by
-  construction; they share only the storage root and the audit file.
+  construction; they share only the storage root and the two server-wide append files.
+  **Those two files are the design's only shared mutable state**, and the claim that no lock
+  is needed rests on something worth stating rather than assuming: each is opened once, as a
+  single append stream owned by `store`, and every writer goes through it. Ordered appends
+  through one stream in one single-threaded process cannot interleave a partial line. Two
+  server processes over one storage root would break that, and nothing currently prevents
+  it — see *Open questions*.
 - **Multiple subscribers to one session.** Fan-out is one-to-many over the same envelopes.
 - **Child stdout arriving while an HTTP request is being handled.** Interleaved by the
   event loop at chunk granularity, never mid-envelope, because an envelope is constructed
@@ -613,6 +707,44 @@ Three consequences, and the third is the reason to prefer it:
 
 This is logged as D16, and it is the reason the contract needs an amendment — see
 *Alternatives considered*.
+
+### Interrupt — the operator's half of D21
+
+D21 removed every server-side timer and put the judgement with the operator. That only works
+if the operator has something to act with, so interrupt is a first-class path rather than a
+convenience, and its semantics are stated here rather than left to the adapter (D24).
+
+**Interrupt is the manager killing the turn's child.** The adapter exposes `kill` as
+mechanism; everything about what it *means* — which events fire, what state is left, whether
+it counts as a failure — belongs to the manager, for the same reason D17 moved turn state
+there. `POST /interrupt` on a session with no live turn is `{ok: true}` and emits nothing;
+an interrupt is a statement about a desired end state, not a command that can arrive too
+late.
+
+Three properties it must have:
+
+1. **It is expected.** The resulting `turn.ended` carries an interrupted stop reason and the
+   session stays live and idle. An operator who interrupts has not caused a crash and must
+   not be shown one — that distinction is why the contract needs a stop-reason value it does
+   not currently have, listed under *Open questions*.
+2. **It terminates on Windows.** A child there does not receive `SIGINT` the way the Unix
+   path assumes, and `child.kill('SIGINT')` on Windows terminates rather than signals. The
+   sequence is therefore terminate-then-force with a grace period, on a process **tree**,
+   because an agent CLI's own children — a compiler, a test runner — are what hold the
+   workspace open and are exactly what makes D16's Windows guarantee matter.
+3. **Pending permissions resolve.** Every outstanding `permission.request` gets a
+   `permission.resolved` carrying `cancelled_process_exit`, the same as an unexpected death,
+   so no client waits forever on a prompt whose child is gone.
+
+What interrupt does **not** do is undo anything. Files the agent already wrote stay written;
+the checkpoint taken before the turn is what returns the workspace, and that is a separate
+operator action. Interrupt stops the agent; restore stops the consequences.
+
+A graceful protocol-level interrupt — asking the CLI to close its own turn so its session
+state stays coherent — is strictly better if a vendor exposes one, and is additive on top of
+this. It is not the design because it is unverified for both vendors, and because its
+behaviour when the child is blocked awaiting a permission response is undefined, which is
+precisely the state an operator most wants to escape.
 
 ### The single-writer invariant
 
@@ -640,6 +772,9 @@ Guaranteed by the design, not by convention:
 - `permission.request` is answered by exactly one `permission.resolved`, including when the
   child dies — that case carries `cancelled_process_exit`.
 - The checkpoint for turn N is committed **before** `turn.started` for turn N.
+- The audit record for a permission decision is durable **before** that decision reaches the
+  child (D26). Not renderer-facing, but it is an ordering guarantee and this is where the
+  ordering guarantees live.
 
 Not guaranteed, and the client must not assume it:
 
@@ -656,6 +791,8 @@ Not guaranteed, and the client must not assume it:
 | Restore during a turn | Refused `409` | Manager turn state |
 | Child emits while a client reconnects | Buffer is appended before fan-out; replay reads the buffer | Synchronous `emit` |
 | A slow subscriber | Per-subscriber queue; drop that one, gap it, keep the rest | Fan-out; logged as D18 |
+| Interrupt arrives as the turn ends on its own | Whichever clears `turn` first wins; the loser is a no-op returning `{ok:true}` | Manager turn state (D24) |
+| Delete arrives during a turn | Refused `409` | Manager turn state (D25) |
 | Two sessions on one workspace | The second is refused at create | Manager, on the resolved path of **live** sessions (D19 + D20) |
 | A client arrives during boot rehydration | Cannot — listening starts after rehydration | Boot ordering |
 
@@ -680,8 +817,8 @@ one place D19 and D20 touch, and it is why they are stated together.
 Three steps, and the order is the point:
 
 ```
-1. reap    recorded child PIDs from the previous run
-2. rehydrate  meta.json → registry, every session marked ended
+1. reap    pids.ndjson entries with no exitedAt, subject to the reuse guard   (D23)
+2. rehydrate  meta.json → registry, every session marked ended                (D20)
 3. listen  only now are connections accepted
 ```
 
@@ -690,9 +827,15 @@ still holding its workspace. Listening comes last so that no client can observe 
 that is half-loaded — a `GET /api/sessions` answered mid-rehydration would report a partial
 list as though it were complete, which is a wrong answer rather than a slow one.
 
-A `meta.json` that fails to parse is skipped and logged; boot continues. One unreadable
-session must not deny the operator every other session, and its files are left untouched so
-the failure can be inspected rather than cleaned up automatically.
+Step 1 kills nothing it cannot positively identify. An entry whose `startedAt` predates the
+host's last boot, or whose pid now belongs to a process with a different image, is logged
+and tombstoned rather than reaped — the reasoning is in *Data model § Process record*, and
+the short version is that pid reuse turns a tidy-up into a wrong kill.
+
+Neither step 1 nor step 2 may abort boot. A `meta.json` that fails to parse is skipped and
+logged; an unreapable pid is tombstoned and logged. One unreadable session must not deny the
+operator every other session, and its files are left untouched so the failure can be
+inspected rather than cleaned up automatically.
 
 ## Alternatives considered
 
@@ -740,6 +883,53 @@ New in this pass:
   is off by default is never exercised, which is how it becomes a bug found during an
   incident.
 
+- **D22 — untruncated tool output is a per-session blob behind a session-scoped route.**
+  Chosen: truncate before the envelope exists, write the full bytes to
+  `sessions/<id>/tool-output/<callId>`, fetch it under `/api/sessions/:id`. Rejected: the
+  spill holding the full output while the wire carries the truncated one — replay from disk
+  and replay from memory would then return different transcripts, falsifying the stated
+  ring-is-a-suffix-of-the-spill invariant with none of `replay_gap`'s reporting. Rejected
+  dropping the fetch entirely — cheapest, and it also removes the unowned route, but a large
+  test log becomes permanently unreadable through the console. Rejected keeping the route
+  keyed on `callId` alone — a vendor-minted identifier outside `/api/sessions/:id` is
+  reachable by any authenticated operator, which is a hole in the ownership check the threat
+  model relies on.
+- **D23 — orphan reaping reads a server-wide `pids.ndjson` with a reuse guard.** Chosen: an
+  append-only record per spawn, tombstoned at exit, reaped at boot only when the recorded
+  start time is after the host's last boot and the process image still matches. Rejected:
+  the pid inside each `meta.json` — writes that file on every turn, and makes reaping depend
+  on rehydration having parsed it, so a corrupt `meta.json` orphans its child. Rejected a job
+  object or process group and no record at all — structurally the strongest, and it deletes
+  the file entirely, but Node exposes neither natively on the platform pair the brief
+  requires, so it buys a dependency to replace one append-only file.
+- **D24 — interrupt is the manager killing the turn's child, and it is an expected end.**
+  Chosen: terminate-then-force on the process tree, pending permissions resolved
+  `cancelled_process_exit`, `turn.ended` with an interrupted stop reason, session stays live
+  and idle. Rejected: a graceful protocol-level interrupt over the CLI's own control channel
+  — better where it exists, but unverified for both vendors and undefined when the child is
+  blocked awaiting a permission response, which is the state an operator most wants to
+  escape. It remains additive later. Rejected refusing interrupt while a permission is
+  outstanding — removes the escape hatch in the one state where the turn is definitely not
+  progressing.
+- **D25 — deleting a session removes its storage and never the audit log.** Chosen: remove
+  `meta.json`, the spill, the tool-output blobs, `ckpt.git` and the registry entry; refuse
+  with `409` during a turn; leave `audit.ndjson` whole. Rejected: a soft delete — adds a
+  third lifecycle state beside live and ended, plus a cleanup path someone must write or the
+  storage root grows without bound, which is the failure D20 was written to close. Rejected
+  keeping `meta.json` as a tombstone — a new rehydration case for a session whose transcript
+  is gone, to record something the audit log already records.
+- **D26 — the audit record is durable before the permission response reaches the child.**
+  Chosen: append, then respond. Rejected: responding first — the natural order, marginally
+  lower latency, and it leaves a window where a crash means a tool ran with no record of who
+  authorised it. Rejected a best-effort append with no ordering — the same hole, harder to
+  see.
+- **D27 — Codex's approval model was overstated; the asymmetry is one of verification.**
+  Chosen: state that `approval_policy = "on-request"` gives Codex a runtime approval concept
+  and that what is unverified is whether it is reachable over a programmatic stream. D5's
+  decision is unchanged; its premise is corrected. Rejected: leaving the earlier wording —
+  it reads as a settled capability gap and would have justified never running the experiment
+  that open question 4 asks for.
+
 Standing decisions this design rests on, all in `90-decisions.md`: D1/D10 transport,
 D2 sequencing, D3 delegated auth, D4 the jail, D5 the permission asymmetry, D6 shadow git,
 D7 no database, D8 reference-only prior art, D9/D11/D12 the Open WebUI evaluations.
@@ -772,24 +962,38 @@ Questions this design cannot answer without information it was not given. Carrie
 1. Once D20's spill reader exists, a too-old `Last-Event-ID` could be served from disk
    rather than answered with `replay_gap`. That removes a failure mode, but S3.3 tests for
    `replay_gap` existing — so it is a slice change, not a free simplification.
+2. **Tool-output blobs have no retention rule** (D22). They are the only storage that grows
+   with tool volume rather than with session count, and a single `find`-heavy turn can
+   outweigh a month of transcripts. Options are a per-session byte budget, an age-based
+   sweep at boot, or deleting them with their session and otherwise never — the last is what
+   the design does today by omission, which is a decision made by not making one.
+3. **Nothing prevents two server processes over one storage root.** The no-lock argument in
+   *Concurrency* holds for one process and silently stops holding for two — interleaved
+   appends to `audit.ndjson` and `pids.ndjson`, two registries disagreeing about which
+   workspace is busy (D19), and boot reaping a live sibling's children. A lock file at the
+   storage root is the obvious answer and it is small; it is listed here rather than decided
+   because the failure it prevents is an operator running the server twice by accident, and
+   whether that is worth a startup failure mode is a judgement about deployment, not about
+   architecture.
 
 **Needing an experiment:**
 
-3. Does `--include-partial-messages` give usable token-level deltas, and does it change the
+4. Is Codex's `approval_policy = "on-request"` reachable over a programmatic stream, or only
+   inside its terminal UI? D27 corrected the premise; this is the question that was hiding
+   behind the old wording, and a yes revisits D5 outright.
+5. Does `--include-partial-messages` give usable token-level deltas, and does it change the
    event contract? Cheap to test, and the answer changes the renderer.
-4. Does the Codex CLI expose a live NDJSON stream at all, and does it match the rollout
+6. Does the Codex CLI expose a live NDJSON stream at all, and does it match the rollout
    schema? First Codex slice answers this (S8.1).
-5. Does Codex offer any runtime approval hook, or is `approval_policy` genuinely the whole
-   story? If there is a hook, D5 gets revisited.
-6. Are Codex's `callId`s unique within a session, or only within a turn? If the latter,
+7. Are Codex's `callId`s unique within a session, or only within a turn? If the latter,
    tool correlation breaks and *Data model § Identity spaces* needs a server-side alias
    after all.
-7. Whether `permission_suggestions` from the Claude CLI is a sufficient grammar for
+8. Whether `permission_suggestions` from the Claude CLI is a sufficient grammar for
    "always allow", or whether a local rule language is needed. Look before inventing.
 
 **Known drift, not a question:**
 
-8. `20-contract.md` needs amendments this design implies, all `/contract`'s to make and
+9. `20-contract.md` needs amendments this design implies, all `/contract`'s to make and
    deliberately not made here:
    - **`session.exit` conflates turn-process exit with session teardown.** Under D16 a
      normal turn ends the child, so a contract-obedient client tears down the session view
@@ -799,6 +1003,11 @@ Questions this design cannot answer without information it was not given. Carrie
    - **`SessionSummary` and `session.started` carry no `state`.** D20 makes `live` vs
      `ended` the field a client reads to decide whether the compose box is enabled, and it
      is currently unexpressible.
-9. `Start-AgentSession.ps1` (D14) is unreconciled against this architecture — it assumes a
-   local interactive terminal, not the server/edge/adapter shape. Reconcile when a slice
-   first needs a CLI launcher, not before.
+   - **`GET /api/tool-output/:callId` must move under `/api/sessions/:id`.** D22, and it is
+     the security half of that decision rather than a tidy-up.
+   - **`TurnEnded.stopReason` has no stated value for an interrupt.** D24 needs one, or an
+     operator-requested end renders as a crash.
+   - **`Attachment` is referenced by `POST /message` and never defined.** Pre-existing, not
+     introduced here, and nothing in this design describes attachment handling.
+10. `Start-AgentSession.ps1` (D14) is unreconciled against this architecture. Carried in
+    `90-decisions.md § Open`; not restated here.
