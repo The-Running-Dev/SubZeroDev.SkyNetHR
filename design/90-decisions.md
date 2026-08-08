@@ -373,7 +373,7 @@ exists.
 ### 2026-08-08 — D23 Orphan reaping reads a server-wide `pids.ndjson` with a reuse guard
 Context: `10-design.md § Boot ordering` reaped "recorded child PIDs" and the failure table
 named a "PID file", but the persistence summary listed no such file and `Turn.child` was
-explicitly in-memory only. S9.4 tests the behaviour. The durable record the whole step
+explicitly in-memory only. S7.5–S7.6 test the behaviour. The durable record the whole step
 depends on did not exist in the data model.
 Chosen: an append-only `<storage>/pids.ndjson`, one record per spawn carrying pid, session,
 turn, start time and process image, tombstoned with `exitedAt` when the child closes. Boot
@@ -964,9 +964,6 @@ Staging only. Once an item becomes an issue it leaves this list.
 - `Start-AgentSession.ps1` (D14) is unreconciled against this repo's own architecture — it
   assumes a local interactive terminal, not the server/SSE/adapter shape D1–D12 settled on.
   Reconcile when a slice first needs a CLI launcher, not before.
-- **S3.3's `replay_gap` assertion changes under D40.** It tested that a too-old
-  `Last-Event-ID` is answered with a gap; it now tests that a gap is reported *only* when the
-  spill cannot serve one. A slice change to carry, not a design question.
 - Are Codex's `callId`s unique within a session or only within a turn? If the latter, tool
   correlation breaks and `10-design.md § Data model — Identity spaces` needs a server-side
   alias after all. Answered by S8.1. The storage half is closed — the blob path carries

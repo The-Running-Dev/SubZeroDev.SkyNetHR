@@ -359,9 +359,9 @@ These blobs are the one part of storage with no stated retention rule — see *O
 
 That invariant is what makes the two tiers interchangeable for reads, and D40 spends it: it
 is *because* the ring is a strict suffix of the spill that a replay can be served from
-either without the client being able to tell. S3.3 currently tests that `replay_gap` is
-reported for a too-old `Last-Event-ID`; under D40 it tests that a gap is reported **only
-when the spill cannot serve one**. That is a slice change and is recorded as one.
+either without the client being able to tell. S3.3 tests that a gap is reported **only when
+the spill cannot serve one**, rather than for any too-old `Last-Event-ID`; that slice change
+is made.
 
 **How the spill is read is stated rather than assumed, and its cost is stated with it.** A
 replay streams the file from the start, skipping until `after`, and serves from there. That
@@ -1458,8 +1458,8 @@ these are cited by number elsewhere in this document and in the slices.
 1. **Resolved by D40.** A too-old `Last-Event-ID` is served from the spill for live and ended
    sessions alike. It was framed here as an optional simplification; it was a brief conflict —
    under a ring-only read path, DoD #5 fails mid-turn, which is the case DoD #5 is about.
-   S3.3's assertion changes from "a gap is reported" to "a gap is reported only when the
-   spill cannot serve", and that is a slice change to be carried.
+   S3.3's assertion changed from "a gap is reported" to "a gap is reported only when the
+   spill cannot serve"; that slice change is carried in `30-slices.md`.
 2. **Tool-output blobs have no retention rule** (D22). They are the only storage that grows
    with tool volume rather than with session count, and a single `find`-heavy turn can
    outweigh a month of transcripts. Options are a per-session byte budget, an age-based
