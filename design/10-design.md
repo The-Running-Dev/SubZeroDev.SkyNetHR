@@ -516,6 +516,12 @@ state, and see whether a session is under a performance plan.*
 | `body` | string | mutable while draft | author |
 | `createdAt` / `updatedAt` | ISO 8601 UTC | set once / on every append | server |
 
+`Rating` is five tokens — `does_not_meet`, `meets_some`, `meets`, `exceeds`, `exceptional` —
+and the wording an operator sees is the client's (D82). Tokens rather than display strings
+because this is an append-only employment record: rewording the scale later must not become a
+migration of `reviews.ndjson`, and a numeric scale would invite arithmetic on a judgement whose
+five points are not evenly spaced.
+
 **Its subject is a session, not a person** (D66), and that is the ruling that keeps D3
 intact. The brief says "against a session" and this design takes it literally: there is no
 employee record, no operator entity, and nothing here that an identity provider renaming
@@ -546,6 +552,9 @@ session they do not own.
 
 **PIP status is derived, and only finals set it** (D72). "Is this session under a performance
 plan?" is answered by the most recent **final** review for that subject having `pip: true`.
+**Most recent** means the greatest `updatedAt` among the finals, ties broken by the later line
+in `reviews.ndjson` (D83) — which needs no finalisation timestamp of its own precisely because
+`final` is terminal, so `updatedAt` on the final line *is* the finalisation time.
 Drafts are excluded, and given the visibility rule above they must be: a half-typed draft
 that changes a badge every other operator sees would leak the draft's content in the one bit
 that matters most, which is worse than the badge arriving when its author finishes.
@@ -667,6 +676,13 @@ newest first, because `audit.ndjson` is the one file in the system with unbounde
 growth: it is never truncated and survives every session deletion, so a read that scans it
 whole gets slower forever. The bound is what makes that acceptable without an index; open
 question 11 already carries the index for the spill and now carries it for this file too.
+
+**That cursor is opaque and server-minted** (D86). An `AuditRecord` carries nothing unique to
+page on, and both obvious alternatives publish something that must later change: a byte offset
+makes the file's physical layout a public interface, which is exactly what open question 11's
+index would move, and `(ts, index)` collides at millisecond precision under a fast stream —
+the argument D2 already made against timestamps as a key. No caller may parse one; what it
+encodes is `store`'s business.
 
 **Who may read all of this is a deliberate policy and it is not the session rule** (D70). See
 *Threat model*.
@@ -2057,6 +2073,16 @@ New in this pass, propagating tier two into the architecture (D65–D79):
   Rejected extending `state`'s union — it would put presentation vocabulary into the value the
   compose box's enabled-ness is decided by. This resolves the `## Open` item that named the
   overlap.
+
+From the tier-two contract derivation and the red-team pass over it (D80–D86), three of which
+this document had left undetermined and no longer does — **D82** fixes `Rating` as five tokens
+against a type this document referenced and never defined, **D83** makes `updatedAt` the
+ordering key for "the most recent final review", and **D86** makes the audit cursor opaque and
+server-minted. The other four are recorded there and change nothing here: **D80**, a
+requisition claim lost to a crash is a dead approval; **D81**, an approved requisition cannot
+be revoked; **D84**, the contract declares the tier-two text caps and the audit window and sets
+no values; **D85**, the checklist fold is served by the server rather than assembled in the
+client.
 
 Standing decisions this design rests on, all in `90-decisions.md`: D1/D10 transport,
 D2 sequencing, D3 delegated auth, D4 the jail, D5 the permission asymmetry, D6 shadow git,
