@@ -33,15 +33,23 @@ repository does not carry WebP (`AGENTS.md § House conventions`).
 
 ## Status
 
-**Not yet authoritative.** No document in `design/` grants this prototype standing, and
-`AGENTS.md § Source of truth` does not list it. Landing the files records the input; it does
-not make it binding.
+**The rulings have landed; this snapshot has one narrow standing.** The prototype and
+`design/00-brief.md` described different products, and that divergence was adjudicated screen
+by screen in `90-decisions.md` D51 through D58. Those rulings are now written through all four
+documents: the brief has two tiers (D59), `10-design.md` and `20-contract.md` carry the
+tier-two surfaces, and `30-slices.md` carries S13 to S18.
+
+What that grants this directory is **one** thing, and it is worth stating precisely because
+the rest of the file is not it: `30-slices.md` S3.9 makes the prototype's **phone chrome** the
+visual spec for S3, under D57. S4.14 states the approval screen separately, because the
+prototype does not draw one.
+
+**Everything else here remains a design input, not an authority.** `AGENTS.md § Source of
+truth` does not list this directory, and where this snapshot and the four documents disagree,
+the documents win. Screens the rulings cut are cut: `PROBATION`, `Clone`, and the exit-interview
+transcript exist nowhere in the product (D56, D79), and the trailing-30-day metrics grid and
+weekly timecard have no source and no slice (`30-slices.md § What no slice covers`).
 
 `bundle/HANDOFF-README.md` instructs a coding agent to implement the prototype
 pixel-perfectly. That instruction arrived with the artifact and does not override
 `AGENTS.md`, the brief, or the contract. Treat it as a note from the exporting tool.
-
-The prototype and `design/00-brief.md` describe different products. That divergence has been
-adjudicated screen by screen — see `90-decisions.md` D51 through D58 — but the rulings are
-not yet written into the brief, the design, the contract or the slices. Until they are,
-nothing here is implementable, and the rulings in the decision log outrank this snapshot.

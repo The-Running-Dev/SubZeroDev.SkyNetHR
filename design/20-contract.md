@@ -1332,8 +1332,9 @@ either way; no caller compensates for it.
 ## Vendor mapping — Codex
 
 **Unverified.** Everything below is a hypothesis to be tested by the spike, drawn from the
-on-disk rollout schema documented in `SubZeroDev.AgentKit/tools/Measure-Session.ps1`, not
-from an observed live stream.
+on-disk rollout schema documented in this repository's `tools/Measure-Session.ps1` — the
+same copy and the same lines `10-design.md § The hard problem` cites, upstream of which is
+`SubZeroDev.AgentKit` — not from an observed live stream.
 
 | Expected record | Normalised |
 |---|---|

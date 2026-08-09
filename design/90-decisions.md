@@ -1526,6 +1526,33 @@ as a public interface, which is exactly what an offset index would later change 
 fast stream, which is the argument D2 already made against timestamps as a key.
 Reversibility: cheap, and cheap *because* it is opaque — that is the point of the choice.
 
+### 2026-08-09 — D87 The spike's contract divergence is declared, not reconciled
+Context: `/reconcile` compared the working tree against `10-design.md` and `20-contract.md`.
+The tree holds no implementation — the only server code is `spike/`, which its own README and
+`30-slices.md:68` declare is throwaway proof. It diverges from the contract in seventeen ways,
+of which the README declared four. An undeclared divergence in the only running code is how a
+throwaway becomes a reference: `agent.md` already records that a shortcut in the reference
+implementation gets copied, because the next author reads the working example before the
+contract.
+Chosen: enumerate every divergence in `spike/README.md` as a table against the contract, and
+fix only the two that are defects rather than gaps — `respondPermission` forwarding a
+client-supplied `input` to the CLI as `updatedInput`, which let an answering client change what
+runs after the operator saw something else (I12); and a comment claiming `scope: 'always'`
+handed the vendor suggestion back, beside a branch that set `updatedPermissions` to `undefined`
+either way, which D35 rejects outright.
+Rejected: bringing the spike up to the contract — the `notify` union, `turnId` on every
+turn-scoped payload, the closed error vocabulary, the origin check, the busy check, atomic
+`meta.json`, the strict CSP. Substantial work on files S1 and S2 delete, and it would make the
+spike look like the implementation it is documented not to be. Rejected deleting the spike now:
+its four proofs are cited by S1 to S4 and the recorded Claude fixtures go with it. Rejected
+fixing the false comment alone and leaving the `input` pass-through — it is the single shortcut
+here most worth not copying.
+Known and retained: the spike still emits `session.exit` (retired by D45), error kinds outside
+`ErrorEventKind`, and payloads without `turnId`. Every one is now in the README's table. Its
+tests cover the NDJSON splitter only, so neither defect fix is under test.
+Reversibility: cheap, and shortly moot — `spike/` is rebuilt in TypeScript by S1 and S2, and
+`spike/.data` is deleted rather than migrated (`20-contract.md § Migration`).
+
 ## Open
 
 Staging only. Once an item becomes an issue it leaves this list.

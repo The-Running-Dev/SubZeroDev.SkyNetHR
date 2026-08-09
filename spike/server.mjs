@@ -27,7 +27,7 @@ const CONFIG = {
   storageDir: process.env.CONSOLE_STORAGE ?? path.join(HERE, '.data'),
 };
 
-// ── Fail closed (10-design.md § Security controls, 30-slices.md S3.4) ──────────────────
+// ── Fail closed (10-design.md § Security controls, 30-slices.md S2.8) ──────────────────
 // A console reachable off-box with no identity is an unauthenticated remote shell. This is
 // a refusal to start, not a warning, because the failure mode of a warning is that nobody
 // reads it.

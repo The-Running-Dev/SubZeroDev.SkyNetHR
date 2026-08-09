@@ -516,6 +516,12 @@ state, and see whether a session is under a performance plan.*
 | `body` | string | mutable while draft | author |
 | `createdAt` / `updatedAt` | ISO 8601 UTC | set once / on every append | server |
 
+`Rating` is five tokens — `does_not_meet`, `meets_some`, `meets`, `exceeds`, `exceptional` —
+and the wording an operator sees is the client's (D82). Tokens rather than display strings
+because this is an append-only employment record: rewording the scale later must not become a
+migration of `reviews.ndjson`, and a numeric scale would invite arithmetic on a judgement whose
+five points are not evenly spaced.
+
 **Its subject is a session, not a person** (D66), and that is the ruling that keeps D3
 intact. The brief says "against a session" and this design takes it literally: there is no
 employee record, no operator entity, and nothing here that an identity provider renaming
@@ -546,6 +552,9 @@ session they do not own.
 
 **PIP status is derived, and only finals set it** (D72). "Is this session under a performance
 plan?" is answered by the most recent **final** review for that subject having `pip: true`.
+**Most recent** means the greatest `updatedAt` among the finals, ties broken by the later line
+in `reviews.ndjson` (D83) — which needs no finalisation timestamp of its own precisely because
+`final` is terminal, so `updatedAt` on the final line *is* the finalisation time.
 Drafts are excluded, and given the visibility rule above they must be: a half-typed draft
 that changes a badge every other operator sees would leak the draft's content in the one bit
 that matters most, which is worse than the badge arriving when its author finishes.
@@ -667,6 +676,13 @@ newest first, because `audit.ndjson` is the one file in the system with unbounde
 growth: it is never truncated and survives every session deletion, so a read that scans it
 whole gets slower forever. The bound is what makes that acceptable without an index; open
 question 11 already carries the index for the spill and now carries it for this file too.
+
+**That cursor is opaque and server-minted** (D86). An `AuditRecord` carries nothing unique to
+page on, and both obvious alternatives publish something that must later change: a byte offset
+makes the file's physical layout a public interface, which is exactly what open question 11's
+index would move, and `(ts, index)` collides at millisecond precision under a fast stream —
+the argument D2 already made against timestamps as a key. No caller may parse one; what it
+encodes is `store`'s business.
 
 **Who may read all of this is a deliberate policy and it is not the session rule** (D70). See
 *Threat model*.
@@ -2058,6 +2074,16 @@ New in this pass, propagating tier two into the architecture (D65–D79):
   compose box's enabled-ness is decided by. This resolves the `## Open` item that named the
   overlap.
 
+From the tier-two contract derivation and the red-team pass over it (D80–D86), three of which
+this document had left undetermined and no longer does — **D82** fixes `Rating` as five tokens
+against a type this document referenced and never defined, **D83** makes `updatedAt` the
+ordering key for "the most recent final review", and **D86** makes the audit cursor opaque and
+server-minted. The other four are recorded there and change nothing here: **D80**, a
+requisition claim lost to a crash is a dead approval; **D81**, an approved requisition cannot
+be revoked; **D84**, the contract declares the tier-two text caps and the audit window and sets
+no values; **D85**, the checklist fold is served by the server rather than assembled in the
+client.
+
 Standing decisions this design rests on, all in `90-decisions.md`: D1/D10 transport,
 D2 sequencing, D3 delegated auth, D4 the jail, D5 the permission asymmetry, D6 shadow git,
 D7 no database, D8 reference-only prior art, D9/D11/D12 the Open WebUI evaluations.
@@ -2145,11 +2171,15 @@ these are cited by number elsewhere in this document and in the slices.
    that document, at commit `0535303`. Three needed decisions of their own and carry them:
    D45 for `session.exit` and where `state` lives, D47 for the undefined `Attachment`, and
    D50 for the vendor authorisation the contract asserted and nothing could hold. Two gaps
-   the derivation exposed are open rather than closed, and are in
-   `90-decisions.md § Open`: attachment handling, and who owns `ToolCall.summary`.
-   **This pass opens a new round of the same drift** — D65 to D79, D73's audit read route, and
-   the whole tier-two surface are in this document and in neither the contract nor the slices.
-   Staged in `90-decisions.md § Open`; not restated here.
+   the derivation exposed are open rather than closed and are now issues: attachment
+   handling (#22), and who owns `ToolCall.summary` (#23).
+   **The round this pass opened is closed too.** D65 to D86, D73's audit read route and the
+   whole tier-two surface reached `20-contract.md` — the types, the routes, `RecordsError`
+   and invariants I29 to I39 — and reached `30-slices.md` as S12 to S18. `90-decisions.md
+   § Open` is empty because everything staged there became an issue. What remains from that
+   round is not drift but undetermined input, and it is carried where it can be checked:
+   `20-contract.md § Unresolved` 5 to 11, each naming its issue, and the seven slices that
+   open with a stop rather than with code.
 10. `Start-AgentSession.ps1` (D14) is unreconciled against this architecture. Carried in
     `90-decisions.md § Open`; not restated here.
 11. **No append-only file here has an index, and every read scans.** For the spill this is
