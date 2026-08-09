@@ -1,0 +1,60 @@
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SkyNet HR</title>
+<link rel="stylesheet" href="/app.css">
+
+<header class="masthead">
+  <h1 class="masthead__title">SkyNet HR</h1>
+  <p id="status" class="masthead__status"></p>
+</header>
+
+<section id="login" class="panel panel--login" hidden>
+  <h2 class="panel__heading">Sign in</h2>
+  <form id="login-form" class="form">
+    <label class="field">
+      <span class="field__label">Shared secret</span>
+      <input id="secret" class="field__input" type="password" autocomplete="current-password" required>
+    </label>
+    <button class="button" type="submit">Sign in</button>
+  </form>
+</section>
+
+<main id="console" class="console">
+  <aside class="sidebar">
+    <div class="sidebar__header">
+      <h2 class="panel__heading">Sessions</h2>
+      <button id="refresh" class="button button--quiet" type="button">Refresh</button>
+    </div>
+    <ul id="sessions" class="sessions"></ul>
+
+    <h2 class="panel__heading">New session</h2>
+    <form id="new-session" class="form">
+      <label class="field">
+        <span class="field__label">Project folder</span>
+        <input id="cwd" class="field__input" type="text" required>
+      </label>
+      <label class="field">
+        <span class="field__label">Agent</span>
+        <input id="vendor" class="field__input" type="text" required>
+      </label>
+      <label class="field">
+        <span class="field__label">Model <span class="field__hint">optional</span></span>
+        <input id="model" class="field__input" type="text">
+      </label>
+      <button class="button" type="submit">Start</button>
+    </form>
+  </aside>
+
+  <section class="transcript-pane">
+    <div id="transcript" class="transcript"></div>
+    <form id="compose" class="compose" hidden>
+      <label class="field field--grow">
+        <span class="field__label field__label--hidden">Message</span>
+        <input id="text" class="field__input" type="text" autocomplete="off" required>
+      </label>
+      <button class="button" type="submit">Send</button>
+    </form>
+  </section>
+</main>
+
+<script type="module" src="/app.js"></script>

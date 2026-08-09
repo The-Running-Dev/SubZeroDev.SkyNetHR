@@ -128,6 +128,15 @@ function parseChecklist(env: Readonly<Record<string, string | undefined>>): Resu
   return { ok: true, value: items };
 }
 
+// Loopback is where a header-trust mode is safe with no allow-list: nothing off-box can
+// reach the port to set the header in the first place. Everything else, `0.0.0.0`
+// included, is routable.
+const LOOPBACK_HOSTS = new Set(['127.0.0.1', '::1', 'localhost']);
+
+function bindIsRoutable(host: string): boolean {
+  return !LOOPBACK_HOSTS.has(host.toLowerCase());
+}
+
 export function loadConfig(env: Readonly<Record<string, string | undefined>>): Result<Config, ConfigError> {
   const host = env['BIND_HOST'] ?? '127.0.0.1';
 
@@ -183,6 +192,16 @@ export function loadConfig(env: Readonly<Record<string, string | undefined>>): R
 
   const checklist = parseChecklist(env);
   if (!checklist.ok) return checklist;
+
+  // Fail closed on startup. A missing auth mode never reaches here: D93 makes one
+  // mandatory and `parseAuth` above already refused with `missing_field`. What is left is
+  // the bind, and it only bites the modes that trust a header the client could otherwise
+  // set — a shared secret is a credential, not a claim about who the peer is, so a
+  // routable bind is legitimate there.
+  const trustsAHeader = auth.value.mode === 'proxy-header' || auth.value.mode === 'open-webui';
+  if (trustsAHeader && bindIsRoutable(host) && trustProxy.length === 0) {
+    return { ok: false, error: { code: 'insecure_bind', bind: `${host}:${portResult.value}` } };
+  }
 
   return {
     ok: true,
