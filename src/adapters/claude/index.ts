@@ -210,18 +210,40 @@ export function createClaudeAdapter(opts: AdapterOptions & { readonly executable
         currentTurnId = turnId;
         resultSeen = false;
 
+        // The resume id lands on an argv that Windows may pass through a shell (below),
+        // so a CLI that reported a session id carrying shell metacharacters is refusing
+        // to follow its own wire schema — refuse it rather than spawn with it.
+        if (resume !== null && !/^[A-Za-z0-9._-]+$/.test(resume)) {
+          resolve({ ok: false, error: { code: 'schema_mismatch', detail: `resume session id contains unsafe characters: ${resume}` } });
+          return;
+        }
+
         // A `.mjs`/`.js` executable is a test fixture script, not a real vendor binary:
         // Windows cannot exec it directly, so run it under this same Node.
         const isScriptFixture = executable.endsWith('.mjs') || executable.endsWith('.js');
-        const spawnCommand = isScriptFixture ? process.execPath : executable;
+        // A shell is needed on Windows for anything that is not a real executable image:
+        // the bare `claude` name (PATH + PATHEXT resolution finds a `.cmd` shim) and any
+        // explicit `.cmd`/`.bat` path — modern Node refuses to spawn those without one
+        // (EINVAL, thrown synchronously). Quoting guards a shim path with spaces, since
+        // a shell spawn concatenates rather than escapes.
+        const needsShell = isWindows && !isScriptFixture && (executable === 'claude' || /\.(cmd|bat)$/i.test(executable));
+        const spawnCommand = isScriptFixture ? process.execPath : needsShell && /\s/.test(executable) ? `"${executable}"` : executable;
         const spawnArgs = isScriptFixture ? [executable, ...buildArgs(resume)] : buildArgs(resume);
 
-        const proc = spawn(spawnCommand, spawnArgs, {
-          cwd: opts.cwd,
-          stdio: ['pipe', 'pipe', 'pipe'],
-          shell: isWindows && !isScriptFixture && executable === 'claude',
-          env: { ...process.env, FORCE_COLOR: '0', NO_COLOR: '1' },
-        });
+        let proc: ChildProcess;
+        try {
+          proc = spawn(spawnCommand, spawnArgs, {
+            cwd: opts.cwd,
+            stdio: ['pipe', 'pipe', 'pipe'],
+            shell: needsShell,
+            env: { ...process.env, FORCE_COLOR: '0', NO_COLOR: '1' },
+          });
+        } catch (err) {
+          // spawn can throw synchronously (EINVAL and friends); a throw here would
+          // otherwise reject this promise and bypass the Result contract entirely.
+          resolve({ ok: false, error: { code: 'agent_unavailable', image: executable, detail: (err as Error).message } });
+          return;
+        }
         child = proc;
 
         let settled = false;
@@ -241,6 +263,10 @@ export function createClaudeAdapter(opts: AdapterOptions & { readonly executable
           const nodeErr = err as NodeJS.ErrnoException;
           if (!settled) {
             settled = true;
+            // The child never spawned, so no turn ran: suppress the close handler's
+            // `turn.ended` synthesis. `send`'s failed Result is the whole story here,
+            // and the manager pairs the already-emitted `turn.started` itself.
+            resultSeen = true;
             resolve({
               ok: false,
               error: { code: 'agent_unavailable', image: executable, detail: nodeErr.message },
@@ -305,7 +331,9 @@ export function createClaudeAdapter(opts: AdapterOptions & { readonly executable
       const proc = child;
       if (!proc || proc.pid === undefined) return;
       if (isWindows) {
-        spawn('taskkill', ['/PID', String(proc.pid), '/T', '/F']);
+        // Failing to kill is non-fatal, but an unlistened ChildProcess 'error' event
+        // (taskkill missing, EPERM) throws and takes the whole server down.
+        spawn('taskkill', ['/PID', String(proc.pid), '/T', '/F']).once('error', () => {});
       } else {
         try {
           process.kill(-proc.pid, 'SIGTERM');

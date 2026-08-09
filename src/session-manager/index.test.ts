@@ -120,6 +120,81 @@ test('S1.5 — seq starts at 1 and is contiguous over 200+ envelopes, assigned o
   assert.equal(seqs[0], 1);
 });
 
+test('two concurrent creates for the same cwd — exactly one wins, the other is workspace_busy', async () => {
+  const { manager, workspaceRoot } = await makeManager('full');
+  const owner = 'operator-1' as OperatorId;
+  const projectDir = path.join(workspaceRoot, 'contested');
+  await mkdir(projectDir);
+
+  const input = { vendor: 'claude' as const, cwd: projectDir, model: null, sandbox: null, requisitionId: null };
+  const [a, b] = await Promise.all([manager.create(owner, input), manager.create(owner, input)]);
+
+  const winners = [a, b].filter((r) => r.ok);
+  assert.equal(winners.length, 1);
+  const loser = [a, b].find((r) => !r.ok)!;
+  if (!loser.ok) assert.equal(loser.error.code, 'workspace_busy');
+});
+
+test('an unspawnable executable still pairs turn.started with turn.ended and frees the turn slot', async () => {
+  const { manager, workspaceRoot } = await makeManager('full');
+  process.env['SKYNET_CLAUDE_EXECUTABLE'] = 'skynet-no-such-binary';
+  try {
+    const owner = 'operator-1' as OperatorId;
+    const projectDir = path.join(workspaceRoot, 'project3');
+    await mkdir(projectDir);
+    const created = await manager.create(owner, { vendor: 'claude', cwd: projectDir, model: null, sandbox: null, requisitionId: null });
+    assert.equal(created.ok, true);
+    if (!created.ok) return;
+
+    const received: Envelope[] = [];
+    await manager.subscribe(created.value.sessionId, owner, 0, { deliver: (e) => received.push(e), close: () => {} });
+
+    const messaged = await manager.message(created.value.sessionId, owner, 'go');
+    assert.equal(messaged.ok, false);
+    if (!messaged.ok) assert.equal(messaged.error.code, 'adapter');
+
+    const started = received.find((e) => e.kind === 'turn.started');
+    const ended = received.find((e) => e.kind === 'turn.ended');
+    assert.ok(started, 'turn.started was emitted');
+    assert.ok(ended, 'turn.ended pairs it');
+    assert.equal((ended!.data as { turnId: string }).turnId, (started!.data as { turnId: string }).turnId);
+    assert.equal((ended!.data as { stopReason: string }).stopReason, 'error');
+
+    // The slot is free again: a second message must not report turn_in_flight.
+    const again = await manager.message(created.value.sessionId, owner, 'go');
+    assert.equal(again.ok, false);
+    if (!again.ok) assert.notEqual(again.error.code, 'turn_in_flight');
+  } finally {
+    process.env['SKYNET_CLAUDE_EXECUTABLE'] = FIXTURE;
+  }
+});
+
+test('a model carrying shell metacharacters is refused with bad_request before any session exists', async () => {
+  const { manager, workspaceRoot } = await makeManager('full');
+  const owner = 'operator-1' as OperatorId;
+  const projectDir = path.join(workspaceRoot, 'project4');
+  await mkdir(projectDir);
+  const result = await manager.create(owner, { vendor: 'claude', cwd: projectDir, model: 'sonnet & calc.exe', sandbox: null, requisitionId: null });
+  assert.equal(result.ok, false);
+  if (!result.ok) {
+    assert.equal(result.error.code, 'bad_request');
+    if (result.error.code === 'bad_request') assert.equal(result.error.field, 'model');
+  }
+});
+
+test('a non-null sandbox for claude is refused with unsupported_sandbox', async () => {
+  const { manager, workspaceRoot } = await makeManager('full');
+  const owner = 'operator-1' as OperatorId;
+  const projectDir = path.join(workspaceRoot, 'project5');
+  await mkdir(projectDir);
+  const result = await manager.create(owner, { vendor: 'claude', cwd: projectDir, model: null, sandbox: 'read-only', requisitionId: null });
+  assert.equal(result.ok, false);
+  if (!result.ok) {
+    assert.equal(result.error.code, 'adapter');
+    if (result.error.code === 'adapter') assert.equal(result.error.cause.code, 'unsupported_sandbox');
+  }
+});
+
 test('S1.6/S1.7 (session-manager integration) — a cwd outside every root is refused before any session is created', async () => {
   const { manager } = await makeManager('full');
   const owner = 'operator-1' as OperatorId;

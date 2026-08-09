@@ -96,6 +96,46 @@ test('S1.8 — meta.json is written once at create (atomic rename) and not per e
   if (lastSeq.ok) assert.equal(lastSeq.value, 25);
 });
 
+test('openToolOutput on a missing blob returns not_found, not a stream that errors later', async () => {
+  const storageRoot = await mkdtemp(path.join(tmpdir(), 'skynet-store-'));
+  const storeResult = await createStore(baseConfig(storageRoot));
+  if (!storeResult.ok) return;
+  const store = storeResult.value;
+  const record = sessionRecord('sess-3');
+  await store.createSession(record);
+
+  const opened = await store.openToolOutput(record.id, 't1' as never, 'call-1' as never);
+  assert.equal(opened.ok, false);
+  if (!opened.ok) assert.equal(opened.error.code, 'not_found');
+});
+
+test('tool-output ids that are not a single path segment are refused; a plain id round-trips', async () => {
+  const storageRoot = await mkdtemp(path.join(tmpdir(), 'skynet-store-'));
+  const storeResult = await createStore(baseConfig(storageRoot));
+  if (!storeResult.ok) return;
+  const store = storeResult.value;
+  const record = sessionRecord('sess-4');
+  await store.createSession(record);
+
+  for (const evil of ['..', '../evil', '..\\evil', 'a/b', 'a\\b']) {
+    const wrote = await store.writeToolOutput(record.id, 't1' as never, evil as never, Buffer.from('x'));
+    assert.equal(wrote.ok, false, `writeToolOutput accepted callId ${JSON.stringify(evil)}`);
+    const openedEvil = await store.openToolOutput(record.id, evil as never, 'call-1' as never);
+    assert.equal(openedEvil.ok, false, `openToolOutput accepted turnId ${JSON.stringify(evil)}`);
+    if (!openedEvil.ok) assert.equal(openedEvil.error.code, 'not_found');
+  }
+
+  const wrote = await store.writeToolOutput(record.id, 't1' as never, 'call-1' as never, Buffer.from('hello'));
+  assert.equal(wrote.ok, true);
+  const opened = await store.openToolOutput(record.id, 't1' as never, 'call-1' as never);
+  assert.equal(opened.ok, true);
+  if (opened.ok) {
+    const chunks: Buffer[] = [];
+    for await (const chunk of opened.value) chunks.push(chunk as Buffer);
+    assert.equal(Buffer.concat(chunks).toString('utf8'), 'hello');
+  }
+});
+
 test('S1.8 — a torn trailing line in events.ndjson is dropped, not fatal, at read time', async () => {
   const storageRoot = await mkdtemp(path.join(tmpdir(), 'skynet-store-'));
   const storeResult = await createStore(baseConfig(storageRoot));

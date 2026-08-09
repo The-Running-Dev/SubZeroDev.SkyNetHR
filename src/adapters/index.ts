@@ -4,6 +4,11 @@ import { createClaudeAdapter } from './claude/index.js';
 export function createAdapter(vendor: Vendor, opts: AdapterOptions): Result<Adapter, AdapterError> {
   switch (vendor) {
     case 'claude':
+      // Sandbox validation is the adapter's (20-contract.md § Adapter), and Claude has
+      // no sandbox mechanism at all (D28) — every non-null request is unsupported.
+      if (opts.sandbox !== null) {
+        return { ok: false, error: { code: 'unsupported_sandbox', sandbox: opts.sandbox } };
+      }
       return { ok: true, value: createClaudeAdapter(opts) };
     case 'codex':
       // S8.1 is the experiment that earns this adapter; it may not be guessed at.

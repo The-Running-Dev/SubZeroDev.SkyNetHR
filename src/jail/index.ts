@@ -17,8 +17,9 @@ function realpathNative(candidate: string): Promise<string> {
 const isWindows = platform === 'win32';
 
 // GetFinalPathNameByHandleW returns the `\\?\`-prefixed extended form; normalise it
-// away so comparisons and anything downstream see an ordinary path.
-function stripExtendedPrefix(p: string): string {
+// away so comparisons and anything downstream see an ordinary path. Exported so config
+// can canonicalise workspace roots with the same normalisation candidates get here.
+export function stripExtendedPrefix(p: string): string {
   if (p.startsWith('\\\\?\\UNC\\')) return '\\\\' + p.slice(8);
   if (p.startsWith('\\\\?\\')) return p.slice(4);
   return p;
@@ -36,6 +37,14 @@ function isInsideRoot(resolved: string, root: string): boolean {
   const sep = isWindows ? '\\' : '/';
   const rootWithSep = b.endsWith(sep) ? b : b + sep;
   return a === b || a.startsWith(rootWithSep);
+}
+
+// True when the two paths are equal or one contains the other, under the same
+// normalisation `isInsideRoot` uses. Both arguments are expected to already be
+// canonical (jail-resolved) paths. This is the one containment predicate in the
+// server; callers must not hand-roll their own.
+export function pathsOverlap(a: string, b: string): boolean {
+  return isInsideRoot(a, b) || isInsideRoot(b, a);
 }
 
 export async function resolveInsideRoot(

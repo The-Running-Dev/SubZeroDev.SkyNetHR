@@ -1,4 +1,5 @@
 import { realpathSync } from 'node:fs';
+import { stripExtendedPrefix } from '../jail/index.js';
 import type {
   AuthConfig,
   Caps,
@@ -90,7 +91,10 @@ function parseWorkspaceRoots(env: Readonly<Record<string, string | undefined>>):
   const resolved: ResolvedPath[] = [];
   for (const candidate of candidates) {
     try {
-      resolved.push(realpathSync(candidate) as ResolvedPath);
+      // `.native` for the same reason the jail uses it (see src/jail/index.ts): the JS
+      // realpath does not resolve Windows 8.3 short names, and a root canonicalised
+      // differently from the candidates checked against it rejects legitimate cwds.
+      resolved.push(stripExtendedPrefix(realpathSync.native(candidate)) as ResolvedPath);
     } catch (err) {
       return invalid('WORKSPACE_ROOTS', `cannot resolve '${candidate}': ${(err as Error).message}`);
     }

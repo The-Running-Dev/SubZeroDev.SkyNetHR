@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { createAdapter } from '../adapters/index.js';
-import { resolveInsideRoot } from '../jail/index.js';
+import { pathsOverlap, resolveInsideRoot } from '../jail/index.js';
 import type {
   Adapter,
   AdapterNotification,
@@ -78,14 +78,6 @@ function notImplemented(method: string): never {
   throw new Error(`session-manager.${method} is not implemented before its owning slice`);
 }
 
-function overlaps(a: string, b: string): boolean {
-  const norm = (p: string) => (process.platform === 'win32' ? p.toLowerCase() : p);
-  const na = norm(a);
-  const nb = norm(b);
-  const sep = process.platform === 'win32' ? '\\' : '/';
-  return na === nb || na.startsWith(nb + sep) || nb.startsWith(na + sep);
-}
-
 export function createSessionManager(deps: {
   readonly config: Config;
   readonly store: Store;
@@ -97,7 +89,7 @@ export function createSessionManager(deps: {
 
   function findLiveOverlap(candidate: ResolvedPath): SessionEntry | null {
     for (const entry of sessions.values()) {
-      if (entry.record.state === 'live' && overlaps(candidate, entry.record.cwd)) return entry;
+      if (entry.record.state === 'live' && pathsOverlap(candidate, entry.record.cwd)) return entry;
     }
     return null;
   }
@@ -143,15 +135,26 @@ export function createSessionManager(deps: {
     },
 
     async create(owner, input) {
+      // The model string lands on the vendor argv, which Windows may pass through a
+      // shell; a shell never sees anything outside this charset, so refusal here keeps
+      // metacharacters out of every adapter rather than each escaping them itself.
+      if (input.model !== null && !/^[A-Za-z0-9][A-Za-z0-9.:/_-]*$/.test(input.model)) {
+        return { ok: false, error: { code: 'bad_request', field: 'model', detail: 'model may contain only letters, digits, and . : / _ -' } };
+      }
+
       const jailed = await resolveInsideRoot(input.cwd, config.workspaceRoots);
       if (!jailed.ok) return { ok: false, error: { code: 'jail', cause: jailed.error } };
       const cwd = jailed.value;
 
+      // I5: the workspace test and the claim happen in one synchronous block — no
+      // `await` between `findLiveOverlap` and `sessions.set` — so two concurrent
+      // creates for overlapping cwds cannot both pass the test.
       const overlap = findLiveOverlap(cwd);
       if (overlap) {
         return { ok: false, error: { code: 'workspace_busy', holder: { cwd: overlap.record.cwd, owner: overlap.record.owner } } };
       }
 
+      const sessionId = randomUUID() as SessionId;
       const adapterResult = createAdapter(input.vendor, {
         cwd,
         model: input.model,
@@ -160,7 +163,6 @@ export function createSessionManager(deps: {
       });
       if (!adapterResult.ok) return { ok: false, error: { code: 'adapter', cause: adapterResult.error } };
 
-      const sessionId = randomUUID() as SessionId;
       const record: SessionRecord = {
         id: sessionId,
         owner,
@@ -176,9 +178,6 @@ export function createSessionManager(deps: {
         endedAt: null,
       };
 
-      const created = await store.createSession(record);
-      if (!created.ok) return { ok: false, error: { code: 'storage', cause: created.error } };
-
       const entry: SessionEntry = {
         record,
         adapter: adapterResult.value,
@@ -189,6 +188,12 @@ export function createSessionManager(deps: {
         writeQueue: Promise.resolve(),
       };
       sessions.set(sessionId, entry);
+
+      const created = await store.createSession(record);
+      if (!created.ok) {
+        sessions.delete(sessionId);
+        return { ok: false, error: { code: 'storage', cause: created.error } };
+      }
 
       // Checkpoints (S6) and requisition attachment (S13) are not this slice's.
 
@@ -225,6 +230,9 @@ export function createSessionManager(deps: {
 
       const sendResult = await entry.adapter.send(text, entry.record.cliSessionId, turnId);
       if (!sendResult.ok) {
+        // The `turn.started` above is already durable; pair it (I14, D39) before
+        // freeing the slot, or the log carries an open turn no restart ever repairs.
+        await emit(entry, 'turn.ended', { turnId, stopReason: 'error', usage: null });
         entry.turn = null;
         return { ok: false, error: { code: 'adapter', cause: sendResult.error } };
       }

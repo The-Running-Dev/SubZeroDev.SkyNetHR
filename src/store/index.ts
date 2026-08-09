@@ -48,6 +48,22 @@ function eventsPath(storageRoot: string, sessionId: SessionId): string {
   return path.join(sessionDir(storageRoot, sessionId), 'events.ndjson');
 }
 
+// Tool-output blob paths are built from a `turnId` the manager minted and a `callId`
+// taken verbatim off the vendor's wire — the one store input an outside process
+// authors. A single path segment (no separators, no `..`, no NUL) cannot escape the
+// blob directory on either platform.
+function isSafePathSegment(name: string): boolean {
+  return (
+    name.length > 0 &&
+    name !== '.' &&
+    name !== '..' &&
+    !name.includes('/') &&
+    !name.includes('\\') &&
+    !name.includes('\0') &&
+    name === path.basename(name)
+  );
+}
+
 // Temp-file-then-atomic-rename, in the same directory so the rename is on one volume.
 async function atomicWrite(targetPath: string, contents: string): Promise<void> {
   const dir = path.dirname(targetPath);
@@ -268,6 +284,9 @@ export async function createStore(config: Config): Promise<Result<Store, StoreEr
     async writeToolOutput(sessionId: SessionId, turnId: TurnId, callId: CallId, bytes: Buffer) {
       const dir = path.join(sessionDir(storageRoot, sessionId), 'tool-output', turnId);
       const filePath = path.join(dir, callId);
+      if (!isSafePathSegment(turnId) || !isSafePathSegment(callId)) {
+        return ioError(filePath, 'id is not a single path segment');
+      }
       try {
         await mkdir(dir, { recursive: true });
         await writeFile(filePath, bytes);
@@ -279,9 +298,17 @@ export async function createStore(config: Config): Promise<Result<Store, StoreEr
 
     async openToolOutput(sessionId: SessionId, turnId: TurnId, callId: CallId) {
       const filePath = path.join(sessionDir(storageRoot, sessionId), 'tool-output', turnId, callId);
+      // An id that is not a single path segment can only name something outside the
+      // blob directory, and outside the blob directory nothing is found.
+      if (!isSafePathSegment(turnId) || !isSafePathSegment(callId)) {
+        return { ok: false, error: { code: 'not_found', path: filePath } };
+      }
+      // `createReadStream` alone never throws for a missing file — the open is lazy and
+      // ENOENT arrives later as a stream 'error' event. Opening the handle first makes
+      // `not_found` a real result instead of a dead branch.
       try {
-        const stream = createReadStream(filePath);
-        return { ok: true, value: stream };
+        const handle = await open(filePath, 'r');
+        return { ok: true, value: handle.createReadStream() };
       } catch (err) {
         if ((err as NodeJS.ErrnoException).code === 'ENOENT') return { ok: false, error: { code: 'not_found', path: filePath } };
         return ioError(filePath, (err as Error).message);
