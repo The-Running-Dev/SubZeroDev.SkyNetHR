@@ -15,6 +15,13 @@ last among them**: it is the read half of brief item 7, which no earlier revisio
 by D22), and `scope: 'always'` forwarding the vendor's own suggestion (retired by D35). Its
 ids are not carried forward.
 
+**Two criteria were added after S1 landed, at the next free id in their slice** — S1.11 and
+S4.15, both by the reconciliation that followed S1 (D89 to D96). Ids are still never reused
+and never renumbered, so `/track` compares on ids as before and sees two additions rather than
+any drift. They are not equivalent: **S1.11 is already met** — a passing test asserted it
+before the criterion existed, which is the coverage arriving without the promise — while
+**S4.15 is not met and names behaviour that has never existed**.
+
 **S1 to S11 and every criterion under them are frozen.** `/track` has run: issues #2 to #12
 carry those slices and their `Done when` checkboxes refer to these ids. This pass adds
 criteria to S2, S3, S4 and S10 at the next free id in each, and adds no criterion in a gap.
@@ -116,6 +123,11 @@ Acceptance:
     `session-manager` and `contract` sources for the literals `claude` and `codex` returns
     only the `Vendor` type declaration and the pass-through argument to `createAdapter`
     (I20).
+  - S1.11 `usage` is normalised per `message.id`, not summed raw: replayed against a captured
+    real-CLI run, the emitted `usage` events sum component-wise to an independently computed
+    total over distinct message ids, and `assistant` records repeating a `message.id` emit no
+    second event (D75, I28). Added after the slice landed, against the probe that answered
+    open question 14 for Claude — see `design/findings/S1-claude-adapter.md`.
 
 Out of scope: HTTP, the browser, identity resolution, answering a permission
 interactively, checkpoints, the audit log, interrupt, replay, truncation, Codex.
@@ -278,6 +290,12 @@ Acceptance:
     input is legible without horizontal scrolling, and allow and deny each round-trip to a real
     child from that layout. The prototype draws no approval screen, so this one is specified
     here rather than taken from it.
+  - S4.15 A turn that spawns with no `--resume` on a session that has already run one emits
+    `session.notice / warn` with code `resume_unavailable`, saying the conversation context was
+    not carried forward (D34). Asserted by killing a child before it reports `system/init` and
+    sending a second message: the notice is emitted, the turn proceeds, and `cliSessionId` is
+    unchanged. Added by reconciliation — the behaviour was specified in
+    `10-design.md § Failure modes` and owned by no slice, so it silently did not exist.
 
 Out of scope: standing rules and `scope: 'always'` (S10, blocked on #16); forwarding
 `updatedPermissions` to the CLI (D35 rejects it); Codex permissions (S8); per-operator vendor

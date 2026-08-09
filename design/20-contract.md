@@ -156,9 +156,23 @@ interface ProcessRecord {
   readonly turnId: TurnId;
   readonly startedAt: IsoTimestamp;    // load-bearing: the pid-reuse guard reads it
   readonly image: string;
-  exitedAt: IsoTimestamp | null;       // tombstone
+  exitedAt: IsoTimestamp | null;       // null while live; set by folding in the tombstone
+}
+
+// The exit line. `pids.ndjson` carries two line shapes and this is the second: a full
+// `ProcessRecord` is written at spawn, and this narrower line at exit, because
+// `tombstonePid` is given a pid and a timestamp and nothing else (D95).
+interface ProcessTombstone {
+  readonly pid: number;
+  readonly exitedAt: IsoTimestamp;
 }
 ```
+
+**A reader folds the two shapes; it does not treat the latest line as a whole record.**
+Liveness comes from the latest line for a `pid`; `startedAt`, `image`, `sessionId` and
+`turnId` come from that pid's most recent **spawn** line. The reuse guard reads all three of
+`exitedAt`, `startedAt` and `image` (I19), and a reader that took them off the tombstone
+would find two of them missing and reap on a guard that never ran.
 
 ### Event envelope
 
@@ -619,10 +633,10 @@ interface SessionMetaFile {
 | File | Key | Ordering / index | Constraints |
 |---|---|---|---|
 | `meta.json` | `sessionId` from the directory name | — | Written by temp-file-then-atomic-rename, never in place, on exactly three occasions: create, a `state` transition, a `cliSessionId` change. Never per event |
-| `events.ndjson` | `(sessionId, seq)` | `seq` ascending, contiguous from 1 | Append-only. Not fsync'd per line. Read from the start and skipped to `after`; no offset index exists |
+| `events.ndjson` | `(sessionId, seq)` | `seq` ascending, contiguous from 1 | Append-only, written in `seq` order through the session's own append chain (D89). Not fsync'd per line. Read from the start and skipped to `after`; no offset index exists |
 | `tool-output/<turnId>/<callId>` | `(sessionId, turnId, callId)` | — | Written once, never appended. `turnId` is in the path because `callId` is vendor-minted and only *assumed* session-unique |
 | `audit.ndjson` | append order | append order, read newest first | Server-wide. fsync'd before the decision it records reaches the child. Never truncated, never deleted with a session. Every read is a bounded window resumed by `AuditCursor` |
-| `pids.ndjson` | append order; `pid` is not unique over time | append order | Server-wide. A tombstone is a second line for the same `pid`; the latest line for a `pid` wins |
+| `pids.ndjson` | append order; `pid` is not unique over time | append order | Server-wide. Two line shapes: a `ProcessRecord` at spawn, a `ProcessTombstone` at exit (D95). The latest line for a `pid` decides liveness; the spawn line carries everything else |
 | `reviews.ndjson` *(tier two)* | `reviewId` | append order; the latest line for an id wins | Server-wide. Never rewritten. Survives deletion of the session it names (D67). A `final` line is terminal — no later line for that id is written |
 | `requisitions.ndjson` *(tier two)* | `requisitionId` | append order; the latest line for an id wins | Server-wide. Never rewritten. Written before the session it opens exists |
 | `ckpt.git/` | git object ids | git history | Git is the store. `add -A` honours the workspace's own `.gitignore` |
@@ -676,7 +690,22 @@ declare function resolveInsideRoot(
   candidate: string,
   roots: readonly ResolvedPath[],
 ): Promise<Result<ResolvedPath, JailError>>;
+
+// The one containment predicate in this server: true when the two paths are equal or
+// either contains the other, under the same normalisation `resolveInsideRoot` applies.
+// Both arguments must already be jail-resolved. `session-manager`'s workspace busy check
+// (D30) calls this; no module hand-rolls a second one.
+declare function pathsOverlap(a: ResolvedPath, b: ResolvedPath): boolean;
+
+// Normalises away the `\\?\` extended-length prefix a native realpath returns on
+// Windows. Exported because `config` must canonicalise a declared workspace root with
+// exactly the normalisation a candidate gets here (D94) — a root spelled differently
+// from the candidates tested against it refuses legitimate paths.
+declare function stripExtendedPrefix(p: string): string;
 ```
+
+`jail` depends on `contract` alone. The roots arrive as a parameter, so there is no
+`jail → config` edge; the edge runs the other way (`10-design.md § Module boundaries`).
 
 ### `store`
 
@@ -786,6 +815,15 @@ declare function createAdapter(vendor: Vendor, opts: AdapterOptions): Result<Ada
 asked" or a standing sandbox banner. `sandbox` is the operator's choice and is validated by
 the adapter.
 
+**A vendor adapter may accept one thing beyond `AdapterOptions`, and it is a test seam, not a
+deployment knob** (D91). `createClaudeAdapter` takes an optional `executable`, defaulting to
+`SKYNET_CLAUDE_EXECUTABLE` and then to the vendor's own name, so a fixture CLI speaking the
+documented wire shape can stand in for the real binary over a real child process — which is
+what D88's verification of the permission round trip rests on. It is deliberately **not** a
+`Config` field: a deployment that can repoint the agent binary from the environment is a
+deployment where the audit log names a program nobody chose. `createAdapter` does not expose
+it, so nothing above `adapters/*` can reach it.
+
 An adapter never emits `checklist.item.completed`: that envelope originates with an operator,
 not with a child process.
 
@@ -866,6 +904,8 @@ There is no `revoke` and no expiry: an approval stays spendable until it is spen
 interface CreateSessionInput {
   readonly vendor: Vendor;
   readonly cwd: string;                  // the client's string; never used after the jail check
+  // Constrained, not free text: `/^[A-Za-z0-9][A-Za-z0-9.:/_-]*$/`, else `422 bad_request`
+  // on `model`. It reaches a child's argv, which Windows passes through a shell (D90).
   readonly model: string | null;
   readonly sandbox: SandboxMode | null;
   readonly requisitionId: RequisitionId | null;   // (tier two) optional; never a gate (D68)
@@ -1281,7 +1321,7 @@ it; where two are named, the second is where a violation would first be observab
 | I24 | The origin allow-list is applied to every mutating route and to the WebSocket handshake, before identity is resolved | `edge/sse`, `edge/ws` |
 | I25 | A `preauthorised` session emits zero `permission.request` events | `adapters/*` |
 | I26 | No string this codebase did not write is ever assigned to `innerHTML` or parsed as markup — agent output, tool results, and stored operator text alike | `client` |
-| I27 | There is no mutex, lock, or semaphore in the server. `emit` is synchronous and is the serialisation point | all |
+| I27 | There is no mutex, lock, or semaphore in the server. `emit`'s synchronous prefix — `seq`, ring push, fan-out — is the serialisation point. The per-session append chain that follows it orders I/O and excludes nothing (D89) | all |
 | I28 | `Usage` on an emitted `usage` event is incremental and summable; no module above `adapters/*` performs arithmetic on a vendor's own token numbers | `adapters/*` |
 | I29 | *(tier two)* A review's `state` moves `draft → final` and never back. A `final` review accepts no further append for that `reviewId` | `records` |
 | I30 | *(tier two)* A review's `snapshot` is copied at authorship and never refreshed; no read of a review resolves its `subject` | `records` |
@@ -1313,11 +1353,24 @@ Verified against `Forks-Claude-Code-Chat@ab6e307`.
 | `result`, subtype success | `turn.ended`, `stopReason: 'completed'`; close stdin |
 | `result`, any other subtype | `turn.ended`, `stopReason: 'error'`; close stdin |
 | `close` with no `result` seen | `turn.ended`, `stopReason: 'process_exit'` |
+| A record on the ignored list below | *nothing*, deliberately — **not** `adapter_unknown_record` |
 
-Launched with `--output-format stream-json --input-format stream-json --verbose
---permission-prompt-tool stdio`, plus `--resume <cliSessionId>` when the manager supplies
-one. Outbound user messages and `control_response` are single JSON lines written to stdin,
-which stays open for the whole turn.
+Launched with `-p --output-format stream-json --input-format stream-json --verbose
+--permission-prompt-tool stdio`, plus `--model <model>` when the session names one and
+`--resume <cliSessionId>` when the manager supplies one. **`-p` is not optional**: without it
+the CLI does not run non-interactively and the stream-json transport never starts. Outbound
+user messages and `control_response` are single JSON lines written to stdin, which stays open
+for the whole turn.
+
+**The twelve rows are not the CLI's whole vocabulary, and the mapper must not treat them as
+one** (D92). The live stream carries records that are ordinary, harmless, and no part of this
+vocabulary; raising `error / adapter_unknown_record` for each would put a diagnostic line in
+front of the operator on every routine turn. The adapter therefore holds a named ignore list —
+top-level `rate_limit_event` and `control_response`, and the `system` subtypes `hook_started`,
+`hook_response`, `thinking_tokens` and `post_turn_summary` — and returns silently for those.
+Anything outside both the twelve rows and that list still raises `adapter_unknown_record`,
+non-fatally, with the record preserved in `raw`. The list is a vendor fact and lives with the
+vendor's adapter; adding to it is an adapter change, never a change to `ErrorEventKind`.
 
 `updatedPermissions` is never sent. Standing approvals are held by this server and matched
 here, so that every match still produces a `permission.request` / `permission.resolved` pair
@@ -1325,9 +1378,15 @@ and an audit record.
 
 Policy for every Claude session: `{ mode: 'interactive', sandbox: null, banner: null }`.
 
-Whether Claude's reported usage is cumulative within a context — and therefore what the
-adapter must subtract to emit a delta — is open question 14. The obligation is the adapter's
-either way; no caller compensates for it.
+**Claude's usage is per-message, not cumulative, and the arithmetic the adapter owes is
+de-duplication rather than subtraction** (open question 14, answered for Claude by S1).
+Each `assistant` record reports that API call's own marginal usage, so nothing is subtracted.
+But one logical message arrives as several `assistant` records that share a `message.id` and
+repeat byte-identical usage, so the adapter emits `usage` **once per `message.id`** and drops
+the repeats. The `result` record's usage is a different and larger basis and has no row in
+this table; mixing it in would misreport burn. Probes and fixtures:
+`design/findings/S1-claude-adapter.md`. The obligation stays the adapter's; no caller
+compensates for it.
 
 ## Vendor mapping — Codex
 
