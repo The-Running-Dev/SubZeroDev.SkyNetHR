@@ -60,8 +60,10 @@ deferred risk.
 
 **Numbering appends; it is not the execution order.** Ids are never renumbered, so a slice
 added later sorts after slices it must be built after *and* after some it need not. The order
-to build in is the `Depends on` line, and only that. Tier one reads S1 → S2 → {S3, S4} → S5 →
-S6 → S7 → S8 → S9 → S10 → S11, with S12 reachable as soon as S4 and S5 have landed. In tier
+to build in is the `Depends on` line, and only that. Tier one reads
+S1 → S2a → S2b → S2c → S2d → {S3, S4} → S5 → S6 → S7 → S8 → S9 → S10 → S11, with S12
+reachable as soon as S4 and S5 have landed. **Letters append the same way numbers do** — S2a
+to S2d subdivide S2 in place (D106) so that nothing after them renumbered. In tier
 two, S13 comes before S15 because it builds `records`; S14 and S16 depend on neither and can be
 taken in any order; **S17 and S18 are last because each waits on a tier-one slice** — S17 on
 S12's route and S18 on S10's held rules.
@@ -135,16 +137,78 @@ Acceptance:
 Out of scope: HTTP, the browser, identity resolution, answering a permission
 interactively, checkpoints, the audit log, interrupt, replay, truncation, Codex.
 
-## S2 — The browser console
+## S2 — The browser console (split into S2a to S2d)
 
 Delivers: An operator opens a page in their browser, is recognised by whatever already
 authenticates them, picks a project folder and Claude, types a message, and watches the
 agent work as it happens — seeing their own sessions and nobody else's.
 
-Touches: `identity`, `edge/sse`, `client`, `config` (bind, auth, `allowedOrigins`,
-`trustProxy`), `session-manager` (`create`, `list`, `get`, `message`, `subscribe`).
+**Split into S2a to S2d by D106.** The four are the whole of S2 and nothing else. Every
+criterion below carries the id it had before the split — none was renumbered, added or
+removed — so `/track` compares on ids and sees a redistribution rather than drift. A
+`Depends on: S2` line anywhere in this document means all four; those lines were deliberately
+**not** narrowed to name a single sub-slice, because re-deriving which one each downstream
+slice truly needs is the generative reconciliation D105 froze `design/` to stop.
+
+Touches, across the four: `config` (bind, auth, `allowedOrigins`, `trustProxy`), `identity`,
+`edge/sse`, `session-manager` (`create`, `list`, `get`, `message`, `subscribe`), `client`.
+
+Out of scope, for all four: the WebSocket edge (S11), the permission prompt (S4), reconnect
+and replay (S3), checkpoints, interrupt, mobile layout beyond not breaking, the other three
+palettes and the theme switcher (S18 — S2.14 ships the token layer and one palette),
+`--include-partial-messages` and `message.delta` (#13).
+
+## S2a — Refuse to start insecurely
+
+Delivers: The server reads its configuration and, where that configuration would expose it,
+refuses to start at all rather than starting with a warning nobody reads. This is the slice
+that makes the dangerous intermediate state — a console reachable off-box with no auth —
+unreachable from the first commit, which is why it comes before anything that serves a route.
+
+Touches: `config` (bind, auth, `allowedOrigins`, `trustProxy`).
 
 Depends on: S1.
+
+Acceptance:
+  - S2.8 The server refuses to start on either fail-closed path, each with a non-zero exit
+    and a message naming the fix. Not a warning. Two cases, because D93 split them: a
+    routable bind that no `trustProxy` allow-list covers is `ConfigError.insecure_bind`; a
+    configuration with no auth mode at all is refused earlier, at parse time, with
+    `ConfigError.missing_field` naming the field — it never reaches the bind decision.
+
+## S2b — Know who is asking
+
+Delivers: An operator is recognised by whatever already authenticates them — a proxy header
+from a peer the configuration trusts, or a shared-secret cookie — and a request that cannot be
+attributed to someone is refused. Requests from an origin the configuration does not allow are
+turned away before identity is even considered.
+
+Touches: `identity`, `config` (auth, `trustProxy`, `allowedOrigins`).
+
+Depends on: S2a.
+
+Acceptance:
+  - S2.4 Proxy-header mode resolves an `OperatorId` from the configured header, and rejects
+    that header with `401 unauthenticated` when the peer address is not in `trustProxy`,
+    logging the address.
+  - S2.5 Shared-secret mode authenticates from its cookie; a wrong secret is
+    `401 unauthenticated`. The cookie is set `SameSite=Strict; HttpOnly; Path=/`.
+  - S2.9 A `POST` whose `Origin` is not in `allowedOrigins` returns `403 bad_origin`, and
+    does so **before identity is resolved** — asserted by an unauthenticated request with a
+    disallowed origin returning `403`, not `401` (I24).
+  - S2.13 The negative authentication cases are each rejected and the counts stated in the
+    slice report: no identity, a forged header from a peer outside `trustProxy`, a wrong
+    shared secret, and a disallowed origin.
+
+## S2c — Create a session, send a message, watch it stream
+
+Delivers: The HTTP surface an operator actually drives — create a session, send it a message,
+and subscribe to a live event stream that survives a reverse proxy's idle timeout. Someone
+else's session is indistinguishable from one that does not exist.
+
+Touches: `edge/sse`, `session-manager` (`create`, `list`, `get`, `message`, `subscribe`).
+
+Depends on: S2b.
 
 Acceptance:
   - S2.1 `POST /api/sessions` returns `201 { sessionId }`, and its refusals carry the exact
@@ -154,33 +218,29 @@ Acceptance:
     turn is running returns `409 turn_in_flight`.
   - S2.3 `GET /api/sessions/:id/events` is `text/event-stream`, one envelope per message,
     `id:` set to `seq` and `event:` set to `kind`.
-  - S2.4 Proxy-header mode resolves an `OperatorId` from the configured header, and rejects
-    that header with `401 unauthenticated` when the peer address is not in `trustProxy`,
-    logging the address.
-  - S2.5 Shared-secret mode authenticates from its cookie; a wrong secret is
-    `401 unauthenticated`. The cookie is set `SameSite=Strict; HttpOnly; Path=/`.
   - S2.6 Every `/api/sessions/:id` route implemented in this slice returns
     `404 no_such_session` — never `403` — for a session owned by another operator.
   - S2.7 `GET /api/sessions` returns only the caller's sessions.
-  - S2.8 The server refuses to start on either fail-closed path, each with a non-zero exit
-    and a message naming the fix. Not a warning. Two cases, because D93 split them: a
-    routable bind that no `trustProxy` allow-list covers is `ConfigError.insecure_bind`; a
-    configuration with no auth mode at all is refused earlier, at parse time, with
-    `ConfigError.missing_field` naming the field — it never reaches the bind decision.
-  - S2.9 A `POST` whose `Origin` is not in `allowedOrigins` returns `403 bad_origin`, and
-    does so **before identity is resolved** — asserted by an unauthenticated request with a
-    disallowed origin returning `403`, not `401` (I24).
   - S2.10 A `: keepalive` comment is sent every `caps.keepaliveMs`, and an idle stream
     survives at least three intervals through a reverse proxy.
+
+## S2d — The page itself
+
+Delivers: The browser page, rendering the agent working as it happens from normalised events
+only — no vendor name anywhere in the client, a strict CSP that hostile text cannot escape,
+and every visual value coming from a design token rather than a literal.
+
+Touches: `client`.
+
+Depends on: S2c.
+
+Acceptance:
   - S2.11 The client renders `message`, `thinking` and `tool.call` from normalised events
     only; a search of client sources for `claude` and `codex` returns nothing.
   - S2.12 The document is served with exactly the CSP in `10-design.md § Security controls`;
     the built client contains no inline script or style; a tool name or message text
     containing `<img src=x onerror=alert(1)>` renders as literal characters and executes
     nothing (I26).
-  - S2.13 The negative authentication cases are each rejected and the counts stated in the
-    slice report: no identity, a forged header from a peer outside `trustProxy`, a wrong
-    shared secret, and a disallowed origin.
   - S2.14 Every colour, spacing, radius and type value the client renders with is a CSS
     custom property declared in one stylesheet; no component style carries a literal colour.
     Asserted by searching the built client's styles for hex literals, `rgb(`, `hsl(` and CSS
@@ -188,11 +248,6 @@ Acceptance:
     D58 requires every component to be built four ways from the first one, and the token layer
     is the half of that which cannot be retrofitted — the four palettes and the switcher are
     S18's.
-
-Out of scope: the WebSocket edge (S11), the permission prompt (S4), reconnect and replay
-(S3), checkpoints, interrupt, mobile layout beyond not breaking, the other three palettes and
-the theme switcher (S18 — S2.14 ships the token layer and one palette),
-`--include-partial-messages` and `message.delta` (#13).
 
 ## S3 — Close the laptop, open the phone
 

@@ -1,0 +1,341 @@
+/*
+ * S2.14 / D58 — the token layer.
+ *
+ * Every colour, spacing, radius and type value this console renders with is declared once,
+ * here, as a custom property. No rule below the token block carries a literal. S18 adds
+ * three more palettes and the switcher over the top of this; that is only cheap if nothing
+ * downstream has to be found and rewritten first, which is why the layer ships now and the
+ * palettes ship later.
+ */
+
+:root {
+  --ink: rgb(232 234 237);
+  --ink-dim: rgb(154 160 166);
+  --ink-faint: rgb(114 120 126);
+  --surface: rgb(20 22 25);
+  --surface-raised: rgb(28 31 35);
+  --surface-sunken: rgb(15 16 19);
+  --line: rgb(48 52 58);
+  --accent: rgb(122 162 247);
+  --accent-ink: rgb(16 18 22);
+  --ok: rgb(126 200 148);
+  --warn: rgb(224 184 112);
+  --danger: rgb(232 130 130);
+  --agent: rgb(158 206 255);
+  --thinking: rgb(150 140 200);
+
+  --space-0: 0;
+  --space-1: 0.25rem;
+  --space-2: 0.5rem;
+  --space-3: 0.75rem;
+  --space-4: 1rem;
+  --space-5: 1.5rem;
+  --space-6: 2rem;
+
+  --radius-1: 0.25rem;
+  --radius-2: 0.5rem;
+
+  --text-xs: 0.75rem;
+  --text-sm: 0.875rem;
+  --text-md: 1rem;
+  --text-lg: 1.25rem;
+
+  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-mono: ui-monospace, "Cascadia Code", "Source Code Pro", Menlo, monospace;
+
+  --shadow-1: 0 1px 2px rgb(0 0 0 / 0.4);
+  --border-width: 1px;
+  --sidebar-width: 20rem;
+  --line-height: 1.5;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: var(--space-0);
+  padding: var(--space-0);
+  background: var(--surface);
+  color: var(--ink);
+  font-family: var(--font-sans);
+  font-size: var(--text-md);
+  line-height: var(--line-height);
+}
+
+/* ---------------------------------------------------------------- masthead */
+
+.masthead {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-4);
+  padding: var(--space-3) var(--space-5);
+  border-bottom: var(--border-width) solid var(--line);
+  background: var(--surface-raised);
+}
+
+.masthead__title {
+  margin: var(--space-0);
+  font-size: var(--text-lg);
+}
+
+.masthead__status {
+  margin: var(--space-0);
+  font-size: var(--text-sm);
+  color: var(--ink-dim);
+}
+
+.status__text--ok { color: var(--ok); }
+.status__text--warn { color: var(--warn); }
+.status__text--error { color: var(--danger); }
+.status__text--info { color: var(--ink-dim); }
+
+/* ------------------------------------------------------------------ layout */
+
+.console {
+  display: grid;
+  grid-template-columns: var(--sidebar-width) 1fr;
+  gap: var(--space-0);
+  height: calc(100vh - 4rem);
+}
+
+.sidebar {
+  padding: var(--space-4);
+  border-right: var(--border-width) solid var(--line);
+  background: var(--surface-sunken);
+  overflow-y: auto;
+}
+
+.sidebar__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+.panel {
+  padding: var(--space-5);
+}
+
+.panel__heading {
+  margin: var(--space-4) var(--space-0) var(--space-2);
+  font-size: var(--text-sm);
+  color: var(--ink-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+/* ---------------------------------------------------------------- sessions */
+
+.sessions {
+  margin: var(--space-0);
+  padding: var(--space-0);
+  list-style: none;
+}
+
+.session {
+  margin: var(--space-0) var(--space-0) var(--space-1);
+}
+
+.session__button {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  width: 100%;
+  padding: var(--space-2) var(--space-3);
+  border: var(--border-width) solid var(--line);
+  border-radius: var(--radius-1);
+  background: var(--surface-raised);
+  color: var(--ink);
+  font-family: var(--font-sans);
+  font-size: var(--text-sm);
+  text-align: left;
+  cursor: pointer;
+}
+
+.session--current .session__button {
+  border-color: var(--accent);
+}
+
+.session__cwd {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  word-break: break-all;
+}
+
+.session__meta {
+  color: var(--ink-faint);
+  font-size: var(--text-xs);
+}
+
+/* ------------------------------------------------------------------- forms */
+
+.form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.field--grow { flex: 1; }
+
+.field__label {
+  font-size: var(--text-xs);
+  color: var(--ink-dim);
+}
+
+.field__label--hidden {
+  position: absolute;
+  width: var(--border-width);
+  height: var(--border-width);
+  overflow: hidden;
+  clip-path: inset(50%);
+}
+
+.field__hint { color: var(--ink-faint); }
+
+.field__input {
+  padding: var(--space-2);
+  border: var(--border-width) solid var(--line);
+  border-radius: var(--radius-1);
+  background: var(--surface);
+  color: var(--ink);
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+}
+
+.field__input:focus-visible {
+  outline: var(--border-width) solid var(--accent);
+}
+
+.button {
+  padding: var(--space-2) var(--space-4);
+  border: var(--border-width) solid var(--accent);
+  border-radius: var(--radius-1);
+  background: var(--accent);
+  color: var(--accent-ink);
+  font-family: var(--font-sans);
+  font-size: var(--text-sm);
+  cursor: pointer;
+}
+
+.button--quiet {
+  border-color: var(--line);
+  background: var(--surface-raised);
+  color: var(--ink-dim);
+}
+
+/* -------------------------------------------------------------- transcript */
+
+.transcript-pane {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.transcript {
+  flex: 1;
+  padding: var(--space-4) var(--space-5);
+  overflow-y: auto;
+}
+
+.event {
+  display: grid;
+  grid-template-columns: 5rem 1fr;
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-0);
+  border-bottom: var(--border-width) solid var(--line);
+}
+
+.event__label {
+  color: var(--ink-faint);
+  font-size: var(--text-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.event--assistant .event__label { color: var(--agent); }
+.event--thinking .event__label { color: var(--thinking); }
+.event--error .event__label { color: var(--danger); }
+.event--permission .event__label { color: var(--warn); }
+
+.message__text,
+.thinking__text,
+.notice__text,
+.error-event__text,
+.turn__text,
+.session__text {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.thinking__text { color: var(--ink-dim); }
+
+.tool__name,
+.permission__tool {
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+}
+
+.tool__summary,
+.permission__hint,
+.tool__truncated,
+.session-started__meta {
+  color: var(--ink-faint);
+  font-size: var(--text-xs);
+}
+
+.tool__input,
+.tool__output,
+.permission__input {
+  margin: var(--space-1) var(--space-0) var(--space-0);
+  padding: var(--space-2);
+  border-radius: var(--radius-2);
+  background: var(--surface-sunken);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-x: auto;
+}
+
+.tool__status { color: var(--ok); }
+
+.session-started__cwd {
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+}
+
+/* ----------------------------------------------------------------- compose */
+
+.compose {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-5);
+  border-top: var(--border-width) solid var(--line);
+  background: var(--surface-raised);
+  box-shadow: var(--shadow-1);
+}
+
+/* The phone layout is S3.9's. This much only keeps the desktop grid from breaking. */
+@media (max-width: 48rem) {
+  .console {
+    grid-template-columns: 1fr;
+  }
+
+  .sidebar {
+    border-right: var(--space-0);
+    border-bottom: var(--border-width) solid var(--line);
+  }
+
+  .event {
+    grid-template-columns: 1fr;
+    gap: var(--space-1);
+  }
+}

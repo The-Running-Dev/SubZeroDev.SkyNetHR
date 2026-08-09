@@ -1836,6 +1836,76 @@ the field to `readonly unknown[]`: the contract would lose a shape whose intent 
 every consumer would cast, and the type returns anyway.
 Reversibility: cheap — one paragraph, deleted when #16 lands.
 
+### 2026-08-09 — D105 `design/` is frozen for the rest of tier one; reconciliation is one pass at the end
+Context: measured over 22 commits, one touched `src/`. Design churn is roughly 14,600 lines
+against 3,222 lines of source, and `design/` at HEAD is 6,733 lines specifying 3,222 lines of
+software. The mechanism is visible either side of the one code commit: S1 landed, and the
+reconciliation that followed emitted D89 to D104 — sixteen decisions and 534 lines of design
+change — which rewrote S2's acceptance criteria before S2 had been started. Landing a slice
+therefore invalidates the next slice's specification, which desyncs the tracker, which needs
+`/track`, which finds drift, which needs `/reconcile`. The loop has no fixed point because each
+pass is generative rather than merely checking. Compounding it, issue #3 pinned its criteria to
+`design/30-slices.md § S2 @ 4ea4660` and #42 to #48 to `@ a89d820`; neither commit is an ancestor
+of `main`, so the tracker cites slice documents this project's history does not contain.
+Chosen: freeze `design/` at HEAD for the remainder of tier one. `/reconcile` and `/track` are not
+run between slices. Slices are implemented against `20-contract.md` as a fixed artifact. Where the
+implementation contradicts a design document, the contradiction is stated in that slice's pull
+request and **left in the document** — the docs are permitted to go stale, deliberately, and one
+reconciliation pass runs when tier one is code-complete. GitHub issues are repinned once, now, to
+the slice document as it stands on `main`, and are not resynced until that pass.
+Rejected: continuing per-slice reconciliation. It is the loop being escaped and its cost is
+measured above. Rejected abandoning the design docs — they are why the contract is coherent and
+why S1 landed as cleanly as it did; the defect is that they are kept live *during* implementation,
+not that they exist. Rejected splitting S2 into smaller slices first: renumbering is what desynced
+the tracker to begin with, and S2's criteria are implementable on one branch even though they are
+more than one session's reading. Rejected repinning every issue continuously — one pass now, one
+pass at the end.
+Reversibility: cheap. This is a working convention, not a code change; resuming per-slice
+reconciliation is one command.
+
+### 2026-08-09 — D106 S2 splits into S2a to S2d, in place, as the last edit before the freeze binds
+Context: D105 rejected splitting S2, on the ground that "renumbering is what desynced the
+tracker to begin with." That reason is sound and is not overturned here — what changed is that
+the split turns out not to require any renumbering. D105's own sentence also concedes the
+defect it declined to fix: S2's criteria "are more than one session's reading," and
+`AGENTS.md` § *Session boundaries* states that a slice which does not fit one session without
+compaction **is too large — that is a `/slices` defect**. So D105 recorded a known defect and
+chose to carry it, which is a legitimate call but not a permanent one. Two further facts were
+established while checking: the repin pass D105 states as done ("repinned once, now") was only
+partly done — #3 carries the D105 repin note, but #42 to #48 still cite
+`design/30-slices.md § S<n> @ 4ea4660`, and `git merge-base --is-ancestor` confirms neither
+`4ea4660` nor `a89d820` is an ancestor of `main`. Fourteen criteria also group cleanly along
+S2's own `Touches:` line, and the uncommitted tree already had `src/config/` and `src/identity/`
+as separate work, which is the split asserting itself in practice before it was written down.
+Chosen: S2 becomes S2a (refuse to start insecurely, S2.8), S2b (know who is asking, S2.4, S2.5,
+S2.9, S2.13), S2c (routes, ownership and the stream, S2.1, S2.2, S2.3, S2.6, S2.7, S2.10) and
+S2d (the page itself, S2.11, S2.12, S2.14). **Nothing is renumbered at either level**: letters
+subdivide S2 in place so S3 to S18 keep their numbers and issues #4 to #48 stay valid, and every
+criterion keeps the exact id it already had, so `/track` compares on ids and sees a
+redistribution rather than drift. `Depends on: S2` lines elsewhere are left alone and defined to
+mean all four — narrowing them would be exactly the generative reconciliation D105 froze
+`design/` to prevent. S2.6 sits in S2c rather than S2b because its own wording is "every
+`/api/sessions/:id` route implemented in this slice," which is vacuous in a slice with no routes.
+**The freeze binds after this edit**, which is the one structural change D105's own subject
+matter could not be corrected without; the tracker is repinned in the same single pass D105
+already scoped, finishing the half that did not happen.
+Rejected: **Renumbering S2 to S5 and shifting S3 to S18 up to S6 to S21** — cleanly sequential,
+and rejected for D105's stated reason unchanged: it invalidates sixteen slice numbers and every
+downstream issue pin, which is the desync being escaped. **Leaving S2 whole**, per D105 as
+written — rejected because it preserves a defect this repository's own contract names, and the
+only argument for it was a renumbering cost this split does not incur. **Three slices, folding
+config into identity** — offered and declined; S2.8 is a startup refusal that must hold before
+any route or identity code exists, and merging it into an authentication slice hides the
+ordering guarantee that makes the insecure intermediate state unreachable. **Repinning every
+issue continuously from here** — unchanged from D105, still rejected; this is one pass, and the
+next is when tier one is code-complete.
+Reversibility: cheap. Four headings merge back into one, the criterion ids are already
+unchanged so nothing has to be renamed to undo it, and the tracker repin is one pass either way.
+Amends: D105 — its rejection of splitting S2 is reversed on the narrow ground that no
+renumbering is required; every other clause of D105 stands, including the freeze itself, the
+suspension of `/reconcile` and `/track`, implementing against `20-contract.md` as fixed, and
+letting the documents go stale until one reconciliation at the end.
+
 ## Open
 
 Staging only. Once an item becomes an issue it leaves this list.
