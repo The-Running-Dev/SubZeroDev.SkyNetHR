@@ -113,9 +113,12 @@ Acceptance:
   - S1.7 The resolved real path, not the caller's string, is what the child runs in —
     asserted from the child's own reported working directory, not from reading the calling
     code.
-  - S1.8 `meta.json` is written by temp-file-then-atomic-rename at create and not again
-    during the run; `events.ndjson` holds one parseable `Envelope` per line with `seq`
-    ascending contiguously from 1.
+  - S1.8 `meta.json` is written only by temp-file-then-atomic-rename, and only on the three
+    occasions `20-contract.md § Persisted schemas` names — create, a `state` transition, and
+    a change of `cliSessionId` — never per event. Asserted through `session-manager` driving
+    a real turn, not against `store` alone, because the per-turn `cliSessionId` write (D34)
+    is only observable there. `events.ndjson` holds one parseable `Envelope` per line with
+    `seq` ascending contiguously from 1.
   - S1.9 A prompt that provokes a tool call produces `permission.request` carrying the exact
     tool input as the CLI sent it. The harness auto-denies, and the turn still reaches
     `turn.ended`.
@@ -159,9 +162,11 @@ Acceptance:
   - S2.6 Every `/api/sessions/:id` route implemented in this slice returns
     `404 no_such_session` — never `403` — for a session owned by another operator.
   - S2.7 `GET /api/sessions` returns only the caller's sessions.
-  - S2.8 The server refuses to start when it would bind a non-loopback interface with no
-    auth mode configured: `ConfigError.insecure_bind`, a message naming the fix, and a
-    non-zero exit. Not a warning.
+  - S2.8 The server refuses to start on either fail-closed path, each with a non-zero exit
+    and a message naming the fix. Not a warning. Two cases, because D93 split them: a
+    routable bind that no `trustProxy` allow-list covers is `ConfigError.insecure_bind`; a
+    configuration with no auth mode at all is refused earlier, at parse time, with
+    `ConfigError.missing_field` naming the field — it never reaches the bind decision.
   - S2.9 A `POST` whose `Origin` is not in `allowedOrigins` returns `403 bad_origin`, and
     does so **before identity is resolved** — asserted by an unauthenticated request with a
     disallowed origin returning `403`, not `401` (I24).

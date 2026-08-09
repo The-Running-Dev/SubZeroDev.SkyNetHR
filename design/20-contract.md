@@ -784,7 +784,11 @@ type AdapterNotification =
 
 type AdapterEmitted = Exclude<
   EventKind,
-  'session.started' | 'session.ended' | 'checkpoint.created' | 'checklist.item.completed'
+  | 'session.started'
+  | 'session.ended'
+  | 'checkpoint.created'
+  | 'checklist.item.completed'
+  | 'permission.resolved'
 >;
 
 type AdapterEvent = {
@@ -826,6 +830,14 @@ it, so nothing above `adapters/*` can reach it.
 
 An adapter never emits `checklist.item.completed`: that envelope originates with an operator,
 not with a child process.
+
+**Nor does it emit `permission.resolved`** (D97). The manager holds the `pending` map, deletes
+from it synchronously (D33) and appends the audit record every resolution owes (I11), so an
+adapter that resolved a request of its own would produce a resolution with no audit record and
+leave the manager's map holding an entry nothing will clear. What the adapter contributes when
+its child dies is the `exited` notification; deciding that every outstanding request is now
+`cancelled_process_exit` is the manager's, in the same place it decides it for an interrupt and
+for a turn boot closes.
 
 ### `records` *(tier two)*
 
@@ -1232,7 +1244,7 @@ type SessionError =
 
 | Variant | Raised when | Retryable | Caller does |
 |---|---|---|---|
-| `ConfigError.insecure_bind` | A non-loopback bind with no auth mode configured | No | Refuse to start, naming the fix |
+| `ConfigError.insecure_bind` | A routable bind that no `trustProxy` allow-list covers. **Not** a missing auth mode: D93 makes one mandatory in every configuration, so that case is `missing_field` at parse time and never reaches here | No | Refuse to start, naming the fix |
 | `ConfigError.missing_field` / `invalid_field` | Validation of the environment | No | Refuse to start |
 | `StartupError.storage_unwritable` | The storage root cannot be written at boot | No | Refuse to start |
 | `IdentityError.no_identity` | No header, no cookie, or an empty one | No | `401 unauthenticated` |
@@ -1375,6 +1387,14 @@ vendor's adapter; adding to it is an adapter change, never a change to `ErrorEve
 `updatedPermissions` is never sent. Standing approvals are held by this server and matched
 here, so that every match still produces a `permission.request` / `permission.resolved` pair
 and an audit record.
+
+**`permission_suggestions` is forwarded unmapped, and no consumer may read a forwarded element
+as a `PermissionSuggestion`** (D104). `PermissionSuggestion` names `{ label, rule }` against a
+`StandingRuleExpression` whose grammar is undecided — `## Unresolved` 2, issue #16 — so there is
+nothing here to map onto yet, and inventing one would be inventing that grammar. The adapter
+therefore passes the vendor's array through as it arrived. Nothing exercises this today: no
+observed CLI run has produced a `control_request` at all (D88), and the fixture sends an empty
+array. This paragraph is deleted when #16 lands and the mapping is written.
 
 Policy for every Claude session: `{ mode: 'interactive', sandbox: null, banner: null }`.
 

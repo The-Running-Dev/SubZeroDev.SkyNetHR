@@ -356,8 +356,9 @@ Shape is owned by `20-contract.md § Event envelope`; it is not restated here.
 
 Two storage tiers, and they are not the same data:
 
-- **Ring buffer**, in memory, bounded (currently 2000 envelopes). Serves live replay after
-  a reconnect, and serves it fast.
+- **Ring buffer**, in memory, bounded by `Caps.ringCapacity` — a deployment's value, not a
+  constant of this design (D99). It ships defaulting to 2000, which is the figure every
+  argument below is calibrated on. Serves live replay after a reconnect, and serves it fast.
 - **Spill file**, `events.ndjson`, append-only, unbounded. The durable transcript, and
   **a read path as well as a write one** (D20), **for live sessions as much as ended ones**
   (D40). A rehydrated session has an empty ring buffer, so the spill is the only place its
@@ -1175,7 +1176,7 @@ operator, because that would need a container per session and is explicitly out 
 
 | Adversary | In scope | Control |
 |---|---|---|
-| The internet | Yes | Server refuses to bind non-loopback without auth configured |
+| The internet | Yes | An auth mode is required in every configuration (D93), and a routable bind is refused unless a `trustProxy` allow-list covers it |
 | **A malicious page in an operator's browser** | Yes | Origin allow-list on every mutating route and the WS handshake (D29). **Not** the bind check, and **not** the auth check |
 | A curious operator starting a session outside their workspace | Yes | Path jail, resolved after symlinks — see below for what this does *not* cover |
 | An agent reaching outside the workspace once running | Partly | Permission prompt (Claude) or vendor sandbox (Codex). **Not the jail** |
@@ -1340,9 +1341,12 @@ The consequence of skipping this is specific rather than theoretical: script exe
 the console's origin can issue exactly the POSTs the operator can, from a page the origin
 check trusts.
 
-**Fail closed on startup.** The server refuses to start if it would bind a non-loopback
-interface with no auth mode configured. Not a warning. A misconfigured console is a remote
-shell, and the failure mode of a warning is that nobody reads it.
+**Fail closed on startup.** An auth mode is required in every configuration, so the
+configuration this rule was originally written against — a bind with no auth at all — cannot
+be loaded (D93). What remains, and what `insecure_bind` now names, is a routable bind that no
+`trustProxy` allow-list covers: a trusted header nothing constrains the source of is a header
+any client can set. The server refuses to start. Not a warning. A misconfigured console is a
+remote shell, and the failure mode of a warning is that nobody reads it.
 
 **Workspace jail.** Configuration declares one or more `workspaceRoot` paths. A requested
 working directory is accepted only if its **fully resolved real path** — symlinks followed,
@@ -1447,6 +1451,15 @@ a client tell a silent agent from a dead connection, so this costs nothing on th
 | Partial failure during delete | Filesystem error | `error`, non-fatal; registry entry removed anyway | "Session removed, storage may need cleaning" | Orphaned files on disk, named in the log. Preferred over a session that reappears |
 | Storage root unwritable at boot | Startup check | **Refuse to start** | Startup error | — |
 
+**The spill-failure row lands in two slices, and saying which avoids reading a partial as the
+whole** (D100). S1 owns the half that keeps the invariants true: the turn slot is cleared and
+`meta.json` is written on the transition, so `state === 'ended'` still implies `turn === null`
+(I8) and a state change is still on disk (I16). The half that needs a child killed and a notice
+vocabulary — interrupting the live turn with `stopReason: 'storage_failure'` and emitting
+`session.ended` plus `session.notice / error` — is **S5's**, which owns interrupt and the process
+tree kill. Until S5 lands, a session struck by a spill failure stops accepting turns and says
+nothing on the wire about why.
+
 ### Records boundary (tier two)
 
 | Failure | Detection | System does | Operator sees | State left behind |
@@ -1509,7 +1522,8 @@ it — carried in `90-decisions.md § Open`.
 | `meta.json` carries an unknown `schemaVersion` | Version check at boot (D49) | **Identical to a parse failure**: skip, log, continue. Never a migration attempt, never a partial read | One session missing, the log saying it is a newer format | Its files untouched. This is the whole reason the field exists |
 | A record log is unreadable at boot *(tier two)* | Open error | Log it; start with that registry empty; **boot continues** | Reviews or requisitions missing | File untouched. Tier two failing must not deny an operator tier one |
 | One corrupt line in a record log *(tier two)* | Parse failure on that line | Drop the line, log it, keep reading | The record at its previous state, or absent | See *Persistence summary* for why a drop here reverts rather than shortens |
-| Bind non-loopback, no auth | Startup check | **Refuse to start**, say why | Startup error naming the fix | — |
+| Routable bind with no `trustProxy` allow-list | Startup check | **Refuse to start**, say why | Startup error naming the fix | — |
+| No auth mode in the configuration | Config parse (D93) | **Refuse to start** — `missing_field`, before any bind decision | Startup error naming the field | — |
 
 ## Concurrency and ordering
 
