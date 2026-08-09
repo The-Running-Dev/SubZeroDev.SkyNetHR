@@ -2171,11 +2171,15 @@ these are cited by number elsewhere in this document and in the slices.
    that document, at commit `0535303`. Three needed decisions of their own and carry them:
    D45 for `session.exit` and where `state` lives, D47 for the undefined `Attachment`, and
    D50 for the vendor authorisation the contract asserted and nothing could hold. Two gaps
-   the derivation exposed are open rather than closed, and are in
-   `90-decisions.md § Open`: attachment handling, and who owns `ToolCall.summary`.
-   **This pass opens a new round of the same drift** — D65 to D79, D73's audit read route, and
-   the whole tier-two surface are in this document and in neither the contract nor the slices.
-   Staged in `90-decisions.md § Open`; not restated here.
+   the derivation exposed are open rather than closed and are now issues: attachment
+   handling (#22), and who owns `ToolCall.summary` (#23).
+   **The round this pass opened is closed too.** D65 to D86, D73's audit read route and the
+   whole tier-two surface reached `20-contract.md` — the types, the routes, `RecordsError`
+   and invariants I29 to I39 — and reached `30-slices.md` as S12 to S18. `90-decisions.md
+   § Open` is empty because everything staged there became an issue. What remains from that
+   round is not drift but undetermined input, and it is carried where it can be checked:
+   `20-contract.md § Unresolved` 5 to 11, each naming its issue, and the seven slices that
+   open with a stop rather than with code.
 10. `Start-AgentSession.ps1` (D14) is unreconciled against this architecture. Carried in
     `90-decisions.md § Open`; not restated here.
 11. **No append-only file here has an index, and every read scans.** For the spill this is

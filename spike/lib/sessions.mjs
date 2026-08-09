@@ -10,7 +10,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { createClaudeAdapter } from './claude-adapter.mjs';
 
-const RING = 2000;   // events retained for replay; S9.3 spills the rest to disk
+const RING = 2000;   // events retained for replay; S9.1 caps and spills the rest to disk
 
 /**
  * Resolve a requested cwd and prove it lies inside a configured root (D4).

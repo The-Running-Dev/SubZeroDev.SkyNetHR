@@ -196,7 +196,7 @@ export function createClaudeAdapter({ cwd, model, executable = 'claude', emit })
         if (!child) return;
         child = null;
         // Anything still waiting is now unanswerable. Resolving it is what stops a client
-        // from hanging on a prompt that can never complete (S4.5).
+        // from hanging on a prompt that can never complete (S4.9).
         for (const [requestId] of pending) {
           emit('permission.resolved', {
             requestId, decision: 'deny', scope: 'once',

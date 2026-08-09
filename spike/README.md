@@ -40,17 +40,19 @@ Four tests, all passing on Node 25.3. Pass no path — `node --test test/` tries
 | `CONSOLE_STORAGE` | Defaults to `spike/.data` |
 
 The server **refuses to start** on a non-loopback interface with no auth configured. That
-is deliberate and is criterion S3.4 — do not relax it to get something working.
+is deliberate and is criterion S2.8 — do not relax it to get something working.
 
 ## What this proves
 
 - The stream-json transport, with stdin held open for the turn (S1.1)
 - The NDJSON splitter, tested byte-by-byte including a mid-character UTF-8 split (S1.2)
 - Claude event mapping to the normalised envelope (S1.3)
-- Server-assigned `seq` and SSE replay via `Last-Event-ID` (S2.1, S3.1–S3.3)
-- The workspace jail on a resolved real path (S2.2, S2.3)
-- The permission handshake both ways, including cancellation on child death (S4.1–S4.5)
-- Fail-closed startup (S3.4)
+- Server-assigned `seq` (S1.5), the SSE stream shape (S2.3) and replay via `Last-Event-ID`
+  (S3.1)
+- The workspace jail on a resolved real path (S1.6, S1.7)
+- The permission handshake both ways (S4.1–S4.5), including cancellation on child death
+  (S4.9)
+- Fail-closed startup (S2.8)
 
 ## What this is not
 
