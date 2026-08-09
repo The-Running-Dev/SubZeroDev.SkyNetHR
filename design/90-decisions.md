@@ -1717,14 +1717,3 @@ Reversibility: cheap, and it reverts the day #34046 ships a fix.
 ## Open
 
 Staging only. Once an item becomes an issue it leaves this list.
-
-- **The four server-wide append files are not held open as one stream.** `10-design.md §
-  Concurrency` rests the no-lock argument for `audit.ndjson`, `pids.ndjson`,
-  `reviews.ndjson` and `requisitions.ndjson` on each being "opened once, as a single append
-  stream owned by `store`"; S1's store opens and closes a handle per line instead. Only one
-  writer reaches any of them today, so nothing is wrong yet — but `audit.ndjson` is the file
-  where it stops being true, because `AuditRecord.input` is contractually never truncated and
-  an oversized line is where a per-call append stops being one write. The design is right and
-  the store changes: open the four handles at `createStore` and route every append through
-  them, with `appendAudit`'s fsync-before-return re-proven against the shared handle. Land it
-  with S4, which is where the audit path arrives.
