@@ -22,6 +22,11 @@ interface EdgeDeps {
   readonly records: Records;
 }
 
+// The browser's own `EventSource` reconnect delay. Independent of `caps.keepaliveMs`,
+// which paces the heartbeat comment, not the client's retry backoff — conflating the two
+// would make a keepalive tuned for a proxy's idle timeout silently slow every reconnect.
+const SSE_RETRY_MS = 2000;
+
 // `10-design.md § Security controls`, verbatim. Served on the document only.
 const CSP =
   "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; " +
@@ -317,7 +322,7 @@ export function createSseEdge(deps: EdgeDeps): RequestListener {
       'x-content-type-options': 'nosniff',
     });
     res.flushHeaders();
-    res.write(`retry: ${config.caps.keepaliveMs}\n\n`);
+    res.write(`retry: ${SSE_RETRY_MS}\n\n`);
 
     const keepalive = setInterval(() => {
       if (open) res.write(': keepalive\n\n');
@@ -402,7 +407,13 @@ export function createSseEdge(deps: EdgeDeps): RequestListener {
 
         const sessionRoute = /^\/api\/sessions\/([^/]+)(\/[^?]*)?$/.exec(pathname);
         if (sessionRoute !== null) {
-          const sessionId = decodeURIComponent(sessionRoute[1]!) as SessionId;
+          let decoded: string;
+          try {
+            decoded = decodeURIComponent(sessionRoute[1]!);
+          } catch {
+            return sendError(res, 'bad_request', 'session id is not a valid path segment', { field: 'sessionId' });
+          }
+          const sessionId = decoded as SessionId;
           const rest = sessionRoute[2] ?? '';
           if (method === 'POST' && rest === '/message') return handleMessage(req, res, owner, sessionId);
           if (method === 'GET' && rest === '/events') return handleEvents(req, res, owner, sessionId);

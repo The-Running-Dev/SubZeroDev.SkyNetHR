@@ -309,6 +309,23 @@ describe('S2.3 — GET /api/sessions/:id/events', () => {
   });
 });
 
+describe('S2.10 — SSE retry hint', () => {
+  it('sets retry: independently of caps.keepaliveMs', async () => {
+    const h = await makeEdge(undefined, {
+      caps: {
+        ringCapacity: 500, toolResultBytes: 65536, subscriberQueueHighWater: 1000,
+        keepaliveMs: 15000, auditPageMax: 200, reviewBodyBytes: 1024, requisitionTextBytes: 1024,
+      },
+    });
+    const id = await newSession(h, 'r1');
+    const res = await get(h, `/api/sessions/${id}/events`);
+    const { raw } = await readFrames(res, (_f, r) => r.includes('retry: '), 5000);
+    const retryLine = raw.split('\n').find((l) => l.startsWith('retry: '))!;
+    const retryMs = Number.parseInt(retryLine.slice('retry: '.length), 10);
+    assert.notEqual(retryMs, 15000, 'retry: must not be caps.keepaliveMs');
+  });
+});
+
 describe('S2.10 — SSE keepalive', () => {
   it('sends a : keepalive comment every caps.keepaliveMs and the idle stream survives three intervals', async () => {
     const h = await makeEdge(undefined, {
@@ -347,6 +364,13 @@ describe('S2.6 / S2.7 — ownership', () => {
     const h = await makeEdge();
     const res = await post(h, '/api/sessions/2b2e1e6a-0000-4000-8000-000000000000/message', { text: 'x' });
     assert.equal(res.status, 404);
+  });
+
+  it('answers 422 bad_request, not 503, for a session id with a malformed percent-escape', async () => {
+    const h = await makeEdge();
+    const res = await post(h, '/api/sessions/%/message', { text: 'x' });
+    assert.equal(res.status, 422);
+    assert.equal(((await res.json()) as { error: { code: string } }).error.code, 'bad_request');
   });
 
   it('GET /api/sessions returns only the caller\'s sessions', async () => {

@@ -39,6 +39,10 @@ async function api(method, path, body) {
   } catch {
     payload = null;
   }
+  // A 401 from any route but the login exchange itself means the credential that got us
+  // this far no longer works — every caller, not just refreshSessions, needs to fall back
+  // to the login panel rather than leaving the console up showing a dead-end error.
+  if (response.status === 401 && path !== '/api/login') showLogin();
   return { status: response.status, payload };
 }
 
@@ -55,7 +59,7 @@ function describe(result) {
 
 async function refreshSessions() {
   const result = await api('GET', '/api/sessions');
-  if (result.status === 401) return showLogin();
+  if (result.status === 401) return;
   if (result.status !== 200) return status(describe(result), 'error');
 
   const list = $('sessions');
@@ -131,6 +135,7 @@ async function createSession(event) {
     model: model === '' ? null : model,
     sandbox: null,
   });
+  if (result.status === 401) return;
   if (result.status !== 201) return status(describe(result), 'error');
   status('session started', 'ok');
   await refreshSessions();
@@ -145,6 +150,10 @@ async function sendMessage(event) {
   field.value = '';
 
   const result = await api('POST', `/api/sessions/${encodeURIComponent(state.sessionId)}/message`, { text: value });
+  if (result.status === 401) {
+    field.value = value;
+    return;
+  }
   if (result.status !== 202) {
     field.value = value;
     return status(describe(result), 'error');

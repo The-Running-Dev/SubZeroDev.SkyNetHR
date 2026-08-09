@@ -41,6 +41,12 @@ describe('config — fail closed on startup (S2.8)', () => {
     }
   });
 
+  it('allows any 127.0.0.0/8 alias, not just 127.0.0.1', () => {
+    for (const host of ['127.0.0.2', '127.1.2.3', '127.255.255.255']) {
+      assert.equal(loadConfig(env({ BIND_HOST: host })).ok, true, host);
+    }
+  });
+
   it('does not apply the bind rule to shared-secret mode, which trusts no header', () => {
     const r = loadConfig(
       env({

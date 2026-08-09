@@ -31,6 +31,9 @@ function header(req: IdentityRequest, name: string): string | undefined {
   return undefined;
 }
 
+// The edge writes the cookie value through `encodeURIComponent` (`edge/sse/index.ts`), so
+// it is decoded on the way back in — otherwise a secret with any character that encoding
+// escapes can never compare equal to what was presented at login.
 function cookie(req: IdentityRequest, name: string): string | undefined {
   const raw = header(req, 'cookie');
   if (raw === undefined) return undefined;
@@ -38,9 +41,21 @@ function cookie(req: IdentityRequest, name: string): string | undefined {
     const eq = pair.indexOf('=');
     if (eq < 0) continue;
     if (pair.slice(0, eq).trim() !== name) continue;
-    return pair.slice(eq + 1).trim();
+    const value = pair.slice(eq + 1).trim();
+    try {
+      return decodeURIComponent(value);
+    } catch {
+      return value;
+    }
   }
   return undefined;
+}
+
+// Node reports an IPv4 peer on a dual-stack (`::`) bind as `::ffff:a.b.c.d`. `trustProxy`
+// is configured in plain IPv4, so the mapped prefix is stripped before either side is
+// compared — otherwise a proxy named correctly in config never matches the peer it is.
+function unmapIPv4(address: string): string {
+  return address.startsWith('::ffff:') ? address.slice('::ffff:'.length) : address;
 }
 
 /**
@@ -50,8 +65,9 @@ function cookie(req: IdentityRequest, name: string): string | undefined {
  * host. Any other reading would make the default configuration authenticate nobody.
  */
 function peerIsTrusted(remoteAddress: string, trustProxy: readonly string[]): boolean {
-  if (trustProxy.length === 0) return LOOPBACK.has(remoteAddress);
-  return trustProxy.includes(remoteAddress);
+  const peer = unmapIPv4(remoteAddress);
+  if (trustProxy.length === 0) return LOOPBACK.has(remoteAddress) || LOOPBACK.has(peer);
+  return trustProxy.some((allowed) => unmapIPv4(allowed) === peer);
 }
 
 function constantTimeEquals(a: string, b: string): boolean {

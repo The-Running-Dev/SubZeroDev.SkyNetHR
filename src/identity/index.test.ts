@@ -57,6 +57,18 @@ describe('identity — proxy-header mode (S2.4)', () => {
     const r = resolve({ headers: { 'x-forwarded-user': ['first', 'second'] }, remoteAddress: '10.0.0.1' });
     assert.equal(r.ok && r.value, 'second');
   });
+
+  it('matches trustProxy against an IPv4-mapped IPv6 peer on a dual-stack bind', () => {
+    const resolve = resolverFor(proxyAuth, ['192.168.1.10']);
+    const r = resolve({ headers: { 'x-forwarded-user': 'ben' }, remoteAddress: '::ffff:192.168.1.10' });
+    assert.equal(r.ok, true);
+  });
+
+  it('matches an IPv4-mapped entry in trustProxy against a plain IPv4 peer', () => {
+    const resolve = resolverFor(proxyAuth, ['::ffff:192.168.1.10']);
+    const r = resolve({ headers: { 'x-forwarded-user': 'ben' }, remoteAddress: '192.168.1.10' });
+    assert.equal(r.ok, true);
+  });
 });
 
 describe('identity — shared-secret mode (S2.5)', () => {
@@ -86,6 +98,15 @@ describe('identity — shared-secret mode (S2.5)', () => {
   it('does not consult trustProxy — the secret is the credential, not the peer', () => {
     const resolve = resolverFor(secretAuth, ['10.0.0.1']);
     assert.equal(resolve({ headers: { cookie: 'skynet=correct horse battery staple' }, remoteAddress: '198.51.100.4' }).ok, true);
+  });
+
+  it('decodes a cookie value the edge wrote through encodeURIComponent', () => {
+    // `edge/sse/index.ts` sets the cookie as `encodeURIComponent(secret)`; a secret with
+    // spaces or `+`/`/` is only readable back if this side decodes it the same way.
+    const resolve = resolverFor(secretAuth, []);
+    const encoded = encodeURIComponent(secretAuth.mode === 'shared-secret' ? secretAuth.secret : '');
+    const r = resolve({ headers: { cookie: `skynet=${encoded}` }, remoteAddress: '127.0.0.1' });
+    assert.equal(r.ok, true);
   });
 });
 

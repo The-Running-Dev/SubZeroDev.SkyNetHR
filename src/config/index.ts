@@ -130,11 +130,17 @@ function parseChecklist(env: Readonly<Record<string, string | undefined>>): Resu
 
 // Loopback is where a header-trust mode is safe with no allow-list: nothing off-box can
 // reach the port to set the header in the first place. Everything else, `0.0.0.0`
-// included, is routable.
-const LOOPBACK_HOSTS = new Set(['127.0.0.1', '::1', 'localhost']);
+// included, is routable. The whole 127.0.0.0/8 block is loopback, not just 127.0.0.1 — a
+// host running several bound services commonly gives each its own loopback alias.
+const LOOPBACK_HOSTS = new Set(['::1', 'localhost']);
+const LOOPBACK_V4 = /^127\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/;
 
 function bindIsRoutable(host: string): boolean {
-  return !LOOPBACK_HOSTS.has(host.toLowerCase());
+  const lower = host.toLowerCase();
+  if (LOOPBACK_HOSTS.has(lower)) return false;
+  const v4 = LOOPBACK_V4.exec(lower);
+  if (v4 === null) return true;
+  return !v4.slice(1).every((octet) => Number(octet) <= 255);
 }
 
 export function loadConfig(env: Readonly<Record<string, string | undefined>>): Result<Config, ConfigError> {
