@@ -1553,6 +1553,32 @@ tests cover the NDJSON splitter only, so neither defect fix is under test.
 Reversibility: cheap, and shortly moot — `spike/` is rebuilt in TypeScript by S1 and S2, and
 `spike/.data` is deleted rather than migrated (`20-contract.md § Migration`).
 
+### 2026-08-09 — D88 S1's permission round trip is verified against a fixture CLI, not the real one
+Context: `--permission-prompt-tool stdio`, the mechanism S1.1 and S1.9 depend on, does not
+emit `control_request`/`can_use_tool` on the real, installed `claude` CLI (2.1.226) — verified
+directly by three probes (Read, Bash, Bash with `--permission-mode manual`), every one of which
+ran the tool with no control-channel prompt at all. This matches a currently open upstream
+defect, anthropics/claude-code#34046, tracked since CLI 2.1.6. `design/findings/S1-claude-adapter.md`
+has the full probes and citations.
+Chosen: implement the adapter against the documented protocol, and test S1.1/S1.3/S1.9 against
+a deterministic fixture CLI (`src/adapters/claude/fixtures/fake-claude-cli.mjs`) that speaks the
+documented wire shape exactly, over real stdio and a real child process — just not the real
+vendor binary. The non-permission path (spawn, drive a turn to `turn.ended`, `session.started`,
+`usage`, `message`) is additionally verified against the real CLI via the S1 harness
+(`harness/run.mjs`), and that half works.
+Rejected: blocking the whole slice on the upstream fix landing — S1's other nine criteria do
+not depend on the control channel and there is no reason to hold them. Rejected silently
+marking S1.1/S1.9 as passing against the real CLI — they did not, and `AGENTS.md § Verification`
+forbids claiming a gate that did not run.
+Reversibility: cheap to re-verify once #34046 ships a fix — swap `SKYNET_CLAUDE_EXECUTABLE`
+back to the real binary and re-run the same fixture-shaped assertions.
+
 ## Open
 
 Staging only. Once an item becomes an issue it leaves this list.
+
+- **`--permission-prompt-tool stdio` does not emit `control_request` on the real Claude CLI**
+  (anthropics/claude-code#34046, D88). Blocks a real-CLI verification of S1.1 and S1.9, and
+  blocks S4 entirely — S4 cannot ship a real permission round trip until this is fixed upstream
+  or a workaround is chosen. Re-check against each CLI upgrade; drop this item once a real-CLI
+  probe shows `control_request` firing.
