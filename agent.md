@@ -56,6 +56,16 @@ and preferences belong in `AGENTS.md`.
   value everything else was checked against.
 - **Several confident recollections were wrong.** Every claim about an external contract
   should be checked against the published spec, not remembered.
+- **A vendor's flag is not verified until it has been run against the installed binary**
+  — documentation and a working third-party fork are both evidence *about* it, and neither
+  is a run. `--permission-prompt-tool stdio` was read out of a fork, written into the design
+  as the mechanism the project exists for, carried through the contract and the slice set,
+  and implemented, before anyone ran it. It does not fire on the shipping CLI
+  (anthropics/claude-code#34046). **Cost: two acceptance criteria that can only be met
+  against a fixture, S4 blocked outright, and a design premise that was wrong for a whole
+  phase.** The same root left the launch-flag list missing `-p`, without which the transport
+  does not start, and made a twelve-row mapping table read as the CLI's whole vocabulary.
+  Probe the protocol at `/design`, not at the slice. *(Earned here, not inherited.)*
 
 ## Token economy
 

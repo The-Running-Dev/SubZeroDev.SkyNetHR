@@ -168,22 +168,31 @@ implementation starts rather than discovered in it.
 | Mechanism | `control_request` / `control_response` over stdio | `approval_policy`, `sandbox_mode` in config. The channel a runtime prompt arrives on is **unverified** |
 | Granularity | This command, this path, now | The sandbox is whole-session. An `on-request` prompt would be per call, if it is reachable at all |
 | Operator sees | A prompt they answer | A sandbox chosen in advance, plus whatever `on-request` surfaces |
-| Source | Verified — read from the fork | `codex/PROFILES.md` in this repository; live behaviour unverified |
+| Source | Documented by the vendor and observed in the fork — **not** against the shipping CLI, where it does not fire (D88) | `codex/PROFILES.md` in this repository; live behaviour unverified |
 
 **Codex has a runtime approval concept of its own.** Every profile in `codex/PROFILES.md`
 carries `approval_policy = "on-request"`. What is unverified is whether that prompt is
 reachable over a programmatic stream, or exists only inside its terminal UI where a browser
 console cannot answer it (D27).
 
-So the asymmetry is one of **verification, not of capability**. Claude's runtime approval is
-observed on the wire; Codex's is documented in config and unobserved. A
+So the asymmetry is one of **verification, not of capability** — and S1 narrowed it further,
+in the uncomfortable direction. **Neither vendor's runtime approval is observed on a live wire
+today** (D88). Claude's handshake was read out of the fork and is documented by the vendor;
+run against the installed CLI at 2.1.226, `--permission-prompt-tool stdio` emits no
+`can_use_tool` of any subtype and the tool simply executes. That is an open upstream defect —
+anthropics/claude-code#34046, tracked since 2.1.6 — with three probes recorded in
+`design/findings/S1-claude-adapter.md`. Codex's is documented in config and equally
+unobserved. The column that reads "verified" above therefore means *verified in someone else's
+code*, which is not the same thing and cost this project a slice to find out. A
 lowest-common-denominator design — launch-time policy only — would throw away the single
 most valuable thing the console offers, which is approving a tool call from somewhere that
 is not the server's terminal, and it would do so on the strength of an assumption nobody has
 tested.
 
 **Decision: model the interactive case as the contract, and let Codex under-deliver
-against it, visibly.** See `90-decisions.md` D5, and D27 for the corrected premise above.
+against it, visibly.** See `90-decisions.md` D5, D27 for the corrected premise above, and D96
+for why the broken Claude handshake does not reopen D5 — a vendor defect in a documented
+mechanism is behaviour to be restored, not a capability that was never there.
 Until an experiment says otherwise, a Codex session launches with an explicit `sandbox_mode`,
 surfaces that mode in the UI as a standing banner, and emits no `permission.request` events.
 The client must therefore treat "no permission events" as a normal state for a session, not
@@ -304,7 +313,7 @@ the server (D23). Boot reaps orphaned children, and it cannot reap what it canno
 | `sessionId` / `turnId` | ids | Which turn owned it |
 | `startedAt` | ISO 8601 UTC | **Load-bearing** — see the reuse guard below |
 | `image` | string | Executable name the child was spawned as |
-| `exitedAt` | ISO 8601 UTC \| `null` | Tombstone, written when the child closes |
+| `exitedAt` | ISO 8601 UTC \| `null` | Set by folding in the tombstone line the child's close appends. That line is narrower than this record and the reader folds the two — shape and rule in `20-contract.md § Process record` (D95) |
 
 Append-only, server-wide, `pids.ndjson`. Server-wide rather than per-session for the same
 reason the audit log is: the reader is boot, which has no session in hand yet and would
@@ -347,8 +356,9 @@ Shape is owned by `20-contract.md § Event envelope`; it is not restated here.
 
 Two storage tiers, and they are not the same data:
 
-- **Ring buffer**, in memory, bounded (currently 2000 envelopes). Serves live replay after
-  a reconnect, and serves it fast.
+- **Ring buffer**, in memory, bounded by `Caps.ringCapacity` — a deployment's value, not a
+  constant of this design (D99). It ships defaulting to 2000, which is the figure every
+  argument below is calibrated on. Serves live replay after a reconnect, and serves it fast.
 - **Spill file**, `events.ndjson`, append-only, unbounded. The durable transcript, and
   **a read path as well as a write one** (D20), **for live sessions as much as ended ones**
   (D40). A rehydrated session has an empty ring buffer, so the spill is the only place its
@@ -822,7 +832,8 @@ flowchart TD
     EW --> ID
     EW --> CF
     ID --> CF
-    JL --> CF
+    CF --> JL
+    CF --> CT
     ST --> CF
     CK --> CF
     RC --> ST
@@ -837,9 +848,9 @@ flowchart TD
 | Module | Owns | Depends on | Exposes |
 |---|---|---|---|
 | `contract` | The normalised vocabulary | *nothing* | Types only, no runtime |
-| `config` | Roots, auth mode, bind address, origin allow-list, caps | *nothing* | A validated config object |
+| `config` | Roots, auth mode, bind address, origin allow-list, caps | `contract`, `jail` | A validated config object |
 | `identity` | Request → `OperatorId`, or rejection | `config` | One function per deployment mode |
-| `jail` | Path resolution and containment | `config`, `contract` | `resolveInsideRoot` |
+| `jail` | Path resolution, normalisation and containment | `contract` | `resolveInsideRoot`, `pathsOverlap`, `stripExtendedPrefix` |
 | `store` | meta, spill, tool-output blobs, audit, process records, **the two record logs**, ring buffer | `config`, `contract` | Read/append primitives |
 | `checkpoints` | Shadow git lifecycle | `config`, `contract` | create / list / restore |
 | `adapters/*` | **The only vendor knowledge** | `contract` | `send`, `respond`, `kill`, and one inbound `notify` (D46) |
@@ -882,6 +893,17 @@ manager, and buried constants are how a cap becomes unconfigurable without a rel
 edges → config**, for the origin allow-list (D29), which each edge applies before it resolves
 identity — it is a property of the request rather than of the operator, so it does not belong
 behind `identity`.
+
+**One edge was drawn backwards, and S1 found it: `config` depends on `jail`, not the reverse**
+(D94). `jail` was given a `config` dependency here for the workspace roots, and it does not
+need one — `resolveInsideRoot` takes the roots as a parameter, which is what
+`20-contract.md § jail` has always said. The real edge runs the other way: `config` must
+canonicalise each declared root with **the same normalisation** the jail applies to a
+candidate, or a legitimate `cwd` is refused for spelling — a Windows 8.3 short name, a
+`\\?\` prefix, a case variation. So `jail` owns three exported functions rather than one:
+`resolveInsideRoot`, the `pathsOverlap` predicate the busy check needs (D30), and the
+normalisation `config` shares. There is exactly one containment predicate in this server and
+no module may hand-roll a second.
 
 **`records` must not depend on `session-manager`, and the edge that tempts it is the review**
 (D77). A review carries a `SessionSnapshot`, so the natural move is for `records` to ask the
@@ -1154,7 +1176,7 @@ operator, because that would need a container per session and is explicitly out 
 
 | Adversary | In scope | Control |
 |---|---|---|
-| The internet | Yes | Server refuses to bind non-loopback without auth configured |
+| The internet | Yes | An auth mode is required in every configuration (D93), and a routable bind is refused unless a `trustProxy` allow-list covers it |
 | **A malicious page in an operator's browser** | Yes | Origin allow-list on every mutating route and the WS handshake (D29). **Not** the bind check, and **not** the auth check |
 | A curious operator starting a session outside their workspace | Yes | Path jail, resolved after symlinks — see below for what this does *not* cover |
 | An agent reaching outside the workspace once running | Partly | Permission prompt (Claude) or vendor sandbox (Codex). **Not the jail** |
@@ -1319,9 +1341,12 @@ The consequence of skipping this is specific rather than theoretical: script exe
 the console's origin can issue exactly the POSTs the operator can, from a page the origin
 check trusts.
 
-**Fail closed on startup.** The server refuses to start if it would bind a non-loopback
-interface with no auth mode configured. Not a warning. A misconfigured console is a remote
-shell, and the failure mode of a warning is that nobody reads it.
+**Fail closed on startup.** An auth mode is required in every configuration, so the
+configuration this rule was originally written against — a bind with no auth at all — cannot
+be loaded (D93). What remains, and what `insecure_bind` now names, is a routable bind that no
+`trustProxy` allow-list covers: a trusted header nothing constrains the source of is a header
+any client can set. The server refuses to start. Not a warning. A misconfigured console is a
+remote shell, and the failure mode of a warning is that nobody reads it.
 
 **Workspace jail.** Configuration declares one or more `workspaceRoot` paths. A requested
 working directory is accepted only if its **fully resolved real path** — symlinks followed,
@@ -1426,6 +1451,15 @@ a client tell a silent agent from a dead connection, so this costs nothing on th
 | Partial failure during delete | Filesystem error | `error`, non-fatal; registry entry removed anyway | "Session removed, storage may need cleaning" | Orphaned files on disk, named in the log. Preferred over a session that reappears |
 | Storage root unwritable at boot | Startup check | **Refuse to start** | Startup error | — |
 
+**The spill-failure row lands in two slices, and saying which avoids reading a partial as the
+whole** (D100). S1 owns the half that keeps the invariants true: the turn slot is cleared and
+`meta.json` is written on the transition, so `state === 'ended'` still implies `turn === null`
+(I8) and a state change is still on disk (I16). The half that needs a child killed and a notice
+vocabulary — interrupting the live turn with `stopReason: 'storage_failure'` and emitting
+`session.ended` plus `session.notice / error` — is **S5's**, which owns interrupt and the process
+tree kill. Until S5 lands, a session struck by a spill failure stops accepting turns and says
+nothing on the wire about why.
+
 ### Records boundary (tier two)
 
 | Failure | Detection | System does | Operator sees | State left behind |
@@ -1463,6 +1497,8 @@ compiles into two behaviours:
 |---|---|---|---|
 | Path resolution | Case-normalised, drive letters, `\` separators, `\\?\` long paths | Case-sensitive, `/` | *Security controls § Workspace jail* |
 | Workspace overlap comparison | Follows from the above — two spellings of one path must compare equal (D30) | — | *Concurrency § Races* |
+| Spawning the CLI | The bare `claude` name resolves through `PATH` + `PATHEXT` to a `.cmd` shim, which modern Node refuses to exec directly — so the spawn goes through a shell, and a shim path containing a space must be quoted because a shell spawn concatenates rather than escapes | Direct exec; no shell | D91 |
+| What may reach the child's argv | A shell sees the command line, so anything interpolated into it — the model string, a vendor-reported resume id — is refused unless it matches a conservative charset | Same refusal, applied uniformly rather than per platform | D90 |
 | Process termination | `taskkill /PID <pid> /T /F`; no signals, and `kill('SIGINT')` terminates rather than signals | `detached: true` at spawn, `process.kill(-pgid)` | *Concurrency § Interrupt*, D38 |
 | Process group id | None to record; `pgid` is `null` | Recorded and load-bearing for the tree kill | *Data model § Process record* |
 | Checkpoint restore | An open handle blocks the write — which is why D16's per-turn child matters here and not on Linux | No equivalent block | *Concurrency § Process lifetime* |
@@ -1486,21 +1522,32 @@ it — carried in `90-decisions.md § Open`.
 | `meta.json` carries an unknown `schemaVersion` | Version check at boot (D49) | **Identical to a parse failure**: skip, log, continue. Never a migration attempt, never a partial read | One session missing, the log saying it is a newer format | Its files untouched. This is the whole reason the field exists |
 | A record log is unreadable at boot *(tier two)* | Open error | Log it; start with that registry empty; **boot continues** | Reviews or requisitions missing | File untouched. Tier two failing must not deny an operator tier one |
 | One corrupt line in a record log *(tier two)* | Parse failure on that line | Drop the line, log it, keep reading | The record at its previous state, or absent | See *Persistence summary* for why a drop here reverts rather than shortens |
-| Bind non-loopback, no auth | Startup check | **Refuse to start**, say why | Startup error naming the fix | — |
+| Routable bind with no `trustProxy` allow-list | Startup check | **Refuse to start**, say why | Startup error naming the fix | — |
+| No auth mode in the configuration | Config parse (D93) | **Refuse to start** — `missing_field`, before any bind decision | Startup error naming the field | — |
 
 ## Concurrency and ordering
 
 ### What is actually concurrent
 
 Very little, and that is deliberate. The Node event loop is single-threaded, and every
-event in the system passes through one `emit` function per session. **That function is the
-serialisation point**, and it is what makes `seq` gap-free and totally ordered without a
-lock. There is no mutex anywhere in this design, and if one appears, something has been
-built wrong.
+event in the system passes through one `emit` function per session. **`emit`'s synchronous
+prefix is the serialisation point** — assigning `seq`, pushing the ring, and handing the
+envelope to every subscriber all happen before the function yields — and it is what makes
+`seq` gap-free and totally ordered without a lock. There is no mutex anywhere in this design,
+and if one appears, something has been built wrong.
 
-**That argument covers `emit` and stops there.** `emit` is synchronous; the request handlers
-are not, and a guard tested before an `await` is not held across it. What replaces the lock
-in those paths is a rule rather than a primitive — see *The single-writer invariant* (D32).
+**The durable append is not in that prefix, and saying so is the difference between the
+argument holding and merely sounding right** (D89). Writing a line to `events.ndjson` is I/O,
+and two writes issued in `seq` order do not complete in `seq` order on their own — so `emit`
+chains each session's append onto that session's own append chain and awaits it. The chain
+is ordering, not mutual exclusion: it excludes nothing, blocks no other session, and cannot
+deadlock, which is why "no mutex" survives it intact. Awaiting it is what lets a failed
+append end the session (D41) instead of leaving the ring holding events the spill never gets.
+
+**That argument covers `emit` and stops there.** `emit`'s prefix is synchronous; the request
+handlers are not, and a guard tested before an `await` is not held across it. What replaces
+the lock in those paths is a rule rather than a primitive — see *The single-writer invariant*
+(D32).
 
 Genuinely simultaneous:
 
@@ -1521,7 +1568,7 @@ Genuinely simultaneous:
 - **Multiple subscribers to one session.** Fan-out is one-to-many over the same envelopes.
 - **Child stdout arriving while an HTTP request is being handled.** Interleaved by the
   event loop at chunk granularity, never mid-envelope, because an envelope is constructed
-  and dispatched synchronously inside `emit`.
+  and dispatched inside `emit`'s synchronous prefix.
 
 ### Process lifetime — the child belongs to the turn
 
@@ -1692,7 +1739,7 @@ Not guaranteed, and the client must not assume it:
 | Two clients send a message at once | First wins; second gets `409` | Manager turn state, **claimed before the first `await`** (D32) |
 | Restore during a turn | Refused `409` | Manager turn state |
 | Interrupt for turn N arrives after turn N+1 started | No-op `{ok:true}`; N+1 is untouched | `turnId` on the interrupt route |
-| Child emits while a client reconnects | Buffer is appended before fan-out; replay reads the buffer | Synchronous `emit` |
+| Child emits while a client reconnects | Buffer is appended before fan-out; replay reads the buffer | `emit`'s synchronous prefix |
 | A slow subscriber | Per-subscriber queue; drop that one, gap it, keep the rest | Fan-out; logged as D18 |
 | Interrupt arrives as the turn ends on its own | Whichever clears `turn` first wins; the loser is a no-op returning `{ok:true}` | Manager turn state (D24) |
 | Delete arrives during a turn | Refused `409` | Manager turn state (D25) |
@@ -2213,13 +2260,19 @@ these are cited by number elsewhere in this document and in the slices.
 
 **Needing an experiment (tier two):**
 
-14. **Are a vendor's `usage` numbers cumulative or incremental?** D75 makes the adapter
-    responsible for emitting something summable, which is the right place for the knowledge —
-    but nobody has looked. Claude reports usage per assistant record and resets counters at a
-    `compact_boundary`, which is consistent with per-context cumulative reporting, in which
-    case summing raw values double-counts input tokens across a turn and again across a
-    compaction. Codex's `token_count` under `payload.info` is unverified for the same question
-    and is unverified for whether it appears on a live stream at all (open question 6). Brief
-    item 8 says "token burn to date", and until this is answered no implementation of that
-    phrase can be shown to be correct rather than merely plausible. Cheap to test on Claude;
-    blocked behind S8.1 for Codex.
+14. **Are a vendor's `usage` numbers cumulative or incremental? Answered for Claude by S1;
+    still open for Codex.** D75 makes the adapter responsible for emitting something summable,
+    which is the right place for the knowledge. The suspicion recorded here was that Claude
+    reports per-context cumulative figures, in which case summing raw values would double-count
+    across a turn and again across a compaction. **It does not.** Two probes against the real
+    CLI (`design/findings/S1-claude-adapter.md`, fixtures at
+    `src/adapters/claude/fixtures/usage-probe-*.ndjson`) show each `assistant` record carrying
+    that API call's own marginal usage — no subtraction needed. The real hazard was a different
+    one: **one logical message is streamed as several `assistant` records sharing a `message.id`
+    and repeating byte-identical usage**, so a naive sum double-counts by duplication rather
+    than by accumulation. The adapter emits once per `message.id` and ignores the `result`
+    record's usage, which is a materially larger and differently-based figure. Codex's
+    `token_count` under `payload.info` is unverified for the same question and is unverified for
+    whether it appears on a live stream at all (open question 6), so brief item 8's "token burn
+    to date" is demonstrable for Claude and still merely plausible for Codex. Blocked behind
+    S8.1 for the remainder.

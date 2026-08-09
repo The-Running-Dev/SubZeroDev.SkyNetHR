@@ -1573,12 +1573,269 @@ forbids claiming a gate that did not run.
 Reversibility: cheap to re-verify once #34046 ships a fix — swap `SKYNET_CLAUDE_EXECUTABLE`
 back to the real binary and re-run the same fixture-shaped assertions.
 
+### 2026-08-09 — D89 `emit` has a synchronous prefix and a per-session append chain
+Context: `10-design.md § Concurrency` said "`emit` is synchronous and is the serialisation
+point" and "there is no mutex anywhere in this design". S1's `emit` is `async`: it assigns
+`seq`, pushes the ring and fans out to subscribers synchronously, then chains the
+`events.ndjson` append onto a per-session promise chain and awaits it. Two appends issued in
+`seq` order do not complete in `seq` order on their own, so without the chain the spill is
+written out of order — which falsifies I1 on disk rather than in memory, where nothing would
+notice until a replay.
+Chosen: keep the code and correct both documents. The serialisation point is named as `emit`'s
+synchronous *prefix*; the append chain is described as ordering rather than exclusion — it
+excludes nothing, blocks no other session, and cannot deadlock — so "no mutex" survives
+intact. I27 is reworded to say so.
+Rejected: making `emit` fully synchronous by firing the append unawaited. It loses the append
+failure, and D41 (a spill write failure ends the session) is built on seeing it; it also
+returns the out-of-order-write problem to a design that would then owe an answer for it.
+Rejected leaving both documents and deciding at S3: every slice between here and there reads
+an invariant the tree already contradicts, which is the failure `/reconcile` exists to catch.
+Reversibility: cheap. It is a doc edit and a rewording of one invariant; no code moves.
+
+### 2026-08-09 — D90 Anything reaching a child's argv is charset-refused, not escaped
+Context: the model string from `CreateSessionInput` and the resume id a CLI reports both land
+on a child's argv, and on Windows that argv can pass through a shell (D91). The contract
+constrained neither: `model` was `string | null` with no stated shape.
+Chosen: refuse both unless they match a conservative charset —
+`/^[A-Za-z0-9][A-Za-z0-9.:/_-]*$/` for `model`, answered `422 bad_request` naming the field
+before any session exists, and `/^[A-Za-z0-9._-]+$/` for a resume id, answered
+`AdapterError.schema_mismatch` because a CLI reporting a session id with shell metacharacters
+in it is not following its own wire schema. The constraint is stated on
+`CreateSessionInput.model` in the contract so a second adapter inherits it rather than
+rediscovering it.
+Rejected: escaping per platform in each adapter — it is the same quoting bug written once per
+vendor, and the one place it is got wrong is a shell injection with the server's privileges.
+Rejected trusting the vendor's own id — the value is only trustworthy while the vendor is
+well-behaved, and the cost of not trusting it is one regex.
+Reversibility: cheap, and it only ever loosens: a model name refused today is admitted by
+widening the class, and nothing is stored that a wider class would invalidate.
+
+### 2026-08-09 — D91 How a vendor binary is found and launched, including the fixture seam
+Context: spawning `claude` on Windows fails outright without a shell — the bare name resolves
+through `PATH`/`PATHEXT` to a `.cmd` shim, which modern Node refuses to exec directly (EINVAL,
+thrown synchronously rather than surfaced as an `error` event). Separately, D88's verification
+of the permission round trip needs a fixture CLI to stand in for the real binary over a real
+child process.
+Chosen: spawn through a shell on Windows for the bare vendor name and for explicit `.cmd`/
+`.bat` paths, quoting a path containing a space because a shell spawn concatenates rather than
+escapes; run a `.mjs`/`.js` fixture under `process.execPath`; catch `spawn`'s synchronous throw
+and return `agent_unavailable` rather than rejecting the promise past the `Result` contract.
+The fixture is selected by an optional `executable` on `createClaudeAdapter`, defaulting to
+`SKYNET_CLAUDE_EXECUTABLE` — declared in the contract as a **test seam**, not a `Config` field,
+and not reachable through `createAdapter`. Two rows are added to the platform-divergence table
+D64 requires.
+Rejected: a `Config` field for the agent binary path. A deployment that can repoint the agent
+from the environment is one where `audit.ndjson` names a program nobody chose, and the audit
+log is the artifact the threat model leans on. Rejected `shell: true` unconditionally — it puts
+a shell in the path on Linux, where none is needed, for the benefit of one platform.
+Reversibility: cheap. The seam is one optional parameter and the shell gate is one predicate.
+
+### 2026-08-09 — D92 Records outside the vendor mapping may be ignored by a named list
+Context: `10-design.md § Failure modes` and S1.4 say an unrecognised record kind raises
+`error / adapter_unknown_record`. Run against the real CLI, the stream carries records that
+are ordinary and no part of the twelve-row mapping — `rate_limit_event`, `control_response`,
+and the `system` subtypes `hook_started`, `hook_response`, `thinking_tokens`,
+`post_turn_summary` — several of them on every routine turn.
+Chosen: hold a named ignore list in the vendor's own adapter and return silently for its
+members; keep `adapter_unknown_record` for everything outside both the mapping and the list.
+The list is written into `20-contract.md § Vendor mapping — Claude` so it is a declared fact
+rather than a silent omission, and extending it is an adapter change, never a change to
+`ErrorEventKind`.
+Rejected: flagging them all, which was the literal reading. It puts a diagnostic line in front
+of the operator on every ordinary turn, and a diagnostic nobody can act on is one they learn to
+scroll past — including the one that mattered. Rejected adding rows to the mapping table that
+normalise to nothing: the table says what a record becomes, and "nothing" is a different
+statement that belongs beside it, not in it.
+Reversibility: cheap; the list is data.
+
+### 2026-08-09 — D93 An auth mode is required in every configuration
+Context: the design's fail-closed rule refuses a non-loopback bind "with no auth mode
+configured", and `ConfigError.insecure_bind` exists for it. S1's `loadConfig` makes `AUTH_MODE`
+mandatory unconditionally, so a configuration with no auth mode never loads at all.
+Chosen: keep it mandatory. There is no deployment shape this project wants in which the auth
+mode is absent, and refusing at parse time is a smaller, earlier failure than refusing at bind
+time. S2 therefore inherits a narrower `insecure_bind`: the reachable cause is a routable bind
+with no `trustProxy` allow-list, not a missing auth mode.
+Rejected: an implicit "none" mode defaulting to loopback-only. It is the configuration most
+likely to be copied to a server and then bound to `0.0.0.0` by someone changing one line.
+Reversibility: cheap now, expensive after a deployment exists — it would be a required field
+appearing in an existing environment.
+
+### 2026-08-09 — D94 `config` depends on `jail`, and `jail` owns the containment predicate
+Context: `10-design.md § Module boundaries` drew `jail → config`. The code has no such edge —
+`resolveInsideRoot` takes the roots as a parameter, exactly as the contract has always said —
+and has the reverse one: `config` canonicalises each declared workspace root through the jail's
+own normalisation. Without that, a root and a candidate are spelled differently on Windows (8.3
+short names, a `\\?\` prefix, case) and a legitimate `cwd` is refused. The session manager
+separately needs an overlap test for the busy check (D30) and had hand-rolled one.
+Chosen: `jail` exports three functions — `resolveInsideRoot`, `pathsOverlap`, and
+`stripExtendedPrefix` — all three declared in `20-contract.md § jail`; the design's graph drops
+`jail → config` and gains `config → jail`, which stays acyclic. There is one containment
+predicate in this server and no module hand-rolls a second.
+Rejected: a thirteenth module holding the normalisation so neither exports beyond its declared
+surface — two functions do not earn a module, and the twelve-module count is load-bearing prose
+in two documents. Rejected declaring `pathsOverlap` alone and letting `config` keep its own
+copy of the prefix handling: two copies of a Windows path rule is the divergence single
+ownership forbids, and its failure mode is a correct path refused for spelling.
+Reversibility: cheap.
+
+### 2026-08-09 — D95 `pids.ndjson` carries two line shapes
+Context: the contract said the file holds one `ProcessRecord` per line, and `tombstonePid(pid,
+exitedAt)` is given a pid and a timestamp and nothing else — so the line it writes is narrower
+than a `ProcessRecord`, and under latest-line-wins the folded entry for an exited pid loses
+`startedAt` and `image`. Those are two of the three fields the reuse guard reads (I19), so a
+reader that took them off the latest line would reap on a guard that never ran. Nothing calls
+`tombstonePid` yet; S7 is where this is first read.
+Chosen: declare the second shape. `pids.ndjson` holds a full `ProcessRecord` at spawn and a
+`ProcessTombstone { pid, exitedAt }` at exit; liveness comes from the latest line for a pid and
+everything else from that pid's most recent spawn line. Stated in the contract before S7 reads
+it.
+Rejected: widening `tombstonePid` to take the whole record. The manager's `exited` notification
+carries a code and a signal, so the record would have to be held across the turn or read back
+out of the file — real cost, to preserve a one-shape claim nothing needs. Rejected leaving it
+for S7 to decide: its implementer would read a contract sentence the store already contradicts,
+which `agent.md` records as how a shortcut becomes the reference.
+Reversibility: cheap; there is no deployed data.
+
+### 2026-08-09 — D96 The broken Claude handshake corrects the premise and does not reopen D5
+Context: `10-design.md § The hard problem` sourced Claude's runtime approval as "Verified —
+read from the fork" and framed the vendor asymmetry as one of verification rather than
+capability. D88 established that `--permission-prompt-tool stdio` emits no `can_use_tool` on
+the shipping CLI (2.1.226, anthropics/claude-code#34046). Neither vendor's runtime approval is
+therefore observed on a live wire today, and the sentence justifying the interactive model as
+the contract described a state that no longer obtains.
+Chosen: correct the premise in place — say that Claude's handshake is documented by the vendor
+and observed in someone else's code, not against the shipping binary — and keep D5. A vendor
+defect in a documented mechanism is behaviour to be restored, not a capability that was never
+there, and the console's reason to exist is unchanged either way.
+Rejected: reopening D5. It would relitigate a signed-off decision on evidence about a bug
+rather than about capability, and it puts S4 and the permission half of the design back in play
+for no gain. Rejected a footnote pointing at D88 while the table still reads "Verified" — that
+word is what a future session reads first, and this repository already knows it is false.
+Reversibility: cheap, and it reverts the day #34046 ships a fix.
+
+### 2026-08-09 — D97 `permission.resolved` leaves `AdapterEmitted`; the manager is its sole emitter
+Context: the Claude adapter resolves its own pending permissions when the child closes, emitting
+`permission.resolved` directly. `AdapterEmitted` permitted it — the type excluded four kinds and
+not this one — while D33 puts the `pending` delete in the manager, synchronous with the lookup,
+and I11 requires exactly one `AuditRecord` per resolution, which only the manager can write. So
+the contract licensed a path that cannot satisfy two of its own rules: the resolution carries no
+audit record, and the manager's own `pending` map is never cleared by it.
+Chosen: exclude `permission.resolved` from `AdapterEmitted`. The adapter's contribution when its
+child dies is the `exited` notification it already sends; deciding that every outstanding request
+is now `cancelled_process_exit` is the manager's, in the same place it already decides it for an
+interrupt (D24) and for a turn boot closes (D39) — one code path for three causes rather than
+three.
+Rejected: keeping the type and requiring the manager to audit adapter-originated resolutions. It
+gives one invariant two emit paths, and the adapter would be choosing `operator` and `reason` for
+a record it does not own. Rejected deferring to S4: the behaviour is live and untested today, and
+S4's implementer would read a contract that permits what its own invariants forbid.
+Reversibility: cheap. One type edit; the code change is `/fix`'s and is three small moves.
+
+### 2026-08-09 — D98 D93's narrowing is propagated, and S2.8 becomes two checkable cases
+Context: D93 made `AUTH_MODE` mandatory in every configuration. It was recorded and not
+propagated: the contract's error table, the design's *Fail closed on startup* paragraph, its
+failure-mode row and its threat-model row all still described `insecure_bind` as "a non-loopback
+bind with no auth mode configured" — a configuration that can no longer be loaded. **S2.8, the
+next slice's acceptance criterion, asserted it**, so as written it could not be constructed.
+Chosen: restate the reachable cause everywhere — a routable bind that no `trustProxy` allow-list
+covers — and split S2.8 into the two refusals that actually exist: `insecure_bind` for the bind,
+`missing_field` at parse time for a missing auth mode.
+Rejected: dropping `insecure_bind` from `ConfigError` and letting the generic validation codes
+carry every startup refusal. The brief's fail-closed rule is the one place a refusal should say
+what it is rather than which field was absent. Rejected reopening D93 to make the old wording
+reachable again — that is the configuration D93 rejected precisely because it is the one most
+likely to be copied to a server and then bound to `0.0.0.0`.
+Reversibility: cheap; four prose edits and one criterion, no code.
+
+### 2026-08-09 — D99 The ring's bound is a cap, not a constant, and its default is 2000
+Context: `10-design.md § Event envelope` asserted the ring holds "currently 2000 envelopes" and
+D40's whole argument for reading the spill is calibrated on that number. `config` defaults
+`CAPS_RING_CAPACITY` to 500, so every replay argument in the design was reasoned against a figure
+no deployment would get.
+Chosen: the design names `Caps.ringCapacity` rather than a constant, and states 2000 as the
+shipped default so the argument and the deployment agree. The code default moves to 2000.
+Rejected: recalibrating the design to 500. D40's threshold reasoning and S3.3's test shape both
+follow the number, so the rewrite reaches further than the one line it looks like. Rejected
+stripping every figure from the design: D40 persuaded because it was concrete about when the ring
+is outrun, and number-free it is an assertion.
+Reversibility: cheap. It is a deployment value in both directions.
+
+### 2026-08-09 — D100 A spill-append failure restores the invariants in S1; the rest is S5's
+Context: S1's `emit` marks the session `ended` on a failed append and stops there — leaving
+`turn` set, which I8 forbids, writing no `meta.json`, which I16's state-transition occasion
+requires, and emitting none of D41's `session.ended` or `session.notice / error`. The code
+conceded the gap in a comment; the design conceded nothing.
+Chosen: split the row explicitly. S1 clears the turn slot and writes `meta.json`, so I8 and I16
+hold today. The half needing a child killed and a notice on the wire lands with S5, which owns
+interrupt and the process-tree kill, and the design says so where the failure mode is described
+rather than only in a decision entry.
+Rejected: implementing D41 whole in S1 — its *Out of scope* names interrupt, so this pulls S5's
+kill path into a landed slice, and it emits envelopes into a spill that has just failed. Rejected
+weakening I8 to permit a live turn during the transition: I8 is what lets every consumer assume
+`ended` means no child is running, and a carve-out is invisible at every call site relying on it.
+Reversibility: cheap.
+
+### 2026-08-09 — D101 S1.8 is restated to the contract's three `meta.json` write occasions
+Context: S1.8 required `meta.json` to be written "at create and not again during the run". The
+contract's third write occasion is a change of `cliSessionId`, and D34 makes the CLI mint a fresh
+one every turn — so the manager rewrites the file per turn, correctly, against a criterion that
+forbids it. The test ticking S1.8 drives `store` directly and never the manager, so the
+contradiction could not surface there.
+Chosen: the contract is right and the criterion is wrong. S1.8 becomes the three occasions, and
+is asserted through the session manager driving a real turn so the per-turn write is observed
+rather than side-stepped. Separately, `/fix` guards the write on an actual change of value, which
+is what the contract's word *change* says and the code does not check.
+Rejected: keeping S1.8 literal by never rewriting `meta.json` and recovering `cliSessionId` at
+boot from the event log. No envelope carries it — it is vendor-opaque and deliberately absent from
+`SessionSummary` — so that needs a new field on the wire, which D44's closed vocabulary forbids.
+Rejected recording the divergence and changing neither: a criterion asserted only where it cannot
+fail is not a criterion.
+Reversibility: cheap, but the S1.8 tick has to be re-earned against a test that can now fail.
+
+### 2026-08-09 — D102 A turn-scoped fact arriving with no live turn is an error, never an invented value
+Context: two sites assumed a turn is always live and quietly manufactured something when it was
+not. The manager stamps `turnId` only while the slot is occupied, so a turn-scoped envelope
+arriving after the slot is freed goes out without the field D44 requires; and `appendPid` writes
+`entry.turn?.turnId ?? randomUUID()`, putting a fabricated id naming no turn into `pids.ndjson`.
+Chosen: treat both as unreachable states and fail loudly — an `error` envelope naming the
+condition. `turnId` stays required on turn-scoped payloads and `ProcessRecord.turnId` stays
+non-null.
+Rejected: carrying a `lastTurnId` forward and stamping late arrivals with it — that attributes an
+envelope to a turn it does not belong to, which is the misattribution D44 put the field on the
+payload to prevent, and it is unfalsifiable afterwards. Rejected making both fields optional:
+every renderer and the boot reaper gain a permanent null case to describe a state the design says
+cannot occur.
+Reversibility: cheap.
+
+### 2026-08-09 — D103 The environment-variable surface and the cap defaults are `config`'s own
+Context: S1's `config` invented the whole deployment surface — `AUTH_MODE`, `WORKSPACE_ROOTS`,
+`STORAGE_ROOT`, `BIND_*`, `CAPS_*`, `INCLUDE_RAW`, `SESSION_TOKEN_BUDGET`, `CHECKLIST_JSON` — and
+a shipped default for all seven caps, against D84's "the contract declares the fields and sets no
+values". Nothing recorded it.
+Chosen: read D84 as governing the contract *document* rather than forbidding a module from having
+a default, and record the surface here. The operator-facing table of names is `/make-human-docs`'
+output, not a design artifact.
+Rejected: declaring the variable names in `20-contract.md`. It takes on deployment configuration
+D84 deliberately kept out, and every rename or added cap becomes a contract amendment before it is
+a code change. Rejected a Configuration section in `10-design.md`: a table of literal values in the
+design is the thing most likely to rot silently, which is exactly what D99 just had to repair.
+Reversibility: cheap; nothing downstream is pinned to a name.
+
+### 2026-08-09 — D104 The Claude adapter forwards `permission_suggestions` unmapped
+Context: the adapter passes the vendor's `permission_suggestions` array through as
+`PermissionSuggestion[]` with no mapping. That type names `{ label, rule }` against a
+`StandingRuleExpression` whose grammar is undecided (`20-contract.md § Unresolved` 2, issue #16),
+so there is nothing to map onto. Nothing exercises it: no observed CLI run has produced a
+`control_request` at all (D88), and the fixture sends an empty array.
+Chosen: declare the pass-through in the vendor mapping and forbid any consumer from reading a
+forwarded element as a `PermissionSuggestion`, until #16 decides the grammar.
+Rejected: mapping now — it invents the grammar #16 owns, and D35 requires a rule this server can
+evaluate, so guessing its shape is what the seven slice-stops exist to prevent. Rejected retyping
+the field to `readonly unknown[]`: the contract would lose a shape whose intent it already knows,
+every consumer would cast, and the type returns anyway.
+Reversibility: cheap — one paragraph, deleted when #16 lands.
+
 ## Open
 
 Staging only. Once an item becomes an issue it leaves this list.
-
-- **`--permission-prompt-tool stdio` does not emit `control_request` on the real Claude CLI**
-  (anthropics/claude-code#34046, D88). Blocks a real-CLI verification of S1.1 and S1.9, and
-  blocks S4 entirely — S4 cannot ship a real permission round trip until this is fixed upstream
-  or a workaround is chosen. Re-check against each CLI upgrade; drop this item once a real-CLI
-  probe shows `control_request` firing.
