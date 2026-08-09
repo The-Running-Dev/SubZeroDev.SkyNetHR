@@ -1836,6 +1836,33 @@ the field to `readonly unknown[]`: the contract would lose a shape whose intent 
 every consumer would cast, and the type returns anyway.
 Reversibility: cheap — one paragraph, deleted when #16 lands.
 
+### 2026-08-09 — D105 `design/` is frozen for the rest of tier one; reconciliation is one pass at the end
+Context: measured over 22 commits, one touched `src/`. Design churn is roughly 14,600 lines
+against 3,222 lines of source, and `design/` at HEAD is 6,733 lines specifying 3,222 lines of
+software. The mechanism is visible either side of the one code commit: S1 landed, and the
+reconciliation that followed emitted D89 to D104 — sixteen decisions and 534 lines of design
+change — which rewrote S2's acceptance criteria before S2 had been started. Landing a slice
+therefore invalidates the next slice's specification, which desyncs the tracker, which needs
+`/track`, which finds drift, which needs `/reconcile`. The loop has no fixed point because each
+pass is generative rather than merely checking. Compounding it, issue #3 pinned its criteria to
+`design/30-slices.md § S2 @ 4ea4660` and #42 to #48 to `@ a89d820`; neither commit is an ancestor
+of `main`, so the tracker cites slice documents this project's history does not contain.
+Chosen: freeze `design/` at HEAD for the remainder of tier one. `/reconcile` and `/track` are not
+run between slices. Slices are implemented against `20-contract.md` as a fixed artifact. Where the
+implementation contradicts a design document, the contradiction is stated in that slice's pull
+request and **left in the document** — the docs are permitted to go stale, deliberately, and one
+reconciliation pass runs when tier one is code-complete. GitHub issues are repinned once, now, to
+the slice document as it stands on `main`, and are not resynced until that pass.
+Rejected: continuing per-slice reconciliation. It is the loop being escaped and its cost is
+measured above. Rejected abandoning the design docs — they are why the contract is coherent and
+why S1 landed as cleanly as it did; the defect is that they are kept live *during* implementation,
+not that they exist. Rejected splitting S2 into smaller slices first: renumbering is what desynced
+the tracker to begin with, and S2's criteria are implementable on one branch even though they are
+more than one session's reading. Rejected repinning every issue continuously — one pass now, one
+pass at the end.
+Reversibility: cheap. This is a working convention, not a code change; resuming per-slice
+reconciliation is one command.
+
 ## Open
 
 Staging only. Once an item becomes an issue it leaves this list.
