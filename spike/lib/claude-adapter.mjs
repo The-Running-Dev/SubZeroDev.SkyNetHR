@@ -20,7 +20,7 @@ export function createClaudeAdapter({ cwd, model, executable = 'claude', emit })
   let cliSessionId = null;
   let turnId = null;
   let announced = false;
-  /** requestId -> { callId, input, suggestions } */
+  /** requestId -> { callId, input } — the input is kept so the response cannot substitute one */
   const pending = new Map();
 
   function buildArgs() {
@@ -112,7 +112,10 @@ export function createClaudeAdapter({ cwd, model, executable = 'claude', emit })
 
       case 'control_request': {
         if (rec.request?.subtype !== 'can_use_tool') return;
-        pending.set(rec.request_id, { callId: rec.request.tool_use_id });
+        pending.set(rec.request_id, {
+          callId: rec.request.tool_use_id,
+          input: rec.request.input ?? {},
+        });
         emit('permission.request', {
           requestId: rec.request_id,
           callId: rec.request.tool_use_id,
@@ -229,7 +232,7 @@ export function createClaudeAdapter({ cwd, model, executable = 'claude', emit })
     },
 
     /** Answer an outstanding permission request. Returns false if it was already resolved. */
-    respondPermission({ requestId, decision, scope, operator, input }) {
+    respondPermission({ requestId, decision, scope, operator }) {
       const req = pending.get(requestId);
       if (!req) return false;
       pending.delete(requestId);
@@ -242,11 +245,13 @@ export function createClaudeAdapter({ cwd, model, executable = 'claude', emit })
           request_id: requestId,
           response: allow
             ? {
+                // The input recorded when the request arrived, never one supplied by the
+                // answering client: what runs must be what the operator was shown
+                // (20-contract.md I12).
                 behavior: 'allow',
-                updatedInput: input,
-                // 'always' hands the vendor's own suggestion back rather than inventing a
-                // local rule grammar. See 90-decisions.md Open.
-                updatedPermissions: scope === 'always' ? undefined : undefined,
+                updatedInput: req.input,
+                // `updatedPermissions` is never sent. D35 holds standing approvals in this
+                // server so every match still produces an event pair and an audit record.
                 toolUseID: req.callId,
               }
             : {
