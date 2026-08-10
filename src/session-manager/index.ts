@@ -641,8 +641,13 @@ export function createSessionManager(deps: {
         // The adapter omits `turnId` from every payload that carries one (contract
         // `AdapterEvent`); the manager, which owns `Turn`, is what stamps it back on.
         const payload = turn && KINDS_CARRYING_TURN_ID.has(kind) ? { ...data, turnId: turn.turnId } : data;
-        await emit(entry, kind, payload as never, raw);
+        // Cleared before the event is emitted, not after: `emit` delivers to
+        // subscribers synchronously but then awaits the spill write, so a caller
+        // reacting to the delivered `turn.ended` (e.g. sending the next message) must
+        // already see the slot free — clearing it after `await emit` leaves a window
+        // where that caller races the still-pending spill append (S5.1).
         if (kind === 'turn.ended') entry.turn = null;
+        await emit(entry, kind, payload as never, raw);
         return;
       }
     }
