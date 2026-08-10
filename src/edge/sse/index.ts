@@ -294,18 +294,30 @@ export function createSseEdge(deps: EdgeDeps): RequestListener {
     const after = (Number.isFinite(parsedAfter) && parsedAfter > 0 ? parsedAfter : 0) as Seq | 0;
 
     let open = true;
+    // `subscribe` (S3) can call `deliver`/`close` synchronously, or after an async
+    // replay, before this function ever reaches `writeHead` below — replaying is what
+    // it's for. Writing to `res` that early would implicitly send default headers, and
+    // the real `writeHead` a few lines down would then throw `ERR_HTTP_HEADERS_SENT`.
+    // Every write is queued here until headers are actually sent, and only then flushed
+    // in order, so nothing observes a difference from writing straight to the socket.
+    let headersSent = false;
+    const pending: Array<() => void> = [];
+    function sendOrQueue(write: () => void): void {
+      if (headersSent) write();
+      else pending.push(write);
+    }
     const sink = {
       deliver(envelope: Envelope): void {
         if (!open) return;
         // `event:` is the kind and `id:` is the seq, so a browser `EventSource` can
         // dispatch by kind and resume by seq with no body parsing. `data:` is one line:
         // `JSON.stringify` never emits a raw newline, so no continuation is possible.
-        res.write(`id: ${envelope.seq}\nevent: ${envelope.kind}\ndata: ${JSON.stringify(envelope)}\n\n`);
+        sendOrQueue(() => res.write(`id: ${envelope.seq}\nevent: ${envelope.kind}\ndata: ${JSON.stringify(envelope)}\n\n`));
       },
       close(): void {
         if (!open) return;
         open = false;
-        res.end();
+        sendOrQueue(() => res.end());
       },
     };
 
@@ -323,6 +335,9 @@ export function createSseEdge(deps: EdgeDeps): RequestListener {
     });
     res.flushHeaders();
     res.write(`retry: ${SSE_RETRY_MS}\n\n`);
+    headersSent = true;
+    for (const write of pending) write();
+    pending.length = 0;
 
     const keepalive = setInterval(() => {
       if (open) res.write(': keepalive\n\n');

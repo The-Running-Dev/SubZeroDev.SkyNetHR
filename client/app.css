@@ -309,6 +309,7 @@ body {
 .session-started__cwd {
   font-family: var(--font-mono);
   font-size: var(--text-sm);
+  word-break: break-all;
 }
 
 /* ----------------------------------------------------------------- compose */

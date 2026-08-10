@@ -309,6 +309,42 @@ describe('S2.3 — GET /api/sessions/:id/events', () => {
   });
 });
 
+describe('S3.1 — reconnect over the wire', () => {
+  it('a Last-Event-ID header resumes from seq+1', async () => {
+    const h = await makeEdge(undefined, undefined, 'many');
+    const id = await newSession(h, 's31');
+    const first = await get(h, `/api/sessions/${id}/events`);
+    await post(h, `/api/sessions/${id}/message`, { text: 'go' });
+
+    const { frames: firstFrames } = await readFrames(first, (f) => f.filter((x) => x.includes('data: ')).length >= 20, 15000);
+    const seqOf = (frame: string): number =>
+      JSON.parse(frame.split('\n').find((l) => l.startsWith('data: '))!.slice('data: '.length)).seq as number;
+    const dataFrames = firstFrames.filter((f) => f.includes('data: '));
+    const cutoff = seqOf(dataFrames[9]!);
+    // Give the first connection's server-side teardown a moment to land before opening
+    // the next one against the same session.
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    const reconnected = await get(h, `/api/sessions/${id}/events`, 'ben', { 'last-event-id': String(cutoff) });
+    const { frames: reconnFrames } = await readFrames(reconnected, (f) => f.filter((x) => x.includes('data: ')).length >= 1, 10000);
+    const firstReconnSeq = seqOf(reconnFrames.filter((f) => f.includes('data: '))[0]!);
+    assert.equal(firstReconnSeq, cutoff + 1, 'resumes at exactly seq+1');
+  });
+
+  it('a connection with no Last-Event-ID at all replays from the start (the "reopen on a phone" case)', async () => {
+    const h = await makeEdge(undefined, undefined, 'error-result');
+    const id = await newSession(h, 's31b');
+    await post(h, `/api/sessions/${id}/message`, { text: 'go' });
+    const seqOf = (frame: string): number =>
+      JSON.parse(frame.split('\n').find((l) => l.startsWith('data: '))!.slice('data: '.length)).seq as number;
+
+    const fresh = await get(h, `/api/sessions/${id}/events`);
+    const { frames: freshFrames } = await readFrames(fresh, (f) => f.filter((x) => x.includes('data: ')).length >= 1, 10000);
+    const firstFreshSeq = seqOf(freshFrames.filter((f) => f.includes('data: '))[0]!);
+    assert.equal(firstFreshSeq, 1, 'a connection with no Last-Event-ID replays from the start');
+  });
+});
+
 describe('S2.10 — SSE retry hint', () => {
   it('sets retry: independently of caps.keepaliveMs', async () => {
     const h = await makeEdge(undefined, {

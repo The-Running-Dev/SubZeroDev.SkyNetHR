@@ -285,20 +285,102 @@ export function createSessionManager(deps: {
     },
 
     async subscribe(sessionId, owner, after, sink: SubscriberSink): Promise<Result<Subscription, SessionError>> {
-      const entry = sessions.get(sessionId);
-      if (!entry || entry.record.owner !== owner) return { ok: false, error: { code: 'no_such_session', sessionId } };
-      // Ring/spill replay (S3) is not this slice's; S1's harness subscribes live-only
-      // from `after: 0`.
-      void after;
-      entry.subscribers.add(sink);
-      return {
-        ok: true,
-        value: {
-          close() {
-            entry.subscribers.delete(sink);
-          },
+      const found = sessions.get(sessionId);
+      if (!found || found.record.owner !== owner) return { ok: false, error: { code: 'no_such_session', sessionId } };
+      const entry = found; // captured once so closures below narrow past `| undefined`
+
+      const gapEnvelope = (message: string): Envelope => ({
+        seq: entry.seq as Seq,
+        sessionId: entry.record.id,
+        ts: nowIso(),
+        kind: 'error',
+        data: { kind: 'replay_gap', message, fatal: false },
+      } as Envelope);
+
+      // The ring is checked first because it answers synchronously: `pushRing` and
+      // `emit`'s fan-out share one synchronous prefix (I27), so reading the ring and
+      // registering the subscriber in the same synchronous block can never straddle a
+      // live envelope arriving in between (D18's "buffer appended before fan-out").
+      const ringResult = store.readRingAfter(sessionId, after);
+      if (ringResult !== null) {
+        entry.subscribers.add(sink);
+        for (const envelope of ringResult) sink.deliver(envelope);
+        return { ok: true, value: { close: () => entry.subscribers.delete(sink) } };
+      }
+
+      // The ring cannot serve this range (D40): replay from the spill instead. That read
+      // is async I/O, so a live envelope can arrive mid-replay — a proxy subscriber is
+      // registered first to buffer anything that lands while the file is being read,
+      // which is then reconciled against the replay's watermark and flushed once the
+      // spill catches up, before switching to direct passthrough for the live stream.
+      const highWater = config.caps.subscriberQueueHighWater;
+      let mode: 'buffering' | 'live' = 'buffering';
+      let dropped = false;
+      const buffered: Envelope[] = [];
+      const proxy: SubscriberSink = {
+        deliver(envelope) {
+          if (dropped) return;
+          if (mode === 'live') {
+            sink.deliver(envelope);
+            return;
+          }
+          if (buffered.length >= highWater) {
+            dropped = true;
+            entry.subscribers.delete(proxy);
+            sink.deliver(gapEnvelope('too many envelopes arrived while catching up from storage'));
+            sink.close();
+            return;
+          }
+          buffered.push(envelope);
+        },
+        close() {
+          sink.close();
         },
       };
+      entry.subscribers.add(proxy);
+
+      // The durable append is asynchronous and only chained, not synchronous, with the
+      // live fan-out above (I27): an envelope already delivered to every other subscriber
+      // can still be in flight to disk. Reading the spill before that flush lands would
+      // see a file genuinely short of what this subscriber's own registration already
+      // promises it — and, since that envelope already had its one-time live fan-out
+      // before this subscriber existed, it would never arrive by the live path either.
+      // Awaiting the write queue captured at registration is what closes that window.
+      await entry.writeQueue;
+
+      // The spill's seq contiguity is what tells a torn *middle* line apart from a torn
+      // *trailing* one (S3.3, S3.6): a gap between what was just delivered and what comes
+      // next is reported once; a torn line with nothing after it to compare against never
+      // trips this and is silently short, per `store`'s own drop-and-log.
+      let replayedThrough = after as number;
+      for await (const result of store.readEventsAfter(sessionId, after)) {
+        if (dropped) break;
+        if (!result.ok) {
+          const detail = 'detail' in result.error ? result.error.detail : result.error.code;
+          sink.deliver(gapEnvelope(`replay from storage failed: ${detail}`));
+          break;
+        }
+        const envelope = result.value;
+        if (envelope.seq !== replayedThrough + 1) {
+          sink.deliver(gapEnvelope('the recorded history has a gap before this point'));
+          break;
+        }
+        sink.deliver(envelope);
+        replayedThrough = envelope.seq;
+      }
+
+      if (!dropped) {
+        mode = 'live';
+        for (const envelope of buffered) {
+          if (envelope.seq > replayedThrough) {
+            sink.deliver(envelope);
+            replayedThrough = envelope.seq;
+          }
+        }
+        buffered.length = 0;
+      }
+
+      return { ok: true, value: { close: () => entry.subscribers.delete(proxy) } };
     },
 
     async payroll(): Promise<Result<PayrollView, SessionError>> {
