@@ -427,6 +427,88 @@ describe('S2.6 / S2.7 — ownership', () => {
   });
 });
 
+/**
+ * Opens the event stream, sends a message, waits for the first permission.request, and
+ * returns its requestId — `readFrames` always cancels the reader it hands back, so the
+ * stream itself is not reusable afterward; a caller wanting what happens next reopens
+ * one (a fresh GET replays the history the ring or spill still holds).
+ */
+async function firstPermissionRequestId(h: Harness, id: string): Promise<{ requestId: string }> {
+  const res = await get(h, `/api/sessions/${id}/events`);
+  await post(h, `/api/sessions/${id}/message`, { text: 'hello' });
+  const { frames } = await readFrames(res, (f) => f.some((x) => x.includes('event: permission.request')));
+  const frame = frames.find((f) => f.includes('event: permission.request'))!;
+  const dataLine = frame.split('\n').find((l) => l.startsWith('data: '))!;
+  const envelope = JSON.parse(dataLine.slice('data: '.length)) as { data: { requestId: string } };
+  return { requestId: envelope.data.requestId };
+}
+
+describe('S4 — POST /api/sessions/:id/permission', () => {
+  it('returns 200 { accepted: true } and the child proceeds accordingly (S4.2)', async () => {
+    const h = await makeEdge();
+    const id = await newSession(h, 'p1');
+    const { requestId } = await firstPermissionRequestId(h, id);
+    const res = await post(h, `/api/sessions/${id}/permission`, { requestId, decision: 'allow', scope: 'once', rule: null, reason: null });
+    assert.equal(res.status, 200);
+    assert.equal(((await res.json()) as { accepted: boolean }).accepted, true);
+
+    const replay = await get(h, `/api/sessions/${id}/events`);
+    await readFrames(replay, (f) => f.some((x) => x.includes('event: turn.ended')));
+  });
+
+  it('returns 200 { accepted: false } for a second answer to the same request', async () => {
+    const h = await makeEdge();
+    const id = await newSession(h, 'p2');
+    const { requestId } = await firstPermissionRequestId(h, id);
+    const first = await post(h, `/api/sessions/${id}/permission`, { requestId, decision: 'allow', scope: 'once', rule: null, reason: null });
+    assert.equal(first.status, 200);
+    const second = await post(h, `/api/sessions/${id}/permission`, { requestId, decision: 'deny', scope: 'once', rule: null, reason: null });
+    assert.equal(second.status, 200);
+    assert.equal(((await second.json()) as { accepted: boolean }).accepted, false);
+  });
+
+  it('answers 404 no_such_session, never 403, for another operator (S4.13)', async () => {
+    const h = await makeEdge();
+    const id = await newSession(h, 'p3', 'ben');
+    const { requestId } = await firstPermissionRequestId(h, id);
+    const res = await post(h, `/api/sessions/${id}/permission`, { requestId, decision: 'allow', scope: 'once', rule: null, reason: null }, 'mallory');
+    assert.equal(res.status, 404);
+    assert.notEqual(res.status, 403);
+    assert.equal(((await res.json()) as { error: { code: string } }).error.code, 'no_such_session');
+  });
+
+  it('refuses scope: always and a supplied rule with 422 bad_request naming the field (S4.12)', async () => {
+    const h = await makeEdge();
+    const id = await newSession(h, 'p4');
+    const { requestId } = await firstPermissionRequestId(h, id);
+
+    const always = await post(h, `/api/sessions/${id}/permission`, { requestId, decision: 'allow', scope: 'always', rule: null, reason: null });
+    assert.equal(always.status, 422);
+    assert.equal(((await always.json()) as { error: { detail?: { field?: string } } }).error.detail?.field, 'scope');
+
+    const withRule = await post(h, `/api/sessions/${id}/permission`, { requestId, decision: 'allow', scope: 'once', rule: 'x', reason: null });
+    assert.equal(withRule.status, 422);
+    assert.equal(((await withRule.json()) as { error: { detail?: { field?: string } } }).error.detail?.field, 'rule');
+  });
+
+  it('refuses a malformed body with 422 bad_request naming the field', async () => {
+    const h = await makeEdge();
+    const id = await newSession(h, 'p5');
+    const cases: Array<[unknown, string]> = [
+      [{ decision: 'allow', scope: 'once', rule: null, reason: null }, 'requestId'],
+      [{ requestId: 'r1', scope: 'once', rule: null, reason: null }, 'decision'],
+      [{ requestId: 'r1', decision: 'allow', rule: null, reason: null }, 'scope'],
+    ];
+    for (const [body, field] of cases) {
+      const res = await post(h, `/api/sessions/${id}/permission`, body);
+      assert.equal(res.status, 422, JSON.stringify(body));
+      const err = ((await res.json()) as { error: { code: string; detail?: { field?: string } } }).error;
+      assert.equal(err.code, 'bad_request');
+      assert.equal(err.detail?.field, field);
+    }
+  });
+});
+
 describe('S2.9 — origin discipline', () => {
   it('refuses a disallowed Origin with 403 bad_origin before identity is resolved', async () => {
     const h = await makeEdge();

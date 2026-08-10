@@ -289,6 +289,49 @@ export function createSseEdge(deps: EdgeDeps): RequestListener {
     sendJson(res, 202, { turnId: sent.value.turnId satisfies TurnId });
   }
 
+  async function handlePermission(req: IncomingMessage, res: ServerResponse, owner: OperatorId, sessionId: SessionId): Promise<void> {
+    const raw = await readBody(req);
+    if (raw === null) return sendError(res, 'bad_request', 'request body too large', { field: 'body' });
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      return sendError(res, 'bad_request', 'body is not valid JSON', { field: 'body' });
+    }
+    if (typeof parsed !== 'object' || parsed === null) {
+      return sendError(res, 'bad_request', 'body must be an object', { field: 'body' });
+    }
+    const body = parsed as Record<string, unknown>;
+
+    if (typeof body['requestId'] !== 'string' || body['requestId'] === '') {
+      return sendError(res, 'bad_request', 'requestId is required', { field: 'requestId' });
+    }
+    if (body['decision'] !== 'allow' && body['decision'] !== 'deny') {
+      return sendError(res, 'bad_request', "decision must be 'allow' or 'deny'", { field: 'decision' });
+    }
+    if (body['scope'] !== 'once' && body['scope'] !== 'always') {
+      return sendError(res, 'bad_request', "scope must be 'once' or 'always'", { field: 'scope' });
+    }
+    const rule = body['rule'] ?? null;
+    if (rule !== null && typeof rule !== 'string') {
+      return sendError(res, 'bad_request', 'rule must be a string or null', { field: 'rule' });
+    }
+    const reason = body['reason'] ?? null;
+    if (reason !== null && typeof reason !== 'string') {
+      return sendError(res, 'bad_request', 'reason must be a string or null', { field: 'reason' });
+    }
+
+    const answered = await manager.answerPermission(sessionId, owner, {
+      requestId: body['requestId'] as never,
+      decision: body['decision'],
+      scope: body['scope'],
+      rule: rule as never,
+      reason: reason as string | null,
+    });
+    if (!answered.ok) return failWith(res, answered.error);
+    sendJson(res, 200, { accepted: answered.value.accepted });
+  }
+
   async function handleEvents(req: IncomingMessage, res: ServerResponse, owner: OperatorId, sessionId: SessionId): Promise<void> {
     const lastEventId = headerValue(req, 'last-event-id');
     const parsedAfter = lastEventId === undefined ? 0 : Number.parseInt(lastEventId, 10);
@@ -464,6 +507,7 @@ export function createSseEdge(deps: EdgeDeps): RequestListener {
           const sessionId = decoded as SessionId;
           const rest = sessionRoute[2] ?? '';
           if (method === 'POST' && rest === '/message') return handleMessage(req, res, owner, sessionId);
+          if (method === 'POST' && rest === '/permission') return handlePermission(req, res, owner, sessionId);
           if (method === 'GET' && rest === '/events') return handleEvents(req, res, owner, sessionId);
           if (method === 'GET' && rest === '') {
             const got = manager.get(sessionId, owner);
