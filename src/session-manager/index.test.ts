@@ -1,13 +1,50 @@
 import assert from 'node:assert/strict';
+import { existsSync } from 'node:fs';
 import { mkdtemp, mkdir, chmod, readFile } from 'node:fs/promises';
+import { execFile } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { test } from 'node:test';
+import { after, test } from 'node:test';
+import { promisify } from 'node:util';
 import { createSessionManager } from './index.js';
 import { createStore } from '../store/index.js';
 import type { AuditRecord, Checkpoints, Config, Envelope, OperatorId, Records, Store } from '../contract/index.js';
 
+const execFileAsync = promisify(execFile);
+
 const FIXTURE = path.join(process.cwd(), 'src', 'adapters', 'claude', 'fixtures', 'fake-claude-cli.mjs');
+
+// A turn deliberately left stalled on an unanswered permission (S4.12, S5.10) leaves its
+// child alive with nothing in this file to end it. `edge/sse/index.test.ts` carries the
+// same safety net for the same reason: reap whatever is still open, from the pid log
+// `store` already writes, so an intentionally-stalled test does not outlive this process.
+const storageRoots: string[] = [];
+
+after(async () => {
+  for (const root of storageRoots) {
+    let log: string;
+    try {
+      log = await readFile(path.join(root, 'pids.ndjson'), 'utf8');
+    } catch {
+      continue;
+    }
+    for (const line of log.split('\n')) {
+      if (line.trim() === '') continue;
+      let record: { pid?: number; exitedAt?: string | null };
+      try {
+        record = JSON.parse(line) as typeof record;
+      } catch {
+        continue;
+      }
+      if (typeof record.pid !== 'number' || record.exitedAt) continue;
+      try {
+        process.kill(record.pid);
+      } catch {
+        // Already gone, which is the common case.
+      }
+    }
+  }
+});
 
 async function readAudit(storageRoot: string): Promise<AuditRecord[]> {
   let raw: string;
@@ -34,6 +71,7 @@ async function makeManager(
   process.env['SKYNET_TEST_SCENARIO'] = scenario;
   process.env['SKYNET_CLAUDE_EXECUTABLE'] = FIXTURE;
   const storageRoot = await mkdtemp(path.join(tmpdir(), 'skynet-sm-'));
+  storageRoots.push(storageRoot);
   const workspaceRoot = await mkdtemp(path.join(tmpdir(), 'skynet-ws-'));
   const config: Config = {
     bind: { host: '127.0.0.1', port: 3000 },
@@ -852,4 +890,335 @@ test('S4.15 — a turn spawning with no --resume on a session that already ran o
   assert.equal(notice.code, 'resume_unavailable');
 
   await waitUntil(() => received.slice(beforeSecondTurn).some((e) => e.kind === 'turn.ended'));
+});
+
+function isAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// Windows 8.3 short name for an entry inside `parentDir` — `dir /x`'s alias column,
+// blank when the long name already fits 8.3 (S1.6, S5.7). `null` when it cannot be
+// determined at all, which callers treat as "skip this case" rather than a failure.
+async function shortNameFor(parentDir: string, entryName: string): Promise<string | null> {
+  let stdout: string;
+  try {
+    ({ stdout } = await execFileAsync('cmd.exe', ['/c', 'dir', '/x', parentDir]));
+  } catch {
+    return null;
+  }
+  for (const line of stdout.split('\n')) {
+    const idx = line.indexOf(entryName);
+    if (idx === -1 || !line.includes('<DIR>')) continue;
+    const before = line.slice(0, idx).trim();
+    const token = before.split(/\s+/).pop();
+    return token && token !== entryName ? token : null;
+  }
+  return null;
+}
+
+test('S5.1/S5.3/S5.4 — interrupt resolves an outstanding permission cancelled_process_exit, leaves the session live with no turn, and no-ops for a stale or absent turn', async () => {
+  const { manager, workspaceRoot } = await makeManager('full');
+  const owner = 'operator-1' as OperatorId;
+  const projectDir = path.join(workspaceRoot, 'proj-s513');
+  await mkdir(projectDir);
+  const created = await manager.create(owner, { vendor: 'claude', cwd: projectDir, model: null, sandbox: null, requisitionId: null });
+  assert.equal(created.ok, true);
+  if (!created.ok) return;
+  const { sessionId } = created.value;
+
+  // S5.3: no live turn at all — a no-op.
+  const noopEarly = await manager.interrupt(sessionId, owner, 'not-a-real-turn' as never);
+  assert.equal(noopEarly.ok, true);
+
+  const received: Envelope[] = [];
+  await manager.subscribe(sessionId, owner, 0, { deliver: (e) => received.push(e), close: () => {} });
+  const messaged = await manager.message(sessionId, owner, 'go');
+  assert.equal(messaged.ok, true);
+  if (!messaged.ok) return;
+  const { turnId } = messaged.value;
+
+  await waitUntil(() => received.some((e) => e.kind === 'permission.request'));
+
+  // S5.3: a turnId that does not name the live turn is also a no-op and emits nothing.
+  const before = received.length;
+  const staleResult = await manager.interrupt(sessionId, owner, 'some-other-turn' as never);
+  assert.equal(staleResult.ok, true);
+  await new Promise((r) => setTimeout(r, 50));
+  assert.equal(received.length, before, 'a stale turnId emits nothing');
+
+  const interrupted = await manager.interrupt(sessionId, owner, turnId);
+  assert.equal(interrupted.ok, true);
+
+  // S5.4: the outstanding permission.request resolves cancelled_process_exit.
+  await waitUntil(() => received.some((e) => e.kind === 'permission.resolved'));
+  const resolved = received.find((e) => e.kind === 'permission.resolved')!.data as { decision: string; reason: string };
+  assert.equal(resolved.decision, 'deny');
+  assert.equal(resolved.reason, 'cancelled_process_exit');
+
+  // S5.1: the resulting turn.ended is an expected end, not a crash.
+  await waitUntil(() => received.some((e) => e.kind === 'turn.ended'));
+  const turnEnded = received.find((e) => e.kind === 'turn.ended')!;
+  assert.equal((turnEnded.data as { stopReason: string }).stopReason, 'interrupted');
+
+  const summary = manager.get(sessionId, owner);
+  assert.equal(summary.ok, true);
+  if (summary.ok) assert.equal(summary.value.state, 'live');
+
+  // The turn slot is free again — a new message is not turn_in_flight.
+  const again = await manager.message(sessionId, owner, 'go again');
+  assert.equal(again.ok, true);
+});
+
+test('S5.2 — interrupt terminates the whole process tree: no live descendant five seconds after it returns, on this platform', async () => {
+  const { manager, workspaceRoot } = await makeManager('grandchild');
+  const owner = 'operator-1' as OperatorId;
+  const projectDir = path.join(workspaceRoot, 'proj-s52');
+  await mkdir(projectDir);
+  const markerDir = await mkdtemp(path.join(tmpdir(), 'skynet-marker-'));
+  const markerPath = path.join(markerDir, 'grandchild.json');
+  process.env['SKYNET_GRANDCHILD_MARKER'] = markerPath;
+
+  const created = await manager.create(owner, { vendor: 'claude', cwd: projectDir, model: null, sandbox: null, requisitionId: null });
+  assert.equal(created.ok, true);
+  if (!created.ok) return;
+  const { sessionId } = created.value;
+
+  const received: Envelope[] = [];
+  await manager.subscribe(sessionId, owner, 0, { deliver: (e) => received.push(e), close: () => {} });
+  const messaged = await manager.message(sessionId, owner, 'go');
+  assert.equal(messaged.ok, true);
+  if (!messaged.ok) return;
+  const { turnId } = messaged.value;
+
+  let marker: { cliPid: number; grandchildPid: number } | null = null;
+  await waitUntil(async () => {
+    try {
+      marker = JSON.parse(await readFile(markerPath, 'utf8')) as { cliPid: number; grandchildPid: number };
+      return true;
+    } catch {
+      return false;
+    }
+  });
+  assert.ok(marker, 'the fixture reported the pids it spawned');
+  const { cliPid, grandchildPid } = marker!;
+  assert.equal(isAlive(grandchildPid), true, 'the grandchild is actually running before interrupt');
+
+  const interrupted = await manager.interrupt(sessionId, owner, turnId);
+  assert.equal(interrupted.ok, true);
+
+  await waitUntil(() => received.some((e) => e.kind === 'turn.ended'));
+
+  // The route (here, `interrupt` itself) has already returned; the criterion measures
+  // five seconds from that point, by real process enumeration against pids this test
+  // spawned itself — D38, and `design/30-slices.md § What no slice covers` notes this
+  // is verified per-platform until the two-platform CI gate (#28) exists to run both.
+  await new Promise((r) => setTimeout(r, 5000));
+  assert.equal(isAlive(cliPid), false, 'the CLI child is gone');
+  assert.equal(isAlive(grandchildPid), false, 'the grandchild is gone too, not just the recorded pid');
+});
+
+test('S5.5/S5.6 — end sets ended, emits session.ended, refuses a further message, and frees the workspace', async () => {
+  const { manager, workspaceRoot } = await makeManager('full');
+  const owner = 'operator-1' as OperatorId;
+  const projectDir = path.join(workspaceRoot, 'proj-s55');
+  await mkdir(projectDir);
+  const created = await manager.create(owner, { vendor: 'claude', cwd: projectDir, model: null, sandbox: null, requisitionId: null });
+  assert.equal(created.ok, true);
+  if (!created.ok) return;
+  const { sessionId } = created.value;
+
+  // Busy before end.
+  const secondCreate = await manager.create(owner, { vendor: 'claude', cwd: projectDir, model: null, sandbox: null, requisitionId: null });
+  assert.equal(secondCreate.ok, false);
+  if (!secondCreate.ok) assert.equal(secondCreate.error.code, 'workspace_busy');
+
+  const received: Envelope[] = [];
+  await manager.subscribe(sessionId, owner, 0, { deliver: (e) => received.push(e), close: () => {} });
+
+  const ended = await manager.end(sessionId, owner);
+  assert.equal(ended.ok, true);
+
+  assert.ok(received.some((e) => e.kind === 'session.ended'));
+  const endedEvent = received.find((e) => e.kind === 'session.ended')!.data as { reason: string };
+  assert.equal(endedEvent.reason, 'operator');
+
+  const summary = manager.get(sessionId, owner);
+  assert.equal(summary.ok, true);
+  if (summary.ok) {
+    assert.equal(summary.value.state, 'ended');
+    assert.notEqual(summary.value.endedAt, null);
+  }
+
+  const messaged = await manager.message(sessionId, owner, 'go');
+  assert.equal(messaged.ok, false);
+  if (!messaged.ok) assert.equal(messaged.error.code, 'session_ended');
+
+  // Freed: a create at the exact same path now succeeds.
+  const afterEnd = await manager.create(owner, { vendor: 'claude', cwd: projectDir, model: null, sandbox: null, requisitionId: null });
+  assert.equal(afterEnd.ok, true);
+});
+
+test('S5.7 — the busy check tests overlap, not equality: a parent, a child, and a differently spelled version of a live session\'s cwd are each refused workspace_busy', async () => {
+  const { manager, workspaceRoot } = await makeManager('full');
+  const owner = 'operator-1' as OperatorId;
+  const parentDir = path.join(workspaceRoot, 'proj-s57');
+  const childDir = path.join(parentDir, 'nested', 'deeper');
+  await mkdir(childDir, { recursive: true });
+
+  const created = await manager.create(owner, { vendor: 'claude', cwd: parentDir, model: null, sandbox: null, requisitionId: null });
+  assert.equal(created.ok, true);
+
+  const cases: Array<[string, string]> = [
+    ['a parent of the holder', workspaceRoot],
+    ['a child of the holder', childDir],
+    ['a trailing separator', parentDir + path.sep],
+  ];
+  if (process.platform === 'win32') cases.push(['a case variation', parentDir.toUpperCase()]);
+
+  for (const [label, candidate] of cases) {
+    const result = await manager.create(owner, { vendor: 'claude', cwd: candidate, model: null, sandbox: null, requisitionId: null });
+    assert.equal(result.ok, false, label);
+    if (!result.ok) {
+      assert.equal(result.error.code, 'workspace_busy', label);
+      if (result.error.code === 'workspace_busy') {
+        assert.equal(result.error.holder.owner, owner, label);
+      }
+    }
+  }
+});
+
+if (process.platform === 'win32') {
+  test('S5.7 — a Windows 8.3 short name of a live session\'s cwd is also refused workspace_busy', async () => {
+    const { manager, workspaceRoot } = await makeManager('full');
+    const owner = 'operator-1' as OperatorId;
+    const longName = 'a-fairly-long-directory-name-for-8dot3';
+    const parentDir = path.join(workspaceRoot, longName);
+    await mkdir(parentDir);
+
+    const created = await manager.create(owner, { vendor: 'claude', cwd: parentDir, model: null, sandbox: null, requisitionId: null });
+    assert.equal(created.ok, true);
+
+    const shortName = await shortNameFor(workspaceRoot, longName);
+    if (shortName === null) return; // could not determine one on this host; not this criterion's to diagnose
+
+    const result = await manager.create(owner, { vendor: 'claude', cwd: path.join(workspaceRoot, shortName), model: null, sandbox: null, requisitionId: null });
+    assert.equal(result.ok, false);
+    if (!result.ok) assert.equal(result.error.code, 'workspace_busy');
+  });
+}
+
+test('S5.8 — the workspace claim and the turn slot are each claimed in the same synchronous block that tests them', async () => {
+  const { manager, workspaceRoot } = await makeManager('full');
+  const owner = 'operator-1' as OperatorId;
+  const projectDir = path.join(workspaceRoot, 'proj-s58');
+  await mkdir(projectDir);
+
+  const [c1, c2] = await Promise.all([
+    manager.create(owner, { vendor: 'claude', cwd: projectDir, model: null, sandbox: null, requisitionId: null }),
+    manager.create(owner, { vendor: 'claude', cwd: projectDir, model: null, sandbox: null, requisitionId: null }),
+  ]);
+  assert.equal([c1, c2].filter((r) => r.ok).length, 1, 'exactly one create succeeded');
+  const createFailure = [c1, c2].find((r) => !r.ok);
+  if (createFailure && !createFailure.ok) assert.equal(createFailure.error.code, 'workspace_busy');
+
+  const createSuccess = [c1, c2].find((r) => r.ok);
+  if (!createSuccess || !createSuccess.ok) return;
+  const { sessionId } = createSuccess.value;
+
+  const [m1, m2] = await Promise.all([
+    manager.message(sessionId, owner, 'a'),
+    manager.message(sessionId, owner, 'b'),
+  ]);
+  assert.equal([m1, m2].filter((r) => r.ok).length, 1, 'exactly one message was accepted');
+  const messageFailure = [m1, m2].find((r) => !r.ok);
+  if (messageFailure && !messageFailure.ok) assert.equal(messageFailure.error.code, 'turn_in_flight');
+});
+
+test('S5.9 — delete removes meta.json, events.ndjson, tool-output/ and the registry entry, and leaves audit.ndjson byte-identical', async () => {
+  const { manager, workspaceRoot, storageRoot } = await makeManager('full');
+  const owner = 'operator-1' as OperatorId;
+  const { sessionId, received, requestEnvelope } = await runOneRequest('full', workspaceRoot, manager, owner, 'proj-s59');
+  const requestId = (requestEnvelope.data as { requestId: string }).requestId;
+  await manager.answerPermission(sessionId, owner, { requestId: requestId as never, decision: 'allow', scope: 'once', rule: null, reason: null });
+  await waitUntil(() => received.some((e) => e.kind === 'turn.ended'));
+
+  const sessionDir = path.join(storageRoot, 'sessions', sessionId);
+  assert.equal(existsSync(path.join(sessionDir, 'meta.json')), true);
+  assert.equal(existsSync(path.join(sessionDir, 'events.ndjson')), true);
+  assert.equal(existsSync(path.join(sessionDir, 'tool-output')), true);
+
+  const auditBefore = await readFile(path.join(storageRoot, 'audit.ndjson'), 'utf8');
+
+  // The turn slot frees only once turn.ended's durable write has landed, slightly after
+  // the subscriber sees the envelope (S3.7's/S4.15's same race) — retry rather than
+  // assert once.
+  let removed;
+  for (;;) {
+    removed = await manager.remove(sessionId, owner);
+    if (removed.ok) break;
+    assert.equal(removed.error.code, 'turn_in_flight', `delete refused: ${removed.error.code}`);
+    await new Promise((r) => setTimeout(r, 10));
+  }
+
+  assert.equal(existsSync(sessionDir), false);
+  const got = manager.get(sessionId, owner);
+  assert.equal(got.ok, false);
+  if (!got.ok) assert.equal(got.error.code, 'no_such_session');
+
+  const auditAfter = await readFile(path.join(storageRoot, 'audit.ndjson'), 'utf8');
+  assert.equal(auditAfter, auditBefore);
+});
+
+test('S5.10 — end and delete are both refused turn_in_flight during a turn', async () => {
+  const { manager, workspaceRoot } = await makeManager('full');
+  const owner = 'operator-1' as OperatorId;
+  const { sessionId } = await runOneRequest('full', workspaceRoot, manager, owner, 'proj-s510');
+
+  const endResult = await manager.end(sessionId, owner);
+  assert.equal(endResult.ok, false);
+  if (!endResult.ok) assert.equal(endResult.error.code, 'turn_in_flight');
+
+  const deleteResult = await manager.remove(sessionId, owner);
+  assert.equal(deleteResult.ok, false);
+  if (!deleteResult.ok) assert.equal(deleteResult.error.code, 'turn_in_flight');
+
+  // Interrupt is the one operation allowed during a turn — exercised end-to-end by the
+  // S5.1/S5.3/S5.4 test above, which interrupts a session with a live turn throughout.
+});
+
+test('S5.11 — a delete that fails part-way still removes the registry entry and emits a non-fatal notice naming what remains', async () => {
+  const owner = 'operator-1' as OperatorId;
+  const failingDeleteStore = (store: Store): Store => ({
+    ...store,
+    async deleteSession() {
+      return { ok: false, error: { code: 'io', path: 'C:\\fake\\stuck-file', detail: 'boom' } };
+    },
+  });
+  const { manager, workspaceRoot } = await makeManager('full', {}, failingDeleteStore);
+  const projectDir = path.join(workspaceRoot, 'proj-s511');
+  await mkdir(projectDir);
+  const created = await manager.create(owner, { vendor: 'claude', cwd: projectDir, model: null, sandbox: null, requisitionId: null });
+  assert.equal(created.ok, true);
+  if (!created.ok) return;
+  const { sessionId } = created.value;
+
+  const received: Envelope[] = [];
+  await manager.subscribe(sessionId, owner, 0, { deliver: (e) => received.push(e), close: () => {} });
+
+  const removed = await manager.remove(sessionId, owner);
+  assert.equal(removed.ok, true, 'a storage failure does not become a 5xx; it is reported non-fatally');
+
+  const got = manager.get(sessionId, owner);
+  assert.equal(got.ok, false, 'the registry entry is gone regardless');
+
+  const notice = received.find((e) => e.kind === 'error' && (e.data as { kind: string }).kind === 'session_delete_incomplete');
+  assert.ok(notice, 'the still-open subscriber saw a session_delete_incomplete notice');
+  const data = notice!.data as { fatal: boolean; message: string };
+  assert.equal(data.fatal, false);
+  assert.match(data.message, /stuck-file/);
 });

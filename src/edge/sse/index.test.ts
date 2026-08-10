@@ -689,3 +689,119 @@ describe('S3.3 — a replay_gap never moves the client\'s resume point', () => {
     assert.doesNotMatch(gapFrame, /^id:/m, 'and carries no id: — an id here would resume past history never received');
   });
 });
+
+/** `delete` is a keyword; a plain named function reads oddly as `deleteSession`. */
+function del(h: Harness, url: string, operator = 'ben') {
+  return fetch(`${h.base}${url}`, {
+    method: 'DELETE',
+    headers: { 'sec-fetch-site': 'same-origin', 'x-forwarded-user': operator },
+  });
+}
+
+describe('S5 — POST .../interrupt, POST .../end, DELETE /api/sessions/:id', () => {
+  it('POST /interrupt returns 200 { ok: true } and the turn ends interrupted (S5.1)', async () => {
+    const h = await makeEdge();
+    const id = await newSession(h, 'i1');
+    const events = await get(h, `/api/sessions/${id}/events`);
+    const messaged = await post(h, `/api/sessions/${id}/message`, { text: 'go' });
+    assert.equal(messaged.status, 202);
+    const { turnId } = (await messaged.json()) as { turnId: string };
+
+    const res = await post(h, `/api/sessions/${id}/interrupt`, { turnId });
+    assert.equal(res.status, 200);
+    assert.equal(((await res.json()) as { ok: boolean }).ok, true);
+
+    const { frames } = await readFrames(events, (f) => f.some((x) => x.includes('"kind":"turn.ended"')), 10000);
+    const ended = frames.find((f) => f.includes('"kind":"turn.ended"'))!;
+    assert.match(ended, /"stopReason":"interrupted"/);
+  });
+
+  it('POST /interrupt is 200 { ok: true } for a turnId that does not name the live turn (S5.3)', async () => {
+    const h = await makeEdge();
+    const id = await newSession(h, 'i2');
+    const res = await post(h, `/api/sessions/${id}/interrupt`, { turnId: 'not-a-real-turn' });
+    assert.equal(res.status, 200);
+    assert.equal(((await res.json()) as { ok: boolean }).ok, true);
+  });
+
+  it('POST /interrupt refuses a missing turnId with 422 bad_request', async () => {
+    const h = await makeEdge();
+    const id = await newSession(h, 'i3');
+    const res = await post(h, `/api/sessions/${id}/interrupt`, {});
+    assert.equal(res.status, 422);
+    assert.equal(((await res.json()) as { error: { detail?: { field?: string } } }).error.detail?.field, 'turnId');
+  });
+
+  it('POST /interrupt is 404 no_such_session for another operator', async () => {
+    const h = await makeEdge();
+    const id = await newSession(h, 'i4', 'ben');
+    const res = await post(h, `/api/sessions/${id}/interrupt`, { turnId: 'x' }, 'mallory');
+    assert.equal(res.status, 404);
+    assert.equal(((await res.json()) as { error: { code: string } }).error.code, 'no_such_session');
+  });
+
+  it('POST /end sets the session ended and a further message is 409 session_ended (S5.5)', async () => {
+    const h = await makeEdge();
+    const id = await newSession(h, 'e1');
+    const res = await post(h, `/api/sessions/${id}/end`, {});
+    assert.equal(res.status, 200);
+    assert.equal(((await res.json()) as { ok: boolean }).ok, true);
+
+    const summary = await get(h, `/api/sessions/${id}`);
+    assert.equal(((await summary.json()) as { session: { state: string } }).session.state, 'ended');
+
+    const messaged = await post(h, `/api/sessions/${id}/message`, { text: 'go' });
+    assert.equal(messaged.status, 409);
+    assert.equal(((await messaged.json()) as { error: { code: string } }).error.code, 'session_ended');
+  });
+
+  it('POST /end frees the workspace for a new create (S5.6)', async () => {
+    const h = await makeEdge();
+    const cwd = path.join(h.workspaceRoot, 'e2');
+    await mkdir(cwd);
+    const first = await post(h, '/api/sessions', { vendor: 'claude', cwd, model: null, sandbox: null, requisitionId: null });
+    assert.equal(first.status, 201);
+    const { sessionId } = (await first.json()) as { sessionId: string };
+
+    const busy = await post(h, '/api/sessions', { vendor: 'claude', cwd, model: null, sandbox: null, requisitionId: null });
+    assert.equal(busy.status, 409);
+
+    await post(h, `/api/sessions/${sessionId}/end`, {});
+
+    const afterEnd = await post(h, '/api/sessions', { vendor: 'claude', cwd, model: null, sandbox: null, requisitionId: null });
+    assert.equal(afterEnd.status, 201);
+  });
+
+  it('POST /end and DELETE are both 409 turn_in_flight during a turn (S5.10)', async () => {
+    const h = await makeEdge();
+    const id = await newSession(h, 'e3');
+    const { requestId } = await firstPermissionRequestId(h, id);
+    void requestId; // the turn is now live and stalled on this request
+
+    const endRes = await post(h, `/api/sessions/${id}/end`, {});
+    assert.equal(endRes.status, 409);
+    assert.equal(((await endRes.json()) as { error: { code: string } }).error.code, 'turn_in_flight');
+
+    const delRes = await del(h, `/api/sessions/${id}`);
+    assert.equal(delRes.status, 409);
+    assert.equal(((await delRes.json()) as { error: { code: string } }).error.code, 'turn_in_flight');
+  });
+
+  it('DELETE removes the session; a subsequent GET is 404 no_such_session (S5.9)', async () => {
+    const h = await makeEdge();
+    const id = await newSession(h, 'd1');
+    const res = await del(h, `/api/sessions/${id}`);
+    assert.equal(res.status, 200);
+    assert.equal(((await res.json()) as { ok: boolean }).ok, true);
+
+    const after = await get(h, `/api/sessions/${id}`);
+    assert.equal(after.status, 404);
+  });
+
+  it('DELETE is 404 no_such_session for another operator', async () => {
+    const h = await makeEdge();
+    const id = await newSession(h, 'd2', 'ben');
+    const res = await del(h, `/api/sessions/${id}`, 'mallory');
+    assert.equal(res.status, 404);
+  });
+});

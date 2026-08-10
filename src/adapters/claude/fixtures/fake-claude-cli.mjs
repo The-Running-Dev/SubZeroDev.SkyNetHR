@@ -1,5 +1,6 @@
 #!/usr/bin/env node
-import { readFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
+import { spawn } from 'node:child_process';
 // A deterministic stand-in for the real `claude` binary, used because
 // `--permission-prompt-tool stdio` does not emit `control_request` on the real CLI
 // today (design/findings/S1-claude-adapter.md, anthropics/claude-code#34046). This
@@ -23,6 +24,10 @@ import { readFileSync } from 'node:fs';
 //                   with more than one outstanding request (S4.9).
 //   no-init       — exits after some output without ever reporting system/init, as if
 //                   the process died before the handshake completed (S4.15).
+//   grandchild    — spawns a real, ordinary (non-detached) grandchild process that
+//                   writes its own pid to SKYNET_GRANDCHILD_MARKER and then idles
+//                   forever, and never sends a result — a turn that stays live until
+//                   something kills the tree (S5.2).
 
 const scenario = process.env.SKYNET_TEST_SCENARIO ?? 'full';
 const sessionId = 'fake-cli-session-' + Math.random().toString(36).slice(2);
@@ -198,6 +203,15 @@ function runScenario() {
       assistantText('vanished before the handshake completed', 'msg-noinit-1');
       process.exit(1);
       return; // unreachable
+    case 'grandchild': {
+      // Ordinary (not `detached`) spawn, so it inherits this process's process group on
+      // POSIX and is this process's child in the Windows process table — either way,
+      // exactly the descendant a tree kill (D38) must reach and a pid-only kill must not.
+      const grandchild = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+      writeFileSync(process.env.SKYNET_GRANDCHILD_MARKER, JSON.stringify({ cliPid: process.pid, grandchildPid: grandchild.pid }));
+      // No result: the turn stays live until something kills the tree.
+      return;
+    }
     case 'usage-real': {
       // Replays a real, captured CLI run verbatim (S1.11) — everything after this
       // script's own synthetic `system/init` line.

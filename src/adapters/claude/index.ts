@@ -17,6 +17,11 @@ import { summariseToolCall } from './summarise.js';
 
 const isWindows = platform === 'win32';
 
+// SIGTERM-then-SIGKILL grace period for a POSIX process group (D38, `10-design.md §
+// Interrupt`). Windows has no equivalent staged termination — `taskkill /T /F` is
+// already forceful — so this applies to the POSIX branch of `kill` only.
+const KILL_GRACE_MS = 2000;
+
 // Top-level record `type`s the wire protocol may legitimately send that this vocabulary
 // does not render. Verified against a real CLI run (`design/findings/S1-claude-adapter.md`):
 // `rate_limit_event` and several `system` subtypes (`hook_started`, `hook_response`,
@@ -40,6 +45,13 @@ export function createClaudeAdapter(opts: AdapterOptions & { readonly executable
   let cliSessionId: CliSessionId | null = null;
   let currentTurnId: TurnId | null = null;
   let resultSeen = false;
+  // Set by `kill`, before the platform kill is issued. Distinguishes an operator-
+  // requested termination from a genuine crash so the `close` handler below reports
+  // `stopReason: 'interrupted'` rather than `'process_exit'` for the same event (S5.1) —
+  // deciding *that* it happened is the manager's, by calling `kill`; naming *what
+  // happened* still has to be this close handler, which is the only place that knows
+  // whether the process actually stopped on its own.
+  let killRequested = false;
   let lastUsageMessageId: string | null = null;
   const pendingByRequestId = new Map<RequestId, { readonly callId: CallId }>();
 
@@ -236,6 +248,13 @@ export function createClaudeAdapter(opts: AdapterOptions & { readonly executable
             cwd: opts.cwd,
             stdio: ['pipe', 'pipe', 'pipe'],
             shell: needsShell,
+            // POSIX only (D38, `10-design.md § Platform divergence`): makes this child
+            // the leader of a new process group, so its own pid is a real group id and
+            // `process.kill(-pid)` in `kill` below reaches everything it later spawns —
+            // a compiler, a test runner — not just this one process. Windows has no
+            // process-group concept here; `taskkill /T` walks the live process table
+            // instead, so `detached` would only detach the console for no benefit.
+            detached: !isWindows,
             env: { ...process.env, FORCE_COLOR: '0', NO_COLOR: '1' },
           });
         } catch (err) {
@@ -296,7 +315,7 @@ export function createClaudeAdapter(opts: AdapterOptions & { readonly executable
           pendingByRequestId.clear();
           notify({ kind: 'exited', code, signal });
           if (!resultSeen) {
-            emitEvent('turn.ended', { stopReason: 'process_exit', usage: null }, null);
+            emitEvent('turn.ended', { stopReason: killRequested ? 'interrupted' : 'process_exit', usage: null }, null);
           }
           currentTurnId = null;
         });
@@ -326,17 +345,41 @@ export function createClaudeAdapter(opts: AdapterOptions & { readonly executable
     async kill(): Promise<void> {
       const proc = child;
       if (!proc || proc.pid === undefined) return;
+      killRequested = true;
       if (isWindows) {
-        // Failing to kill is non-fatal, but an unlistened ChildProcess 'error' event
-        // (taskkill missing, EPERM) throws and takes the whole server down.
+        // Already terminate-then-force in one step — `/F` — and resolves the tree from
+        // the live process table at kill time (D38), so no separate grace period applies
+        // here. Failing to kill is non-fatal, but an unlistened ChildProcess 'error'
+        // event (taskkill missing, EPERM) throws and takes the whole server down.
         spawn('taskkill', ['/PID', String(proc.pid), '/T', '/F']).once('error', () => {});
-      } else {
+        return;
+      }
+      const pid = proc.pid;
+      try {
+        process.kill(-pid, 'SIGTERM');
+      } catch {
         try {
-          process.kill(-proc.pid, 'SIGTERM');
-        } catch {
           proc.kill('SIGTERM');
+        } catch {
+          // Already gone.
         }
       }
+      // Not awaited: the caller (the manager, on an operator's interrupt) gets its
+      // result back as soon as the signal is dispatched. The force follow-up runs on its
+      // own timer so a tree that ignores SIGTERM — the case the grace period exists for
+      // — is still gone within it, without holding the HTTP response open to find out.
+      setTimeout(() => {
+        if (child !== proc) return; // already exited; 'close' cleared it
+        try {
+          process.kill(-pid, 'SIGKILL');
+        } catch {
+          try {
+            proc.kill('SIGKILL');
+          } catch {
+            // Already gone.
+          }
+        }
+      }, KILL_GRACE_MS).unref();
     },
   };
 
