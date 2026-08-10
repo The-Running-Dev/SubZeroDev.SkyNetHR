@@ -462,25 +462,39 @@ export function createSessionManager(deps: {
       const entry = sessions.get(sessionId);
       if (!entry || entry.record.owner !== owner) return { ok: false, error: { code: 'no_such_session', sessionId } };
       // S6.5/D17: restore is a second consumer of the single-writer turn-slot invariant,
-      // alongside `POST /message` — the manager, not the adapter, is what both ask.
+      // alongside `POST /message` — claimed synchronously here, before the first `await`
+      // (I5), the same way `message()` claims it, so a concurrent `message()` or a second
+      // `restore()` can never interleave its own git operations with this one.
       if (entry.turn) return { ok: false, error: { code: 'turn_in_flight', sessionId, turnId: entry.turn.turnId } };
+      entry.turn = { turnId: randomUUID() as TurnId, phase: 'running', pending: new Map() };
 
-      const restored = await checkpoints.restore(sessionId, entry.record.cwd, sha);
-      if (!restored.ok) {
-        if (restored.error.code === 'restore_incomplete') {
-          await emit(entry, 'error', {
-            kind: 'checkpoint_restore_failed',
-            message: `restore to ${sha} failed part-way: ${restored.error.detail}`,
-            fatal: false,
-          });
+      try {
+        const restored = await checkpoints.restore(sessionId, entry.record.cwd, sha);
+        if (!restored.ok) {
+          if (restored.error.code === 'restore_incomplete') {
+            await emit(entry, 'error', {
+              kind: 'checkpoint_restore_failed',
+              message: `restore to ${sha} failed part-way: ${restored.error.detail}`,
+              fatal: false,
+            });
+            // D31/S6.11: the safety checkpoint was already committed before this failure —
+            // announce it so the client's list picks it up even though the restore itself
+            // did not complete; `list()` returns newest-first, so the safety commit is its
+            // first entry.
+            const listed = await checkpoints.list(sessionId, entry.record.cwd);
+            const safety = listed.ok ? listed.value[0] : undefined;
+            if (safety) await emit(entry, 'checkpoint.created', { turnId: null, sha: safety.sha, label: safety.label });
+          }
+          return { ok: false, error: { code: 'checkpoint', cause: restored.error } };
         }
-        return { ok: false, error: { code: 'checkpoint', cause: restored.error } };
-      }
 
-      // D31: `turnId: null` is CheckpointCreated's discriminator for the safety
-      // checkpoint restore always takes first.
-      await emit(entry, 'checkpoint.created', { turnId: null, sha: restored.value.sha, label: restored.value.label });
-      return { ok: true, value: undefined };
+        // D31: `turnId: null` is CheckpointCreated's discriminator for the safety
+        // checkpoint restore always takes first.
+        await emit(entry, 'checkpoint.created', { turnId: null, sha: restored.value.sha, label: restored.value.label });
+        return { ok: true, value: undefined };
+      } finally {
+        entry.turn = null;
+      }
     },
 
     async openToolOutput() {

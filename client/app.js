@@ -101,8 +101,12 @@ function selectSession(sessionId) {
 
 async function refreshCheckpoints() {
   if (state.sessionId === null) return;
-  const result = await api('GET', `/api/sessions/${encodeURIComponent(state.sessionId)}/checkpoints`);
+  const requestedSessionId = state.sessionId;
+  const result = await api('GET', `/api/sessions/${encodeURIComponent(requestedSessionId)}/checkpoints`);
   if (result.status === 401 || result.status !== 200) return;
+  // A faster response for a session switched to *after* this request was sent must not
+  // overwrite that session's own list with a stale one.
+  if (state.sessionId !== requestedSessionId) return;
 
   const list = $('checkpoint-list');
   clear(list);

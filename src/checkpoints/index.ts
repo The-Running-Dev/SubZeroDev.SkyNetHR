@@ -116,9 +116,15 @@ export function createCheckpoints(config: Config): Checkpoints {
       // A shadow repo with no commits yet (a session that has never run a turn, or whose
       // `init` never completed) is `git log`'s ordinary failure mode — an unborn HEAD —
       // not a real error; there is nothing to list either way (S6.2's "before each turn"
-      // means the first checkpoint exists only once a turn has actually started).
+      // means the first checkpoint exists only once a turn has actually started). Every
+      // other failure (a missing git binary, a corrupted `ckpt.git`, a permissions/I/O
+      // error) is a real failure and must not be reported as "no checkpoints" the same
+      // way — only git's own unborn-HEAD message is treated as empty.
       const log = await runGit(gitDir, cwd, ['log', `--format=%H${FIELD_SEP}%s${FIELD_SEP}%cI`]);
-      if (!log.ok) return { ok: true, value: [] };
+      if (!log.ok) {
+        if (/does not have any commits yet/.test(log.error.message)) return { ok: true, value: [] };
+        return { ok: false, error: initFailure(log.error) };
+      }
 
       const checkpoints: Checkpoint[] = [];
       for (const line of log.value.split('\n')) {

@@ -95,9 +95,7 @@ function sessionEndedNode(doc, data) {
 }
 
 function checkpointCreatedNode(doc, data) {
-  const body = el(doc, 'div', 'checkpoint');
-  body.appendChild(el(doc, 'div', 'checkpoint__text', data.turnId === null ? `safety checkpoint — ${data.label}` : data.label));
-  return row(doc, 'checkpoint', 'checkpoint', body);
+  return row(doc, 'checkpoint', 'checkpoint', el(doc, 'div', 'checkpoint__text', data.turnId === null ? `safety checkpoint — ${data.label}` : data.label));
 }
 
 // `handlers.onAnswerPermission(requestId, decision)` posts the answer and resolves to

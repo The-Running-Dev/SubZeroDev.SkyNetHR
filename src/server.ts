@@ -7,8 +7,8 @@ import { createCheckpoints } from './checkpoints/index.js';
 import { loadConfig } from './config/index.js';
 import type { ConfigError, Records } from './contract/index.js';
 
-// Checkpoints (S6) and records (tier two) are not built. A proxy that throws names the
-// slice rather than failing as `undefined is not a function` three frames deeper.
+// Records (tier two) is not built. A proxy that throws names the slice rather than
+// failing as `undefined is not a function` three frames deeper.
 function notBuiltYet<T extends object>(name: string, slice: string): T {
   return new Proxy(
     {},
