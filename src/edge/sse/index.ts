@@ -332,6 +332,38 @@ export function createSseEdge(deps: EdgeDeps): RequestListener {
     sendJson(res, 200, { accepted: answered.value.accepted });
   }
 
+  async function handleInterrupt(req: IncomingMessage, res: ServerResponse, owner: OperatorId, sessionId: SessionId): Promise<void> {
+    const raw = await readBody(req);
+    if (raw === null) return sendError(res, 'bad_request', 'request body too large', { field: 'body' });
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      return sendError(res, 'bad_request', 'body is not valid JSON', { field: 'body' });
+    }
+    const turnId = (parsed as { turnId?: unknown } | null)?.turnId;
+    if (typeof turnId !== 'string' || turnId === '') {
+      return sendError(res, 'bad_request', 'turnId is required', { field: 'turnId' });
+    }
+    const interrupted = await manager.interrupt(sessionId, owner, turnId as TurnId);
+    if (!interrupted.ok) return failWith(res, interrupted.error);
+    sendJson(res, 200, { ok: true });
+  }
+
+  async function handleEnd(req: IncomingMessage, res: ServerResponse, owner: OperatorId, sessionId: SessionId): Promise<void> {
+    await readBody(req); // drains the request; `{}` carries nothing to validate
+    const ended = await manager.end(sessionId, owner);
+    if (!ended.ok) return failWith(res, ended.error);
+    sendJson(res, 200, { ok: true });
+  }
+
+  async function handleDelete(req: IncomingMessage, res: ServerResponse, owner: OperatorId, sessionId: SessionId): Promise<void> {
+    await readBody(req); // no request body defined for DELETE; drains it regardless
+    const removed = await manager.remove(sessionId, owner);
+    if (!removed.ok) return failWith(res, removed.error);
+    sendJson(res, 200, { ok: true });
+  }
+
   async function handleEvents(req: IncomingMessage, res: ServerResponse, owner: OperatorId, sessionId: SessionId): Promise<void> {
     const lastEventId = headerValue(req, 'last-event-id');
     const parsedAfter = lastEventId === undefined ? 0 : Number.parseInt(lastEventId, 10);
@@ -508,6 +540,9 @@ export function createSseEdge(deps: EdgeDeps): RequestListener {
           const rest = sessionRoute[2] ?? '';
           if (method === 'POST' && rest === '/message') return handleMessage(req, res, owner, sessionId);
           if (method === 'POST' && rest === '/permission') return handlePermission(req, res, owner, sessionId);
+          if (method === 'POST' && rest === '/interrupt') return handleInterrupt(req, res, owner, sessionId);
+          if (method === 'POST' && rest === '/end') return handleEnd(req, res, owner, sessionId);
+          if (method === 'DELETE' && rest === '') return handleDelete(req, res, owner, sessionId);
           if (method === 'GET' && rest === '/events') return handleEvents(req, res, owner, sessionId);
           if (method === 'GET' && rest === '') {
             const got = manager.get(sessionId, owner);

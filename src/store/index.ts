@@ -199,10 +199,15 @@ export async function createStore(config: Config): Promise<Result<Store, StoreEr
     },
 
     async deleteSession(sessionId: SessionId) {
+      const dir = sessionDir(storageRoot, sessionId);
       try {
-        await rm(sessionDir(storageRoot, sessionId), { recursive: true, force: true });
+        await rm(dir, { recursive: true, force: true });
       } catch (err) {
-        return ioError(sessionDir(storageRoot, sessionId), (err as Error).message);
+        // `fs.rm` stops at the first entry it cannot remove and leaves the rest of the
+        // subtree behind; `.path` on the thrown error names that entry, which is more
+        // useful to an operator than the session directory it sits under (S5.11).
+        const nodeErr = err as NodeJS.ErrnoException;
+        return ioError(nodeErr.path ?? dir, nodeErr.message);
       }
       return { ok: true, value: undefined };
     },

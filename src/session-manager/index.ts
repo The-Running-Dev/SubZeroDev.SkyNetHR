@@ -332,14 +332,69 @@ export function createSessionManager(deps: {
       return { ok: true, value: { accepted: true } };
     },
 
-    async interrupt() {
-      notImplemented('interrupt');
+    async interrupt(sessionId, owner, turnId) {
+      const entry = sessions.get(sessionId);
+      if (!entry || entry.record.owner !== owner) return { ok: false, error: { code: 'no_such_session', sessionId } };
+
+      // S5.3: a statement about a desired end state, not a command that can arrive too
+      // late — a session with no live turn, or a `turnId` that no longer names it,
+      // no-ops rather than erroring.
+      if (!entry.turn || entry.turn.turnId !== turnId) return { ok: true, value: undefined };
+
+      // What `turn.ended` this produces, and resolving every outstanding
+      // `permission.request` as `cancelled_process_exit`, both follow from the child's
+      // own `exited` notification once `kill` reaches it (S5.1, S5.4) — the same path
+      // an unexpected crash already takes, and the vendor adapter is what tells the two
+      // apart for `stopReason`.
+      await entry.adapter.kill();
+      return { ok: true, value: undefined };
     },
-    async end() {
-      notImplemented('end');
+
+    async end(sessionId, owner) {
+      const entry = sessions.get(sessionId);
+      if (!entry || entry.record.owner !== owner) return { ok: false, error: { code: 'no_such_session', sessionId } };
+      if (entry.turn) return { ok: false, error: { code: 'turn_in_flight', sessionId, turnId: entry.turn.turnId } };
+
+      entry.record.state = 'ended';
+      entry.record.endedAt = nowIso();
+      // Best-effort, matching the 'cli-session' notification handler below: `/end`'s
+      // only refusals are `bad_origin`, `no_such_session` and `turn_in_flight` (no 500),
+      // so a failed rewrite does not block the state transition that already freed the
+      // workspace (S5.6) — the in-memory record, which `findLiveOverlap` reads, is
+      // already `ended` regardless of whether the disk copy caught up.
+      await store.writeMeta(entry.record);
+      await emit(entry, 'session.ended', { reason: 'operator', endedAt: entry.record.endedAt });
+      return { ok: true, value: undefined };
     },
-    async remove() {
-      notImplemented('remove');
+
+    async remove(sessionId, owner) {
+      const entry = sessions.get(sessionId);
+      if (!entry || entry.record.owner !== owner) return { ok: false, error: { code: 'no_such_session', sessionId } };
+      if (entry.turn) return { ok: false, error: { code: 'turn_in_flight', sessionId, turnId: entry.turn.turnId } };
+
+      const deleted = await store.deleteSession(sessionId);
+      // S5.11: the registry entry comes out regardless of whether storage cleanup fully
+      // succeeded — a partial failure must not leave a session an operator asked to
+      // remove still listed.
+      sessions.delete(sessionId);
+
+      if (!deleted.ok) {
+        const named = deleted.error.code === 'io' ? `${deleted.error.path}: ${deleted.error.detail}` : deleted.error.code;
+        entry.seq += 1;
+        const notice: Envelope = {
+          seq: entry.seq as Seq,
+          sessionId: entry.record.id,
+          ts: nowIso(),
+          kind: 'error',
+          data: { kind: 'session_delete_incomplete', message: `session storage could not be fully removed: ${named}`, fatal: false },
+        } as Envelope;
+        // Delivered live only: the session (and, on a happy path, its spill) is already
+        // gone from the registry by the time this fires, so there is nothing left to
+        // replay it from — a subscriber still attached is the only audience left (S5.11).
+        for (const sub of entry.subscribers) sub.deliver(notice);
+      }
+
+      return { ok: true, value: undefined };
     },
     async listCheckpoints(): Promise<Result<readonly Checkpoint[], SessionError>> {
       notImplemented('listCheckpoints');
