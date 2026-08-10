@@ -54,6 +54,9 @@
 }
 
 body {
+  display: flex;
+  flex-direction: column;
+  min-height: 100dvh;
   margin: var(--space-0);
   padding: var(--space-0);
   background: var(--surface);
@@ -67,6 +70,7 @@ body {
 
 .masthead {
   display: flex;
+  flex-wrap: wrap;
   align-items: baseline;
   gap: var(--space-4);
   padding: var(--space-3) var(--space-5);
@@ -92,11 +96,15 @@ body {
 
 /* ------------------------------------------------------------------ layout */
 
+/* The masthead sizes itself and the console takes the rest. A fixed `100vh` minus a
+ * guessed masthead height was close enough on the desktop and wrong on the phone, where
+ * the masthead wraps and `vh` counts the address bar the browser then draws over. */
 .console {
   display: grid;
   grid-template-columns: var(--sidebar-width) 1fr;
   gap: var(--space-0);
-  height: calc(100vh - 4rem);
+  flex: 1;
+  min-height: 0;
 }
 
 .sidebar {
@@ -170,10 +178,14 @@ body {
 
 /* ------------------------------------------------------------------- forms */
 
+/* The UA sheet gives `form` a bottom margin. On the desktop it is a stray gap; on the
+ * phone it is a dead strip below the compose bar, which is the one edge the layout is
+ * supposed to sit flush against. */
 .form {
   display: flex;
   flex-direction: column;
   gap: var(--space-3);
+  margin: var(--space-0);
 }
 
 .field {
@@ -182,7 +194,13 @@ body {
   gap: var(--space-1);
 }
 
-.field--grow { flex: 1; }
+/* `min-width: 0` on both: a text input carries an intrinsic minimum width that a flex item
+ * otherwise refuses to shrink below, which is what pushes the compose row — and with it
+ * the page — wider than a 390 px phone. */
+.field--grow {
+  flex: 1;
+  min-width: 0;
+}
 
 .field__label {
   font-size: var(--text-xs);
@@ -200,6 +218,7 @@ body {
 .field__hint { color: var(--ink-faint); }
 
 .field__input {
+  min-width: 0;
   padding: var(--space-2);
   border: var(--border-width) solid var(--line);
   border-radius: var(--radius-1);
@@ -236,6 +255,7 @@ body {
   display: flex;
   flex-direction: column;
   min-width: 0;
+  min-height: 0;
 }
 
 .transcript {
@@ -309,6 +329,7 @@ body {
 .session-started__cwd {
   font-family: var(--font-mono);
   font-size: var(--text-sm);
+  word-break: break-all;
 }
 
 /* ----------------------------------------------------------------- compose */
@@ -317,25 +338,55 @@ body {
   display: flex;
   align-items: flex-end;
   gap: var(--space-3);
+  margin: var(--space-0);
   padding: var(--space-3) var(--space-5);
   border-top: var(--border-width) solid var(--line);
   background: var(--surface-raised);
   box-shadow: var(--shadow-1);
 }
 
-/* The phone layout is S3.9's. This much only keeps the desktop grid from breaking. */
+/*
+ * S3.9 / D57 — the phone layout, against `design/prototype/`'s phone chrome as the visual
+ * spec. The chrome the prototype's three phone screens share, and the only part of them
+ * that transfers (their content is tier two): a compact header, one scrolling body that
+ * takes the remaining height, and an action bar pinned to the bottom edge. There is no
+ * side rail on a phone, so the session list becomes a height-capped block that scrolls
+ * above the transcript rather than beside it.
+ *
+ * The binding measurement is that at 390 px the transcript, the session list and the
+ * compose box render with nothing scrolling horizontally. Every rule here that looks
+ * cosmetic is holding one of those three inside the viewport.
+ */
 @media (max-width: 48rem) {
+  .masthead {
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-4);
+  }
+
   .console {
     grid-template-columns: 1fr;
+    grid-template-rows: auto minmax(0, 1fr);
   }
 
   .sidebar {
+    max-height: 38dvh;
+    padding: var(--space-3) var(--space-4);
     border-right: var(--space-0);
     border-bottom: var(--border-width) solid var(--line);
+  }
+
+  .transcript {
+    padding: var(--space-3) var(--space-4);
   }
 
   .event {
     grid-template-columns: 1fr;
     gap: var(--space-1);
+  }
+
+  /* The prototype's bottom tab bar: flush to the edge, clear of the home indicator. */
+  .compose {
+    padding: var(--space-3) var(--space-4);
+    padding-bottom: calc(var(--space-3) + env(safe-area-inset-bottom, 0px));
   }
 }

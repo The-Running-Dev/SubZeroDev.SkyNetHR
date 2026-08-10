@@ -159,3 +159,89 @@ test('S1.8 — a torn trailing line in events.ndjson is dropped, not fatal, at r
   }
   assert.equal(collected.length, 2);
 });
+
+test('S3.6 — a torn trailing line is dropped, the preceding lines are served, and the file is not modified by the read', async () => {
+  const storageRoot = await mkdtemp(path.join(tmpdir(), 'skynet-store-'));
+  const storeResult = await createStore(baseConfig(storageRoot));
+  if (!storeResult.ok) return;
+  const store = storeResult.value;
+  const record = sessionRecord('sess-6');
+  await store.createSession(record);
+  await store.appendEvent(record.id, envelope('sess-6', 1));
+  await store.appendEvent(record.id, envelope('sess-6', 2));
+
+  const eventsPath = path.join(storageRoot, 'sessions', 'sess-6', 'events.ndjson');
+  const { appendFile } = await import('node:fs/promises');
+  await appendFile(eventsPath, '{"seq":3,"sessionId":"sess-6","tor');
+  const beforeRead = await readFile(eventsPath, 'utf8');
+
+  const collected: Envelope[] = [];
+  for await (const result of store.readEventsAfter(record.id, 0 as never)) {
+    assert.equal(result.ok, true);
+    if (result.ok) collected.push(result.value);
+  }
+  assert.deepEqual(collected.map((e) => e.seq), [1, 2]);
+
+  const afterRead = await readFile(eventsPath, 'utf8');
+  assert.equal(afterRead, beforeRead, 'a read must not modify the spill file');
+});
+
+test('S3.5 — the ring buffer is a strict suffix of the spill, envelope for envelope, over 500+ envelopes at capacity 100', async () => {
+  const storageRoot = await mkdtemp(path.join(tmpdir(), 'skynet-store-'));
+  const config = baseConfig(storageRoot);
+  const capped: Config = { ...config, caps: { ...config.caps, ringCapacity: 100 } };
+  const storeResult = await createStore(capped);
+  if (!storeResult.ok) return;
+  const store = storeResult.value;
+  const record = sessionRecord('sess-7');
+  await store.createSession(record);
+
+  for (let seq = 1; seq <= 523; seq++) {
+    const e = envelope('sess-7', seq);
+    // Mirrors `session-manager.emit`'s order: ring push happens alongside the durable
+    // append, which is what makes the ring a suffix of the spill in the first place.
+    store.pushRing(record.id, e);
+    await store.appendEvent(record.id, e);
+  }
+
+  const ringTail = store.readRingAfter(record.id, 423 as never);
+  assert.notEqual(ringTail, null);
+  const spillTail: Envelope[] = [];
+  for await (const result of store.readEventsAfter(record.id, 423 as never)) {
+    assert.equal(result.ok, true);
+    if (result.ok) spillTail.push(result.value);
+  }
+  assert.equal(ringTail!.length, 100);
+  assert.equal(spillTail.length, 100);
+  assert.deepEqual(ringTail, spillTail);
+});
+
+test('S3.5 — an empty ring cannot serve any range, including after: 0, so replay falls through to the spill', async () => {
+  const storageRoot = await mkdtemp(path.join(tmpdir(), 'skynet-store-'));
+  const config = baseConfig(storageRoot);
+  // `ringCapacity: 0` is a legal configuration and makes `pushRing` a no-op, which is the
+  // cheapest way to reach the state a rehydrated session is also in.
+  const off: Config = { ...config, caps: { ...config.caps, ringCapacity: 0 } };
+  const storeResult = await createStore(off);
+  if (!storeResult.ok) return;
+  const store = storeResult.value;
+  const record = sessionRecord('sess-8');
+  await store.createSession(record);
+
+  for (let seq = 1; seq <= 5; seq++) {
+    const e = envelope('sess-8', seq);
+    store.pushRing(record.id, e);
+    await store.appendEvent(record.id, e);
+  }
+
+  // `[]` here would be the ring claiming to have served the whole history it never held,
+  // which is a blank transcript for a session whose events are all on disk.
+  assert.equal(store.readRingAfter(record.id, 0 as never), null, 'an empty ring cannot answer after: 0');
+  assert.equal(store.readRingAfter(record.id, 3 as never), null, 'nor any later range');
+
+  const spilled: Envelope[] = [];
+  for await (const result of store.readEventsAfter(record.id, 0 as never)) {
+    if (result.ok) spilled.push(result.value);
+  }
+  assert.deepEqual(spilled.map((e) => e.seq), [1, 2, 3, 4, 5], 'and the spill still holds all of it');
+});

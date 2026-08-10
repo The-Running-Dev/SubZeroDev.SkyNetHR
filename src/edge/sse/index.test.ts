@@ -309,6 +309,42 @@ describe('S2.3 — GET /api/sessions/:id/events', () => {
   });
 });
 
+describe('S3.1 — reconnect over the wire', () => {
+  it('a Last-Event-ID header resumes from seq+1', async () => {
+    const h = await makeEdge(undefined, undefined, 'many');
+    const id = await newSession(h, 's31');
+    const first = await get(h, `/api/sessions/${id}/events`);
+    await post(h, `/api/sessions/${id}/message`, { text: 'go' });
+
+    const { frames: firstFrames } = await readFrames(first, (f) => f.filter((x) => x.includes('data: ')).length >= 20, 15000);
+    const seqOf = (frame: string): number =>
+      JSON.parse(frame.split('\n').find((l) => l.startsWith('data: '))!.slice('data: '.length)).seq as number;
+    const dataFrames = firstFrames.filter((f) => f.includes('data: '));
+    const cutoff = seqOf(dataFrames[9]!);
+    // Give the first connection's server-side teardown a moment to land before opening
+    // the next one against the same session.
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    const reconnected = await get(h, `/api/sessions/${id}/events`, 'ben', { 'last-event-id': String(cutoff) });
+    const { frames: reconnFrames } = await readFrames(reconnected, (f) => f.filter((x) => x.includes('data: ')).length >= 1, 10000);
+    const firstReconnSeq = seqOf(reconnFrames.filter((f) => f.includes('data: '))[0]!);
+    assert.equal(firstReconnSeq, cutoff + 1, 'resumes at exactly seq+1');
+  });
+
+  it('a connection with no Last-Event-ID at all replays from the start (the "reopen on a phone" case)', async () => {
+    const h = await makeEdge(undefined, undefined, 'error-result');
+    const id = await newSession(h, 's31b');
+    await post(h, `/api/sessions/${id}/message`, { text: 'go' });
+    const seqOf = (frame: string): number =>
+      JSON.parse(frame.split('\n').find((l) => l.startsWith('data: '))!.slice('data: '.length)).seq as number;
+
+    const fresh = await get(h, `/api/sessions/${id}/events`);
+    const { frames: freshFrames } = await readFrames(fresh, (f) => f.filter((x) => x.includes('data: ')).length >= 1, 10000);
+    const firstFreshSeq = seqOf(freshFrames.filter((f) => f.includes('data: '))[0]!);
+    assert.equal(firstFreshSeq, 1, 'a connection with no Last-Event-ID replays from the start');
+  });
+});
+
 describe('S2.10 — SSE retry hint', () => {
   it('sets retry: independently of caps.keepaliveMs', async () => {
     const h = await makeEdge(undefined, {
@@ -549,5 +585,25 @@ describe('S2.12 — the document CSP', () => {
       const res = await fetch(`${h.base}${attempt}`);
       assert.ok(res.status === 404 || res.status === 400, `${attempt} -> ${res.status}`);
     }
+  });
+});
+
+describe('S3.3 — a replay_gap never moves the client\'s resume point', () => {
+  it('is sent without an id:, so EventSource keeps the Last-Event-ID it already had', async () => {
+    const h = await makeEdge(undefined, undefined, 'error-result');
+    const id = await newSession(h, 's33c');
+    await post(h, `/api/sessions/${id}/message`, { text: 'go' });
+
+    // Wait for the turn to produce history, so `lastSeq` is well above zero.
+    const warm = await get(h, `/api/sessions/${id}/events`);
+    await readFrames(warm, (f) => f.some((x) => x.includes('"kind":"turn.ended"')), 15000);
+
+    // A resume point the session never reached: the one range no store can serve.
+    const beyond = await get(h, `/api/sessions/${id}/events`, 'ben', { 'last-event-id': '999999999' });
+    const { frames } = await readFrames(beyond, (f) => f.some((x) => x.includes('replay_gap')), 10000);
+
+    const gapFrame = frames.find((f) => f.includes('replay_gap'))!;
+    assert.match(gapFrame, /^event: error$/m, 'the gap is dispatched as an error event');
+    assert.doesNotMatch(gapFrame, /^id:/m, 'and carries no id: — an id here would resume past history never received');
   });
 });

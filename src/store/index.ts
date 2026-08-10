@@ -230,13 +230,23 @@ export async function createStore(config: Config): Promise<Result<Store, StoreEr
               envelope = JSON.parse(line) as Envelope;
             } catch {
               // A torn trailing line (or, mid-file, corruption): dropped, not surfaced
-              // as fatal — S3.6 governs this fully; S1 only needs it not to crash.
+              // as fatal (S3.6). The session manager's replay watermark is what turns a
+              // dropped *mid-file* line into a reported `replay_gap`; a dropped *trailing*
+              // one has nothing after it to detect the gap against and stays silent here.
+              console.warn(`[store] dropped an unparseable line in ${filePath}`);
               continue;
             }
             if (envelope.seq > after) yield { ok: true, value: envelope };
           }
         } catch (err) {
           yield ioError(filePath, (err as Error).message);
+        } finally {
+          // A consumer that stops early — every `replay_gap` path in the session manager
+          // breaks out of this loop — closes the generator here. `readline`'s own cleanup
+          // closes the interface but leaves the input stream open, so without this the fd
+          // stays open until the process exits, one per abandoned replay.
+          rl.close();
+          stream.destroy();
         }
       }
       return generator();
@@ -271,9 +281,19 @@ export async function createStore(config: Config): Promise<Result<Store, StoreEr
 
     readRingAfter(sessionId: SessionId, after: Seq | 0) {
       const buf = ring.get(sessionId);
-      if (!buf || buf.length === 0) return after === 0 ? [] : null;
+      // An empty ring knows nothing about the range asked for — including `after: 0`,
+      // which it cannot answer merely because it holds nothing. Answering `[]` there
+      // would serve a blank transcript for a session whose whole history is on disk:
+      // a `ringCapacity` of 0 (accepted by config), a rehydrated session, or one whose
+      // ring was dropped. `null` is what sends every one of those to the spill.
+      if (!buf || buf.length === 0) return null;
       const oldest = buf[0]!.seq;
-      if (after !== 0 && after < oldest - 1) return null; // cannot serve: gap before the ring's start
+      // `after === 0` asks for the whole history, which the ring can only answer once it
+      // has trimmed nothing yet — i.e. it still holds seq 1. Folding that into the same
+      // comparison as every other `after` (rather than special-casing 0 as always-servable)
+      // is what makes a fresh page load against a long-running session fall through to the
+      // spill instead of silently starting the transcript partway through.
+      if (after < oldest - 1) return null; // cannot serve: gap before the ring's start
       return buf.filter((e) => e.seq > after);
     },
 
