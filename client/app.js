@@ -89,8 +89,48 @@ function selectSession(sessionId) {
   state.sessionId = sessionId;
   state.refetched = false;
   $('compose').hidden = false;
+  $('checkpoints').hidden = false;
   openStream(sessionId);
   void refreshSessions();
+  void refreshCheckpoints();
+}
+
+// ---------------------------------------------------------------------------
+// Checkpoints
+// ---------------------------------------------------------------------------
+
+async function refreshCheckpoints() {
+  if (state.sessionId === null) return;
+  const result = await api('GET', `/api/sessions/${encodeURIComponent(state.sessionId)}/checkpoints`);
+  if (result.status === 401 || result.status !== 200) return;
+
+  const list = $('checkpoint-list');
+  clear(list);
+  for (const checkpoint of result.payload.checkpoints) {
+    const item = document.createElement('li');
+    item.className = 'checkpoint-item';
+
+    item.appendChild(text('span', 'checkpoint-item__label', checkpoint.label));
+
+    const button = document.createElement('button');
+    button.className = 'button button--quiet';
+    button.type = 'button';
+    button.textContent = 'Restore';
+    button.addEventListener('click', () => void restoreCheckpoint(checkpoint.sha));
+
+    item.appendChild(button);
+    list.appendChild(item);
+  }
+}
+
+async function restoreCheckpoint(sha) {
+  if (state.sessionId === null) return;
+  status('restoring…', 'info');
+  const result = await api('POST', `/api/sessions/${encodeURIComponent(state.sessionId)}/checkpoint/restore`, { sha });
+  if (result.status === 401) return;
+  if (result.status !== 200) return status(describe(result), 'error');
+  status('restored', 'ok');
+  await refreshCheckpoints();
 }
 
 // A `replay_gap` says the server could not serve the history this connection asked for, so
@@ -132,7 +172,7 @@ function openStream(sessionId) {
     'session.started', 'session.ended', 'session.notice',
     'turn.started', 'turn.ended',
     'message', 'thinking', 'tool.call', 'tool.result',
-    'permission.request', 'permission.resolved', 'error',
+    'permission.request', 'permission.resolved', 'checkpoint.created', 'error',
   ]) {
     stream.addEventListener(kind, (event) => {
       let envelope;
@@ -143,6 +183,11 @@ function openStream(sessionId) {
       }
       if (envelope.kind === 'error' && envelope.data?.kind === 'replay_gap') {
         if (handleReplayGap()) return;
+      }
+      if (envelope.kind === 'checkpoint.created') {
+        // A new checkpoint invalidates the list this session already fetched, whether it
+        // came from this client's own turn or a restore issued elsewhere.
+        void refreshCheckpoints();
       }
       if (envelope.kind === 'permission.resolved') {
         const controls = state.pendingPermissions.get(envelope.data.requestId);

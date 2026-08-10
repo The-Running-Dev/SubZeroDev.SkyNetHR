@@ -3,8 +3,9 @@ import { createSseEdge } from './edge/sse/index.js';
 import { resolverFor } from './identity/index.js';
 import { createSessionManager } from './session-manager/index.js';
 import { createStore } from './store/index.js';
+import { createCheckpoints } from './checkpoints/index.js';
 import { loadConfig } from './config/index.js';
-import type { Checkpoints, ConfigError, Records } from './contract/index.js';
+import type { ConfigError, Records } from './contract/index.js';
 
 // Checkpoints (S6) and records (tier two) are not built. A proxy that throws names the
 // slice rather than failing as `undefined is not a function` three frames deeper.
@@ -65,7 +66,7 @@ async function main(): Promise<void> {
   const manager = createSessionManager({
     config: config.value,
     store: store.value,
-    checkpoints: notBuiltYet<Checkpoints>('checkpoints', 'S6'),
+    checkpoints: createCheckpoints(config.value),
     records: notBuiltYet<Records>('records', 'S13'),
   });
 

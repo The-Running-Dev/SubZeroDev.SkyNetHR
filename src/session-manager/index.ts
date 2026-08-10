@@ -7,6 +7,7 @@ import type {
   AuditRecord,
   CallId,
   Checkpoint,
+  CheckpointError,
   ChecklistItemId,
   ChecklistItemState,
   Config,
@@ -37,6 +38,13 @@ import type {
 import type { Checkpoints } from '../contract/index.js';
 import type { Records } from '../contract/index.js';
 
+// Every `CheckpointError` variant but `no_such_checkpoint` carries `detail`; that one
+// carries `sha` instead. Centralised so every notice/error text built from a
+// `CheckpointError` reads the same way regardless of which variant it is.
+function checkpointErrorDetail(e: CheckpointError): string {
+  return e.code === 'no_such_checkpoint' ? `no such checkpoint: ${e.sha}` : e.detail;
+}
+
 interface TurnState {
   readonly turnId: TurnId;
   phase: 'starting' | 'running';
@@ -54,6 +62,10 @@ interface SessionEntry {
   // `system/init` on its first turn, which is exactly the case the resume_unavailable
   // notice exists to name.
   hasRunATurn: boolean;
+  // S6.8: set false when `checkpoints.init` failed at create — the operator was already
+  // told once, so every later turn skips the doomed commit attempt rather than repeating
+  // the same `checkpoints_unavailable` story as a `checkpoint_skipped` notice each time.
+  checkpointsAvailable: boolean;
   readonly subscribers: Set<SubscriberSink>;
   // I27: there is no lock in this server; `emit`'s synchronous prefix (seq assignment,
   // ring push, subscriber delivery) is the serialisation point. The durable spill write
@@ -90,7 +102,7 @@ export function createSessionManager(deps: {
   readonly checkpoints: Checkpoints;
   readonly records: Records;
 }): SessionManager {
-  const { config, store } = deps;
+  const { config, store, checkpoints } = deps;
   const sessions = new Map<SessionId, SessionEntry>();
 
   function findLiveOverlap(candidate: ResolvedPath): SessionEntry | null {
@@ -191,6 +203,7 @@ export function createSessionManager(deps: {
         seq: 0,
         firstTurnAnnounced: false,
         hasRunATurn: false,
+        checkpointsAvailable: true,
         subscribers: new Set(),
         writeQueue: Promise.resolve(),
       };
@@ -202,7 +215,19 @@ export function createSessionManager(deps: {
         return { ok: false, error: { code: 'storage', cause: created.error } };
       }
 
-      // Checkpoints (S6) and requisition attachment (S13) are not this slice's.
+      // S6.8: a ckpt.git that cannot be initialised is a warning, not a session-creation
+      // failure — the session is created and usable without checkpoints.
+      const initialised = await checkpoints.init(sessionId, cwd);
+      if (!initialised.ok) {
+        entry.checkpointsAvailable = false;
+        await emit(entry, 'session.notice', {
+          level: 'warn',
+          code: 'checkpoints_unavailable',
+          text: `checkpoints could not be initialised for this session: ${checkpointErrorDetail(initialised.error)}`,
+        });
+      }
+
+      // Requisition attachment is S13's.
 
       return { ok: true, value: { sessionId } };
     },
@@ -231,6 +256,21 @@ export function createSessionManager(deps: {
       const turnId = randomUUID() as TurnId;
       entry.turn = { turnId, phase: 'starting', pending: new Map() };
       // Every check above this line completed before the first `await` (I5).
+
+      // S6.2/D42: committed while the slot is claimed but before turn.started fires, so
+      // checkpoint.created always precedes it in seq order.
+      if (entry.checkpointsAvailable) {
+        const checkpointed = await checkpoints.commit(sessionId, entry.record.cwd, `before turn ${turnId}`);
+        if (checkpointed.ok) {
+          await emit(entry, 'checkpoint.created', { turnId, sha: checkpointed.value.sha, label: checkpointed.value.label });
+        } else {
+          await emit(entry, 'session.notice', {
+            level: 'warn',
+            code: 'checkpoint_skipped',
+            text: `the pre-turn checkpoint failed; this turn has no restore point: ${checkpointErrorDetail(checkpointed.error)}`,
+          });
+        }
+      }
 
       await emit(entry, 'turn.started', { turnId });
       entry.turn.phase = 'running';
@@ -372,21 +412,35 @@ export function createSessionManager(deps: {
       if (!entry || entry.record.owner !== owner) return { ok: false, error: { code: 'no_such_session', sessionId } };
       if (entry.turn) return { ok: false, error: { code: 'turn_in_flight', sessionId, turnId: entry.turn.turnId } };
 
+      // S6.10: ckpt.git comes out alongside everything else `store.deleteSession`
+      // already owns removing. Sequential, not concurrent — `ckpt.git` sits inside the
+      // very directory `store.deleteSession` recursively removes, and two concurrent
+      // `fs.rm({recursive: true})` calls over overlapping trees can trip each other
+      // (an `ENOTEMPTY` mid-walk, on the loser). Any failure from either still folds
+      // into the same non-fatal notice below (S5.11).
+      const destroyed = await checkpoints.destroy(sessionId);
       const deleted = await store.deleteSession(sessionId);
       // S5.11: the registry entry comes out regardless of whether storage cleanup fully
       // succeeded — a partial failure must not leave a session an operator asked to
       // remove still listed.
       sessions.delete(sessionId);
 
+      const failures: string[] = [];
       if (!deleted.ok) {
-        const named = deleted.error.code === 'io' ? `${deleted.error.path}: ${deleted.error.detail}` : deleted.error.code;
+        failures.push(deleted.error.code === 'io' ? `${deleted.error.path}: ${deleted.error.detail}` : deleted.error.code);
+      }
+      if (!destroyed.ok) {
+        failures.push(`ckpt.git: ${checkpointErrorDetail(destroyed.error)}`);
+      }
+
+      if (failures.length > 0) {
         entry.seq += 1;
         const notice: Envelope = {
           seq: entry.seq as Seq,
           sessionId: entry.record.id,
           ts: nowIso(),
           kind: 'error',
-          data: { kind: 'session_delete_incomplete', message: `session storage could not be fully removed: ${named}`, fatal: false },
+          data: { kind: 'session_delete_incomplete', message: `session storage could not be fully removed: ${failures.join('; ')}`, fatal: false },
         } as Envelope;
         // Delivered live only: the session (and, on a happy path, its spill) is already
         // gone from the registry by the time this fires, so there is nothing left to
@@ -396,12 +450,39 @@ export function createSessionManager(deps: {
 
       return { ok: true, value: undefined };
     },
-    async listCheckpoints(): Promise<Result<readonly Checkpoint[], SessionError>> {
-      notImplemented('listCheckpoints');
+    async listCheckpoints(sessionId, owner): Promise<Result<readonly Checkpoint[], SessionError>> {
+      const entry = sessions.get(sessionId);
+      if (!entry || entry.record.owner !== owner) return { ok: false, error: { code: 'no_such_session', sessionId } };
+      const listed = await checkpoints.list(sessionId, entry.record.cwd);
+      if (!listed.ok) return { ok: false, error: { code: 'checkpoint', cause: listed.error } };
+      return { ok: true, value: listed.value };
     },
-    async restore() {
-      notImplemented('restore');
+
+    async restore(sessionId, owner, sha) {
+      const entry = sessions.get(sessionId);
+      if (!entry || entry.record.owner !== owner) return { ok: false, error: { code: 'no_such_session', sessionId } };
+      // S6.5/D17: restore is a second consumer of the single-writer turn-slot invariant,
+      // alongside `POST /message` — the manager, not the adapter, is what both ask.
+      if (entry.turn) return { ok: false, error: { code: 'turn_in_flight', sessionId, turnId: entry.turn.turnId } };
+
+      const restored = await checkpoints.restore(sessionId, entry.record.cwd, sha);
+      if (!restored.ok) {
+        if (restored.error.code === 'restore_incomplete') {
+          await emit(entry, 'error', {
+            kind: 'checkpoint_restore_failed',
+            message: `restore to ${sha} failed part-way: ${restored.error.detail}`,
+            fatal: false,
+          });
+        }
+        return { ok: false, error: { code: 'checkpoint', cause: restored.error } };
+      }
+
+      // D31: `turnId: null` is CheckpointCreated's discriminator for the safety
+      // checkpoint restore always takes first.
+      await emit(entry, 'checkpoint.created', { turnId: null, sha: restored.value.sha, label: restored.value.label });
+      return { ok: true, value: undefined };
     },
+
     async openToolOutput() {
       notImplemented('openToolOutput');
     },
