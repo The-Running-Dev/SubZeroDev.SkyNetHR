@@ -8,6 +8,7 @@ import { after, test } from 'node:test';
 import { promisify } from 'node:util';
 import { createSessionManager } from './index.js';
 import { createStore } from '../store/index.js';
+import { createCheckpoints } from '../checkpoints/index.js';
 import type { AuditRecord, Checkpoints, Config, Envelope, OperatorId, Records, Store } from '../contract/index.js';
 
 const execFileAsync = promisify(execFile);
@@ -67,6 +68,7 @@ async function makeManager(
   scenario: string,
   capsOverride: Partial<Config['caps']> = {},
   wrapStore: (store: Store) => Store = (s) => s,
+  checkpointsOverride: ((config: Config) => Checkpoints) | null = null,
 ) {
   process.env['SKYNET_TEST_SCENARIO'] = scenario;
   process.env['SKYNET_CLAUDE_EXECUTABLE'] = FIXTURE;
@@ -96,13 +98,14 @@ async function makeManager(
   };
   const storeResult = await createStore(config);
   if (!storeResult.ok) throw new Error('store failed to init');
+  const checkpoints = (checkpointsOverride ?? createCheckpoints)(config);
   const manager = createSessionManager({
     config,
     store: wrapStore(storeResult.value),
-    checkpoints: notImplementedProxy<Checkpoints>('checkpoints'),
+    checkpoints,
     records: notImplementedProxy<Records>('records'),
   });
-  return { manager, workspaceRoot, storageRoot, store: storeResult.value };
+  return { manager, workspaceRoot, storageRoot, store: storeResult.value, checkpoints };
 }
 
 async function waitUntil(predicate: () => boolean | Promise<boolean>, timeoutMs = 5000): Promise<void> {
@@ -1221,4 +1224,157 @@ test('S5.11 — a delete that fails part-way still removes the registry entry an
   const data = notice!.data as { fatal: boolean; message: string };
   assert.equal(data.fatal, false);
   assert.match(data.message, /stuck-file/);
+});
+
+// ---------------------------------------------------------------------------
+// S6 — checkpoints
+// ---------------------------------------------------------------------------
+
+function wrapCheckpoints(over: Partial<Checkpoints>): (config: Config) => Checkpoints {
+  return (config) => ({ ...createCheckpoints(config), ...over });
+}
+
+test('S6.2 - a pre-turn checkpoint.created precedes turn.started in seq order, and the checkpoint appears in listCheckpoints', async () => {
+  const { manager, workspaceRoot } = await makeManager('full');
+  const owner = 'operator-1' as OperatorId;
+  const { sessionId, received, requestEnvelope } = await runOneRequest('full', workspaceRoot, manager, owner, 'proj-s62');
+  const requestId = (requestEnvelope.data as { requestId: string }).requestId;
+  await manager.answerPermission(sessionId, owner, { requestId: requestId as never, decision: 'allow', scope: 'once', rule: null, reason: null });
+  await waitUntil(() => received.some((e) => e.kind === 'turn.ended'));
+
+  const checkpointCreated = received.find((e) => e.kind === 'checkpoint.created');
+  const turnStarted = received.find((e) => e.kind === 'turn.started');
+  assert.ok(checkpointCreated, 'a checkpoint.created envelope was emitted');
+  assert.ok(turnStarted, 'a turn.started envelope was emitted');
+  assert.ok(checkpointCreated!.seq < turnStarted!.seq, 'checkpoint.created precedes turn.started in seq order');
+  const data = checkpointCreated!.data as { turnId: string | null; sha: string; label: string };
+  assert.notEqual(data.turnId, null, "a pre-turn checkpoint's turnId is not null (only a restore's safety checkpoint is)");
+
+  const listed = await manager.listCheckpoints(sessionId, owner);
+  assert.equal(listed.ok, true);
+  if (listed.ok) assert.ok(listed.value.some((c) => c.sha === data.sha && c.label === data.label));
+});
+
+test('S6.4/S6.5 - restore commits a safety checkpoint (turnId null), is refused turn_in_flight mid-turn, and an unknown sha is no_such_checkpoint', async () => {
+  const { manager, workspaceRoot } = await makeManager('full');
+  const owner = 'operator-1' as OperatorId;
+  const { sessionId, received, requestEnvelope } = await runOneRequest('full', workspaceRoot, manager, owner, 'proj-s64');
+  const requestId = (requestEnvelope.data as { requestId: string }).requestId;
+
+  // S6.5: refused while the turn from runOneRequest is still live and unanswered.
+  const duringTurn = await manager.restore(sessionId, owner, 'deadbeef'.repeat(5) as never);
+  assert.equal(duringTurn.ok, false);
+  if (!duringTurn.ok) assert.equal(duringTurn.error.code, 'turn_in_flight');
+
+  await manager.answerPermission(sessionId, owner, { requestId: requestId as never, decision: 'allow', scope: 'once', rule: null, reason: null });
+  await waitUntil(() => received.some((e) => e.kind === 'turn.ended'));
+
+  // S6.5: an unknown sha, once no turn is running. The turn slot frees only once
+  // turn.ended's durable write has landed, slightly after the subscriber sees the
+  // envelope (the same S3.7/S4.15/S5.9 race) — retry rather than assert once.
+  let bogus;
+  for (;;) {
+    bogus = await manager.restore(sessionId, owner, '0'.repeat(40) as never);
+    if (!bogus.ok && bogus.error.code === 'turn_in_flight') {
+      await new Promise((r) => setTimeout(r, 10));
+      continue;
+    }
+    break;
+  }
+  assert.equal(bogus.ok, false);
+  if (!bogus.ok) {
+    assert.equal(bogus.error.code, 'checkpoint');
+    if (bogus.error.code === 'checkpoint') assert.equal(bogus.error.cause.code, 'no_such_checkpoint');
+  }
+
+  // S6.4: restoring to the real pre-turn checkpoint succeeds and announces the safety
+  // checkpoint with turnId: null.
+  const checkpointCreated = received.find((e) => e.kind === 'checkpoint.created')!;
+  const target = (checkpointCreated.data as { sha: string }).sha;
+  let restored;
+  for (;;) {
+    restored = await manager.restore(sessionId, owner, target as never);
+    if (!restored.ok && restored.error.code === 'turn_in_flight') {
+      await new Promise((r) => setTimeout(r, 10));
+      continue;
+    }
+    break;
+  }
+  assert.equal(restored.ok, true);
+
+  await waitUntil(() => received.filter((e) => e.kind === 'checkpoint.created').length >= 2);
+  const safety = received.filter((e) => e.kind === 'checkpoint.created')[1]!;
+  const safetyData = safety.data as { turnId: string | null; sha: string; label: string };
+  assert.equal(safetyData.turnId, null, "the safety checkpoint's turnId is null (D31)");
+  assert.match(safetyData.label, /before restore to/);
+
+  const listed = await manager.listCheckpoints(sessionId, owner);
+  assert.equal(listed.ok, true);
+  if (listed.ok) assert.ok(listed.value.some((c) => c.sha === safetyData.sha));
+});
+
+test('S6.8 - a ckpt.git that cannot be initialised yields session.notice/warn checkpoints_unavailable, and the session is created and usable', async () => {
+  const owner = 'operator-1' as OperatorId;
+  const { manager, workspaceRoot } = await makeManager(
+    'full',
+    {},
+    (s) => s,
+    (config) => wrapCheckpoints({ init: async () => ({ ok: false, error: { code: 'init_failed', detail: 'simulated: disk full' } }) })(config),
+  );
+  const projectDir = path.join(workspaceRoot, 'proj-s68');
+  await mkdir(projectDir);
+  const received: Envelope[] = [];
+  const created = await manager.create(owner, { vendor: 'claude', cwd: projectDir, model: null, sandbox: null, requisitionId: null });
+  assert.equal(created.ok, true);
+  if (!created.ok) return;
+  await manager.subscribe(created.value.sessionId, owner, 0, { deliver: (e) => received.push(e), close: () => {} });
+
+  const notice = received.find((e) => e.kind === 'session.notice' && (e.data as { code: string }).code === 'checkpoints_unavailable');
+  assert.ok(notice, 'checkpoints_unavailable was announced');
+  assert.equal((notice!.data as { level: string }).level, 'warn');
+
+  // The session is still usable: a message still runs a turn.
+  const messaged = await manager.message(created.value.sessionId, owner, 'go');
+  assert.equal(messaged.ok, true, 'the session is created and usable without checkpoints');
+});
+
+test('S6.9 - a pre-turn checkpoint that fails yields session.notice/warn checkpoint_skipped naming ckpt.git/index.lock, and the turn proceeds', async () => {
+  const owner = 'operator-1' as OperatorId;
+  const { manager, workspaceRoot } = await makeManager(
+    'full',
+    {},
+    (s) => s,
+    (config) =>
+      wrapCheckpoints({
+        commit: async () => ({ ok: false, error: { code: 'locked', detail: 'ckpt.git/index.lock exists - git said: simulated' } }),
+      })(config),
+  );
+  const { sessionId, received, requestEnvelope } = await runOneRequest('full', workspaceRoot, manager, owner, 'proj-s69');
+  const requestId = (requestEnvelope.data as { requestId: string }).requestId;
+  await manager.answerPermission(sessionId, owner, { requestId: requestId as never, decision: 'allow', scope: 'once', rule: null, reason: null });
+  await waitUntil(() => received.some((e) => e.kind === 'turn.ended'));
+
+  const notice = received.find((e) => e.kind === 'session.notice' && (e.data as { code: string }).code === 'checkpoint_skipped');
+  assert.ok(notice, 'checkpoint_skipped was announced');
+  assert.equal((notice!.data as { level: string }).level, 'warn');
+  assert.match((notice!.data as { text: string }).text, /ckpt\.git\/index\.lock/);
+  assert.equal(received.some((e) => e.kind === 'checkpoint.created'), false, 'no checkpoint.created for a failed commit');
+  const ended = received.find((e) => e.kind === 'turn.ended');
+  assert.ok(ended);
+});
+
+test('S6.10 - DELETE also removes ckpt.git', async () => {
+  const owner = 'operator-1' as OperatorId;
+  const { manager, workspaceRoot, storageRoot } = await makeManager('full');
+  const projectDir = path.join(workspaceRoot, 'proj-s610');
+  await mkdir(projectDir);
+  const created = await manager.create(owner, { vendor: 'claude', cwd: projectDir, model: null, sandbox: null, requisitionId: null });
+  assert.equal(created.ok, true);
+  if (!created.ok) return;
+  const gitDir = path.join(storageRoot, 'sessions', created.value.sessionId, 'ckpt.git');
+  assert.equal(existsSync(gitDir), true, 'ckpt.git exists after create');
+
+  const removed = await manager.remove(created.value.sessionId, owner);
+  assert.equal(removed.ok, true);
+  assert.equal(existsSync(gitDir), false, 'ckpt.git is gone after delete');
 });

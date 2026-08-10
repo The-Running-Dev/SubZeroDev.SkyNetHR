@@ -94,6 +94,10 @@ function sessionEndedNode(doc, data) {
   return row(doc, 'session-ended', 'session', el(doc, 'div', 'session__text', `ended — ${data.reason}`));
 }
 
+function checkpointCreatedNode(doc, data) {
+  return row(doc, 'checkpoint', 'checkpoint', el(doc, 'div', 'checkpoint__text', data.turnId === null ? `safety checkpoint — ${data.label}` : data.label));
+}
+
 // `handlers.onAnswerPermission(requestId, decision)` posts the answer and resolves to
 // whether the server accepted it; `handlers.onRequestRendered(requestId, controls)`
 // hands the caller a `setResolved(text)` closure so a later `permission.resolved` —
@@ -163,6 +167,7 @@ const RENDERERS = {
   'tool.result': toolResultNode,
   'permission.request': permissionRequestNode,
   'permission.resolved': permissionResolvedNode,
+  'checkpoint.created': checkpointCreatedNode,
   error: errorNode,
 };
 

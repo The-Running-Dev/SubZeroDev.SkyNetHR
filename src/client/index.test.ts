@@ -72,6 +72,8 @@ describe('S2.11 — the client renders normalised events only', () => {
       { kind: 'message', data: { turnId: 't', role: 'assistant', text: 'hello there' } },
       { kind: 'thinking', data: { turnId: 't', text: 'considering' } },
       { kind: 'tool.call', data: { turnId: 't', callId: 'c1', name: 'Bash', input: { command: 'ls' }, summary: 'ls' } },
+      { kind: 'checkpoint.created', data: { turnId: 't', sha: 'a'.repeat(40), label: 'before turn t' } },
+      { kind: 'checkpoint.created', data: { turnId: null, sha: 'b'.repeat(40), label: `before restore to ${'a'.repeat(40)}` } },
     ];
     for (const c of cases) {
       const { doc } = makeDoc();
@@ -242,7 +244,7 @@ interface FakeStream {
 
 async function runConsole(sessions: ReadonlyArray<Record<string, unknown>>) {
   const byId = new Map<string, FakeEl>();
-  for (const id of ['status', 'login', 'console', 'sessions', 'transcript', 'compose', 'new-session', 'login-form', 'refresh', 'cwd', 'vendor', 'model', 'text', 'secret']) {
+  for (const id of ['status', 'login', 'console', 'sessions', 'transcript', 'compose', 'new-session', 'login-form', 'refresh', 'cwd', 'vendor', 'model', 'text', 'secret', 'checkpoints', 'checkpoint-list']) {
     byId.set(id, fakeEl('div'));
   }
   const streams: FakeStream[] = [];
@@ -271,8 +273,10 @@ async function runConsole(sessions: ReadonlyArray<Record<string, unknown>>) {
     }
     close(): void { this.closed = true; }
   };
-  globals['fetch'] = async (input: string) =>
-    ({ status: 200, json: async () => (String(input).startsWith('/api/sessions') ? { sessions } : {}) });
+  globals['fetch'] = async (input: string) => ({
+    status: 200,
+    json: async () => (String(input).endsWith('/checkpoints') ? { checkpoints: [] } : String(input) === '/api/sessions' ? { sessions } : {}),
+  });
 
   // A distinct query per load: `app.js` runs its bootstrap on import, so a cached module
   // would replay nothing.

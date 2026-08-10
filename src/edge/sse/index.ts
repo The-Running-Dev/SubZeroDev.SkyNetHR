@@ -126,7 +126,13 @@ function apiErrorFor(error: SessionError): { code: ApiErrorCode; message: string
           return { code: 'agent_unavailable', message: `the agent failed: ${error.cause.code}` };
       }
     case 'checkpoint':
-      return { code: 'checkpoint_failed', message: 'a checkpoint operation failed' };
+      // `20-contract.md`'s route table distinguishes an unknown `sha` (`404
+      // no_such_checkpoint`) from every other checkpoint failure (`500
+      // checkpoint_failed`); collapsing both to the same code would make a restore
+      // against a typo'd sha indistinguishable from a git failure.
+      return error.cause.code === 'no_such_checkpoint'
+        ? { code: 'no_such_checkpoint', message: 'no such checkpoint', detail: { sha: error.cause.sha } }
+        : { code: 'checkpoint_failed', message: 'a checkpoint operation failed' };
     case 'storage':
       return { code: 'agent_unavailable', message: 'session storage is unavailable' };
     case 'records':
@@ -364,6 +370,30 @@ export function createSseEdge(deps: EdgeDeps): RequestListener {
     sendJson(res, 200, { ok: true });
   }
 
+  async function handleListCheckpoints(_req: IncomingMessage, res: ServerResponse, owner: OperatorId, sessionId: SessionId): Promise<void> {
+    const listed = await manager.listCheckpoints(sessionId, owner);
+    if (!listed.ok) return failWith(res, listed.error);
+    sendJson(res, 200, { checkpoints: listed.value });
+  }
+
+  async function handleCheckpointRestore(req: IncomingMessage, res: ServerResponse, owner: OperatorId, sessionId: SessionId): Promise<void> {
+    const raw = await readBody(req);
+    if (raw === null) return sendError(res, 'bad_request', 'request body too large', { field: 'body' });
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      return sendError(res, 'bad_request', 'body is not valid JSON', { field: 'body' });
+    }
+    const sha = (parsed as { sha?: unknown } | null)?.sha;
+    if (typeof sha !== 'string' || sha === '') {
+      return sendError(res, 'bad_request', 'sha is required', { field: 'sha' });
+    }
+    const restored = await manager.restore(sessionId, owner, sha as never);
+    if (!restored.ok) return failWith(res, restored.error);
+    sendJson(res, 200, { ok: true });
+  }
+
   async function handleEvents(req: IncomingMessage, res: ServerResponse, owner: OperatorId, sessionId: SessionId): Promise<void> {
     const lastEventId = headerValue(req, 'last-event-id');
     const parsedAfter = lastEventId === undefined ? 0 : Number.parseInt(lastEventId, 10);
@@ -542,8 +572,10 @@ export function createSseEdge(deps: EdgeDeps): RequestListener {
           if (method === 'POST' && rest === '/permission') return handlePermission(req, res, owner, sessionId);
           if (method === 'POST' && rest === '/interrupt') return handleInterrupt(req, res, owner, sessionId);
           if (method === 'POST' && rest === '/end') return handleEnd(req, res, owner, sessionId);
+          if (method === 'POST' && rest === '/checkpoint/restore') return handleCheckpointRestore(req, res, owner, sessionId);
           if (method === 'DELETE' && rest === '') return handleDelete(req, res, owner, sessionId);
           if (method === 'GET' && rest === '/events') return handleEvents(req, res, owner, sessionId);
+          if (method === 'GET' && rest === '/checkpoints') return handleListCheckpoints(req, res, owner, sessionId);
           if (method === 'GET' && rest === '') {
             const got = manager.get(sessionId, owner);
             return got.ok ? sendJson(res, 200, { session: got.value }) : failWith(res, got.error);

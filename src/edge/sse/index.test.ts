@@ -8,7 +8,8 @@ import { createSseEdge } from './index.js';
 import { resolverFor } from '../../identity/index.js';
 import { createSessionManager } from '../../session-manager/index.js';
 import { createStore } from '../../store/index.js';
-import type { AuthConfig, Checkpoints, Config, Records } from '../../contract/index.js';
+import { createCheckpoints } from '../../checkpoints/index.js';
+import type { AuthConfig, Config, Records } from '../../contract/index.js';
 
 const FIXTURE = path.join(process.cwd(), 'src', 'adapters', 'claude', 'fixtures', 'fake-claude-cli.mjs');
 
@@ -96,7 +97,7 @@ async function makeEdge(
   const manager = createSessionManager({
     config,
     store: storeResult.value,
-    checkpoints: notImplementedProxy<Checkpoints>('checkpoints'),
+    checkpoints: createCheckpoints(config),
     records: notImplementedProxy<Records>('records'),
   });
   const listener = createSseEdge({ config, identity: resolverFor(config.auth, config.trustProxy), manager, records: notImplementedProxy<Records>('records') });
@@ -803,5 +804,114 @@ describe('S5 — POST .../interrupt, POST .../end, DELETE /api/sessions/:id', ()
     const id = await newSession(h, 'd2', 'ben');
     const res = await del(h, `/api/sessions/${id}`, 'mallory');
     assert.equal(res.status, 404);
+  });
+});
+
+describe('S6 — GET .../checkpoints, POST .../checkpoint/restore', () => {
+  /** Runs one turn to completion (allow) and returns the pre-turn checkpoint's sha. */
+  async function checkpointedSha(h: Harness, id: string): Promise<string> {
+    const events = await get(h, `/api/sessions/${id}/events`);
+    const { requestId } = await firstPermissionRequestId(h, id);
+    await post(h, `/api/sessions/${id}/permission`, { requestId, decision: 'allow', scope: 'once', rule: null, reason: null });
+    const { frames } = await readFrames(events, (f) => f.some((x) => x.includes('"kind":"turn.ended"')));
+    const created = frames.find((f) => f.includes('event: checkpoint.created'))!;
+    const dataLine = created.split('\n').find((l) => l.startsWith('data: '))!;
+    return (JSON.parse(dataLine.slice('data: '.length)) as { data: { sha: string } }).data.sha;
+  }
+
+  // The turn slot frees only once turn.ended's durable write has landed, slightly after
+  // the client observes the SSE frame (the same S3.7/S4.15/S5.9 race) — retry rather than
+  // assert once on the very next request after a `turn.ended` this test just saw.
+  async function restoreAfterTurnEnds(h: Harness, id: string, sha: string): Promise<Response> {
+    for (;;) {
+      const res = await post(h, `/api/sessions/${id}/checkpoint/restore`, { sha });
+      if (res.status === 409) {
+        const body = (await res.clone().json()) as { error: { code: string } };
+        if (body.error.code === 'turn_in_flight') {
+          await new Promise((r) => setTimeout(r, 10));
+          continue;
+        }
+      }
+      return res;
+    }
+  }
+
+  it('GET /checkpoints returns 200 { checkpoints } including the pre-turn checkpoint (S6.2)', async () => {
+    const h = await makeEdge();
+    const id = await newSession(h, 'c1');
+    const sha = await checkpointedSha(h, id);
+
+    const res = await get(h, `/api/sessions/${id}/checkpoints`);
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as { checkpoints: Array<{ sha: string }> };
+    assert.ok(body.checkpoints.some((c) => c.sha === sha));
+  });
+
+  it('GET /checkpoints is 404 no_such_session for another operator', async () => {
+    const h = await makeEdge();
+    const id = await newSession(h, 'c2', 'ben');
+    const res = await get(h, `/api/sessions/${id}/checkpoints`, 'mallory');
+    assert.equal(res.status, 404);
+  });
+
+  it('POST /checkpoint/restore returns 200 { ok: true } and a later restore of the resulting safety checkpoint is possible (S6.4)', async () => {
+    const h = await makeEdge();
+    const id = await newSession(h, 'c3');
+    const sha = await checkpointedSha(h, id);
+
+    const res = await restoreAfterTurnEnds(h, id, sha);
+    assert.equal(res.status, 200);
+    assert.equal(((await res.json()) as { ok: boolean }).ok, true);
+
+    const listed = await get(h, `/api/sessions/${id}/checkpoints`);
+    const body = (await listed.json()) as { checkpoints: Array<{ sha: string; label: string }> };
+    assert.ok(body.checkpoints.some((c) => c.label.includes('before restore to')), 'the safety checkpoint is listed');
+  });
+
+  it('POST /checkpoint/restore is 404 no_such_checkpoint for an unknown sha (S6.5)', async () => {
+    const h = await makeEdge();
+    const id = await newSession(h, 'c4');
+    await checkpointedSha(h, id);
+
+    const res = await restoreAfterTurnEnds(h, id, '0'.repeat(40));
+    assert.equal(res.status, 404);
+    assert.equal(((await res.json()) as { error: { code: string } }).error.code, 'no_such_checkpoint');
+  });
+
+  it('POST /checkpoint/restore is 409 turn_in_flight while a turn runs (S6.5)', async () => {
+    const h = await makeEdge();
+    const id = await newSession(h, 'c5');
+    const { requestId } = await firstPermissionRequestId(h, id);
+    void requestId; // the turn is now live and stalled on this request
+
+    const res = await post(h, `/api/sessions/${id}/checkpoint/restore`, { sha: '0'.repeat(40) });
+    assert.equal(res.status, 409);
+    assert.equal(((await res.json()) as { error: { code: string } }).error.code, 'turn_in_flight');
+  });
+
+  it('POST /checkpoint/restore refuses a missing sha with 422 bad_request', async () => {
+    const h = await makeEdge();
+    const id = await newSession(h, 'c6');
+    const res = await post(h, `/api/sessions/${id}/checkpoint/restore`, {});
+    assert.equal(res.status, 422);
+    assert.equal(((await res.json()) as { error: { detail?: { field?: string } } }).error.detail?.field, 'sha');
+  });
+
+  it('POST /checkpoint/restore is 404 no_such_session for another operator', async () => {
+    const h = await makeEdge();
+    const id = await newSession(h, 'c7', 'ben');
+    const res = await post(h, `/api/sessions/${id}/checkpoint/restore`, { sha: '0'.repeat(40) }, 'mallory');
+    assert.equal(res.status, 404);
+  });
+
+  it('POST /checkpoint/restore is 403 bad_origin cross-origin', async () => {
+    const h = await makeEdge();
+    const id = await newSession(h, 'c8');
+    const res = await fetch(`${h.base}/api/sessions/${id}/checkpoint/restore`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-forwarded-user': 'ben', origin: 'https://evil.example' },
+      body: JSON.stringify({ sha: '0'.repeat(40) }),
+    });
+    assert.equal(res.status, 403);
   });
 });
