@@ -289,13 +289,30 @@ export function createSessionManager(deps: {
       if (!found || found.record.owner !== owner) return { ok: false, error: { code: 'no_such_session', sessionId } };
       const entry = found; // captured once so closures below narrow past `| undefined`
 
-      const gapEnvelope = (message: string): Envelope => ({
-        seq: entry.seq as Seq,
+      // A gap is not an event: `emit` never produces one, it consumes no `seq`, it is
+      // never appended to the spill, and it goes to a single subscriber. So it restates
+      // the watermark that subscriber is complete *through* rather than claiming a new
+      // position. Stamping it with `entry.seq` instead would tell the client it holds
+      // history it never received, and — because the edge writes `seq` as the SSE `id:` —
+      // would make that the resume point of the next reconnect, turning one reported gap
+      // into permanent silent loss (I1).
+      const gapEnvelope = (through: number, message: string): Envelope => ({
+        seq: through as Seq,
         sessionId: entry.record.id,
         ts: nowIso(),
         kind: 'error',
         data: { kind: 'replay_gap', message, fatal: false },
       } as Envelope);
+
+      // A resume point past the end of this session's history is unservable by
+      // construction: no store holds it, and waiting for `seq` to climb to it would
+      // stream nothing forever. Reporting it as a gap is what makes the client refetch
+      // rather than sit on a silently empty transcript.
+      if ((after as number) > entry.record.lastSeq) {
+        entry.subscribers.add(sink);
+        sink.deliver(gapEnvelope(entry.record.lastSeq, 'the resume point is past the end of this session'));
+        return { ok: true, value: { close: () => entry.subscribers.delete(sink) } };
+      }
 
       // The ring is checked first because it answers synchronously: `pushRing` and
       // `emit`'s fan-out share one synchronous prefix (I27), so reading the ring and
@@ -316,6 +333,9 @@ export function createSessionManager(deps: {
       const highWater = config.caps.subscriberQueueHighWater;
       let mode: 'buffering' | 'live' = 'buffering';
       let dropped = false;
+      // Declared above the proxy because the drop path reports the gap against it too:
+      // what a dropped subscriber is complete through is whatever the replay had reached.
+      let replayedThrough = after as number;
       const buffered: Envelope[] = [];
       const proxy: SubscriberSink = {
         deliver(envelope) {
@@ -327,7 +347,7 @@ export function createSessionManager(deps: {
           if (buffered.length >= highWater) {
             dropped = true;
             entry.subscribers.delete(proxy);
-            sink.deliver(gapEnvelope('too many envelopes arrived while catching up from storage'));
+            sink.deliver(gapEnvelope(replayedThrough, 'too many envelopes arrived while catching up from storage'));
             sink.close();
             return;
           }
@@ -352,17 +372,16 @@ export function createSessionManager(deps: {
       // *trailing* one (S3.3, S3.6): a gap between what was just delivered and what comes
       // next is reported once; a torn line with nothing after it to compare against never
       // trips this and is silently short, per `store`'s own drop-and-log.
-      let replayedThrough = after as number;
       for await (const result of store.readEventsAfter(sessionId, after)) {
         if (dropped) break;
         if (!result.ok) {
           const detail = 'detail' in result.error ? result.error.detail : result.error.code;
-          sink.deliver(gapEnvelope(`replay from storage failed: ${detail}`));
+          sink.deliver(gapEnvelope(replayedThrough, `replay from storage failed: ${detail}`));
           break;
         }
         const envelope = result.value;
         if (envelope.seq !== replayedThrough + 1) {
-          sink.deliver(gapEnvelope('the recorded history has a gap before this point'));
+          sink.deliver(gapEnvelope(replayedThrough, 'the recorded history has a gap before this point'));
           break;
         }
         sink.deliver(envelope);

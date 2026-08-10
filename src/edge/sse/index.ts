@@ -12,6 +12,7 @@ import type {
   SessionError,
   SessionId,
   SessionManager,
+  Subscription,
   TurnId,
 } from '../../contract/index.js';
 
@@ -293,37 +294,39 @@ export function createSseEdge(deps: EdgeDeps): RequestListener {
     const parsedAfter = lastEventId === undefined ? 0 : Number.parseInt(lastEventId, 10);
     const after = (Number.isFinite(parsedAfter) && parsedAfter > 0 ? parsedAfter : 0) as Seq | 0;
 
+    // Ownership and existence are settled before any byte goes out, because after the
+    // 200 there is no status code left to say `no_such_session` with. This is the order
+    // `10-design.md § Reconnect and replay` draws: identity and `get`, then replay.
+    const known = manager.get(sessionId, owner);
+    if (!known.ok) return failWith(res, known.error);
+
     let open = true;
-    // `subscribe` (S3) can call `deliver`/`close` synchronously, or after an async
-    // replay, before this function ever reaches `writeHead` below — replaying is what
-    // it's for. Writing to `res` that early would implicitly send default headers, and
-    // the real `writeHead` a few lines down would then throw `ERR_HTTP_HEADERS_SENT`.
-    // Every write is queued here until headers are actually sent, and only then flushed
-    // in order, so nothing observes a difference from writing straight to the socket.
-    let headersSent = false;
-    const pending: Array<() => void> = [];
-    function sendOrQueue(write: () => void): void {
-      if (headersSent) write();
-      else pending.push(write);
-    }
-    const sink = {
-      deliver(envelope: Envelope): void {
-        if (!open) return;
-        // `event:` is the kind and `id:` is the seq, so a browser `EventSource` can
-        // dispatch by kind and resume by seq with no body parsing. `data:` is one line:
-        // `JSON.stringify` never emits a raw newline, so no continuation is possible.
-        sendOrQueue(() => res.write(`id: ${envelope.seq}\nevent: ${envelope.kind}\ndata: ${JSON.stringify(envelope)}\n\n`));
-      },
-      close(): void {
-        if (!open) return;
-        open = false;
-        sendOrQueue(() => res.end());
-      },
+    let subscription: Subscription | null = null;
+    let keepalive: NodeJS.Timeout | null = null;
+
+    // Registered *before* the subscribe below, which since S3 replays the whole spill and
+    // can therefore take arbitrarily long. A client that gives up mid-replay emits
+    // `close` during that window, and a listener attached afterwards would never see it —
+    // leaving the subscriber registered on the session for its whole life, fed every
+    // later envelope through a destroyed socket.
+    const teardown = (): void => {
+      open = false;
+      if (keepalive !== null) {
+        clearInterval(keepalive);
+        keepalive = null;
+      }
+      if (subscription !== null) {
+        subscription.close();
+        subscription = null;
+      }
     };
+    req.on('close', teardown);
+    res.on('close', teardown);
 
-    const subscribed = await manager.subscribe(sessionId, owner, after, sink);
-    if (!subscribed.ok) return failWith(res, subscribed.error);
-
+    // Headers first, so the replay streams to the socket as it is read rather than
+    // accumulating in this process: a session whose spill holds the whole of a long turn
+    // is exactly the case S3 exists for, and it must not be buffered here in its
+    // entirety before the browser sees a single byte.
     res.writeHead(200, {
       'content-type': 'text/event-stream; charset=utf-8',
       'cache-control': 'no-cache, no-transform',
@@ -335,24 +338,54 @@ export function createSseEdge(deps: EdgeDeps): RequestListener {
     });
     res.flushHeaders();
     res.write(`retry: ${SSE_RETRY_MS}\n\n`);
-    headersSent = true;
-    for (const write of pending) write();
-    pending.length = 0;
 
-    const keepalive = setInterval(() => {
+    keepalive = setInterval(() => {
       if (open) res.write(': keepalive\n\n');
     }, config.caps.keepaliveMs);
     // The heartbeat should not be a reason for the process to stay alive; the open socket
     // already is one.
     keepalive.unref();
 
-    const teardown = (): void => {
-      clearInterval(keepalive);
-      open = false;
-      subscribed.value.close();
+    // `id:` is what a browser `EventSource` sends back as `Last-Event-ID`, so it may only
+    // ever advance past what this connection has actually delivered. A `replay_gap`
+    // restates the watermark the client is complete through rather than carrying a new
+    // position (`session-manager.subscribe`), so it never writes one.
+    //
+    // The floor is `after`, not zero: a connection that reports a gap before delivering
+    // anything would otherwise stamp the gap's seq as the resume point, and the next
+    // reconnect would start past the history this one failed to serve.
+    let lastIdWritten = after as number;
+    const sink = {
+      deliver(envelope: Envelope): void {
+        if (!open) return;
+        // `event:` is the kind and `id:` is the seq, so a browser `EventSource` can
+        // dispatch by kind and resume by seq with no body parsing. `data:` is one line:
+        // `JSON.stringify` never emits a raw newline, so no continuation is possible.
+        const advances = envelope.seq > lastIdWritten;
+        if (advances) lastIdWritten = envelope.seq;
+        const id = advances ? `id: ${envelope.seq}\n` : '';
+        res.write(`${id}event: ${envelope.kind}\ndata: ${JSON.stringify(envelope)}\n\n`);
+      },
+      close(): void {
+        if (!open) return;
+        open = false;
+        res.end();
+      },
     };
-    req.on('close', teardown);
-    res.on('close', teardown);
+
+    const subscribed = await manager.subscribe(sessionId, owner, after, sink);
+    if (!subscribed.ok) {
+      // The `get` above already passed, so this is a session removed underneath us. The
+      // status line is long gone; ending the stream is the only honest signal left, and
+      // the client's reconnect gets the real error from the route.
+      teardown();
+      if (!res.writableEnded) res.end();
+      return;
+    }
+    subscription = subscribed.value;
+    // The client may have left while the replay ran, in which case `teardown` already
+    // fired with nothing to close.
+    if (!open) subscription.close();
   }
 
   async function handleLogin(req: IncomingMessage, res: ServerResponse): Promise<void> {

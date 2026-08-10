@@ -587,3 +587,23 @@ describe('S2.12 — the document CSP', () => {
     }
   });
 });
+
+describe('S3.3 — a replay_gap never moves the client\'s resume point', () => {
+  it('is sent without an id:, so EventSource keeps the Last-Event-ID it already had', async () => {
+    const h = await makeEdge(undefined, undefined, 'error-result');
+    const id = await newSession(h, 's33c');
+    await post(h, `/api/sessions/${id}/message`, { text: 'go' });
+
+    // Wait for the turn to produce history, so `lastSeq` is well above zero.
+    const warm = await get(h, `/api/sessions/${id}/events`);
+    await readFrames(warm, (f) => f.some((x) => x.includes('"kind":"turn.ended"')), 15000);
+
+    // A resume point the session never reached: the one range no store can serve.
+    const beyond = await get(h, `/api/sessions/${id}/events`, 'ben', { 'last-event-id': '999999999' });
+    const { frames } = await readFrames(beyond, (f) => f.some((x) => x.includes('replay_gap')), 10000);
+
+    const gapFrame = frames.find((f) => f.includes('replay_gap'))!;
+    assert.match(gapFrame, /^event: error$/m, 'the gap is dispatched as an error event');
+    assert.doesNotMatch(gapFrame, /^id:/m, 'and carries no id: — an id here would resume past history never received');
+  });
+});

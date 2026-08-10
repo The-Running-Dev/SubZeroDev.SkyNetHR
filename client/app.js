@@ -6,6 +6,7 @@ const state = {
   sessionId: null,
   stream: null,
   lastSeq: 0,
+  refetched: false,
 };
 
 function text(tag, className, value) {
@@ -82,14 +83,36 @@ async function refreshSessions() {
 }
 
 function selectSession(sessionId) {
-  if (state.stream) state.stream.close();
   state.sessionId = sessionId;
+  state.refetched = false;
+  $('compose').hidden = false;
+  openStream(sessionId);
+  void refreshSessions();
+}
+
+// A `replay_gap` says the server could not serve the history this connection asked for, so
+// what is on screen is not the run (S3.3). A fresh `EventSource` carries no `Last-Event-ID`
+// and therefore asks for the transcript from seq 1 — which is the refetch. Once only: a
+// spill that cannot be read will gap again, and a client that reopens on every gap is a
+// reconnect loop rather than a recovery.
+function handleReplayGap() {
+  if (state.refetched) {
+    status('history unavailable — showing live events only', 'warn');
+    return false;
+  }
+  state.refetched = true;
+  status('reloading the transcript…', 'warn');
+  openStream(state.sessionId);
+  return true;
+}
+
+function openStream(sessionId) {
+  if (state.stream) state.stream.close();
   state.lastSeq = 0;
   clear($('transcript'));
-  $('compose').hidden = false;
 
-  // Reconnect and replay are S3's; this build opens a fresh stream and lets the browser's
-  // own EventSource retry handle a dropped connection.
+  // The browser's own EventSource retry handles a dropped connection, replaying from the
+  // `Last-Event-ID` it kept; only a reported gap needs anything from this side.
   const stream = new EventSource(`/api/sessions/${encodeURIComponent(sessionId)}/events`);
   state.stream = stream;
 
@@ -109,6 +132,9 @@ function selectSession(sessionId) {
       } catch {
         return;
       }
+      if (envelope.kind === 'error' && envelope.data?.kind === 'replay_gap') {
+        if (handleReplayGap()) return;
+      }
       state.lastSeq = envelope.seq;
       const node = renderEvent(document, envelope);
       if (node === null) return;
@@ -117,8 +143,6 @@ function selectSession(sessionId) {
       transcript.scrollTop = transcript.scrollHeight;
     });
   }
-
-  void refreshSessions();
 }
 
 async function createSession(event) {

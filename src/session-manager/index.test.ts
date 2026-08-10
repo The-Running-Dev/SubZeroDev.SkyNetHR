@@ -5,7 +5,7 @@ import path from 'node:path';
 import { test } from 'node:test';
 import { createSessionManager } from './index.js';
 import { createStore } from '../store/index.js';
-import type { Checkpoints, Config, Envelope, OperatorId, Records } from '../contract/index.js';
+import type { Checkpoints, Config, Envelope, OperatorId, Records, Store } from '../contract/index.js';
 
 const FIXTURE = path.join(process.cwd(), 'src', 'adapters', 'claude', 'fixtures', 'fake-claude-cli.mjs');
 
@@ -13,7 +13,11 @@ function notImplementedProxy<T extends object>(name: string): T {
   return new Proxy({}, { get: () => () => { throw new Error(`${name} must not be called by session-manager in S1`); } }) as T;
 }
 
-async function makeManager(scenario: string, capsOverride: Partial<Config['caps']> = {}) {
+async function makeManager(
+  scenario: string,
+  capsOverride: Partial<Config['caps']> = {},
+  wrapStore: (store: Store) => Store = (s) => s,
+) {
   process.env['SKYNET_TEST_SCENARIO'] = scenario;
   process.env['SKYNET_CLAUDE_EXECUTABLE'] = FIXTURE;
   const storageRoot = await mkdtemp(path.join(tmpdir(), 'skynet-sm-'));
@@ -43,7 +47,7 @@ async function makeManager(scenario: string, capsOverride: Partial<Config['caps'
   if (!storeResult.ok) throw new Error('store failed to init');
   const manager = createSessionManager({
     config,
-    store: storeResult.value,
+    store: wrapStore(storeResult.value),
     checkpoints: notImplementedProxy<Checkpoints>('checkpoints'),
     records: notImplementedProxy<Records>('records'),
   });
@@ -340,7 +344,27 @@ test('S3.4 — the same spill-served replay works for a session in state ended',
 });
 
 test('S3.7 — a subscriber past subscriberQueueHighWater is dropped with a gap reported to it alone; other subscribers see every envelope', async () => {
-  const { manager, workspaceRoot } = await makeManager('many', { ringCapacity: 1, subscriberQueueHighWater: 1 });
+  // The drop needs live envelopes to arrive *while* a spill replay is still running. Racing
+  // a real file read against a real child process decides that on disk speed, and a run
+  // where the read wins asserts nothing — so the replay is held open explicitly instead,
+  // and released only once the overflow is guaranteed to have happened.
+  let releaseReplay = (): void => {};
+  const replayHeld = new Promise<void>((resolve) => { releaseReplay = resolve; });
+  let holdNextReplay = false;
+
+  const { manager, workspaceRoot } = await makeManager('many', { ringCapacity: 1, subscriberQueueHighWater: 1 }, (store) => ({
+    ...store,
+    readEventsAfter(sessionId, after) {
+      if (!holdNextReplay) return store.readEventsAfter(sessionId, after);
+      holdNextReplay = false;
+      const inner = store.readEventsAfter(sessionId, after);
+      return (async function* () {
+        await replayHeld;
+        yield* inner;
+      })();
+    },
+  }));
+
   const owner = 'operator-1' as OperatorId;
   const projectDir = path.join(workspaceRoot, 'proj-s37');
   await mkdir(projectDir);
@@ -349,30 +373,47 @@ test('S3.7 — a subscriber past subscriberQueueHighWater is dropped with a gap 
   if (!created.ok) return;
   const { sessionId } = created.value;
 
-  const firstTurn: Envelope[] = [];
-  await manager.subscribe(sessionId, owner, 0, { deliver: (e) => firstTurn.push(e), close: () => {} });
-  await manager.message(sessionId, owner, 'go');
-  await waitUntil(() => firstTurn.some((e) => e.kind === 'turn.ended'));
-
-  // Second turn: subscribe (forcing a spill replay of the whole first turn, since the
-  // ring holds only 1) in the same tick the turn is kicked off, racing the async replay
-  // against this turn's live envelopes with a highWater of 1 — the tightest possible
-  // squeeze.
+  // A subscriber that is live before the second turn starts, and so is never buffered.
   const unaffected: Envelope[] = [];
   await manager.subscribe(sessionId, owner, 0, { deliver: (e) => unaffected.push(e), close: () => {} });
+  await manager.message(sessionId, owner, 'go');
+  await waitUntil(() => unaffected.some((e) => e.kind === 'turn.ended'), 15000);
+
+  // This one subscribes with its replay pinned open, so every envelope of the second turn
+  // lands in its buffer — two of them past a highWater of 1.
   const overflowSink: Envelope[] = [];
   let overflowClosed = false;
-  const messagePromise = manager.message(sessionId, owner, 'go again');
-  await manager.subscribe(sessionId, owner, 0, { deliver: (e) => overflowSink.push(e), close: () => { overflowClosed = true; } });
-  await messagePromise;
-  await waitUntil(() => unaffected.filter((e) => e.kind === 'turn.ended').length === 2);
+  holdNextReplay = true;
+  const subscribing = manager.subscribe(sessionId, owner, 0, {
+    deliver: (e) => overflowSink.push(e),
+    close: () => { overflowClosed = true; },
+  });
 
-  if (overflowClosed) {
-    assert.deepEqual(errorKinds(overflowSink), ['replay_gap']);
+  // `turn.ended` reaches a subscriber inside `emit`'s synchronous fan-out, but the turn
+  // slot is only freed once that emit's durable write has landed — so a second `message`
+  // issued the instant the first turn is seen to end is refused as `turn_in_flight`.
+  const before = unaffected.length;
+  for (;;) {
+    const sent = await manager.message(sessionId, owner, 'go again');
+    if (sent.ok) break;
+    assert.equal(sent.error.code, 'turn_in_flight', `second turn refused: ${sent.error.code}`);
+    await new Promise((resolve) => setTimeout(resolve, 10));
   }
-  // Whether or not the race tripped the drop on this run, the other subscriber — never
-  // buffered, since it was already live from before the second turn started — must see
-  // every envelope of both turns with no gap reported.
+  await waitUntil(() => unaffected.length >= before + 3, 15000);
+  releaseReplay();
+  await subscribing;
+  await waitUntil(() => unaffected.filter((e) => e.kind === 'turn.ended').length === 2, 15000);
+
+  assert.equal(overflowClosed, true, 'the overflowing subscriber is closed, not left half-fed');
+  assert.deepEqual(errorKinds(overflowSink), ['replay_gap']);
+  assert.equal(overflowSink.length, 1, 'the gap is all it gets: nothing was replayed to it before the drop');
+
+  // The gap restates the watermark it is complete through, and must never name a seq it
+  // did not receive — the edge turns `seq` into the SSE `id:`, which is the next
+  // reconnect's resume point.
+  assert.equal(overflowSink[0]!.seq as unknown as number, 0, 'a subscriber dropped before any replay is complete through nothing');
+
+  // The other subscriber is untouched by any of it.
   assert.deepEqual(errorKinds(unaffected), []);
   assert.equal(unaffected.filter((e) => e.kind === 'turn.ended').length, 2);
 });
@@ -409,4 +450,56 @@ test('S3.8 — a disconnected client does not reach the child: the turn runs to 
   assert.equal(control.filter((e) => e.kind === 'turn.ended').length, 1);
   const seqs = control.map((e) => e.seq as unknown as number);
   for (let i = 1; i < seqs.length; i++) assert.equal(seqs[i], seqs[i - 1]! + 1, 'seq stays contiguous across the disconnect');
+});
+
+test('S3.2 — a session whose ring holds nothing at all still replays its whole history from the spill', async () => {
+  // `ringCapacity: 0` is accepted by config and makes `pushRing` a no-op. It stands in
+  // here for every state where the ring is empty but the spill is not — the same state a
+  // rehydrated session boots into.
+  const { manager, workspaceRoot } = await makeManager('error-result', { ringCapacity: 0 });
+  const owner = 'operator-1' as OperatorId;
+  const projectDir = path.join(workspaceRoot, 'proj-s32b');
+  await mkdir(projectDir);
+  const created = await manager.create(owner, { vendor: 'claude', cwd: projectDir, model: null, sandbox: null, requisitionId: null });
+  assert.equal(created.ok, true);
+  if (!created.ok) return;
+  const { sessionId } = created.value;
+
+  const control: Envelope[] = [];
+  await manager.subscribe(sessionId, owner, 0, { deliver: (e) => control.push(e), close: () => {} });
+  await manager.message(sessionId, owner, 'go');
+  await waitUntil(() => control.some((e) => e.kind === 'turn.ended'));
+
+  const fresh: Envelope[] = [];
+  await manager.subscribe(sessionId, owner, 0, { deliver: (e) => fresh.push(e), close: () => {} });
+
+  assert.deepEqual(errorKinds(fresh), [], 'a readable spill is not a gap');
+  assert.ok(fresh.length > 0, 'a fresh subscriber does not get an empty transcript');
+  assert.deepEqual(fresh.map((e) => e.seq), control.map((e) => e.seq));
+});
+
+test('S3.3 — a Last-Event-ID past the end of the session is reported as a gap, not served as nothing', async () => {
+  const { manager, workspaceRoot } = await makeManager('error-result');
+  const owner = 'operator-1' as OperatorId;
+  const projectDir = path.join(workspaceRoot, 'proj-s33b');
+  await mkdir(projectDir);
+  const created = await manager.create(owner, { vendor: 'claude', cwd: projectDir, model: null, sandbox: null, requisitionId: null });
+  assert.equal(created.ok, true);
+  if (!created.ok) return;
+  const { sessionId } = created.value;
+
+  const control: Envelope[] = [];
+  await manager.subscribe(sessionId, owner, 0, { deliver: (e) => control.push(e), close: () => {} });
+  await manager.message(sessionId, owner, 'go');
+  await waitUntil(() => control.some((e) => e.kind === 'turn.ended'));
+  const lastSeq = control[control.length - 1]!.seq as unknown as number;
+
+  const beyond: Envelope[] = [];
+  await manager.subscribe(sessionId, owner, (lastSeq + 500) as never, { deliver: (e) => beyond.push(e), close: () => {} });
+
+  assert.deepEqual(errorKinds(beyond), ['replay_gap'], 'an unreachable resume point is a gap, not silence');
+  assert.equal(beyond.length, 1);
+  // The gap names the end of the history that does exist, never the resume point that
+  // does not — the edge turns `seq` into the SSE `id:`.
+  assert.equal(beyond[0]!.seq as unknown as number, lastSeq);
 });

@@ -180,3 +180,167 @@ describe('S2.14 — every rendered value is a CSS custom property', () => {
     assert.ok(checked >= 10, `the sweep actually examined declarations (saw ${checked})`);
   });
 });
+
+// ---------------------------------------------------------------------------
+// S3.3 (client half) — a browser stub thin enough to run `app.js` end to end.
+//
+// The renderer above is exercised against a document stub; the reconnect behaviour
+// cannot be, because it lives in the module that owns the `EventSource`. This stub is
+// the smallest thing that lets that module run: elements that record their listeners,
+// an `EventSource` that records its constructions, and a `fetch` that answers the one
+// route the console calls on start.
+// ---------------------------------------------------------------------------
+
+interface FakeEl {
+  tag: string;
+  className: string;
+  hidden: boolean;
+  type: string;
+  value: string;
+  scrollTop: number;
+  scrollHeight: number;
+  textContent: string | null;
+  children: FakeEl[];
+  listeners: Map<string, Array<(event: unknown) => void>>;
+  appendChild(child: FakeEl): FakeEl;
+  removeChild(child: FakeEl): FakeEl;
+  firstChild: FakeEl | null;
+  addEventListener(kind: string, fn: (event: unknown) => void): void;
+  querySelector(): null;
+}
+
+function fakeEl(tag: string): FakeEl {
+  const node: FakeEl = {
+    tag,
+    className: '',
+    hidden: false,
+    type: '',
+    value: '',
+    scrollTop: 0,
+    scrollHeight: 0,
+    textContent: null,
+    children: [],
+    listeners: new Map(),
+    appendChild(child) { node.children.push(child); return child; },
+    removeChild(child) { node.children = node.children.filter((c) => c !== child); return child; },
+    get firstChild() { return node.children[0] ?? null; },
+    addEventListener(kind, fn) {
+      const existing = node.listeners.get(kind) ?? [];
+      existing.push(fn);
+      node.listeners.set(kind, existing);
+    },
+    querySelector: () => null,
+  };
+  return node;
+}
+
+interface FakeStream {
+  url: string;
+  closed: boolean;
+  listeners: Map<string, Array<(event: { data: string }) => void>>;
+}
+
+async function runConsole(sessions: ReadonlyArray<Record<string, unknown>>) {
+  const byId = new Map<string, FakeEl>();
+  for (const id of ['status', 'login', 'console', 'sessions', 'transcript', 'compose', 'new-session', 'login-form', 'refresh', 'cwd', 'vendor', 'model', 'text', 'secret']) {
+    byId.set(id, fakeEl('div'));
+  }
+  const streams: FakeStream[] = [];
+
+  const globals = globalThis as unknown as Record<string, unknown>;
+  const saved = { document: globals['document'], EventSource: globals['EventSource'], fetch: globals['fetch'] };
+
+  globals['document'] = {
+    getElementById: (id: string) => byId.get(id) ?? null,
+    createElement: (tag: string) => fakeEl(tag),
+  };
+  globals['EventSource'] = class {
+    url: string;
+    closed = false;
+    listeners = new Map<string, Array<(event: { data: string }) => void>>();
+    onopen: unknown = null;
+    onerror: unknown = null;
+    constructor(url: string) {
+      this.url = url;
+      streams.push(this as unknown as FakeStream);
+    }
+    addEventListener(kind: string, fn: (event: { data: string }) => void): void {
+      const existing = this.listeners.get(kind) ?? [];
+      existing.push(fn);
+      this.listeners.set(kind, existing);
+    }
+    close(): void { this.closed = true; }
+  };
+  globals['fetch'] = async (input: string) =>
+    ({ status: 200, json: async () => (String(input).startsWith('/api/sessions') ? { sessions } : {}) });
+
+  // A distinct query per load: `app.js` runs its bootstrap on import, so a cached module
+  // would replay nothing.
+  await import(`${pathToFileURL(path.join(CLIENT, 'app.js')).href}?t=${Math.random()}`);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  // Selecting a session kicks off a session-list refresh the console does not await.
+  // Putting the real globals back while that is still in flight would fail it against a
+  // `document` that no longer exists, so the drain happens first.
+  const restore = async (): Promise<void> => {
+    for (let i = 0; i < 3; i++) await new Promise((resolve) => setTimeout(resolve, 0));
+    globals['document'] = saved.document;
+    globals['EventSource'] = saved.EventSource;
+    globals['fetch'] = saved.fetch;
+  };
+  return { byId, streams, restore };
+}
+
+function deliver(stream: FakeStream, envelope: Record<string, unknown>): void {
+  for (const fn of stream.listeners.get(String(envelope['kind'])) ?? []) fn({ data: JSON.stringify(envelope) });
+}
+
+const GAP = { seq: 0, sessionId: 's1', ts: '2026-08-09T00:00:00.000Z', kind: 'error', data: { kind: 'replay_gap', message: 'the spill could not serve this range', fatal: false } };
+
+describe('S3.3 — a reported replay_gap makes the client refetch the transcript', () => {
+  it('reopens the stream once, from the start, and drops the transcript it knows is short', async () => {
+    const { byId, streams, restore } = await runConsole([{ id: 's1', cwd: '/w/p', vendor: 'claude', state: 'live' }]);
+    try {
+      const list = byId.get('sessions')!;
+      const button = list.children[0]!.children[0]!;
+      for (const fn of button.listeners.get('click') ?? []) fn({});
+      assert.equal(streams.length, 1, 'selecting a session opens one stream');
+
+      const transcript = byId.get('transcript')!;
+      deliver(streams[0]!, { seq: 1, sessionId: 's1', ts: GAP.ts, kind: 'message', data: { turnId: 't', role: 'assistant', text: 'partial history' } });
+      assert.equal(transcript.children.length, 1);
+
+      deliver(streams[0]!, GAP);
+      assert.equal(streams.length, 2, 'the gap reopens the stream');
+      assert.equal(streams[0]!.closed, true, 'the gapped stream is closed, not left running alongside');
+      // A fresh EventSource carries no Last-Event-ID, so the reopen asks from seq 1 — and
+      // the short transcript is dropped rather than having the refetch appended to it.
+      assert.equal(streams[1]!.url, streams[0]!.url);
+      assert.equal(transcript.children.length, 0, 'the transcript known to be short is cleared');
+      assert.equal(transcript.children.some((c) => JSON.stringify(c).includes('replay_gap')), false);
+    } finally {
+      await restore();
+    }
+  });
+
+  it('refetches once only, so an unreadable spill does not become a reconnect loop', async () => {
+    const { byId, streams, restore } = await runConsole([{ id: 's1', cwd: '/w/p', vendor: 'claude', state: 'live' }]);
+    try {
+      const button = byId.get('sessions')!.children[0]!.children[0]!;
+      for (const fn of button.listeners.get('click') ?? []) fn({});
+
+      deliver(streams[0]!, GAP);
+      assert.equal(streams.length, 2);
+      deliver(streams[1]!, GAP);
+      assert.equal(streams.length, 2, 'the second gap does not reopen again');
+
+      const status = byId.get('status')!;
+      const shown = status.children.map((c) => c.textContent).join(' ');
+      assert.match(shown, /history unavailable/, 'and the operator is told the transcript is incomplete');
+      // The second gap is rendered rather than swallowed: the run on screen is not the run.
+      assert.equal(byId.get('transcript')!.children.length, 1);
+    } finally {
+      await restore();
+    }
+  });
+});
