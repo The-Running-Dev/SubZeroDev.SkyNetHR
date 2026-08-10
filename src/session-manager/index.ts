@@ -245,7 +245,6 @@ export function createSessionManager(deps: {
           text: 'The previous turn ended before its session id was reported; conversation context was not carried forward.',
         });
       }
-      entry.hasRunATurn = true;
 
       const sendResult = await entry.adapter.send(text, entry.record.cliSessionId, turnId);
       if (!sendResult.ok) {
@@ -255,6 +254,9 @@ export function createSessionManager(deps: {
         entry.turn = null;
         return { ok: false, error: { code: 'adapter', cause: sendResult.error } };
       }
+      // Set only once the CLI actually spawned: a `send` failure never ran a process, so
+      // it must not count as "a turn that could have lost context" for the next one.
+      entry.hasRunATurn = true;
       return { ok: true, value: { turnId } };
     },
 
@@ -313,9 +315,12 @@ export function createSessionManager(deps: {
         return { ok: true, value: { accepted: true } };
       }
 
-      const responded = entry.adapter.respond(answer.requestId, answer.decision);
-      if (!responded.ok) return { ok: false, error: { code: 'adapter', cause: responded.error } };
-
+      // The audit record is already durable: the decision is final regardless of
+      // whether `respond` can still reach the child (it may already be gone — the same
+      // benign race the `exited` handler resolves for every other outstanding request).
+      // `permission.resolved` must fire either way, or this answer's own audit record
+      // ends up with no paired resolution event (I9).
+      entry.adapter.respond(answer.requestId, answer.decision);
       await emit(entry, 'permission.resolved', {
         turnId: turn.turnId,
         requestId: answer.requestId,
@@ -554,7 +559,19 @@ export function createSessionManager(deps: {
               reason: 'cancelled_process_exit',
             }),
           );
-          await Promise.all([...emits, ...audits]);
+          await Promise.all(emits);
+          const auditResults = await Promise.all(audits);
+          // The decision was already forced to 'deny' by the exit itself, so a failed
+          // append cannot change what was resolved on the wire the way it does in
+          // `answerPermission` — but I11 still owes one `AuditRecord` per resolution, so
+          // a failure here must not pass silently the way an unchecked `Result` would.
+          if (auditResults.some((r) => !r.ok)) {
+            await emit(entry, 'session.notice', {
+              level: 'error',
+              code: 'audit_unavailable',
+              text: 'The audit record for one or more cancelled permissions could not be written.',
+            });
+          }
         }
         // Pid tombstoning across a real restart is S7's; not exercised here.
         return;

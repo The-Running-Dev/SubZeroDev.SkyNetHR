@@ -147,8 +147,13 @@ function openStream(sessionId) {
       if (envelope.kind === 'permission.resolved') {
         const controls = state.pendingPermissions.get(envelope.data.requestId);
         if (controls) {
+          // The request row this client already rendered is updated in place; a
+          // separate standalone row would just repeat the same outcome right below it.
           const who = envelope.data.operator ? envelope.data.operator : `server (${envelope.data.reason})`;
           controls.setResolved(`${envelope.data.decision} — ${who}`);
+          state.pendingPermissions.delete(envelope.data.requestId);
+          state.lastSeq = envelope.seq;
+          return;
         }
       }
       state.lastSeq = envelope.seq;

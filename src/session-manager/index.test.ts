@@ -67,17 +67,9 @@ async function makeManager(
   return { manager, workspaceRoot, storageRoot, store: storeResult.value };
 }
 
-async function waitUntil2(predicate: () => Promise<boolean>, timeoutMs = 5000): Promise<void> {
+async function waitUntil(predicate: () => boolean | Promise<boolean>, timeoutMs = 5000): Promise<void> {
   const start = Date.now();
   while (!(await predicate())) {
-    if (Date.now() - start > timeoutMs) throw new Error('timed out waiting for condition');
-    await new Promise((r) => setTimeout(r, 10));
-  }
-}
-
-async function waitUntil(predicate: () => boolean, timeoutMs = 5000): Promise<void> {
-  const start = Date.now();
-  while (!predicate()) {
     if (Date.now() - start > timeoutMs) throw new Error('timed out waiting for condition');
     await new Promise((r) => setTimeout(r, 10));
   }
@@ -755,7 +747,7 @@ test('S4.9 — a child that dies with requests outstanding resolves each one can
   for (const r of resolutions) assert.ok((r.seq as unknown as number) < turnEndedSeq, 'each cancellation precedes turn.ended');
 
   let audit: AuditRecord[] = [];
-  await waitUntil2(async () => {
+  await waitUntil(async () => {
     audit = await readAudit(storageRoot);
     return audit.length >= 2;
   });
