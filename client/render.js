@@ -94,14 +94,61 @@ function sessionEndedNode(doc, data) {
   return row(doc, 'session-ended', 'session', el(doc, 'div', 'session__text', `ended — ${data.reason}`));
 }
 
-function permissionRequestNode(doc, data) {
+// `handlers.onAnswerPermission(requestId, decision)` posts the answer and resolves to
+// whether the server accepted it; `handlers.onRequestRendered(requestId, controls)`
+// hands the caller a `setResolved(text)` closure so a later `permission.resolved` —
+// including one answered from a different client — can update this same row without
+// the caller ever querying the DOM for it.
+function permissionRequestNode(doc, data, handlers) {
   const body = el(doc, 'div', 'permission');
   body.appendChild(el(doc, 'div', 'permission__tool', data.tool));
   body.appendChild(el(doc, 'pre', 'permission__input', pretty(data.input)));
-  // Answering is S4's. Until then the request is shown so a stalled turn is legible
-  // rather than looking like an agent that stopped thinking.
-  body.appendChild(el(doc, 'div', 'permission__hint', 'awaiting an answer'));
+
+  const actions = el(doc, 'div', 'permission__actions');
+  const allowBtn = el(doc, 'button', 'button button--allow', 'Allow');
+  allowBtn.type = 'button';
+  const denyBtn = el(doc, 'button', 'button button--deny', 'Deny');
+  denyBtn.type = 'button';
+  const hint = el(doc, 'div', 'permission__hint', 'awaiting an answer');
+
+  function setResolved(text) {
+    allowBtn.disabled = true;
+    denyBtn.disabled = true;
+    hint.textContent = text;
+  }
+
+  if (handlers && handlers.onAnswerPermission) {
+    async function answer(decision) {
+      allowBtn.disabled = true;
+      denyBtn.disabled = true;
+      hint.textContent = 'sending…';
+      const accepted = await handlers.onAnswerPermission(data.requestId, decision);
+      // A definite outcome — who answered, and with what — arrives separately as this
+      // same request's `permission.resolved` envelope, which calls `setResolved`
+      // above; `accepted: false` here means only that this click lost the race.
+      if (!accepted) hint.textContent = 'already answered';
+    }
+    allowBtn.addEventListener('click', () => void answer('allow'));
+    denyBtn.addEventListener('click', () => void answer('deny'));
+  } else {
+    setResolved('awaiting an answer');
+  }
+
+  actions.appendChild(allowBtn);
+  actions.appendChild(denyBtn);
+  body.appendChild(actions);
+  body.appendChild(hint);
+
+  if (handlers && handlers.onRequestRendered) handlers.onRequestRendered(data.requestId, { setResolved });
+
   return row(doc, 'permission', 'permission', body);
+}
+
+function permissionResolvedNode(doc, data) {
+  const body = el(doc, 'div', 'permission-resolved');
+  const who = data.operator ? data.operator : `server (${data.reason})`;
+  body.appendChild(el(doc, 'div', 'permission-resolved__text', `${data.decision} — ${who}`));
+  return row(doc, 'permission-resolved', 'permission', body);
 }
 
 const RENDERERS = {
@@ -115,6 +162,7 @@ const RENDERERS = {
   'tool.call': toolCallNode,
   'tool.result': toolResultNode,
   'permission.request': permissionRequestNode,
+  'permission.resolved': permissionResolvedNode,
   error: errorNode,
 };
 
@@ -122,9 +170,12 @@ const RENDERERS = {
  * Returns a detached element for one envelope, or `null` for a kind this build does not
  * draw. `null` rather than a placeholder: an event a later slice introduces should be
  * invisible here, not rendered as damage.
+ *
+ * `handlers` is optional and reaches only `permission.request` today (see above); every
+ * other renderer ignores it.
  */
-export function renderEvent(doc, envelope) {
+export function renderEvent(doc, envelope, handlers) {
   const renderer = RENDERERS[envelope.kind];
   if (renderer === undefined) return null;
-  return renderer(doc, envelope.data ?? {});
+  return renderer(doc, envelope.data ?? {}, handlers);
 }

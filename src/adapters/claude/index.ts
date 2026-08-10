@@ -290,13 +290,9 @@ export function createClaudeAdapter(opts: AdapterOptions & { readonly executable
 
         proc.on('close', (code, signal) => {
           child = null;
-          for (const [requestId] of pendingByRequestId) {
-            emitEvent(
-              'permission.resolved',
-              { requestId, decision: 'deny', scope: 'once', operator: null, reason: 'cancelled_process_exit' },
-              null,
-            );
-          }
+          // D97: the adapter never resolves a permission of its own — resolving every
+          // outstanding request as `cancelled_process_exit`, and owing each one an
+          // `AuditRecord`, is the manager's, done off the `exited` notification below.
           pendingByRequestId.clear();
           notify({ kind: 'exited', code, signal });
           if (!resultSeen) {

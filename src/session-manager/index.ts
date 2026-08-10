@@ -4,6 +4,7 @@ import { pathsOverlap, resolveInsideRoot } from '../jail/index.js';
 import type {
   Adapter,
   AdapterNotification,
+  AuditRecord,
   CallId,
   Checkpoint,
   ChecklistItemId,
@@ -48,6 +49,11 @@ interface SessionEntry {
   turn: TurnState | null;
   seq: number;
   firstTurnAnnounced: boolean;
+  // S4.15: whether a turn has ever been started on this session, tracked independently
+  // of `record.cliSessionId` — the two can diverge when the CLI died before reporting
+  // `system/init` on its first turn, which is exactly the case the resume_unavailable
+  // notice exists to name.
+  hasRunATurn: boolean;
   readonly subscribers: Set<SubscriberSink>;
   // I27: there is no lock in this server; `emit`'s synchronous prefix (seq assignment,
   // ring push, subscriber delivery) is the serialisation point. The durable spill write
@@ -184,6 +190,7 @@ export function createSessionManager(deps: {
         turn: null,
         seq: 0,
         firstTurnAnnounced: false,
+        hasRunATurn: false,
         subscribers: new Set(),
         writeQueue: Promise.resolve(),
       };
@@ -228,6 +235,17 @@ export function createSessionManager(deps: {
       await emit(entry, 'turn.started', { turnId });
       entry.turn.phase = 'running';
 
+      // S4.15/D34: a turn that spawns with no `--resume` on a session that has already
+      // run one — because the CLI died before ever reporting `system/init`, leaving
+      // `cliSessionId` null — loses conversation context silently unless this says so.
+      if (entry.hasRunATurn && entry.record.cliSessionId === null) {
+        await emit(entry, 'session.notice', {
+          level: 'warn',
+          code: 'resume_unavailable',
+          text: 'The previous turn ended before its session id was reported; conversation context was not carried forward.',
+        });
+      }
+
       const sendResult = await entry.adapter.send(text, entry.record.cliSessionId, turnId);
       if (!sendResult.ok) {
         // The `turn.started` above is already durable; pair it (I14, D39) before
@@ -236,24 +254,73 @@ export function createSessionManager(deps: {
         entry.turn = null;
         return { ok: false, error: { code: 'adapter', cause: sendResult.error } };
       }
+      // Set only once the CLI actually spawned: a `send` failure never ran a process, so
+      // it must not count as "a turn that could have lost context" for the next one.
+      entry.hasRunATurn = true;
       return { ok: true, value: { turnId } };
     },
 
     async answerPermission(sessionId, owner, answer: PermissionAnswer) {
       const entry = sessions.get(sessionId);
       if (!entry || entry.record.owner !== owner) return { ok: false, error: { code: 'no_such_session', sessionId } };
+
+      // S4.12: standing rules are S10's; until it ships a grammar, `scope: 'always'` and
+      // a supplied `rule` are both refused rather than silently downgraded to 'once'.
+      if (answer.scope === 'always') {
+        return { ok: false, error: { code: 'bad_request', field: 'scope', detail: "scope 'always' is not available until S10 ships a grammar" } };
+      }
+      if (answer.rule !== null) {
+        return { ok: false, error: { code: 'bad_request', field: 'rule', detail: 'rule is not available until S10 ships a grammar' } };
+      }
+
       const turn = entry.turn;
       if (!turn) return { ok: true, value: { accepted: false } };
       const pending = turn.pending.get(answer.requestId);
       if (!pending) return { ok: true, value: { accepted: false } }; // already resolved (D33)
-      turn.pending.delete(answer.requestId);
+      turn.pending.delete(answer.requestId); // synchronous with the lookup, before any await (D33)
 
-      // The audit trail (I10, I11) and standing-rule matching (D35) are S4's and S10's.
-      // This slice's harness needs only enough to unblock the turn and record the
-      // outcome on the wire.
-      const responded = entry.adapter.respond(answer.requestId, answer.decision);
-      if (!responded.ok) return { ok: false, error: { code: 'adapter', cause: responded.error } };
+      const record: AuditRecord = {
+        ts: nowIso(),
+        operator: owner,
+        sessionId: entry.record.id,
+        vendor: entry.record.vendor,
+        sandbox: entry.record.sandbox,
+        tool: pending.tool,
+        input: pending.input,
+        decision: answer.decision,
+        scope: 'once',
+        reason: answer.reason,
+      };
 
+      // I10/S4.6: the audit record is fsync'd (store.appendAudit's contract) before the
+      // control_response reaches the child's stdin.
+      const appended = await store.appendAudit(record);
+      if (!appended.ok) {
+        // S4.7: an audit append failure denies, regardless of what the operator asked
+        // for — the turn continues and no tool runs.
+        entry.adapter.respond(answer.requestId, 'deny');
+        await emit(entry, 'permission.resolved', {
+          turnId: turn.turnId,
+          requestId: answer.requestId,
+          decision: 'deny',
+          scope: 'once',
+          operator: null,
+          reason: 'audit_unavailable',
+        });
+        await emit(entry, 'session.notice', {
+          level: 'error',
+          code: 'audit_unavailable',
+          text: 'The audit record could not be written; the tool call was denied.',
+        });
+        return { ok: true, value: { accepted: true } };
+      }
+
+      // The audit record is already durable: the decision is final regardless of
+      // whether `respond` can still reach the child (it may already be gone — the same
+      // benign race the `exited` handler resolves for every other outstanding request).
+      // `permission.resolved` must fire either way, or this answer's own audit record
+      // ends up with no paired resolution event (I9).
+      entry.adapter.respond(answer.requestId, answer.decision);
       await emit(entry, 'permission.resolved', {
         turnId: turn.turnId,
         requestId: answer.requestId,
@@ -449,8 +516,66 @@ export function createSessionManager(deps: {
         });
         return;
       }
-      case 'exited':
-        return; // pid tombstoning across a real restart is S7's; not exercised here
+      case 'exited': {
+        // S4.9/D97: the adapter never resolves a permission of its own — it only
+        // reports that its child is gone. Deciding every outstanding request is now
+        // `cancelled_process_exit`, and owing each one exactly one `AuditRecord`
+        // (I11), is the manager's, the same as for an interrupt or a boot-time close.
+        //
+        // `turn.ended` for this same exit follows as a second, separate notification
+        // the adapter sends right after this one (still inside the same synchronous
+        // callback), so every cancellation's `seq` must already be assigned before
+        // this function next yields — otherwise `turn.ended` could be delivered with
+        // an earlier `seq` than a cancellation the criterion requires to precede it.
+        // `emit`'s synchronous prefix assigns `seq` the instant it is called, so firing
+        // every cancellation's `emit` from a synchronous `.map()` (rather than one at a
+        // time inside a `for` loop with an `await` between each) is what keeps that
+        // order intact when there is more than one outstanding request.
+        const turn = entry.turn;
+        if (turn && turn.pending.size > 0) {
+          const cancelled = [...turn.pending.entries()];
+          turn.pending.clear();
+          const emits = cancelled.map(([requestId]) =>
+            emit(entry, 'permission.resolved', {
+              turnId: turn.turnId,
+              requestId,
+              decision: 'deny',
+              scope: 'once',
+              operator: null,
+              reason: 'cancelled_process_exit',
+            }),
+          );
+          const audits = cancelled.map(([, pending]) =>
+            store.appendAudit({
+              ts: nowIso(),
+              operator: null,
+              sessionId: entry.record.id,
+              vendor: entry.record.vendor,
+              sandbox: entry.record.sandbox,
+              tool: pending.tool,
+              input: pending.input,
+              decision: 'deny',
+              scope: 'once',
+              reason: 'cancelled_process_exit',
+            }),
+          );
+          await Promise.all(emits);
+          const auditResults = await Promise.all(audits);
+          // The decision was already forced to 'deny' by the exit itself, so a failed
+          // append cannot change what was resolved on the wire the way it does in
+          // `answerPermission` — but I11 still owes one `AuditRecord` per resolution, so
+          // a failure here must not pass silently the way an unchecked `Result` would.
+          if (auditResults.some((r) => !r.ok)) {
+            await emit(entry, 'session.notice', {
+              level: 'error',
+              code: 'audit_unavailable',
+              text: 'The audit record for one or more cancelled permissions could not be written.',
+            });
+          }
+        }
+        // Pid tombstoning across a real restart is S7's; not exercised here.
+        return;
+      }
       case 'event': {
         const { kind, data, raw } = n.event as { kind: EventKind; data: Record<string, unknown>; raw?: unknown };
         const turn = entry.turn;

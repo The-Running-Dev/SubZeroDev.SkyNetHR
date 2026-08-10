@@ -1,13 +1,26 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, chmod } from 'node:fs/promises';
+import { mkdtemp, mkdir, chmod, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
 import { createSessionManager } from './index.js';
 import { createStore } from '../store/index.js';
-import type { Checkpoints, Config, Envelope, OperatorId, Records, Store } from '../contract/index.js';
+import type { AuditRecord, Checkpoints, Config, Envelope, OperatorId, Records, Store } from '../contract/index.js';
 
 const FIXTURE = path.join(process.cwd(), 'src', 'adapters', 'claude', 'fixtures', 'fake-claude-cli.mjs');
+
+async function readAudit(storageRoot: string): Promise<AuditRecord[]> {
+  let raw: string;
+  try {
+    raw = await readFile(path.join(storageRoot, 'audit.ndjson'), 'utf8');
+  } catch {
+    return [];
+  }
+  return raw
+    .split('\n')
+    .filter((l) => l.trim().length > 0)
+    .map((l) => JSON.parse(l) as AuditRecord);
+}
 
 function notImplementedProxy<T extends object>(name: string): T {
   return new Proxy({}, { get: () => () => { throw new Error(`${name} must not be called by session-manager in S1`); } }) as T;
@@ -54,9 +67,9 @@ async function makeManager(
   return { manager, workspaceRoot, storageRoot, store: storeResult.value };
 }
 
-async function waitUntil(predicate: () => boolean, timeoutMs = 5000): Promise<void> {
+async function waitUntil(predicate: () => boolean | Promise<boolean>, timeoutMs = 5000): Promise<void> {
   const start = Date.now();
-  while (!predicate()) {
+  while (!(await predicate())) {
     if (Date.now() - start > timeoutMs) throw new Error('timed out waiting for condition');
     await new Promise((r) => setTimeout(r, 10));
   }
@@ -502,4 +515,341 @@ test('S3.3 — a Last-Event-ID past the end of the session is reported as a gap,
   // The gap names the end of the history that does exist, never the resume point that
   // does not — the edge turns `seq` into the SSE `id:`.
   assert.equal(beyond[0]!.seq as unknown as number, lastSeq);
+});
+
+// ---------------------------------------------------------------------------
+// S4 — Ask before you run it, and write down who said yes
+// ---------------------------------------------------------------------------
+
+async function runOneRequest(scenario: string, workspaceRoot: string, manager: Awaited<ReturnType<typeof makeManager>>['manager'], owner: OperatorId, dir: string) {
+  const projectDir = path.join(workspaceRoot, dir);
+  await mkdir(projectDir);
+  const created = await manager.create(owner, { vendor: 'claude', cwd: projectDir, model: null, sandbox: null, requisitionId: null });
+  assert.equal(created.ok, true);
+  if (!created.ok) throw new Error('unreachable');
+  const { sessionId } = created.value;
+  const received: Envelope[] = [];
+  await manager.subscribe(sessionId, owner, 0, { deliver: (e) => received.push(e), close: () => {} });
+  const messaged = await manager.message(sessionId, owner, 'go');
+  assert.equal(messaged.ok, true);
+  await waitUntil(() => received.some((e) => e.kind === 'permission.request'));
+  const requestEnvelope = received.find((e) => e.kind === 'permission.request')!;
+  return { sessionId, received, requestEnvelope };
+}
+
+test('S4.1/S4.8 — permission.request carries the tool input exactly, and AuditRecord.input equals it key for key', async () => {
+  const { manager, workspaceRoot, storageRoot } = await makeManager('full');
+  const owner = 'operator-1' as OperatorId;
+  const { sessionId, received, requestEnvelope } = await runOneRequest('full', workspaceRoot, manager, owner, 'proj-s41');
+  const data = requestEnvelope.data as { requestId: string; tool: string; input: Record<string, unknown> };
+  assert.deepEqual(data.input, { command: 'echo hi' });
+
+  await manager.answerPermission(sessionId, owner, { requestId: data.requestId as never, decision: 'allow', scope: 'once', rule: null, reason: null });
+  await waitUntil(() => received.some((e) => e.kind === 'permission.resolved'));
+
+  const audit = await readAudit(storageRoot);
+  assert.equal(audit.length, 1);
+  assert.deepEqual(audit[0]!.input, data.input);
+  assert.equal(audit[0]!.tool, data.tool);
+});
+
+test('S4.2 — allow and deny each round-trip to the real child and the agent proceeds accordingly', async () => {
+  const owner = 'operator-1' as OperatorId;
+  for (const decision of ['allow', 'deny'] as const) {
+    const { manager, workspaceRoot } = await makeManager('full');
+    const { sessionId, received, requestEnvelope } = await runOneRequest('full', workspaceRoot, manager, owner, `proj-s42-${decision}`);
+    const requestId = (requestEnvelope.data as { requestId: string }).requestId;
+
+    const answered = await manager.answerPermission(sessionId, owner, { requestId: requestId as never, decision, scope: 'once', rule: null, reason: null });
+    assert.equal(answered.ok, true);
+    if (answered.ok) assert.equal(answered.value.accepted, true);
+
+    await waitUntil(() => received.some((e) => e.kind === 'tool.result'));
+    const toolResult = received.find((e) => e.kind === 'tool.result')!;
+    assert.equal((toolResult.data as { ok: boolean }).ok, decision === 'allow');
+
+    await waitUntil(() => received.some((e) => e.kind === 'turn.ended'));
+    assert.equal((received.find((e) => e.kind === 'turn.ended')!.data as { stopReason: string }).stopReason, 'completed');
+  }
+});
+
+test('S4.3 — every permission.request is followed by exactly one permission.resolved with the same requestId, over a run of three requests, before or at turn.ended', async () => {
+  const { manager, workspaceRoot } = await makeManager('many-permissions');
+  const owner = 'operator-1' as OperatorId;
+  const projectDir = path.join(workspaceRoot, 'proj-s43');
+  await mkdir(projectDir);
+  const created = await manager.create(owner, { vendor: 'claude', cwd: projectDir, model: null, sandbox: null, requisitionId: null });
+  assert.equal(created.ok, true);
+  if (!created.ok) return;
+  const { sessionId } = created.value;
+
+  const received: Envelope[] = [];
+  await manager.subscribe(sessionId, owner, 0, { deliver: (e) => received.push(e), close: () => {} });
+  await manager.message(sessionId, owner, 'go');
+
+  const answeredIds: string[] = [];
+  for (let i = 0; i < 3; i++) {
+    await waitUntil(() => received.filter((e) => e.kind === 'permission.request').length > i);
+    const req = received.filter((e) => e.kind === 'permission.request')[i]!;
+    const requestId = (req.data as { requestId: string }).requestId;
+    const answered = await manager.answerPermission(sessionId, owner, { requestId: requestId as never, decision: 'allow', scope: 'once', rule: null, reason: null });
+    assert.equal(answered.ok, true);
+    answeredIds.push(requestId);
+  }
+  await waitUntil(() => received.some((e) => e.kind === 'turn.ended'));
+
+  const requests = received.filter((e) => e.kind === 'permission.request');
+  const resolutions = received.filter((e) => e.kind === 'permission.resolved');
+  assert.equal(requests.length, 3);
+  assert.equal(resolutions.length, 3);
+  assert.deepEqual(
+    resolutions.map((e) => (e.data as { requestId: string }).requestId).sort(),
+    answeredIds.sort(),
+  );
+  const turnEndedSeq = received.find((e) => e.kind === 'turn.ended')!.seq as unknown as number;
+  for (const r of resolutions) assert.ok((r.seq as unknown as number) <= turnEndedSeq, 'every resolution precedes or is at turn.ended');
+});
+
+test('S4.4 — a second client answering an already-resolved request gets accepted: false, and only one audit record exists', async () => {
+  const { manager, workspaceRoot, storageRoot } = await makeManager('full');
+  const owner = 'operator-1' as OperatorId;
+  const { sessionId, requestEnvelope } = await runOneRequest('full', workspaceRoot, manager, owner, 'proj-s44');
+  const requestId = (requestEnvelope.data as { requestId: string }).requestId;
+
+  const first = await manager.answerPermission(sessionId, owner, { requestId: requestId as never, decision: 'allow', scope: 'once', rule: null, reason: null });
+  assert.equal(first.ok, true);
+  if (first.ok) assert.equal(first.value.accepted, true);
+
+  const second = await manager.answerPermission(sessionId, owner, { requestId: requestId as never, decision: 'deny', scope: 'once', rule: null, reason: null });
+  assert.equal(second.ok, true);
+  if (second.ok) assert.equal(second.value.accepted, false, 'already resolved — not an error');
+
+  await new Promise((r) => setTimeout(r, 100));
+  const audit = await readAudit(storageRoot);
+  assert.equal(audit.length, 1, 'exactly one audit record — the second answer never reached the child or the log');
+  assert.equal(audit[0]!.decision, 'allow');
+});
+
+test('S4.5 — two answers dispatched in the same tick produce exactly one audit record', async () => {
+  const { manager, workspaceRoot, storageRoot } = await makeManager('full');
+  const owner = 'operator-1' as OperatorId;
+  const { sessionId, requestEnvelope } = await runOneRequest('full', workspaceRoot, manager, owner, 'proj-s45');
+  const requestId = (requestEnvelope.data as { requestId: string }).requestId;
+
+  const [a, b] = await Promise.all([
+    manager.answerPermission(sessionId, owner, { requestId: requestId as never, decision: 'allow', scope: 'once', rule: null, reason: null }),
+    manager.answerPermission(sessionId, owner, { requestId: requestId as never, decision: 'deny', scope: 'once', rule: null, reason: null }),
+  ]);
+  const accepted = [a, b].filter((r) => r.ok && r.value.accepted);
+  assert.equal(accepted.length, 1, 'exactly one of the two answers was accepted');
+
+  await new Promise((r) => setTimeout(r, 100));
+  const audit = await readAudit(storageRoot);
+  assert.equal(audit.length, 1);
+});
+
+test('S4.6 — the audit record is fsync\'d (store double resolves) before the control_response reaches the child', async () => {
+  let release = (): void => {};
+  const held = new Promise<void>((resolve) => { release = resolve; });
+  let holdNextAppend = false;
+  let auditAppendCalled = false;
+
+  const { manager, workspaceRoot } = await makeManager('full', {}, (store) => ({
+    ...store,
+    async appendAudit(record) {
+      if (!holdNextAppend) return store.appendAudit(record);
+      holdNextAppend = false;
+      auditAppendCalled = true;
+      await held;
+      return store.appendAudit(record);
+    },
+  }));
+  const owner = 'operator-1' as OperatorId;
+  const { sessionId, received, requestEnvelope } = await runOneRequest('full', workspaceRoot, manager, owner, 'proj-s46');
+  const requestId = (requestEnvelope.data as { requestId: string }).requestId;
+
+  holdNextAppend = true;
+  const answering = manager.answerPermission(sessionId, owner, { requestId: requestId as never, decision: 'allow', scope: 'once', rule: null, reason: null });
+  await waitUntil(() => auditAppendCalled);
+
+  // While the audit append is held open, the control_response must not have reached
+  // the child yet — asserted by the fixture never having produced the tool_result
+  // that only follows a received control_response.
+  await new Promise((r) => setTimeout(r, 100));
+  assert.equal(received.some((e) => e.kind === 'tool.result'), false, 'no control_response reached the child while the audit append was still in flight');
+
+  release();
+  await answering;
+  await waitUntil(() => received.some((e) => e.kind === 'tool.result'));
+});
+
+test('S4.7 — an audit append failure denies the permission, and the turn continues with no tool run', async () => {
+  const { manager, workspaceRoot } = await makeManager('full', {}, (store) => ({
+    ...store,
+    async appendAudit() {
+      return { ok: false, error: { code: 'io', path: 'audit.ndjson', detail: 'disk full' } } as const;
+    },
+  }));
+  const owner = 'operator-1' as OperatorId;
+  const { sessionId, received, requestEnvelope } = await runOneRequest('full', workspaceRoot, manager, owner, 'proj-s47');
+  const requestId = (requestEnvelope.data as { requestId: string }).requestId;
+
+  const answered = await manager.answerPermission(sessionId, owner, { requestId: requestId as never, decision: 'allow', scope: 'once', rule: null, reason: null });
+  assert.equal(answered.ok, true);
+  if (answered.ok) assert.equal(answered.value.accepted, true);
+
+  await waitUntil(() => received.some((e) => e.kind === 'permission.resolved'));
+  const resolved = received.find((e) => e.kind === 'permission.resolved')!.data as { decision: string; operator: string | null; reason: string };
+  assert.equal(resolved.decision, 'deny');
+  assert.equal(resolved.operator, null);
+  assert.equal(resolved.reason, 'audit_unavailable');
+
+  // The 'full' scenario also emits an unrelated info-level compaction notice earlier in
+  // its scripted sequence; the one this criterion is about is the audit_unavailable one.
+  await waitUntil(() => received.some((e) => e.kind === 'session.notice' && (e.data as { code: string }).code === 'audit_unavailable'));
+  const notice = received.find((e) => e.kind === 'session.notice' && (e.data as { code: string }).code === 'audit_unavailable')!.data as { level: string; code: string };
+  assert.equal(notice.level, 'error');
+  assert.equal(notice.code, 'audit_unavailable');
+
+  await waitUntil(() => received.some((e) => e.kind === 'tool.result'));
+  const toolResult = received.find((e) => e.kind === 'tool.result')!.data as { ok: boolean };
+  assert.equal(toolResult.ok, false, 'the tool never ran — the child was told deny');
+});
+
+test('S4.9 — a child that dies with requests outstanding resolves each one cancelled_process_exit, each with an audit record, before turn.ended', async () => {
+  const { manager, workspaceRoot, storageRoot } = await makeManager('die-with-pending');
+  const owner = 'operator-1' as OperatorId;
+  const projectDir = path.join(workspaceRoot, 'proj-s49');
+  await mkdir(projectDir);
+  const created = await manager.create(owner, { vendor: 'claude', cwd: projectDir, model: null, sandbox: null, requisitionId: null });
+  assert.equal(created.ok, true);
+  if (!created.ok) return;
+  const { sessionId } = created.value;
+
+  const received: Envelope[] = [];
+  await manager.subscribe(sessionId, owner, 0, { deliver: (e) => received.push(e), close: () => {} });
+  await manager.message(sessionId, owner, 'go');
+
+  await waitUntil(() => received.some((e) => e.kind === 'turn.ended'));
+
+  const resolutions = received.filter((e) => e.kind === 'permission.resolved');
+  assert.equal(resolutions.length, 2, 'both outstanding requests were resolved');
+  for (const r of resolutions) {
+    const data = r.data as { decision: string; operator: string | null; reason: string };
+    assert.equal(data.decision, 'deny');
+    assert.equal(data.operator, null);
+    assert.equal(data.reason, 'cancelled_process_exit');
+  }
+
+  const turnEnded = received.find((e) => e.kind === 'turn.ended')!;
+  assert.equal((turnEnded.data as { stopReason: string }).stopReason, 'process_exit');
+  const turnEndedSeq = turnEnded.seq as unknown as number;
+  for (const r of resolutions) assert.ok((r.seq as unknown as number) < turnEndedSeq, 'each cancellation precedes turn.ended');
+
+  let audit: AuditRecord[] = [];
+  await waitUntil(async () => {
+    audit = await readAudit(storageRoot);
+    return audit.length >= 2;
+  });
+  assert.equal(audit.length, 2);
+  for (const a of audit) {
+    assert.equal(a.operator, null);
+    assert.equal(a.decision, 'deny');
+    assert.equal(a.reason, 'cancelled_process_exit');
+  }
+});
+
+test('S4.10 — audit.ndjson is server-wide and append-only across two sessions', async () => {
+  const { manager, workspaceRoot, storageRoot } = await makeManager('full');
+  const owner = 'operator-1' as OperatorId;
+  const first = await runOneRequest('full', workspaceRoot, manager, owner, 'proj-s410a');
+  await manager.answerPermission(first.sessionId, owner, { requestId: (first.requestEnvelope.data as { requestId: string }).requestId as never, decision: 'allow', scope: 'once', rule: null, reason: null });
+  await waitUntil(() => first.received.some((e) => e.kind === 'permission.resolved'));
+
+  const second = await runOneRequest('full', workspaceRoot, manager, owner, 'proj-s410b');
+  await manager.answerPermission(second.sessionId, owner, { requestId: (second.requestEnvelope.data as { requestId: string }).requestId as never, decision: 'deny', scope: 'once', rule: null, reason: null });
+  await waitUntil(() => second.received.some((e) => e.kind === 'permission.resolved'));
+
+  const audit = await readAudit(storageRoot);
+  assert.equal(audit.length, 2);
+  assert.deepEqual(audit.map((a) => a.sessionId).sort(), [first.sessionId, second.sessionId].sort());
+});
+
+test('S4.12 — scope: always is refused bad_request naming the field, and so is a supplied rule', async () => {
+  const { manager, workspaceRoot } = await makeManager('full');
+  const owner = 'operator-1' as OperatorId;
+  const { sessionId, requestEnvelope } = await runOneRequest('full', workspaceRoot, manager, owner, 'proj-s412');
+  const requestId = (requestEnvelope.data as { requestId: string }).requestId;
+
+  const alwaysResult = await manager.answerPermission(sessionId, owner, { requestId: requestId as never, decision: 'allow', scope: 'always', rule: null, reason: null });
+  assert.equal(alwaysResult.ok, false);
+  if (!alwaysResult.ok) {
+    assert.equal(alwaysResult.error.code, 'bad_request');
+    if (alwaysResult.error.code === 'bad_request') assert.equal(alwaysResult.error.field, 'scope');
+  }
+
+  const ruleResult = await manager.answerPermission(sessionId, owner, { requestId: requestId as never, decision: 'allow', scope: 'once', rule: 'anything' as never, reason: null });
+  assert.equal(ruleResult.ok, false);
+  if (!ruleResult.ok) {
+    assert.equal(ruleResult.error.code, 'bad_request');
+    if (ruleResult.error.code === 'bad_request') assert.equal(ruleResult.error.field, 'rule');
+  }
+});
+
+test('S4.13 — another operator answering gets no_such_session and writes no audit record; the answering operator is who is recorded', async () => {
+  const { manager, workspaceRoot, storageRoot } = await makeManager('full');
+  const owner = 'operator-1' as OperatorId;
+  const stranger = 'operator-2' as OperatorId;
+  const { sessionId, requestEnvelope } = await runOneRequest('full', workspaceRoot, manager, owner, 'proj-s413');
+  const requestId = (requestEnvelope.data as { requestId: string }).requestId;
+
+  const strangerResult = await manager.answerPermission(sessionId, stranger, { requestId: requestId as never, decision: 'allow', scope: 'once', rule: null, reason: null });
+  assert.equal(strangerResult.ok, false);
+  if (!strangerResult.ok) assert.equal(strangerResult.error.code, 'no_such_session');
+
+  await new Promise((r) => setTimeout(r, 50));
+  assert.equal((await readAudit(storageRoot)).length, 0, 'the stranger wrote nothing');
+
+  const ownerResult = await manager.answerPermission(sessionId, owner, { requestId: requestId as never, decision: 'allow', scope: 'once', rule: null, reason: null });
+  assert.equal(ownerResult.ok, true);
+  await new Promise((r) => setTimeout(r, 50));
+  const audit = await readAudit(storageRoot);
+  assert.equal(audit.length, 1);
+  assert.equal(audit[0]!.operator, owner);
+});
+
+test('S4.15 — a turn spawning with no --resume on a session that already ran one emits resume_unavailable, the turn proceeds, and cliSessionId stays null', async () => {
+  const { manager, workspaceRoot } = await makeManager('no-init');
+  const owner = 'operator-1' as OperatorId;
+  const projectDir = path.join(workspaceRoot, 'proj-s415');
+  await mkdir(projectDir);
+  const created = await manager.create(owner, { vendor: 'claude', cwd: projectDir, model: null, sandbox: null, requisitionId: null });
+  assert.equal(created.ok, true);
+  if (!created.ok) return;
+  const { sessionId } = created.value;
+
+  const received: Envelope[] = [];
+  await manager.subscribe(sessionId, owner, 0, { deliver: (e) => received.push(e), close: () => {} });
+
+  // First turn: the fixture never reports system/init, so cliSessionId never gets set.
+  await manager.message(sessionId, owner, 'go');
+  await waitUntil(() => received.some((e) => e.kind === 'turn.ended'));
+
+  const beforeSecondTurn = received.length;
+  // The turn slot frees only once turn.ended's durable write has landed, slightly after
+  // the subscriber sees the envelope (S3.7's same race) — retry rather than assert once.
+  let messaged;
+  for (;;) {
+    messaged = await manager.message(sessionId, owner, 'go again');
+    if (messaged.ok) break;
+    assert.equal(messaged.error.code, 'turn_in_flight', `second turn refused: ${messaged.error.code}`);
+    await new Promise((r) => setTimeout(r, 10));
+  }
+
+  await waitUntil(() => received.slice(beforeSecondTurn).some((e) => e.kind === 'session.notice'));
+  const notice = received.slice(beforeSecondTurn).find((e) => e.kind === 'session.notice')!.data as { level: string; code: string };
+  assert.equal(notice.level, 'warn');
+  assert.equal(notice.code, 'resume_unavailable');
+
+  await waitUntil(() => received.slice(beforeSecondTurn).some((e) => e.kind === 'turn.ended'));
 });

@@ -7,6 +7,9 @@ const state = {
   stream: null,
   lastSeq: 0,
   refetched: false,
+  // requestId -> { setResolved(text) }, so a permission.resolved envelope — including
+  // one answered from a different client — can update the row without querying the DOM.
+  pendingPermissions: new Map(),
 };
 
 function text(tag, className, value) {
@@ -109,6 +112,7 @@ function handleReplayGap() {
 function openStream(sessionId) {
   if (state.stream) state.stream.close();
   state.lastSeq = 0;
+  state.pendingPermissions = new Map();
   clear($('transcript'));
 
   // The browser's own EventSource retry handles a dropped connection, replaying from the
@@ -119,11 +123,16 @@ function openStream(sessionId) {
   stream.onopen = () => status('connected', 'ok');
   stream.onerror = () => status('reconnecting…', 'warn');
 
+  const handlers = {
+    onAnswerPermission: answerPermission,
+    onRequestRendered: (requestId, controls) => state.pendingPermissions.set(requestId, controls),
+  };
+
   for (const kind of [
     'session.started', 'session.ended', 'session.notice',
     'turn.started', 'turn.ended',
     'message', 'thinking', 'tool.call', 'tool.result',
-    'permission.request', 'error',
+    'permission.request', 'permission.resolved', 'error',
   ]) {
     stream.addEventListener(kind, (event) => {
       let envelope;
@@ -135,8 +144,20 @@ function openStream(sessionId) {
       if (envelope.kind === 'error' && envelope.data?.kind === 'replay_gap') {
         if (handleReplayGap()) return;
       }
+      if (envelope.kind === 'permission.resolved') {
+        const controls = state.pendingPermissions.get(envelope.data.requestId);
+        if (controls) {
+          // The request row this client already rendered is updated in place; a
+          // separate standalone row would just repeat the same outcome right below it.
+          const who = envelope.data.operator ? envelope.data.operator : `server (${envelope.data.reason})`;
+          controls.setResolved(`${envelope.data.decision} — ${who}`);
+          state.pendingPermissions.delete(envelope.data.requestId);
+          state.lastSeq = envelope.seq;
+          return;
+        }
+      }
       state.lastSeq = envelope.seq;
-      const node = renderEvent(document, envelope);
+      const node = renderEvent(document, envelope, handlers);
       if (node === null) return;
       const transcript = $('transcript');
       transcript.appendChild(node);
@@ -164,6 +185,25 @@ async function createSession(event) {
   status('session started', 'ok');
   await refreshSessions();
   selectSession(result.payload.sessionId);
+}
+
+// Posts the operator's decision and reports whether the server accepted it — `false`
+// means another client (or this one, twice) already answered, per the wire contract.
+async function answerPermission(requestId, decision) {
+  if (state.sessionId === null) return false;
+  const result = await api('POST', `/api/sessions/${encodeURIComponent(state.sessionId)}/permission`, {
+    requestId,
+    decision,
+    scope: 'once',
+    rule: null,
+    reason: null,
+  });
+  if (result.status === 401) return false;
+  if (result.status !== 200) {
+    status(describe(result), 'error');
+    return false;
+  }
+  return Boolean(result.payload && result.payload.accepted);
 }
 
 async function sendMessage(event) {
