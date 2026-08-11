@@ -15,6 +15,7 @@ import type {
   Subscription,
   TurnId,
 } from '../../contract/index.js';
+import { sendError } from '../error-envelope/index.js';
 
 interface EdgeDeps {
   readonly config: Config;
@@ -43,36 +44,6 @@ const STATIC: ReadonlyMap<string, { readonly file: string; readonly type: string
 ]);
 
 const CLIENT_DIR = new URL('../../../client/', import.meta.url);
-
-const STATUS_FOR: Record<ApiErrorCode, number> = {
-  unauthenticated: 401,
-  bad_origin: 403,
-  no_such_session: 404,
-  no_such_output: 404,
-  no_such_checkpoint: 404,
-  turn_in_flight: 409,
-  session_ended: 409,
-  workspace_busy: 409,
-  outside_workspace_root: 409,
-  bad_request: 422,
-  checkpoint_failed: 500,
-  agent_unavailable: 503,
-  no_such_requisition: 404,
-  requisition_not_approved: 409,
-  requisition_consumed: 409,
-  already_decided: 409,
-  no_such_review: 404,
-  review_final: 409,
-  no_such_item: 404,
-  record_write_failed: 500,
-  payroll_unavailable: 500,
-};
-
-function sendError(res: ServerResponse, code: ApiErrorCode, message: string, detail?: unknown): void {
-  const body = JSON.stringify({ error: detail === undefined ? { code, message } : { code, message, detail } });
-  res.writeHead(STATUS_FOR[code], { 'content-type': 'application/json; charset=utf-8', 'x-content-type-options': 'nosniff' });
-  res.end(body);
-}
 
 function sendJson(res: ServerResponse, status: number, body: unknown): void {
   res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'x-content-type-options': 'nosniff' });
