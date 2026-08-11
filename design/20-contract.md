@@ -1410,24 +1410,144 @@ compensates for it.
 
 ## Vendor mapping — Codex
 
-**Unverified.** Everything below is a hypothesis to be tested by the spike, drawn from the
-on-disk rollout schema documented in this repository's `tools/Measure-Session.ps1` — the
-same copy and the same lines `10-design.md § The hard problem` cites, upstream of which is
-`SubZeroDev.AgentKit` — not from an observed live stream.
+**Observed against `codex-cli 0.146.0`, not hypothesised** (`design/findings/S8-codex-adapter.md`,
+S8.1). What stood here before is **falsified**: neither live interface emits `session_meta`,
+`payload.info` or `token_count`. That schema describes `~/.codex/sessions/**/rollout-*.jsonl` on
+disk, which S8's *Out of scope* forbids scraping, and it is not what the CLI puts on a wire.
 
-| Expected record | Normalised |
+The CLI exposes **two** live interfaces, not one, and their guarantees differ in ways this
+contract cannot average away — item-id uniqueness and the usage basis both change between them.
+Both are mapped. **`app-server` is primary; `exec --json` is the fallback** (D107).
+
+**Transport selection is the adapter's and it ends there.** `createAdapter` takes no transport
+parameter and none is added: a transport is a vendor fact, and I20 forbids one above
+`adapters/*`. The adapter selects `app-server` where the installed CLI offers it and `exec --json`
+otherwise, once, at `create`. Where neither is available the result is
+`AdapterError.agent_unavailable`, exactly as for a missing binary.
+
+### `codex app-server` — primary
+
+JSON-RPC 2.0 over stdio, marked `[experimental]` by the CLI itself. The shapes below are
+schema-generated (`codex app-server generate-json-schema`, `v2/`), not hand-transcribed.
+
+| Wire record | Normalised |
 |---|---|
-| `payload.type == 'session_meta'` | `AdapterNotification` `cli-session` |
-| `payload.info` → `token_count` | `usage`, normalised to a delta |
-| *(unknown)* | `message`, `tool.call`, `tool.result` |
+| `thread/started` | `AdapterNotification` `cli-session`, carrying `threadId`; the manager emits `session.started` on the first turn only |
+| `turn/started` | *nothing* — the manager emitted `turn.started` when it claimed the slot |
+| `item/started`, type `reasoning` | *nothing*; text accumulates in the adapter |
+| `item/reasoning/summaryTextDelta` | *nothing*; accumulated |
+| `item/completed`, type `reasoning` | `thinking`, with the accumulated text |
+| `item/agentMessage/delta` | `message.delta`, role assistant |
+| `item/completed`, type `agentMessage` | `message`, role assistant |
+| `item/started`, type `commandExecution` | `tool.call`; `callId` is the item's `id` |
+| `item/commandExecution/outputDelta` | *nothing*; accumulated |
+| `item/completed`, type `commandExecution` | `tool.result`, same `callId`; `ok` from `status`, `output` from `aggregated_output` |
+| `thread/tokenUsage/updated` → `last` | `usage` |
+| `turn/completed` → `last` | `usage`, then `turn.ended`, `stopReason: 'completed'` |
+| `item/commandExecution/requestApproval` | **unreachable under the shipped policy** — see below |
+| `close` with no `turn/completed` seen | `turn.ended`, `stopReason: 'process_exit'` |
 
-Policy for every Codex session, until proven otherwise:
-`{ mode: 'preauthorised', sandbox: <the mode chosen at launch>, banner: <naming that mode> }`.
+### `codex exec --json` — fallback
 
-**The adapter must fail loudly, not degrade quietly.** If the stream does not match, return
-`AdapterError.schema_mismatch` and emit `error / adapter_schema_mismatch` with
-`fatal: true`. A Codex adapter that silently renders nothing is worse than one that refuses
-to start, because the operator will believe the agent is thinking.
+Newline-delimited JSON on stdout. **No deltas of any kind**: text arrives whole, on completion.
+
+| Wire record | Normalised |
+|---|---|
+| `thread.started` | `AdapterNotification` `cli-session`, carrying `thread_id` |
+| `turn.started` | *nothing* |
+| `item.completed`, `item.type == 'reasoning'` | `thinking` |
+| `item.completed`, `item.type == 'agent_message'` | `message`, role assistant |
+| `item.started`, `item.type == 'command_execution'` | `tool.call` — **but see *Item ids* below** |
+| `item.completed`, `item.type == 'command_execution'` | `tool.result`; `ok` from `exit_code == 0`, `output` from `aggregated_output` |
+| `turn.completed` | `turn.ended`, `stopReason: 'completed'`. Its `usage` is **not** mapped — see *Usage* |
+| `close` with no `turn.completed` seen | `turn.ended`, `stopReason: 'process_exit'` |
+
+### Neither interface emits a `tool.call` / `tool.result` pair
+
+Both model a command execution as **one** item with two lifecycle states — `started` with null
+result fields, then `completed` on the same id carrying `aggregated_output`, `exit_code` and
+`status`. There is no discrete result record to normalise. The adapter therefore **synthesises**
+the contract's pair from one item's two states. This is what the falsified table's three
+`(unknown)` rows could not describe, and it is why filling them was a contract amendment rather
+than an adapter detail.
+
+The ordering guarantee holds by construction: `completed` for an item cannot precede its
+`started`, so *"`tool.result` follows its `tool.call`"* is satisfied with no buffering.
+
+### Policy, and the approval prompt now known to be reachable
+
+Policy for every Codex session is unchanged:
+`{ mode: 'preauthorised', sandbox: <the mode chosen at launch>, banner: <naming that mode> }`,
+and I25 holds — a Codex session emits **zero** `permission.request` events.
+
+**What changed is that the fallback's premise no longer holds, and this says so rather than
+quietly keeping the conclusion.** `10-design.md § The hard problem` recorded Codex's runtime
+approval as unverified and open question 4 asked for the experiment. S8.1 ran it: under
+`app-server` with `approvalPolicy: 'on-request'`, the server sends a genuine JSON-RPC **request**
+— `item/commandExecution/requestApproval`, carrying `reason`, `command` and an `availableDecisions`
+enum — which a client can answer. `exec --json` sends nothing of the kind and cannot; it is
+non-interactive by construction and represents a sandbox denial only as the model reporting its
+own failure in prose.
+
+The asymmetry D5 accepted is therefore measurably narrower than when it was accepted. **This
+section does not act on that**: S8's *Out of scope* says a reachable `on-request` prompt is
+reported, not acted on, and D5 is `/design`'s. The row is marked unreachable under the shipped
+policy rather than deleted, because the mapping it would need is one decision away, not one
+experiment away.
+
+### Usage
+
+**`app-server` needs no arithmetic.** `turn/completed` and `thread/tokenUsage/updated` both carry
+explicit `total` and `last` sub-objects. The adapter reads `last`, which is that turn's own
+marginal figure, so D75's summability requirement is met by reading rather than by subtracting —
+the same shape of answer S1 reached for Claude.
+
+**`exec --json`'s basis is undetermined, so its usage is not mapped at all.** Its
+`turn.completed.usage` was observed almost exactly doubling across two sequential resumed turns of
+one thread — `input_tokens` 46276 → 93393, `cached_input_tokens` 33280 → 66560 — which is
+consistent with a running total and equally consistent with each call resending a growing context.
+S8.1 did not settle which, and I28 forbids guessing: a cumulative figure summed as a delta
+double-counts burn on the one screen headed *payroll*. A session on this transport therefore emits
+no `usage` events, and whether that silence is itself surfaced — which would need a
+`SessionNoticeCode` this contract does not add — is `## Unresolved` 12.
+
+### Item ids, and where the fallback breaks correlation
+
+`CallId` is session-unique **by assumption** (`10-design.md § Data model — Identity spaces`). That
+assumption is now measured for Codex, and it holds on only one of the two transports.
+
+- **`app-server`: UUID-based** (`exec-a2215fa5-…`), distinct across two sequential turns of one
+  thread. That is evidence of the scheme, not proof it never collides — two turns were probed, and
+  only for `commandExecution` items. It is treated exactly as Claude's is: assumed, and stated as
+  an assumption.
+- **`exec --json`: a per-turn counter** — `item_0`, `item_1`, `item_2` — that **restarts on every
+  turn of the same thread**, reproduced across two independent `codex exec resume --last` runs.
+  This is not an assumption that might fail; it is a known collision.
+
+S8.7 stops the slice before implementing tool correlation where this is found, and it is found. The
+fallback's `tool.call` / `tool.result` correlation is therefore **not specified here** and no alias
+is invented; `## Unresolved` 13 carries it. What must not happen is the obvious patch: composing a
+session-unique `CallId` from `(turnId, itemId)` inside the adapter is cheap and invisible above the
+boundary, and may well be the answer — but S8.7 reserves it, and a contract that quietly took it
+would be deciding open question 7's correlation half by writing a table.
+
+Storage is unaffected either way: D22 already puts `turnId` in the blob path, so a turn-scoped
+`callId` cannot overwrite an earlier turn's output (I22). Correlation is the half no path scheme
+closes.
+
+### Schema mismatch
+
+Unchanged, with two surfaces to check rather than one. A stream not matching the table for the
+transport **actually selected** returns `AdapterError.schema_mismatch` and emits
+`error / adapter_schema_mismatch` with `fatal: true`; the session refuses to start. **The adapter
+must fail loudly, not degrade quietly** — a Codex adapter that silently renders nothing is worse
+than one that refuses to start, because the operator will believe the agent is thinking.
+
+An `app-server` probe that finds no such subcommand is **not** a mismatch: that is the fallback's
+trigger, and it is the one case where falling back rather than failing is correct.
+
+Records outside a transport's table but harmless may be held on a named ignore list, exactly as
+D92 gives Claude one. Adding to it is an adapter change, never a change to `ErrorEventKind`.
 
 ## Unresolved
 
@@ -1449,8 +1569,11 @@ are new in this pass and each names the issue that carries it.
    entity, no field, no file, and no statement of its lifetime across session end or restart.
    Until both are decided, no `match(rule, request)` signature can be written, `scope:
    'always'` cannot be implemented, and `ResolvedScope: 'standing'` is unreachable. (#16, #37)
-3. **The Codex event mapping.** Three of the normalised kinds have no source record. S8.1 is
-   the experiment that answers it; the adapter may not guess. (#14, #18)
+3. **Resolved by S8.1.** The Codex event mapping had three normalised kinds with no source
+   record. Both transports are now mapped from observation in `## Vendor mapping — Codex`, and
+   the three rows are filled: there is no wire-level `tool.call` / `tool.result` pair on either
+   interface, and the adapter synthesises it from one item's two lifecycle states. What the
+   experiment exposed instead is carried as 12 and 13 below. (#14, #18)
 4. **`ToolCall.summary`'s renderer.** The design calls it "server-rendered" and names no
    owner. It is emitted by the adapter in the shape above, which makes it vendor code
    producing a display string — the one place that reading is uncomfortable. It is not
@@ -1494,3 +1617,24 @@ are new in this pass and each names the issue that carries it.
     migrated.** Every other persisted shape gates on `meta.json`'s `schemaVersion`, and these
     two files are not under it. Adding fields is safe today; removing or retyping one has no
     stated rule and no discriminator to hang one on.
+
+Items 12 and 13 are new in this pass (S8.2) and carry no issue number: `/track` is suspended
+under D105, so they are opened at the reconciliation pass tier one ends with. Both belong to the
+`exec --json` fallback alone; neither affects a session on `app-server`.
+
+12. **What basis `codex exec --json` reports usage on.** Its `turn.completed.usage` was observed
+    roughly doubling across two resumed turns of one thread, which fits a running total and fits a
+    growing resent context equally well. I28 requires the adapter to emit something summable, and
+    guessing wrong double-counts burn in `PayrollView`. Until a probe distinguishes the two, that
+    transport emits no `usage`. A second question rides on the answer and is not settled either:
+    whether a session that reports no burn says so — which needs a `SessionNoticeCode` that does
+    not exist, and which the design's *fail loudly, never degrade quietly* rule argues for — or
+    whether the fallback should not ship until the basis is known. Related: 8, and whether
+    `reasoning_output_tokens` counts toward `Usage.outputTokens` at all. (#29, #30)
+13. **Tool correlation on `codex exec --json`, whose item ids collide across turns.** Its ids are
+    a per-turn counter that restarts each turn of a thread, so `CallId` is not session-unique on
+    that transport — measured, not assumed. S8.7 stops before implementing correlation here and
+    routes it to `/design` as open question 7's correlation half. The obvious fix — the adapter
+    composing a session-unique `CallId` from `(turnId, itemId)` — is deliberately **not** taken
+    here: it is invisible above the adapter boundary and may well be right, but S8.7 reserves the
+    choice, and writing it into the mapping table would decide it by omission.

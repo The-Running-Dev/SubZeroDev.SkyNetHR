@@ -1906,6 +1906,43 @@ renumbering is required; every other clause of D105 stands, including the freeze
 suspension of `/reconcile` and `/track`, implementing against `20-contract.md` as fixed, and
 letting the documents go stale until one reconciliation at the end.
 
+### 2026-08-11 — D107 The Codex mapping covers both live transports, `app-server` preferred
+Context: S8.2 required `20-contract.md § Vendor mapping — Codex` corrected against observation.
+S8.1 found the section's premise false in a way it did not anticipate: the CLI exposes **two**
+live interfaces rather than one — `codex app-server` (JSON-RPC 2.0 over stdio, marked
+`[experimental]` by the vendor) and `codex exec --json` (non-interactive NDJSON) — and neither
+resembles the on-disk rollout schema the section was hypothesised from. Nothing in `10-design.md`
+chooses between them; it could not, since neither was known to exist when it was written. The
+choice is not cosmetic: item-id uniqueness and the usage basis differ between the two, and only
+`app-server` carries a runtime approval request, so picking `exec --json` alone would settle D5
+permanently by removing the option rather than by deciding it.
+Chosen: map both. `app-server` is primary and `exec --json` is the fallback where the installed
+CLI does not offer it. Selection is the adapter's, once, at `create`, and is never visible above
+`adapters/*` — a transport is a vendor fact and I20 forbids one above the boundary. The two
+places the transports genuinely diverge are declared rather than averaged: `exec --json` emits no
+`usage` at all until its basis is probed (`20-contract.md § Unresolved` 12), and its tool
+correlation is unspecified because its item ids are a per-turn counter that collides across turns
+(`Unresolved` 13, S8.7). Policy stays `preauthorised` and I25 is untouched; the reachable
+`on-request` prompt is recorded and not acted on, per S8's *Out of scope*.
+Rejected: **`app-server` alone** — the recommendation, and the cleaner contract: thread-scoped
+UUID ids, explicit `last`/`total` usage that satisfies D75 by reading rather than subtracting, and
+a verified approval round trip. Declined because the vendor marks it `[experimental]`, and a
+deployment whose CLI drops or renames it would have no Codex path at all. **`exec --json` alone**
+— non-experimental and simpler, and rejected because it buys that stability with three defects:
+per-turn ids that fire S8.7, an undetermined usage basis that I28 forbids guessing at, and no
+approval record on the wire in any configuration, which forecloses D5 rather than deferring it.
+**Exposing the selected transport above the adapter** so callers could branch on the guarantees
+that differ — rejected outright as the vendor string above the adapter layer that the design's
+governing rule exists to prevent; where a difference cannot be normalised away it is declared
+Unresolved, not published. **Inventing the `(turnId, itemId)` composition** that would make the
+fallback's ids session-unique — cheap, invisible above the boundary, and probably correct, but
+S8.7 reserves it for `/design`, and taking it here would decide open question 7's correlation half
+by writing a table.
+Reversibility: expensive in one direction only. Dropping the fallback later is cheap — delete a
+table and a probe. Dropping `app-server` later is not: the approval path, the delta stream and the
+usage basis all rest on it, and D5 would have to be re-decided against a transport that cannot
+carry the prompt.
+
 ## Open
 
 Staging only. Once an item becomes an issue it leaves this list.
