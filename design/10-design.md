@@ -162,49 +162,82 @@ so it solves a problem we do not have. Worth remembering if that ever changes.
 This is where the cross-vendor decision costs something, and it should be understood before
 implementation starts rather than discovered in it.
 
-| | Claude CLI | Codex CLI |
-|---|---|---|
-| When policy is set | Per tool call, at runtime | `sandbox_mode` at launch; `approval_policy` decides whether it *also* asks at runtime |
-| Mechanism | `control_request` / `control_response` over stdio | `approval_policy`, `sandbox_mode` in config. The channel a runtime prompt arrives on is **unverified** |
-| Granularity | This command, this path, now | The sandbox is whole-session. An `on-request` prompt would be per call, if it is reachable at all |
-| Operator sees | A prompt they answer | A sandbox chosen in advance, plus whatever `on-request` surfaces |
-| Source | Documented by the vendor and observed in the fork — **not** against the shipping CLI, where it does not fire (D88) | `codex/PROFILES.md` in this repository; live behaviour unverified |
+**Codex is not one row.** S8.1 found the CLI exposes *two* live programmatic interfaces with
+materially different guarantees, so a table with a single "Codex CLI" column would state as
+one fact something that depends entirely on which interface is driven:
 
-**Codex has a runtime approval concept of its own.** Every profile in `codex/PROFILES.md`
-carries `approval_policy = "on-request"`. What is unverified is whether that prompt is
-reachable over a programmatic stream, or exists only inside its terminal UI where a browser
-console cannot answer it (D27).
+| | Claude CLI | `codex exec --json` | `codex app-server` |
+|---|---|---|---|
+| When policy is set | Per tool call, at runtime | `sandbox_mode` and `approval_policy` at launch; it never asks | `approvalPolicy` and `sandbox` per `turn/start`; it asks at runtime |
+| Mechanism | `control_request` / `control_response` over stdio | **None.** stdin carries the prompt and nothing else — there is no inbound control channel | JSON-RPC request `item/commandExecution/requestApproval` over stdio |
+| Granularity | This command, this path, now | Whole session. The sandbox is the only control | This command, now, with an `availableDecisions` enum |
+| Operator sees | A prompt they answer | A sandbox chosen in advance, and a banner naming it | A prompt they answer — were this interface adopted |
+| Source | Documented by the vendor and observed in the fork — **not** against the shipping CLI, where it does not fire (D88) | Observed against `codex-cli 0.146.0` (S8.1) | Observed against `codex-cli 0.146.0` — the request only; the round trip was never completed (S8.1). Marked `[experimental]` by the vendor's own help |
 
-So the asymmetry is one of **verification, not of capability** — and S1 narrowed it further,
-in the uncomfortable direction. **Neither vendor's runtime approval is observed on a live wire
-today** (D88). Claude's handshake was read out of the fork and is documented by the vendor;
-run against the installed CLI at 2.1.226, `--permission-prompt-tool stdio` emits no
-`can_use_tool` of any subtype and the tool simply executes. That is an open upstream defect —
-anthropics/claude-code#34046, tracked since 2.1.6 — with three probes recorded in
-`design/findings/S1-claude-adapter.md`. Codex's is documented in config and equally
-unobserved. The column that reads "verified" above therefore means *verified in someone else's
-code*, which is not the same thing and cost this project a slice to find out. A
-lowest-common-denominator design — launch-time policy only — would throw away the single
-most valuable thing the console offers, which is approving a tool call from somewhere that
-is not the server's terminal, and it would do so on the strength of an assumption nobody has
-tested.
+**Codex has a runtime approval concept, and it is reachable.** D27 corrected an earlier claim
+that Codex sets policy only at launch, on the strength of `approval_policy = "on-request"` in
+every profile in `codex/PROFILES.md`, and left open whether that prompt could be reached over
+a programmatic transport or lived only in the terminal UI. **S8.1 answered it: yes, over
+`app-server`.** A genuine JSON-RPC request arrived on the wire, carrying the command, a
+human-readable reason and the decisions available. Under `exec --json` the answer is no, and
+not by omission — that interface is non-interactive by construction, and a sandbox denial
+reaches the operator only as the agent reporting in prose that a command failed.
+
+**The asymmetry has inverted, and it is worth saying so plainly.** This section once argued
+the gap was one of *verification, not capability*, on the reading that Claude's mechanism was
+verified and Codex's was not. Both halves of that have since been overturned by observation
+against shipping binaries, in opposite directions. Claude's handshake was read out of the fork
+and is documented by the vendor, but run against the installed CLI at 2.1.226,
+`--permission-prompt-tool stdio` emits no `can_use_tool` of any subtype and the tool simply
+executes — an open upstream defect, anthropics/claude-code#34046, tracked since 2.1.6, with
+three probes in `design/findings/S1-claude-adapter.md` (D88, issue #56). Codex's, meanwhile,
+was observed working. **The vendor this contract is modelled on is the one whose mechanism
+does not fire; the vendor permitted to under-deliver is the one whose mechanism was seen
+arriving.** That is uncomfortable and it is the state of the evidence.
+
+It does not change the shape of the contract. A lowest-common-denominator design — launch-time
+policy only, for both — would still throw away the single most valuable thing this console
+offers, which is approving a tool call from somewhere that is not the server's terminal.
 
 **Decision: model the interactive case as the contract, and let Codex under-deliver
-against it, visibly.** See `90-decisions.md` D5, D27 for the corrected premise above, and D96
-for why the broken Claude handshake does not reopen D5 — a vendor defect in a documented
-mechanism is behaviour to be restored, not a capability that was never there.
-Until an experiment says otherwise, a Codex session launches with an explicit `sandbox_mode`,
-surfaces that mode in the UI as a standing banner, and emits no `permission.request` events.
-The client must therefore treat "no permission events" as a normal state for a session, not
-as a stuck turn. If `on-request` turns out to be reachable programmatically, D5 is revisited
-and Codex stops under-delivering — that is the shape open question 4 is looking for.
+against it, visibly.** D5, unchanged, and now for a third recorded reason rather than the
+original one. D27 corrected the premise from "Codex has no runtime approval" to "reachability
+unverified"; D96 kept D5 when Claude's handshake turned out broken, on the ground that a
+vendor defect in a documented mechanism is behaviour to be restored rather than a capability
+that never existed; **D110 keeps it now that Codex's reachability is confirmed** — this time
+as a cost judgement rather than a factual correction, because the question the earlier wording
+deferred has been answered and cannot be deferred again.
 
-**Stated as plainly as it deserves: Codex's live stdio protocol is unverified.** What is
-verified is its *on-disk rollout schema* — `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`,
-records wrapped in `payload`, opening with `session_meta`, usage as `token_count` events
-under `payload.info` (`tools/Measure-Session.ps1:28-29,181,454`). Whether the
-live stream matches that schema is an assumption, and the first slice of the Codex adapter
-is an experiment to find out, not an implementation. Budget for it accordingly.
+A Codex session therefore launches with an explicit `sandbox_mode`, surfaces that mode in the
+UI as a standing banner, and emits no `permission.request` events. The client must treat "no
+permission events" as a normal state for a session, not as a stuck turn.
+
+**What D110 declined, and why it is a judgement rather than a limit.** Reaching Codex's
+prompt means adopting `app-server`, and that is charged against three things. The vendor marks
+it `[experimental]`. The approval exchange was observed *starting* and never completing — the
+probe answered in a guessed shape and was refused, so a working approval client is documented
+but unobserved, which is the precise failure mode `agent.md` records against
+`--permission-prompt-tool stdio`. And used as the vendor intends it is a long-lived server
+spanning turns, which retires *Process lifetime*'s third consequence below: no turn means no
+child means nothing holds a handle on the workspace, and that is what makes checkpoint restore
+safe by construction on Windows rather than a retry loop. Set against a capability the brief
+already declares optional — definition-of-done item 4 "names Claude by decision, not by
+omission" — the trade is bad today and may not be tomorrow. **Driving `app-server` per turn
+would preserve *Process lifetime* entirely**, and that is the one shape D110 left open;
+issue #80 carries it, with the probes it owes and the condition that the interface settle
+first.
+
+**What is verified about the Codex wire, and what is not.** Both live interfaces are observed
+against `codex-cli 0.146.0`, and **neither matches the on-disk rollout schema** that this
+design previously offered as the thing the live stream might turn out to be. That schema is
+real — `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`, records wrapped in `payload`, opening
+with `session_meta`, usage as `token_count` under `payload.info`
+(`tools/Measure-Session.ps1:28-29,181,454`) — and it is simply not what either live interface
+emits. The mapping is written against `codex exec --json` (D107) and lives in
+`20-contract.md § Vendor mapping — Codex`. What that mapping still owes is enumerated there
+rather than here, in `§ Unresolved` 12: a single happy-path turn is not an enumeration, and
+three observed item types against a union of eighteen is why the fatal `schema_mismatch` check
+is **not yet armed**.
 
 ## Data model
 
@@ -423,7 +456,7 @@ most likely source of a subtle cross-vendor bug, so they are enumerated:
 | `turnId` | server | session | client |
 | `seq` | server | session | nobody — it is ordered and compared |
 | `cliSessionId` | **vendor** | vendor's own store | everything above the adapter |
-| `callId` | **vendor** | session (assumed) | everything above the adapter |
+| `callId` | **vendor** | Claude: session (assumed). Codex `exec --json`: **turn** (observed) | everything above the adapter |
 | `requestId` | **vendor** | turn (assumed) | everything above the adapter |
 
 The last three are the exception to "no vendor above the adapter". They cross the boundary
@@ -432,11 +465,24 @@ server-side alias for a vendor id buys nothing but a mapping table to get wrong.
 opaque**: no code above the adapter may parse, compare-for-ordering, or infer structure
 from them. Equality is the only permitted operation.
 
-The two "(assumed)" rows are assumptions about Claude that hold in the observed stream and
-are **unverified for Codex**. If Codex mints `callId`s unique only within a turn, tool
-correlation across a session breaks. That belongs in S8's experiment report. Storage no
-longer rests on the assumption — the blob path carries `turnId`, so a turn-scoped `callId`
-cannot overwrite anything — but correlation still does, and no path scheme fixes that.
+The remaining "(assumed)" entries are assumptions about Claude that hold in the observed
+stream. **`callId` is no longer one of them for Codex, and the assumption did not survive.**
+S8.1 observed `codex exec --json` numbering items with a per-turn counter that restarts on
+every resumed turn — `item_0`, `item_1`, … again — reproduced across two independent resumes.
+A `callId` is therefore turn-scoped there, not session-scoped.
+
+**This is recorded and not repaired** (D111, on D109's evidence). The scope narrows what a
+`callId` means; it breaks nothing, because every correlation this system actually performs is
+already keyed by the pair `(turnId, callId)` — both `ToolCall` and `ToolResult` carry
+`turnId`, the tool-output blob path is `tool-output/:turnId/:callId`, the manager's pending
+map is created per turn, and the client renders call and result as independent rows in `seq`
+order without matching ids at all. A server-side alias would be minted for no reader that
+exists. It stops being free the moment something needs to correlate *across* turns, and that
+condition is what a future reader should test this entry against rather than the id scheme
+itself.
+
+`app-server` mints thread-scoped UUIDs instead and would not have this property — noted
+because it is one of the advantages issue #80 weighs, not because it changes anything here.
 
 ### Checkpoint
 
@@ -1410,6 +1456,14 @@ Two rows deserve their own sentence.
 **A Codex adapter that silently renders nothing is worse than one that refuses to start**,
 because the operator will believe the agent is thinking. Fail loudly, never degrade quietly.
 
+**That row states the target, and the check is deliberately not armed yet.** S8.1 observed
+three item types against a union of eighteen the shipping binary declares, so a fatal check
+against the observed set would refuse ordinary traffic — the opposite failure, and a worse
+one, since it turns an unrecognised-but-harmless record into a session that will not start.
+Until the union is enumerated, an unknown Codex item takes the non-fatal
+`adapter_unknown_record` path two rows above. `20-contract.md § Unresolved` 12 owns what the
+enumeration owes and is what arms this; S8.5 is the slice that flips it.
+
 **Nothing in this system kills a turn on a timer** (D21). A long compile emits nothing and
 looks exactly like a hang, so any threshold would kill the legitimate case this console
 exists to supervise. The client instead reports elapsed silence and leaves interrupt to
@@ -1923,7 +1977,9 @@ New in this pass:
   and that what is unverified is whether it is reachable over a programmatic stream. D5's
   decision is unchanged; its premise is corrected. Rejected: leaving the earlier wording —
   it reads as a settled capability gap and would have justified never running the experiment
-  that open question 4 asks for.
+  that open question 4 asks for. **The experiment ran (S8.1) and the answer is yes, over
+  `app-server`** — which is the outcome this entry was written to keep reachable. D110 keeps
+  D5 anyway, on cost rather than on capability; issue #80 holds the reversal.
 
 - **D28 — the workspace jail is a start-time control, not a sandbox, and the threat model
   now says so.** Chosen: split the jail row into what it covers (where a session starts, and
@@ -2196,17 +2252,34 @@ these are cited by number elsewhere in this document and in the slices.
 
 **Needing an experiment:**
 
-4. Is Codex's `approval_policy = "on-request"` reachable over a programmatic stream, or only
-   inside its terminal UI? D27 corrected the premise; this is the question that was hiding
-   behind the old wording, and a yes revisits D5 outright.
+4. **Resolved by S8.1 and D110. Yes — over `app-server`, not over `exec --json`.** A genuine
+   JSON-RPC approval request was observed arriving, carrying the command, a reason and an
+   `availableDecisions` enum. The promise attached to this question was that a yes "revisits
+   D5 outright", and it did: D110 is that revisit. **D5 stands anyway**, on cost rather than
+   capability — `app-server` is vendor-marked `[experimental]`, its approval round trip has
+   been watched starting but never completing, and adopting it as the vendor intends would
+   make the Codex child span turns and retire *Process lifetime*'s restore-safety guarantee
+   on the primary platform. Against definition-of-done item 4, which names Claude "by
+   decision, not by omission", that trade is refused for now and not forever. **Issue #80**
+   carries the reversal, the per-turn shape that would preserve *Process lifetime*, and the
+   probes it owes.
 5. Does `--include-partial-messages` give usable token-level deltas, and does it change the
    event contract? Cheap to test, and the answer changes the renderer.
-6. Does the Codex CLI expose a live NDJSON stream at all, and does it match the rollout
-   schema? First Codex slice answers this (S8.1).
-7. Are Codex's `callId`s unique within a session, or only within a turn? If the latter,
-   tool correlation breaks and *Data model § Identity spaces* needs a server-side alias
-   after all. The *storage* half of this is closed — the blob path carries `turnId` — but
-   correlation is not, and no path scheme closes it.
+6. **Resolved by S8.1. Yes to a live stream, no to the rollout schema — and there are two
+   streams, not one.** `codex exec --json` and `codex app-server` are both live and
+   programmatic; **neither emits the rollout schema's shapes**, so the hypothesis behind this
+   question is dead rather than approximately right. D107 adopts `exec --json` as the
+   mapping's source and `20-contract.md § Vendor mapping — Codex` carries the observed rows.
+   What one happy-path turn did not enumerate is tracked as `20-contract.md § Unresolved` 12,
+   not here.
+7. **Resolved by S8.1 and D111. Only within a turn, under `exec --json` — and no alias is
+   minted.** Item ids are a per-turn counter that restarts on each resumed turn, reproduced
+   across two independent resumes. The correlation break this question feared turns out not
+   to exist: every correlation the system performs is already keyed by `(turnId, callId)`, so
+   an alias would serve no reader that exists. *Data model § Identity spaces* records the
+   scope and the condition under which the ruling stops holding — something needing to
+   correlate *across* turns. `app-server` mints thread-scoped UUIDs and would not have the
+   property at all, which is one of the advantages issue #80 weighs.
 8. Whether `permission_suggestions` from the Claude CLI is a sufficient grammar for
    "always allow", or whether a local rule language is needed. Look before inventing.
    **D35 makes this blocking for the slice that ships standing approvals** rather than a
@@ -2271,8 +2344,16 @@ these are cited by number elsewhere in this document and in the slices.
     one: **one logical message is streamed as several `assistant` records sharing a `message.id`
     and repeating byte-identical usage**, so a naive sum double-counts by duplication rather
     than by accumulation. The adapter emits once per `message.id` and ignores the `result`
-    record's usage, which is a materially larger and differently-based figure. Codex's
-    `token_count` under `payload.info` is unverified for the same question and is unverified for
-    whether it appears on a live stream at all (open question 6), so brief item 8's "token burn
-    to date" is demonstrable for Claude and still merely plausible for Codex. Blocked behind
-    S8.1 for the remainder.
+    record's usage, which is a materially larger and differently-based figure. **The Codex half
+    stays open, but its subject has changed.** `token_count` under `payload.info` is not the
+    field to ask about — S8.1 established it appears on no live stream (open question 6).
+    `codex exec --json` reports usage once per turn, on `turn.completed`, and whether that
+    figure is cumulative or marginal is the live question: S8.1 watched `input_tokens` and
+    `cached_input_tokens` both almost exactly double across two resumed turns, which reads as
+    cumulative, and stopped short of calling it on two data points. D75 makes the adapter owe a
+    delta, so the difference is a correct burn figure against a doubled one. Tracked as
+    `20-contract.md § Unresolved` 12 (#30), which is why no `usage` row appears in the Codex
+    mapping. Brief item 8's "token burn to date" is therefore demonstrable for Claude and still
+    merely plausible for Codex. **`app-server` would settle it for free** — it reports `total`
+    and `last` as separate sub-objects, so D75's delta is a field read rather than arithmetic —
+    which is one more thing issue #80 weighs and not a reason on its own to take it.

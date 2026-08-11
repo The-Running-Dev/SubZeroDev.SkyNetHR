@@ -1977,6 +1977,85 @@ This entry states the evidence for that ruling and does not pre-empt it.
 Reversibility: cheap while nothing correlates across turns, and that is exactly the condition
 being recorded. It stops being cheap the moment a consumer does.
 
+### 2026-08-11 — D110 Codex's runtime approval is reachable, and D5 still stands — on cost, not capability
+Context: `10-design.md § The hard problem` committed in writing that if `on-request` "turns out
+to be reachable programmatically, D5 is revisited and Codex stops under-delivering." S8.1 ran the
+experiment against `codex-cli 0.146.0` and it is reachable: driving `codex app-server` with
+`approvalPolicy: 'on-request'`, a genuine JSON-RPC request `item/commandExecution/requestApproval`
+arrived on the wire carrying the command, a human-readable reason and an `availableDecisions`
+enum. This is the third time D5's premise has moved — D27 corrected "Codex cannot ask" to
+"reachability unverified", D96 kept D5 when Claude's own handshake turned out broken — and the
+first time the movement is a confirmed capability rather than a factual correction. The question
+cannot be deferred again: it has an answer.
+Chosen: **keep D5.** Codex sessions remain `preauthorised` on `codex exec --json` (D107), with the
+sandbox banner and no `permission.request` events. Open question 4 is discharged as
+answered-and-declined rather than left reading as unexamined, because a declined capability
+recorded as an unknown is rediscovered later as a bug. Three costs justify the refusal, and only
+the third is structural. The vendor marks `app-server` `[experimental]`, so its shape has no claim
+on stability. **Its approval round trip has been observed starting and never completing** — S8.1's
+probe replied in a guessed shape and the server refused the command — so a working approval client
+is documented and unobserved, which is exactly the state `--permission-prompt-tool stdio` was in
+when it was written into this design, carried through the contract and the slices, implemented,
+and only then found not to fire (`agent.md`, D88, #56). And used as the vendor intends it is a
+long-lived server spanning turns, which retires `10-design.md § Process lifetime` consequence 3:
+no turn means no child means nothing holds a handle on the workspace, and that is what makes
+checkpoint restore safe by construction rather than a retry loop on Windows, the brief's primary
+host. Set against a capability the brief already makes optional — definition-of-done item 4 "names
+Claude by decision, not by omission" — the trade is refused now and explicitly not forever.
+Rejected: **adopting `app-server` long-lived, as the vendor intends.** The richest option and the
+only one that pays with a tier-one definition-of-done item: brief item 6 is workspace rollback,
+and this converts it from an impossibility into a Windows failure mode with retries. An idle Codex
+session would also hold a live process and file handles, against consequence 2 of the same section.
+Rejected: **adopting `app-server` driven per turn** — start, one turn, tear down. This is the
+strongest rejected option and it is rejected only on timing, not on shape. Neither D107 nor S8.1
+considered it; both treated "long-lived" as inherent to the interface, and it is not. It preserves
+`§ Process lifetime` entirely while buying the real approval prompt, thread-scoped ids, and
+`total`/`last` usage that would satisfy D75 with no arithmetic. What it costs today is a second
+wire protocol beside `adapters/ndjson.ts`, a stalled S8, and a dependency on an experimental
+interface for the console's headline capability — against three facts nobody has watched: whether
+`app-server` tolerates single-turn use and teardown, whether a thread resumes *by its own id*
+across process restarts, and whether one approval round trip completes using the documented
+response shape. **This is the shape any future reversal takes**, and it is issue #80.
+Rejected: **leaving open question 4 open.** It has an answer; a question kept open past its
+experiment is how a decided thing gets relitigated as an unknown.
+Reversibility: cheap as a document decision, and the reversal is scoped in advance by #80. It is
+not cheap once a slice ships against the assumption that Codex never prompts — the client's "no
+permission events is a normal state" rule is the surface that would have to change.
+Amends: D105 — narrowly, and on the same ground D107 took. D105 freezes `design/` and suspends
+`/reconcile`. That clause is set aside for `10-design.md § The hard problem`, `§ Identity spaces`,
+the `§ Failure modes` schema-mismatch row, the D27 entry in `§ Alternatives considered`, and open
+questions 4, 6, 7 and 14 — the statements S8.1 falsified, no others. The ground is that D105's
+purpose is stopping the generative churn loop between slices, and this is neither generative nor
+between slices: it corrects statements a probe proved false and answers a question the document
+itself promised to answer on exactly this trigger. **Every other clause of D105 stands**, including
+the freeze on the remaining documents, the suspension of `/reconcile` and `/track`, implementing
+against `20-contract.md` as fixed, and one reconciliation pass when tier one is code-complete.
+
+### 2026-08-11 — D111 Open question 7 is discharged: the turn-scoped Codex `callId` is recorded, not repaired
+Context: D109 established the fact and deliberately declined to rule on it — `exec --json` numbers
+items with a per-turn counter that restarts on every resumed turn, reproduced across two
+independent resumes, and D109 stopped there because "whether open question 7 is discharged or
+still owed is `/design`'s ruling", holding S8 at S8.7 until one was made. `10-design.md § Identity
+spaces` still recorded `callId` as session-scoped and "(assumed)", and open question 7 still warned
+that a turn-scoped id breaks correlation and needs a server-side alias.
+Chosen: adopt D109's disposition as the design's. `§ Identity spaces` now records `callId` as
+turn-scoped for Codex `exec --json` and session-scoped-assumed for Claude, and open question 7 is
+resolved. No alias is minted. The correlation the question feared does not exist to break: every
+correlation this system performs is already keyed by `(turnId, callId)` — `ToolCall` and
+`ToolResult` both carry `turnId`, the blob path is `tool-output/:turnId/:callId`, the pending map
+is per turn, and the client renders call and result as independent rows in `seq` order without
+matching ids at all. The design records the condition that would overturn this — a consumer needing
+to correlate across turns — so the ruling is checkable rather than merely asserted.
+Rejected: **minting the alias**, which D109 already rejected at contract tier for the same reason
+and which this entry declines to overturn: it is a mapping table to keep correct forever, bought
+for a hypothetical reader.
+Rejected: **leaving open question 7 open on the ground that `app-server` would answer it
+differently.** It would — thread-scoped UUIDs — but the design is written against `exec --json`
+(D107), and holding a question open against an interface this project has not adopted describes a
+different system. Issue #80 carries it.
+Reversibility: cheap while nothing correlates across turns; that condition is now written where a
+reader will meet it, which is the difference between this and the assumption it replaces.
+
 ## Open
 
 Staging only. Once an item becomes an issue it leaves this list.
