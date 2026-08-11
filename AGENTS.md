@@ -84,6 +84,7 @@ Name model *families*, never pinned versions. Version identifiers churn; family 
 | `/make-human-docs` | `sonnet`, `medium` | Escalate only if the design turns out to be ambiguous — then stop, do not resolve it in prose |
 | `/track` | `sonnet`, `medium` | Mechanical sync; escalate only to judge whether a drifted slice is a design change |
 | `/verify` | `sonnet`, `medium` | Escalate to deep reasoning only to diagnose a failure, never to run the gates |
+| `/code-review` | review agents run at the effort passed (e.g. `high`); adjudicating findings is deep-reasoning tier, `opus`/`high` | The effort argument sets how hard the review agents think, not the session model, which stays mine to set. A contract contradiction it surfaces goes in the slice's PR description, not a `design/` edit, while `design/FROZEN.md` exists |
 | `/pr` | `sonnet`, `medium` | Runs `/verify` and `/resolve` as its own phases — the same tier, and the same escalation rules, apply inside them |
 | `/resolve` | `sonnet`, `medium` | Escalate to judge a contested finding, not to triage the obvious ones |
 | `/fix` | `sonnet`, `medium` | Escalate only where the fix turns out to need a contract, schema, or public-interface change — that is `/contract`'s or `/design`'s, and this command stops rather than absorbing it |
@@ -93,6 +94,8 @@ Name model *families*, never pinned versions. Version identifiers churn; family 
 | `/kit-sync` | `sonnet`, `medium` | Escalate only to judge whether a refused fast-forward in `~/.agent-kit` is safe to resolve — never to force past it unattended |
 | `/kit-help` | `haiku`, `low` | Orientation from file existence and a tracker listing. Escalate only where the repository's state matches no stage |
 | `/done` | `haiku`, `low` | Mechanical git housekeeping — branch switch, `--merged` check, prune. Escalate only to judge whether an unmerged-looking branch is actually safe to delete |
+| `/freeze` | `sonnet`, `medium` | `Frozen because`/`Lifts when` come from the user, never invented — ask rather than draft them |
+| `/unfreeze` | `sonnet`, `medium` for the sequencing; runs `/reconcile` (`opus`, `high`) and `/track` (`sonnet`, `medium`) as its own phases | Runs unattended, no confirmation prompt — that is this repository's policy, not a gap |
 
 **Never recommend re-running a phase gate.** I decide when a phase repeats. This holds outside `/redteam` too — see that command for its own stopping rule.
 
@@ -146,6 +149,33 @@ Two distinctions that are easy to get wrong:
 - **The mechanical half of a task is red; the judgement half is not.** Opening an issue is an API call, but deciding what warrants one is not. Writing a PR description is a template, but which merge convention governs is not — `/pr` exists because that half is real. Do not classify a whole command by its cheapest step.
 - **Do not report a cost you did not measure.** A model is not given its own token counts or elapsed time, so any figure it states about its own run is an estimate presented as a measurement. `tools/Measure-Session.ps1` reads the real per-call usage from the session transcript. Use it, or say nothing. It measures **Claude Code sessions only** — Codex writes a different schema this has no reader for, and Copilot records no token usage at all. Under either, *say nothing* is the whole instruction.
 
+## The design freeze
+
+The pipeline's normal loop keeps `design/` live: a slice lands, `/reconcile` writes reality back, `/track` resyncs the tracker. That is right while the design is still being settled and **wrong once implementation is the bottleneck**, because each pass is generative rather than merely checking — landing slice N rewrites slice N+1's specification, which desyncs the tracker, which needs `/track`, which finds drift, which needs `/reconcile`. The loop has no fixed point. Freezing is how it is escaped.
+
+**`design/FROZEN.md` is the marker, and its existence is the whole mechanism.** It is tracked, not ignored — a freeze is a statement to everyone working in the repository, not local state. While it exists:
+
+- **`/reconcile` and `/track` do not run.** The tracker is deliberately allowed to go stale.
+- **`/design`, `/contract` and `/slices` refuse.** Authoring is gated too, so the docs cannot drift forward while the implementation is being checked against them.
+- **Slices implement against `20-contract.md` as a fixed artifact**, at the SHA the marker names.
+- **A contradiction found while implementing is stated in that slice's pull request and left in the document.** Do not fix it in `design/`. The staleness is the point; recording it in the PR is what makes the eventual reconciliation cheap.
+
+**`/freeze` writes the marker; `/unfreeze` lifts it** — deletes the file, then runs one reconciliation pass, `/reconcile` then `/track`, in the same session. `/unfreeze` runs unattended, without a confirmation prompt; the freeze itself is still the user's decision, made when `/freeze` is invoked, and lifting it early is one command call away rather than gated a second time. A slice that turns out to need a contract amendment still stops and says so; that escalation is the user's to answer, and answering it may well be "thaw, amend, re-freeze."
+
+The marker's format, which the five gated commands read and must not restate:
+
+```markdown
+# design/ is frozen
+
+Frozen at: <sha>, <YYYY-MM-DD>
+Frozen because: <what the freeze is escaping>
+Lifts when: <the checkable condition — "tier one is code-complete", not "when we are ready">
+
+To lift: run `/unfreeze`, or delete this file by hand and run `/reconcile`, then `/track`.
+```
+
+A command that refuses reports `Frozen because` and `Lifts when` **verbatim** rather than paraphrasing them — the point of a stated condition is that it can be checked against, and a paraphrase is where it stops being checkable.
+
 ## Hard rules
 
 - **Non-goals are binding.** Anything listed as a non-goal in the brief is out of scope even if it looks trivial, even if you are already touching that file.
@@ -191,6 +221,7 @@ Two distinctions that are easy to get wrong:
 - **Committing and pushing to a non-default branch are delegated in this repository.** Whenever a change is made on a branch other than the default, commit it (staged by named path, per above) and push immediately — no separate ask, and no waiting for the user to request the commit. This is narrower than it sounds: it covers landing work on the branch it was made on, nothing more.
 - External writes still need my authorization beyond that: creating a remote repository, changing visibility, pushing **to the default branch**, merging pull requests, changing a domain, deploying. **Discussing a decision does not authorize it.** Carve-outs: GitHub issue, milestone, and project writes (*Tracking work*), commit-and-push to a non-default branch (above), and **opening a pull request** — `/slice`, `/fix`, and `/pr` all open theirs without asking (`.claude/commands/slice.md`, `.claude/commands/fix.md`, `.claude/commands/pr.md`). **Never as a draft.** A draft is invisible to reviewers and to CI gates that ignore drafts, which splits "opened" from "actually in review" and leaves someone to reconcile the two by hand; an open PR is reverted by closing it, which is as cheap as closing an issue. **Merging is not carved out and stays mine.**
 - Do not delete files, branches, or history without explicit authorization.
+- **Deleting a local branch `/done` independently confirms via `git branch --merged` is delegated in this repository.** `/done` (`.claude/commands/done.md`) runs proactively — as soon as a merge is on the table, not only when asked — and deletes every branch on that confirmed list without a chat confirmation first; the `--merged` check is the authorization. It also may stash (never discard) a dirty tree to unblock its own branch switch, and always reports the stash back rather than popping it silently. This delegation stops exactly where `--merged` stops: a branch it did not confirm, or a `-d` refusal on one it did, still needs a separate ask before anything stronger (`-D`) is even considered.
 - Check review **threads**, not just requested reviewers — an automated reviewer can leave blocking conversation threads that do not appear in a reviewer listing. Resolve a thread only when a validated fix satisfies it; leave ambiguous findings open and report them. `/resolve` does this — as `/pr`'s final phase, or invoked on its own; the query it needs is written out there.
 - **Resolving or replying to a review thread is delegated in this repository.** `/resolve` (`.claude/commands/resolve.md`) pushes the fix, updates the pull request, and resolves every `Defect`-class thread it satisfies **without asking first** — this repository's own convention overrides the general external-write rule for this one action. This delegation is unavailable in a repository I do not own — every action there is requested individually, the same boundary every carve-out in *Tracking work* stops at (**I9**). `Ambiguous`-class threads are still brought to me one at a time; delegation covers execution of a classification already made, not the classification itself. The five classes, and what happens to each, stay owned by `resolve.md`.
 
