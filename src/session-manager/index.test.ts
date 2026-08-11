@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
-import { mkdtemp, mkdir, chmod, readFile } from 'node:fs/promises';
-import { execFile } from 'node:child_process';
+import { mkdtemp, mkdir, chmod, readFile, rm, writeFile } from 'node:fs/promises';
+import { execFile, spawn } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { after, test } from 'node:test';
@@ -9,7 +9,7 @@ import { promisify } from 'node:util';
 import { createSessionManager } from './index.js';
 import { createStore } from '../store/index.js';
 import { createCheckpoints } from '../checkpoints/index.js';
-import type { AuditRecord, Checkpoints, Config, Envelope, OperatorId, Records, Store } from '../contract/index.js';
+import type { AuditRecord, Checkpoints, Config, Envelope, IsoTimestamp, OperatorId, ProcessRecord, Records, SessionId, Store, TurnId } from '../contract/index.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -105,7 +105,7 @@ async function makeManager(
     checkpoints,
     records: notImplementedProxy<Records>('records'),
   });
-  return { manager, workspaceRoot, storageRoot, store: storeResult.value, checkpoints };
+  return { manager, workspaceRoot, storageRoot, store: storeResult.value, checkpoints, config };
 }
 
 async function waitUntil(predicate: () => boolean | Promise<boolean>, timeoutMs = 5000): Promise<void> {
@@ -1377,4 +1377,359 @@ test('S6.10 - DELETE also removes ckpt.git', async () => {
   const removed = await manager.remove(created.value.sessionId, owner);
   assert.equal(removed.ok, true);
   assert.equal(existsSync(gitDir), false, 'ckpt.git is gone after delete');
+});
+
+// --- S7 — Survive a restart -------------------------------------------------------
+
+// Processes deliberately left running by a "not reaped" test (S7.6) — the module-level
+// safety net at the top of this file only kills what `pids.ndjson` still calls open, and
+// a correctly-declined reap tombstones the entry precisely because it left the process
+// alone, so that net would miss it.
+const strayPids: number[] = [];
+after(() => {
+  for (const pid of strayPids) {
+    try {
+      process.kill(pid);
+    } catch {
+      // Already gone.
+    }
+  }
+});
+
+// A hand-built `SessionRecord`, bypassing `session-manager`/the adapter entirely — S7's
+// rehydration path only ever reads what `store` already wrote, so a fixture built
+// straight against `store` exercises exactly that contract without needing a real turn.
+function bootSessionRecord(id: string, overrides: Partial<import('../contract/index.js').SessionRecord> = {}): import('../contract/index.js').SessionRecord {
+  return {
+    id: id as SessionId,
+    owner: 'operator-1' as OperatorId,
+    vendor: 'claude',
+    cwd: 'C:\\workspace\\proj' as never,
+    model: null,
+    policy: { mode: 'interactive', sandbox: null, banner: null },
+    sandbox: null,
+    cliSessionId: null,
+    lastSeq: 0 as never,
+    state: 'live',
+    createdAt: new Date().toISOString() as IsoTimestamp,
+    endedAt: null,
+    ...overrides,
+  };
+}
+
+function bootEnvelope(sessionId: string, seq: number, kind: string, data: unknown): Envelope {
+  return {
+    seq: seq as never,
+    sessionId: sessionId as never,
+    ts: new Date().toISOString() as never,
+    kind: kind as never,
+    data: data as never,
+  } as Envelope;
+}
+
+// A real process tree — a parent that spawns one grandchild in its own group (POSIX) or
+// under it in the live process table (Windows) — for exercising the tree-kill half of
+// the reuse guard (S7.5, S7.6), independent of the adapter's own copy of the same
+// mechanism (already covered by S5.2).
+async function spawnTrackedTree(): Promise<{ pid: number; pgid: number | null; grandchildPid: number }> {
+  const markerDir = await mkdtemp(path.join(tmpdir(), 'skynet-s7-marker-'));
+  const markerPath = path.join(markerDir, 'gc.json');
+  const script =
+    "const { spawn } = require('node:child_process'); const fs = require('node:fs'); " +
+    "const gc = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 120000)'], { stdio: 'ignore' }); gc.unref(); " +
+    `fs.writeFileSync(${JSON.stringify(markerPath)}, JSON.stringify({ grandchildPid: gc.pid })); ` +
+    'setTimeout(() => {}, 120000);';
+  const parent = spawn(process.execPath, ['-e', script], {
+    detached: process.platform !== 'win32',
+    stdio: 'ignore',
+  });
+  parent.unref();
+  await waitUntil(() => existsSync(markerPath));
+  const marker = JSON.parse(await readFile(markerPath, 'utf8')) as { grandchildPid: number };
+  return {
+    pid: parent.pid!,
+    pgid: process.platform === 'win32' ? null : (parent.pid ?? null),
+    grandchildPid: marker.grandchildPid,
+  };
+}
+
+test('S7.1 — boot runs reap, then rehydrate, in that order, and does not resolve until both finish', async () => {
+  const order: string[] = [];
+  let release: () => void = () => {};
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const wrapStore = (store: Store): Store => ({
+    ...store,
+    async readOpenPids() {
+      order.push('readOpenPids:start');
+      await gate;
+      order.push('readOpenPids:end');
+      return store.readOpenPids();
+    },
+    async readAllMeta() {
+      order.push('readAllMeta');
+      return store.readAllMeta();
+    },
+  });
+  const { manager } = await makeManager('full', {}, wrapStore);
+
+  const bootPromise = manager.boot();
+  await new Promise((r) => setTimeout(r, 30));
+  assert.deepEqual(order, ['readOpenPids:start'], 'rehydration has not started while reap is still in flight');
+
+  release();
+  const booted = await bootPromise;
+  assert.equal(booted.ok, true);
+  assert.deepEqual(order, ['readOpenPids:start', 'readOpenPids:end', 'readAllMeta']);
+  // `server.ts` awaits `manager.boot()` before calling `server.listen()` (unchanged by
+  // this slice) — this is the ordering that makes a connection during rehydration
+  // impossible at the system level; this test proves the internal step order it depends on.
+});
+
+test('S7.2/S7.3 — a rehydrated session is ended with endedAt set and lastSeq derived from the spill, not a stale meta.json value; a message to it is refused session_ended', async () => {
+  const { config, store, checkpoints } = await makeManager('full');
+  const sessionId = 'sess-rehydrate-1';
+  const record = bootSessionRecord(sessionId);
+  assert.equal((await store.createSession(record)).ok, true);
+  for (let seq = 1; seq <= 5; seq++) {
+    assert.equal((await store.appendEvent(record.id, bootEnvelope(sessionId, seq, 'message', { turnId: 't1', role: 'user', text: `m${seq}` }))).ok, true);
+  }
+  // S7.3: meta.json's own lastSeq is deliberately wrong.
+  await store.writeMeta({ ...record, lastSeq: 99999 as never });
+
+  const manager2 = createSessionManager({ config, store, checkpoints, records: notImplementedProxy<Records>('records') });
+  const booted = await manager2.boot();
+  assert.equal(booted.ok, true);
+
+  const got = manager2.get(sessionId as never, record.owner);
+  assert.equal(got.ok, true);
+  if (got.ok) {
+    assert.equal(got.value.state, 'ended');
+    assert.notEqual(got.value.endedAt, null);
+    assert.equal(got.value.lastSeq, 5, 'lastSeq follows the spill, not the stale meta.json value');
+  }
+
+  const messaged = await manager2.message(sessionId as never, record.owner, 'hello');
+  assert.equal(messaged.ok, false);
+  if (!messaged.ok) assert.equal(messaged.error.code, 'session_ended');
+});
+
+test('S7.2/S7.3 follow-up — restore(), interrupt(), and a repeat end() on a rehydrated session are refused/no-op rather than touching its null adapter', async () => {
+  const { config, store, checkpoints } = await makeManager('full');
+  const sessionId = 'sess-rehydrate-2';
+  const record = bootSessionRecord(sessionId);
+  assert.equal((await store.createSession(record)).ok, true);
+  assert.equal((await store.appendEvent(record.id, bootEnvelope(sessionId, 1, 'message', { turnId: 't1', role: 'user', text: 'm1' }))).ok, true);
+
+  const manager2 = createSessionManager({ config, store, checkpoints, records: notImplementedProxy<Records>('records') });
+  assert.equal((await manager2.boot()).ok, true);
+
+  const before = manager2.get(sessionId as never, record.owner);
+  assert.equal(before.ok, true);
+  const endedAtBefore = before.ok ? before.value.endedAt : null;
+
+  const restored = await manager2.restore(sessionId as never, record.owner, 'deadbeef' as never);
+  assert.equal(restored.ok, false);
+  if (!restored.ok) assert.equal(restored.error.code, 'session_ended', 'restore does not run checkpoints.restore against a cwd this entry no longer owns');
+
+  const interrupted = await manager2.interrupt(sessionId as never, record.owner, 't1' as never);
+  assert.equal(interrupted.ok, true, 'no live turn to interrupt is a no-op, not an error');
+
+  const ended = await manager2.end(sessionId as never, record.owner);
+  assert.equal(ended.ok, true, 'ending an already-ended session is a no-op, not an error');
+
+  const after = manager2.get(sessionId as never, record.owner);
+  assert.equal(after.ok, true);
+  if (after.ok) {
+    assert.equal(after.value.endedAt, endedAtBefore, 'endedAt is not clobbered by a repeat end()');
+    assert.equal(after.value.lastSeq, before.ok ? before.value.lastSeq : -1, 'no duplicate session.ended was appended');
+  }
+});
+
+test('S7.4 — a spill ending on an unpaired turn.started is closed at boot: outstanding permission.requests resolve cancelled_process_exit, then turn.ended/server_restart, at the next contiguous seq', async () => {
+  const { config, store, checkpoints, storageRoot } = await makeManager('full');
+  const sessionId = 'sess-crash-1';
+  const record = bootSessionRecord(sessionId);
+  assert.equal((await store.createSession(record)).ok, true);
+
+  const turnId = 't-crash';
+  let seq = 0;
+  const append = async (kind: string, data: unknown) => {
+    seq += 1;
+    assert.equal((await store.appendEvent(record.id, bootEnvelope(sessionId, seq, kind, data))).ok, true);
+  };
+  await append('turn.started', { turnId });
+  await append('permission.request', { turnId, requestId: 'req-1', callId: 'call-1', tool: 'Bash', input: { cmd: 'ls' }, suggestions: [] });
+  await append('permission.request', { turnId, requestId: 'req-2', callId: 'call-2', tool: 'Write', input: { path: 'x' }, suggestions: [] });
+  // No turn.ended written — this is the crash.
+
+  const manager2 = createSessionManager({ config, store, checkpoints, records: notImplementedProxy<Records>('records') });
+  const booted = await manager2.boot();
+  assert.equal(booted.ok, true);
+
+  const replayed: Envelope[] = [];
+  await manager2.subscribe(sessionId as never, record.owner, 0, { deliver: (e) => replayed.push(e), close: () => {} });
+
+  const seqs = replayed.map((e) => e.seq as unknown as number);
+  for (let i = 1; i < seqs.length; i++) assert.equal(seqs[i], seqs[i - 1]! + 1, 'contiguous seq, continuing from where the spill left off');
+
+  const kinds = replayed.map((e) => e.kind);
+  assert.deepEqual(kinds, ['turn.started', 'permission.request', 'permission.request', 'permission.resolved', 'permission.resolved', 'turn.ended']);
+
+  const resolved = replayed.filter((e) => e.kind === 'permission.resolved');
+  for (const r of resolved) {
+    const d = r.data as { reason: string; decision: string; operator: unknown; turnId: string };
+    assert.equal(d.reason, 'cancelled_process_exit');
+    assert.equal(d.decision, 'deny');
+    assert.equal(d.operator, null);
+    assert.equal(d.turnId, turnId);
+  }
+
+  const ended = replayed.find((e) => e.kind === 'turn.ended')!;
+  const endedData = ended.data as { stopReason: string; turnId: string };
+  assert.equal(endedData.stopReason, 'server_restart');
+  assert.equal(endedData.turnId, turnId);
+
+  const auditRecords = await readAudit(storageRoot);
+  const forThisSession = auditRecords.filter((r) => r.sessionId === (sessionId as never));
+  assert.equal(forThisSession.length, 2);
+  for (const a of forThisSession) {
+    assert.equal(a.decision, 'deny');
+    assert.equal(a.reason, 'cancelled_process_exit');
+    assert.equal(a.operator, null);
+  }
+});
+
+test('S7.7 — a meta.json that fails to parse, or carries an unknown schemaVersion, is skipped and logged; boot continues to serve every other session', async () => {
+  const { config, store, checkpoints, storageRoot } = await makeManager('full');
+
+  const good = bootSessionRecord('sess-good');
+  assert.equal((await store.createSession(good)).ok, true);
+
+  const corrupt = bootSessionRecord('sess-corrupt');
+  assert.equal((await store.createSession(corrupt)).ok, true);
+  await writeFile(path.join(storageRoot, 'sessions', 'sess-corrupt', 'meta.json'), '{ not json');
+
+  const future = bootSessionRecord('sess-future');
+  assert.equal((await store.createSession(future)).ok, true);
+  await writeFile(path.join(storageRoot, 'sessions', 'sess-future', 'meta.json'), JSON.stringify({ schemaVersion: 99, session: future }));
+
+  const manager2 = createSessionManager({ config, store, checkpoints, records: notImplementedProxy<Records>('records') });
+  const booted = await manager2.boot();
+  assert.equal(booted.ok, true);
+
+  const goodGot = manager2.get('sess-good' as never, good.owner);
+  assert.equal(goodGot.ok, true);
+  if (goodGot.ok) assert.equal(goodGot.value.state, 'ended');
+
+  assert.equal(manager2.get('sess-corrupt' as never, corrupt.owner).ok, false);
+  assert.equal(manager2.get('sess-future' as never, future.owner).ok, false);
+
+  // Left untouched, for inspection.
+  const corruptRaw = await readFile(path.join(storageRoot, 'sessions', 'sess-corrupt', 'meta.json'), 'utf8');
+  assert.equal(corruptRaw, '{ not json');
+});
+
+test('S7.8 — a rehydrated session does not hold its workspace: a new session on the same path is created after a restart', async () => {
+  const { manager: manager1, config, store, checkpoints, workspaceRoot } = await makeManager('full');
+  const owner = 'operator-1' as OperatorId;
+  const projectDir = path.join(workspaceRoot, 'reclaim-me');
+  await mkdir(projectDir);
+  const created = await manager1.create(owner, { vendor: 'claude', cwd: projectDir, model: null, sandbox: null, requisitionId: null });
+  assert.equal(created.ok, true);
+  if (!created.ok) return;
+
+  const manager2 = createSessionManager({ config, store, checkpoints, records: notImplementedProxy<Records>('records') });
+  assert.equal((await manager2.boot()).ok, true);
+
+  const createdAgain = await manager2.create(owner, { vendor: 'claude', cwd: projectDir, model: null, sandbox: null, requisitionId: null });
+  assert.equal(createdAgain.ok, true);
+});
+
+test('S7.9 — pids.ndjson gains one line per spawn and one tombstone per exit; the latest line for a pid wins', async () => {
+  const { store, storageRoot } = await makeManager('full');
+  const pid = 999001; // synthetic: nothing is actually spawned for this test
+  const record: ProcessRecord = {
+    pid,
+    pgid: null,
+    sessionId: 'sess-s79' as SessionId,
+    turnId: 'turn-s79' as TurnId,
+    startedAt: new Date().toISOString() as IsoTimestamp,
+    image: 'whatever',
+    exitedAt: null,
+  };
+  assert.equal((await store.appendPid(record)).ok, true);
+  assert.equal((await store.readOpenPids()).some((r) => r.pid === pid), true);
+
+  assert.equal((await store.tombstonePid(pid, new Date().toISOString() as IsoTimestamp)).ok, true);
+  assert.equal((await store.readOpenPids()).some((r) => r.pid === pid), false);
+
+  const raw = await readFile(path.join(storageRoot, 'pids.ndjson'), 'utf8');
+  const lines = raw.split('\n').filter((l) => l.trim().length > 0);
+  assert.equal(lines.length, 2, 'one spawn line, one tombstone line');
+});
+
+test('S7.5 — a live process whose recorded image matches and started after the host boot is reaped: the whole tree is killed and the entry tombstoned', async () => {
+  const { manager, store } = await makeManager('full');
+  const { pid, pgid, grandchildPid } = await spawnTrackedTree();
+  strayPids.push(pid, grandchildPid);
+  assert.equal(isAlive(pid), true, 'the parent is running before boot');
+  assert.equal(isAlive(grandchildPid), true, 'the grandchild is running before boot');
+
+  const record: ProcessRecord = {
+    pid,
+    pgid,
+    sessionId: 'sess-reap-s75' as SessionId,
+    turnId: 'turn-reap-s75' as TurnId,
+    startedAt: new Date().toISOString() as IsoTimestamp,
+    image: path.basename(process.execPath).replace(/\.exe$/i, ''),
+    exitedAt: null,
+  };
+  assert.equal((await store.appendPid(record)).ok, true);
+
+  const booted = await manager.boot();
+  assert.equal(booted.ok, true);
+
+  await waitUntil(() => !isAlive(pid) && !isAlive(grandchildPid), 5000);
+
+  const open = await store.readOpenPids();
+  assert.equal(open.some((r) => r.pid === pid), false, 'the reaped entry is tombstoned');
+});
+
+test('S7.6 — a live process whose image does not match the record is not reaped: it is logged and tombstoned, and left running', async () => {
+  const { manager, store } = await makeManager('full');
+  const { pid, pgid, grandchildPid } = await spawnTrackedTree();
+  strayPids.push(pid, grandchildPid);
+
+  const record: ProcessRecord = {
+    pid,
+    pgid,
+    sessionId: 'sess-reap-s76' as SessionId,
+    turnId: 'turn-reap-s76' as TurnId,
+    startedAt: new Date().toISOString() as IsoTimestamp,
+    image: 'definitely-not-the-real-image',
+    exitedAt: null,
+  };
+  assert.equal((await store.appendPid(record)).ok, true);
+
+  const booted = await manager.boot();
+  assert.equal(booted.ok, true);
+
+  // The (correctly declined) reap gets time it does not need, so a false-positive kill
+  // would have had time to land.
+  await new Promise((r) => setTimeout(r, 300));
+  assert.equal(isAlive(pid), true, 'a wrong kill is an incident, so the process was left alone');
+
+  const open = await store.readOpenPids();
+  assert.equal(open.some((r) => r.pid === pid), false, 'still tombstoned even though not killed, so this is a one-time bookkeeping event, not a permanent stall');
+});
+
+test('S7.10 — a storage root that cannot be written at boot refuses to start with StartupError.storage_unwritable', async () => {
+  const { manager, storageRoot } = await makeManager('full');
+  await rm(storageRoot, { recursive: true, force: true });
+
+  const booted = await manager.boot();
+  assert.equal(booted.ok, false);
+  if (!booted.ok) assert.equal(booted.error.code, 'storage_unwritable');
 });
