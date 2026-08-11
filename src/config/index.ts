@@ -161,7 +161,11 @@ export function loadConfig(env: Readonly<Record<string, string | undefined>>): R
   const allowedOrigins = parseList(env, 'ALLOWED_ORIGINS');
   const trustProxy = parseList(env, 'TRUST_PROXY');
 
-  const ringCapacity = parseIntEnv(env, 'CAPS_RING_CAPACITY', 500);
+  // D99: the shipped default is 2000, and it is not an arbitrary round number — D40's
+  // argument for reading replay from the spill, and S3.3's test shape, are both calibrated
+  // on it. A deployment may still override it; what it may not be is a figure the design
+  // reasoned against and no deployment ever gets.
+  const ringCapacity = parseIntEnv(env, 'CAPS_RING_CAPACITY', 2000);
   if (!ringCapacity.ok) return ringCapacity;
   const toolResultBytes = parseIntEnv(env, 'CAPS_TOOL_RESULT_BYTES', 64 * 1024);
   if (!toolResultBytes.ok) return toolResultBytes;

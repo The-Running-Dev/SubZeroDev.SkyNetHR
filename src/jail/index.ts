@@ -40,10 +40,14 @@ function isInsideRoot(resolved: string, root: string): boolean {
 }
 
 // True when the two paths are equal or one contains the other, under the same
-// normalisation `isInsideRoot` uses. Both arguments are expected to already be
-// canonical (jail-resolved) paths. This is the one containment predicate in the
-// server; callers must not hand-roll their own.
-export function pathsOverlap(a: string, b: string): boolean {
+// normalisation `isInsideRoot` uses. This is the one containment predicate in the server;
+// callers must not hand-roll their own.
+//
+// Both parameters are `ResolvedPath` rather than `string`, and that is the whole
+// enforcement of "both arguments must already be jail-resolved": only this module mints
+// the brand, so a caller cannot reach this with a path the jail never proved. Widening it
+// to `string` makes that sentence a comment instead of a check.
+export function pathsOverlap(a: ResolvedPath, b: ResolvedPath): boolean {
   return isInsideRoot(a, b) || isInsideRoot(b, a);
 }
 

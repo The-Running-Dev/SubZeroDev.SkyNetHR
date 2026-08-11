@@ -1733,3 +1733,49 @@ test('S7.10 — a storage root that cannot be written at boot refuses to start w
   assert.equal(booted.ok, false);
   if (!booted.ok) assert.equal(booted.error.code, 'storage_unwritable');
 });
+
+// D41/D100 — the spill-failure row's first half. The second half (killing the child,
+// resolving outstanding permissions, and the `turn.ended` / `session.ended` /
+// `session.notice` envelopes) is S5's and is deliberately not asserted here.
+test('D100 — a failed spill append ends the session, clears the turn slot (I8) and rewrites meta.json (I16)', async () => {
+  let failAppends = false;
+  const { manager, workspaceRoot, storageRoot } = await makeManager('many', {}, (store) => ({
+    ...store,
+    async appendEvent(sessionId, envelope) {
+      if (failAppends) return { ok: false, error: { code: 'io', path: 'events.ndjson', detail: 'disk full' } };
+      return store.appendEvent(sessionId, envelope);
+    },
+  }));
+
+  const owner = 'operator-1' as OperatorId;
+  const projectDir = path.join(workspaceRoot, 'proj-d100');
+  await mkdir(projectDir);
+  const created = await manager.create(owner, { vendor: 'claude', cwd: projectDir, model: null, sandbox: null, requisitionId: null });
+  assert.equal(created.ok, true);
+  if (!created.ok) return;
+  const { sessionId } = created.value;
+
+  failAppends = true;
+  const sent = await manager.message(sessionId, owner, 'go');
+
+  // The session is ended, not merely marked: `state === 'ended'` implies `turn === null`
+  // (I8), and the only way to observe the slot from outside is what a second message is
+  // refused with. `turn_in_flight` here would mean the slot survived the transition.
+  const summary = manager.get(sessionId, owner);
+  assert.equal(summary.ok, true);
+  if (!summary.ok) return;
+  assert.equal(summary.value.state, 'ended');
+  assert.notEqual(summary.value.endedAt, null);
+
+  assert.equal(sent.ok, false);
+  if (!sent.ok) assert.equal(sent.error.code, 'session_ended');
+
+  const again = await manager.message(sessionId, owner, 'again');
+  assert.equal(again.ok, false);
+  if (!again.ok) assert.equal(again.error.code, 'session_ended', 'a surviving turn slot would refuse with turn_in_flight instead');
+
+  // I16: a `state` transition is one of the three occasions meta.json is written.
+  const meta = JSON.parse(await readFile(path.join(storageRoot, 'sessions', sessionId, 'meta.json'), 'utf8')) as { session: { state: string; endedAt: string | null } };
+  assert.equal(meta.session.state, 'ended');
+  assert.notEqual(meta.session.endedAt, null);
+});

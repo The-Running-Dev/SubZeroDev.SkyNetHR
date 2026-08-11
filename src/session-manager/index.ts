@@ -80,6 +80,11 @@ interface SessionEntry {
   // told once, so every later turn skips the doomed commit attempt rather than repeating
   // the same `checkpoints_unavailable` story as a `checkpoint_skipped` notice each time.
   checkpointsAvailable: boolean;
+  // D41/D100: set once, the first time a spill append fails. Every later append on a dead
+  // spill fails too, and without this the session would re-end itself per envelope —
+  // walking `endedAt` forward and rewriting `meta.json` for a transition that already
+  // happened.
+  storageFailed: boolean;
   readonly subscribers: Set<SubscriberSink>;
   // I27: there is no lock in this server; `emit`'s synchronous prefix (seq assignment,
   // ring push, subscriber delivery) is the serialisation point. The durable spill write
@@ -146,15 +151,39 @@ export function createSessionManager(deps: {
 
     // The durable spill write is I/O and does not resolve in call order on its own;
     // chaining it onto the session's write queue is what keeps `events.ndjson` written
-    // in seq order despite that (I1, I27). A spill-append failure is fatal to the
-    // session (D41); full recovery is out of this slice's scope, but the session is at
-    // least marked so it stops accepting new turns.
+    // in seq order despite that (I1, I27).
+    //
+    // A spill-append failure is fatal to the session (D41), and D100 splits the handling
+    // in two. This is the first half: restore the invariants the rest of the server reads
+    // as unconditional. `state` moves to `ended` *and the turn slot is cleared with it*,
+    // because I8 says `ended` implies `turn === null` and every consumer of that
+    // implication assumes no child is running; `meta.json` is rewritten because a `state`
+    // transition is one of the three occasions I16 names.
+    //
+    // The second half is S5's and is **not implemented**: killing the turn's child,
+    // resolving each outstanding `permission.request` `cancelled_process_exit` (I9), and
+    // emitting `turn.ended { storage_failure }`, `session.ended` and
+    // `session.notice / error`. Until it lands, a session struck by a spill failure stops
+    // accepting turns and says nothing on the wire about why, which is exactly what
+    // `10-design.md § Failure modes` describes for that interim.
+    //
+    // Nothing here may call `emit`: this callback *is* the write queue, so an `emit`
+    // inside it would await a promise that cannot settle until it returns.
     entry.writeQueue = entry.writeQueue.then(async () => {
       const appended = await store.appendEvent(entry.record.id, envelope as Envelope);
-      if (!appended.ok) {
-        entry.record.state = 'ended';
-        entry.record.endedAt = nowIso();
-      }
+      if (appended.ok || entry.storageFailed) return;
+      entry.storageFailed = true;
+      entry.turn = null;
+      entry.record.state = 'ended';
+      entry.record.endedAt = nowIso();
+      console.error(
+        `[session-manager] session ${entry.record.id}: the event spill could not be written ` +
+          `(${appended.error.code}); the session is ended. ${JSON.stringify(appended.error)}`,
+      );
+      // Best-effort, like `end()`'s: the storage that just failed may be the same storage
+      // this writes to, and the in-memory record — which `findLiveOverlap` reads, and which
+      // therefore frees the workspace — is already `ended` regardless.
+      await store.writeMeta(entry.record);
     });
     await entry.writeQueue;
   }
@@ -368,6 +397,7 @@ export function createSessionManager(deps: {
           firstTurnAnnounced: true,
           hasRunATurn: true,
           checkpointsAvailable: false,
+          storageFailed: false,
           subscribers: new Set(),
           writeQueue: Promise.resolve(),
         };
@@ -440,6 +470,7 @@ export function createSessionManager(deps: {
         firstTurnAnnounced: false,
         hasRunATurn: false,
         checkpointsAvailable: true,
+        storageFailed: false,
         subscribers: new Set(),
         writeQueue: Promise.resolve(),
       };
@@ -508,7 +539,16 @@ export function createSessionManager(deps: {
         }
       }
 
+      // D41/D100: any `emit` above may have ended the session and cleared the slot this
+      // function claimed, because a spill append failed. TypeScript's narrowing of
+      // `entry.turn` does not survive that — it is a mutable property another function
+      // wrote — so the check is explicit, and it is `session_ended` rather than a throw:
+      // that is a documented refusal on this route, and it is precisely what happened.
+      // Returning here is also what keeps a child from being spawned into a dead session.
+      if (entry.turn === null) return { ok: false, error: { code: 'session_ended', sessionId } };
+
       await emit(entry, 'turn.started', { turnId });
+      if (entry.turn === null) return { ok: false, error: { code: 'session_ended', sessionId } };
       entry.turn.phase = 'running';
 
       // S4.15/D34: a turn that spawns with no `--resume` on a session that has already
