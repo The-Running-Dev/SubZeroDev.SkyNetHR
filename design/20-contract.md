@@ -1410,29 +1410,91 @@ compensates for it.
 
 ## Vendor mapping — Codex
 
-**Unverified.** Everything below is a hypothesis to be tested by the spike, drawn from the
-on-disk rollout schema documented in this repository's `tools/Measure-Session.ps1` — the
-same copy and the same lines `10-design.md § The hard problem` cites, upstream of which is
-`SubZeroDev.AgentKit` — not from an observed live stream.
+**The rollout-schema hypothesis is dead.** The table this section previously carried was drawn
+from the on-disk rollout schema in `tools/Measure-Session.ps1`, upstream of which is
+`SubZeroDev.AgentKit`, and **none of its record shapes appear on any live stream**. S8.1 probed
+the installed CLI (`codex-cli 0.146.0`) and found *two* live interfaces, neither matching it:
+`codex exec --json` and `codex app-server`. Probes, commands and transcripts:
+`design/findings/S8-codex-adapter.md`.
 
-| Expected record | Normalised |
+**The source is `codex exec --json`** (D107). `app-server` is the richer interface — per-item
+deltas, thread-scoped ids, explicitly marginal usage, and a real approval round trip — and every
+one of those advantages costs a change this document may not make. It is a long-lived JSON-RPC
+server spanning turns, where `Adapter.send` spawns *the turn's* child and holds its stdin; and
+its reachable `on-request` prompt reopens D5. Both are `/design`'s.
+
+Launched with `--json -s <sandbox> --skip-git-repo-check`, the prompt on stdin. `SandboxMode`
+maps `read-only` → `read-only`, `workspace-write` → `workspace-write`, `unrestricted` →
+`danger-full-access` (`codex exec --help`, 0.146.0). **Unlike Claude, stdin carries the prompt
+and nothing else**: this interface has no inbound control channel. `Adapter.respond` therefore
+needs no Codex behaviour and gains no error variant — a `preauthorised` session emits zero
+`permission.request` events, so nothing above ever calls it, and a stray answer is already
+refused by the manager before it could.
+
+| CLI stdout | Normalised |
 |---|---|
-| `payload.type == 'session_meta'` | `AdapterNotification` `cli-session` |
-| `payload.info` → `token_count` | `usage`, normalised to a delta |
-| *(unknown)* | `message`, `tool.call`, `tool.result` |
+| `thread.started` | `AdapterNotification` `cli-session`; `cliSessionId` = `thread_id` |
+| `turn.started` | *nothing* — the manager mints the `turnId` and emits `turn.started` itself |
+| `item.completed`, item `reasoning` | `thinking` |
+| `item.completed`, item `agent_message` | `message`, role assistant |
+| `item.started`, item `command_execution` | `tool.call`; `callId` = `item.id`, `name` = `'command_execution'`, `input` = `{ command }` |
+| `item.completed`, item `command_execution` | `tool.result`; `callId` = `item.id`, `ok` = `exit_code === 0`, `output` = `aggregated_output` |
+| `turn.completed` | `turn.ended`, `stopReason: 'completed'` |
+| `close` with no `turn.completed` seen | `turn.ended`, `stopReason: 'process_exit'` |
 
-Policy for every Codex session, until proven otherwise:
+**Eight rows is not the vocabulary, and unlike Claude's list this one is knowingly short.** The
+rows above are every shape S8.1 *observed*. They are not every shape the CLI emits — see
+`## Unresolved` 12, which names what is missing and why no row may be written for it yet.
+
+**There is no `tool.result` on the wire; the adapter synthesizes the split** (D108). A command
+execution is one item whose lifecycle carries its own result as a field update — `item.started`
+with `status: 'in_progress'`, then `item.completed` with the same `id` now carrying
+`aggregated_output` and `exit_code`. The `tool.call` / `tool.result` pair this contract requires
+is manufactured from those two states, never read off the wire as two records. An
+`item.completed` whose `item.started` was never seen still emits both, in order, so the
+renderer's "`tool.result` always follows its `tool.call`" rule holds unconditionally.
+`ToolCall.summary` is rendered from `command`, and the Claude summariser is not reused: it keys
+on Claude's tool names and would fall through to the bare name for every Codex call.
+
+**`callId` is unique within a turn only, and nothing in this contract needs more** (D109).
+`exec --json` numbers items with a per-turn counter (`item_0`, `item_1`, …) that restarts on
+every resumed turn — confirmed across two independent resumes. That is the condition **S8.7**
+stops on, and it is recorded here rather than resolved: every correlation this contract performs
+is already keyed by `(turnId, callId)` — `ToolCall` and `ToolResult` both carry `turnId`, the
+blob path is `tool-output/:turnId/:callId`, and the manager's pending map is per-turn and keyed
+by `requestId`. Whether that discharges open question 7 or a server-side alias is still owed is
+`/design`'s ruling, and S8 stays stopped at S8.7 until it makes one.
+
+Policy for every Codex session:
 `{ mode: 'preauthorised', sandbox: <the mode chosen at launch>, banner: <naming that mode> }`.
+**`approval_policy = 'on-request'` is unreachable on this interface, and reachable on the other.**
+S8.1 set it, prompted a write under `read-only`, and saw no approval record of any kind: the
+sandbox denied the write and the agent reported the failure in its own message. `exec` is
+non-interactive by construction. Over `app-server` a genuine JSON-RPC approval request arrives.
+Open question 4 is therefore answered *yes for the vendor, no for the interface adopted here*,
+and D5 stands unreopened.
 
 **The adapter must fail loudly, not degrade quietly.** If the stream does not match, return
 `AdapterError.schema_mismatch` and emit `error / adapter_schema_mismatch` with
 `fatal: true`. A Codex adapter that silently renders nothing is worse than one that refuses
 to start, because the operator will believe the agent is thinking.
 
+**That rule cannot be armed against the table above, and S8.5 may not be implemented until it
+can.** `schema_mismatch` is specified fatal, so every item type absent from the table refuses
+the session outright. The type union has **eighteen** variants against the three observed here,
+and an operator whose agent edits a file or runs a search would be refused for ordinary traffic.
+Claude solved the same problem with a named ignore list (D92); Codex needs one, and it cannot be
+written from an enumeration nothing has watched arrive. Until `## Unresolved` 12 closes, the
+adapter treats an unmodelled item type as `adapter_unknown_record`, **non-fatally**, with the
+record preserved in `raw` — Claude's behaviour, deliberately, because refusing on the strength
+of an incomplete list is the failure this paragraph exists to prevent.
+
 ## Unresolved
 
-Signatures the design does not determine. Nothing downstream may invent them. Items 5 to 11
-are new in this pass and each names the issue that carries it.
+Signatures the design does not determine. Nothing downstream may invent them. Twelve items.
+Items 5 to 11 were new in the tier-two pass and each names the issue that carries it. Item 12
+is new in this one and is the odd one out in kind: the others wait on a decision, it waits on
+an observation, and it names an issue for one of its four bullets only.
 
 1. **`Attachment`.** `POST /api/sessions/:id/message` previously carried
    `attachments?: Attachment[]` against a type that was never defined, and no section of
@@ -1449,8 +1511,10 @@ are new in this pass and each names the issue that carries it.
    entity, no field, no file, and no statement of its lifetime across session end or restart.
    Until both are decided, no `match(rule, request)` signature can be written, `scope:
    'always'` cannot be implemented, and `ResolvedScope: 'standing'` is unreachable. (#16, #37)
-3. **The Codex event mapping.** Three of the normalised kinds have no source record. S8.1 is
-   the experiment that answers it; the adapter may not guess. (#14, #18)
+3. **Resolved by S8.1 and superseded by item 12.** The three normalised kinds that had no
+   source record now have one: `message` and `tool.call` / `tool.result` are in the table
+   above, the last pair synthesized from a single item's two lifecycle states (D108). What
+   replaced this is narrower and is carried as item 12. (#14, #18)
 4. **`ToolCall.summary`'s renderer.** The design calls it "server-rendered" and names no
    owner. It is emitted by the adapter in the shape above, which makes it vendor code
    producing a display string — the one place that reading is uncomfortable. It is not
@@ -1494,3 +1558,32 @@ are new in this pass and each names the issue that carries it.
     migrated.** Every other persisted shape gates on `meta.json`'s `schemaVersion`, and these
     two files are not under it. Adding fields is safe today; removing or retyping one has no
     stated rule and no discriminator to hang one on.
+12. **Four facts `codex exec --json` has not been watched producing.** S8.1 answered its five
+    questions and its probes were real, but a single happy-path turn is not an enumeration, and
+    the gap is what stops S8.2 from being fully met. Each item below is a probe, not a design
+    question, and none may be filled from `codex app-server generate-json-schema` — that dumps
+    the *other* interface's protocol, and reading this one's rows out of it would repeat exactly
+    the mistake `agent.md` records against `--permission-prompt-tool stdio`.
+    - **The item-type ignore list.** The type union has eighteen variants
+      (`userMessage, hookPrompt, agentMessage, plan, reasoning, commandExecution, fileChange,
+      mcpToolCall, dynamicToolCall, collabAgentToolCall, subAgentActivity, webSearch, imageView,
+      sleep, imageGeneration, enteredReviewMode, exitedReviewMode, contextCompaction`) against
+      three observed. Which are ordinary traffic to ignore, which map, and which are genuinely a
+      `schema_mismatch` is undetermined, and it is what arms S8.5. `contextCompaction` looks like
+      `session.notice` (`compaction`) and `fileChange` like a second `tool.call` shape — both are
+      guesses and neither is written above.
+    - **`item.updated` and `turn.failed`.** Both are present in the shipping binary's string
+      table and neither was observed. If `item.updated` carries incremental text it is
+      `message.delta`'s source, which changes what the renderer can do; `turn.failed` is
+      presumably `stopReason: 'error'` and presumption is not a row.
+    - **Whether `turn.completed.usage` is cumulative or marginal.** D75 makes the adapter owe a
+      delta. S8.1 saw `input_tokens` and `cached_input_tokens` both almost exactly double across
+      two resumed turns and stopped short of calling it, and `app-server`'s separate `total` and
+      `last` make cumulative the better reading — but the arithmetic the adapter owes is the
+      difference between a correct burn figure and a doubled one, and no `usage` row appears
+      above until it is observed. This is open question 14's Codex half. (#30)
+    - **Whether `exec resume <thread_id>` resumes by id.** `Adapter.send` takes
+      `resume: CliSessionId | null` and needs resumption *by that id*. `codex exec resume --help`
+      documents a `SESSION_ID` argument and S8.1 only ever ran `--last`, which the manager cannot
+      use — it would resume whichever session the host touched most recently, not this one.
+      Documented is not observed.

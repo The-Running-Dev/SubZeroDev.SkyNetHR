@@ -1906,6 +1906,77 @@ renumbering is required; every other clause of D105 stands, including the freeze
 suspension of `/reconcile` and `/track`, implementing against `20-contract.md` as fixed, and
 letting the documents go stale until one reconciliation at the end.
 
+### 2026-08-11 — D107 The Codex vendor mapping is written against `codex exec --json`, not `app-server`
+Context: S8.1 probed the installed CLI (`codex-cli 0.146.0`) and found the rollout-schema
+hypothesis in `20-contract.md § Vendor mapping — Codex` matched nothing on any live stream, and
+that *two* live interfaces exist rather than one. The report deliberately declined to choose
+between them (S8.2), because the choice is a contract decision. `app-server` is materially
+richer: per-item deltas for messages, reasoning and command output; thread-scoped UUID item ids;
+`total` and `last` token sub-objects that satisfy D75 with no adapter arithmetic; and an observed
+JSON-RPC approval round trip.
+Chosen: `codex exec --json`. It is the only one of the two that fits what this contract already
+says — `Adapter.send` spawns *the turn's* child and holds its stdin, which is exactly what a
+one-shot `exec` invocation is, resumed per turn; it reuses `adapters/ndjson.ts` with no second
+transport; and it is not marked `[experimental]` by the vendor's own help output. It also leaves
+D5 untouched, which S8's *Out of scope* requires.
+Rejected: **`app-server`.** Every advantage it holds costs a change outside `/contract`'s
+authority. It is a long-lived server spanning turns, so adopting it rewrites the process model in
+`Adapter.send`, in `AdapterNotification`'s per-turn `spawned`/`exited`, and in the stdin lifecycle
+the Claude mapping shares — and its reachable `on-request` prompt reopens D5 outright. Both are
+`/design`'s. This is a deferral, not a refusal: if D5 is ever revisited, `app-server` is the
+interface that would carry it, and this entry is where that thread is picked up.
+Rejected: **supporting both behind one adapter.** Two wire protocols under one `Adapter` doubles
+the surface that `schema_mismatch` has to police while `## Unresolved` 12 says the first one is
+not yet enumerable.
+Reversibility: expensive. Not because the mapping table is large, but because switching interfaces
+later drags D5, the process model, and the approval story with it.
+Amends: D105 — narrowly. D105 freezes `design/` and has slices implement against
+`20-contract.md` as a fixed artifact. That clause is set aside for this one section only, on the
+ground that S8.2 is the more specific instruction: it names this exact edit, names `/contract` as
+its owner, and stops S8 until it lands. D105 suspends `/reconcile` and `/track` by name and is
+aimed at the churn loop between slices; nothing here rewrites another slice's criteria. Every
+other clause of D105 stands, including the freeze on the remaining documents.
+
+### 2026-08-11 — D108 The Codex adapter synthesizes the `tool.call` / `tool.result` split
+Context: `NormalizedEvent` requires a `tool.call` and a later `tool.result` sharing a `callId`.
+Neither Codex interface emits such a pair. A command execution is one item whose lifecycle
+carries its own result as a field update — `item.started` with `status: 'in_progress'`, then
+`item.completed` with the same id now carrying `aggregated_output` and `exit_code`. This is a
+structural mismatch, not a naming one, and the old `(unknown)` rows did not describe it.
+Chosen: the adapter manufactures both envelopes from the one item's two lifecycle states.
+`ToolCall.name` is the literal `'command_execution'` and `ToolCall.input` is `{ command }`, since
+the wire carries no tool name to map. An `item.completed` whose `item.started` was never seen
+emits both, in order, so the renderer's "`tool.result` always follows its `tool.call`" rule holds
+unconditionally rather than only on the happy path. `ToolCall.summary` gets a Codex-local
+summariser; `summariseToolCall` keys on Claude's tool names and would degrade to the bare name
+for every Codex call.
+Rejected: **emitting only `tool.result`** — it would break the renderer rule and leave an
+in-flight command invisible for its whole duration, which is the blank-screen failure S8 exists
+to prevent. Rejected **widening `NormalizedEvent` with a single combined tool event**: the
+vocabulary is closed (D44), and one vendor's ergonomics is not a reason to reopen it. Rejected
+**deriving `name` from the command's first token** — it reads a tool name out of a shell string,
+which is the kind of inference the vendor boundary exists to keep out of a display field.
+Reversibility: cheap. It is adapter-local and nothing above it can tell the difference.
+
+### 2026-08-11 — D109 A turn-scoped Codex `callId` is accepted; no server-side alias is minted here
+Context: `10-design.md § Identity spaces` records `callId` uniqueness as session-scoped and
+"(assumed)", and open question 7 warns that a turn-scoped id breaks correlation and would need a
+server-side alias. S8.1 confirmed the condition: `exec --json` numbers items with a per-turn
+counter that restarts on every resumed turn, across two independent resumes. S8.7 says the slice
+stops there.
+Chosen: record it, do not fix it. Every correlation this contract actually performs is already
+keyed by `(turnId, callId)` — both `ToolCall` and `ToolResult` carry `turnId`; the tool-output
+blob path is `tool-output/:turnId/:callId`; the manager's pending map is created per turn and
+keyed by `requestId`; and the client renders call and result as independent rows in `seq` order
+with no id matching at all. An alias would therefore be minted to serve no existing reader.
+Rejected: **minting the alias now**, on the strength of a design sentence rather than a consumer
+that needs one — it is a mapping table to keep correct forever, bought against a hypothetical.
+Rejected **silently correcting `10-design.md § Identity spaces`**: whether open question 7 is
+discharged or still owed is `/design`'s ruling, and S8 stays stopped at S8.7 until it makes one.
+This entry states the evidence for that ruling and does not pre-empt it.
+Reversibility: cheap while nothing correlates across turns, and that is exactly the condition
+being recorded. It stops being cheap the moment a consumer does.
+
 ## Open
 
 Staging only. Once an item becomes an issue it leaves this list.
