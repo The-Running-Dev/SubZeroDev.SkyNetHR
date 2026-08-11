@@ -10,7 +10,31 @@ const state = {
   // requestId -> { setResolved(text) }, so a permission.resolved envelope — including
   // one answered from a different client — can update the row without querying the DOM.
   pendingPermissions: new Map(),
+  // id -> SessionSummary, from the last list. `state` on the summary is what decides
+  // whether the compose box is offered (S7.2, D20): an ended session — rehydrated after a
+  // restart, or closed by its operator — refuses every message with `409 session_ended`,
+  // and a box that still invites typing turns that refusal into a surprise.
+  sessionsById: new Map(),
 };
+
+function currentSession() {
+  return state.sessionId === null ? null : (state.sessionsById.get(state.sessionId) ?? null);
+}
+
+function sessionIsEnded() {
+  const session = currentSession();
+  return session !== null && session.state === 'ended';
+}
+
+// The compose box is the one control whose availability is a fact about the session rather
+// than about this client. Everything else on the page stays readable either way: an ended
+// session keeps its whole transcript and its checkpoints (D20).
+function applySessionAvailability() {
+  if (state.sessionId === null) return;
+  const ended = sessionIsEnded();
+  $('compose').hidden = ended;
+  if (ended) status('this session has ended — the transcript is read-only', 'warn');
+}
 
 function text(tag, className, value) {
   const node = document.createElement(tag);
@@ -68,6 +92,10 @@ async function refreshSessions() {
 
   const list = $('sessions');
   clear(list);
+  state.sessionsById = new Map();
+  for (const session of result.payload.sessions) {
+    state.sessionsById.set(session.id, session);
+  }
   for (const session of result.payload.sessions) {
     const item = document.createElement('li');
     item.className = 'session';
@@ -83,12 +111,17 @@ async function refreshSessions() {
     item.appendChild(button);
     list.appendChild(item);
   }
+
+  // A session can end without this client doing anything — a restart, or its operator
+  // closing it from another tab — so the refresh that discovers that is also what has to
+  // withdraw the compose box.
+  applySessionAvailability();
 }
 
 function selectSession(sessionId) {
   state.sessionId = sessionId;
   state.refetched = false;
-  $('compose').hidden = false;
+  applySessionAvailability();
   $('checkpoints').hidden = false;
   openStream(sessionId);
   void refreshSessions();
@@ -164,7 +197,10 @@ function openStream(sessionId) {
   const stream = new EventSource(`/api/sessions/${encodeURIComponent(sessionId)}/events`);
   state.stream = stream;
 
-  stream.onopen = () => status('connected', 'ok');
+  // An ended session still streams — its whole transcript replays from the spill (D40) —
+  // so "connected" is true and is not the thing the operator needs told. Saying it anyway
+  // would overwrite the one message explaining why they cannot type.
+  stream.onopen = () => (sessionIsEnded() ? applySessionAvailability() : status('connected', 'ok'));
   stream.onerror = () => status('reconnecting…', 'warn');
 
   const handlers = {
@@ -187,6 +223,15 @@ function openStream(sessionId) {
       }
       if (envelope.kind === 'error' && envelope.data?.kind === 'replay_gap') {
         if (handleReplayGap()) return;
+      }
+      if (envelope.kind === 'session.ended' && envelope.sessionId === state.sessionId) {
+        // Withdrawn the moment it happens rather than at the next refresh: the session may
+        // have been ended from another tab, or by a storage failure, and the operator must
+        // not be left typing into a box whose next send is a `409`. The event still renders
+        // below, so the transcript says what happened as well as the status bar.
+        const session = currentSession();
+        if (session !== null) state.sessionsById.set(state.sessionId, { ...session, state: 'ended' });
+        applySessionAvailability();
       }
       if (envelope.kind === 'checkpoint.created') {
         // A new checkpoint invalidates the list this session already fetched, whether it

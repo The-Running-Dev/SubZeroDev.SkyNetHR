@@ -348,3 +348,45 @@ describe('S3.3 — a reported replay_gap makes the client refetch the transcript
     }
   });
 });
+
+describe('S7.2 — an ended session offers no compose box', () => {
+  it('a session listed as ended is selected read-only, and says why', async () => {
+    const { byId, restore } = await runConsole([{ id: 's1', cwd: '/w/p', vendor: 'claude', state: 'ended' }]);
+    try {
+      const button = byId.get('sessions')!.children[0]!.children[0]!;
+      for (const fn of button.listeners.get('click') ?? []) fn({});
+
+      assert.equal(byId.get('compose')!.hidden, true, 'a rehydrated session refuses every message with 409 session_ended (D20)');
+      // Everything else stays readable: D20 keeps the transcript and the checkpoints.
+      assert.equal(byId.get('checkpoints')!.hidden, false);
+      const shown = byId.get('status')!.children.map((c) => c.textContent).join(' ');
+      assert.match(shown, /ended/, 'a box that vanishes with no reason given is a bug report');
+    } finally {
+      await restore();
+    }
+  });
+
+  it('a live session withdraws the box the moment session.ended arrives', async () => {
+    const { byId, streams, restore } = await runConsole([{ id: 's1', cwd: '/w/p', vendor: 'claude', state: 'live' }]);
+    try {
+      const button = byId.get('sessions')!.children[0]!.children[0]!;
+      for (const fn of button.listeners.get('click') ?? []) fn({});
+      assert.equal(byId.get('compose')!.hidden, false, 'a live session composes normally');
+
+      // Ended from somewhere this client did not act: another tab, or a storage failure.
+      deliver(streams[0]!, {
+        seq: 7,
+        sessionId: 's1',
+        ts: '2026-08-09T00:00:00.000Z',
+        kind: 'session.ended',
+        data: { reason: 'operator', endedAt: '2026-08-09T00:00:00.000Z' },
+      });
+
+      assert.equal(byId.get('compose')!.hidden, true, 'the box goes at the event, not at the next refresh');
+      // The event is still drawn: the status bar is transient, the transcript is the record.
+      assert.equal(byId.get('transcript')!.children.length, 1);
+    } finally {
+      await restore();
+    }
+  });
+});
