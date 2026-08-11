@@ -127,7 +127,21 @@ export interface ProcessRecord {
   readonly turnId: TurnId;
   readonly startedAt: IsoTimestamp; // load-bearing: the pid-reuse guard reads it
   readonly image: string;
-  exitedAt: IsoTimestamp | null; // tombstone
+  exitedAt: IsoTimestamp | null; // null while live; set by folding in the tombstone
+}
+
+// The exit line. `pids.ndjson` carries two line shapes and this is the second: a full
+// `ProcessRecord` is written at spawn, and this narrower line at exit, because
+// `tombstonePid` is given a pid and a timestamp and nothing else (D95).
+//
+// A reader folds the two shapes; it does not treat the latest line as a whole record.
+// Liveness comes from the latest line for a `pid`; `startedAt`, `image`, `sessionId` and
+// `turnId` come from that pid's most recent *spawn* line. The reuse guard reads all three
+// of `exitedAt`, `startedAt` and `image` (I19), and a reader that took them off the
+// tombstone would find two of them missing and reap on a guard that never ran.
+export interface ProcessTombstone {
+  readonly pid: number;
+  readonly exitedAt: IsoTimestamp;
 }
 
 // ---------------------------------------------------------------------------
@@ -538,7 +552,15 @@ export type AdapterNotification =
 
 export type AdapterEmitted = Exclude<
   EventKind,
-  'session.started' | 'session.ended' | 'checkpoint.created' | 'checklist.item.completed'
+  | 'session.started'
+  | 'session.ended'
+  | 'checkpoint.created'
+  | 'checklist.item.completed'
+  // D97: the manager is the sole emitter. It holds the `pending` map, deletes from it
+  // synchronously (D33) and appends the `AuditRecord` every resolution owes (I11), so an
+  // adapter resolving a request of its own would produce a resolution with no audit record
+  // and leave the map holding an entry nothing clears.
+  | 'permission.resolved'
 >;
 
 export type AdapterEvent = {

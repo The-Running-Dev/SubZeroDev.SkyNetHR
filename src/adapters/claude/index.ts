@@ -221,6 +221,11 @@ export function createClaudeAdapter(opts: AdapterOptions & { readonly executable
       return new Promise((resolve) => {
         currentTurnId = turnId;
         resultSeen = false;
+        // Cleared per turn, not per adapter. One adapter serves every turn of a session,
+        // so a flag left set by an earlier interrupt would make the *next* turn's genuine
+        // crash report `stopReason: 'interrupted'` — an expected end the operator never
+        // asked for, hiding a real failure behind a routine one.
+        killRequested = false;
 
         // The resume id lands on an argv that Windows may pass through a shell (below),
         // so a CLI that reported a session id carrying shell metacharacters is refusing

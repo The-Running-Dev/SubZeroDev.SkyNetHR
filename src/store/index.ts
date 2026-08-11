@@ -13,6 +13,7 @@ import type {
   IsoTimestamp,
   LoadedMeta,
   ProcessRecord,
+  ProcessTombstone,
   Requisition,
   Review,
   Seq,
@@ -356,8 +357,9 @@ export async function createStore(config: Config): Promise<Result<Store, StoreEr
     },
 
     async tombstonePid(pid: number, exitedAt: IsoTimestamp) {
-      // A tombstone is a second line for the same pid; the latest line wins on read.
-      return appendLine(path.join(storageRoot, 'pids.ndjson'), JSON.stringify({ pid, exitedAt } satisfies Partial<ProcessRecord>), false);
+      // D95: a tombstone is the second of the file's two line shapes, not a partial record.
+      // The latest line for a pid decides liveness; the spawn line carries everything else.
+      return appendLine(path.join(storageRoot, 'pids.ndjson'), JSON.stringify({ pid, exitedAt } satisfies ProcessTombstone), false);
     },
 
     async readOpenPids(): Promise<readonly ProcessRecord[]> {
