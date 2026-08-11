@@ -1515,6 +1515,38 @@ test('S7.2/S7.3 — a rehydrated session is ended with endedAt set and lastSeq d
   if (!messaged.ok) assert.equal(messaged.error.code, 'session_ended');
 });
 
+test('S7.2/S7.3 follow-up — restore(), interrupt(), and a repeat end() on a rehydrated session are refused/no-op rather than touching its null adapter', async () => {
+  const { config, store, checkpoints } = await makeManager('full');
+  const sessionId = 'sess-rehydrate-2';
+  const record = bootSessionRecord(sessionId);
+  assert.equal((await store.createSession(record)).ok, true);
+  assert.equal((await store.appendEvent(record.id, bootEnvelope(sessionId, 1, 'message', { turnId: 't1', role: 'user', text: 'm1' }))).ok, true);
+
+  const manager2 = createSessionManager({ config, store, checkpoints, records: notImplementedProxy<Records>('records') });
+  assert.equal((await manager2.boot()).ok, true);
+
+  const before = manager2.get(sessionId as never, record.owner);
+  assert.equal(before.ok, true);
+  const endedAtBefore = before.ok ? before.value.endedAt : null;
+
+  const restored = await manager2.restore(sessionId as never, record.owner, 'deadbeef' as never);
+  assert.equal(restored.ok, false);
+  if (!restored.ok) assert.equal(restored.error.code, 'session_ended', 'restore does not run checkpoints.restore against a cwd this entry no longer owns');
+
+  const interrupted = await manager2.interrupt(sessionId as never, record.owner, 't1' as never);
+  assert.equal(interrupted.ok, true, 'no live turn to interrupt is a no-op, not an error');
+
+  const ended = await manager2.end(sessionId as never, record.owner);
+  assert.equal(ended.ok, true, 'ending an already-ended session is a no-op, not an error');
+
+  const after = manager2.get(sessionId as never, record.owner);
+  assert.equal(after.ok, true);
+  if (after.ok) {
+    assert.equal(after.value.endedAt, endedAtBefore, 'endedAt is not clobbered by a repeat end()');
+    assert.equal(after.value.lastSeq, before.ok ? before.value.lastSeq : -1, 'no duplicate session.ended was appended');
+  }
+});
+
 test('S7.4 — a spill ending on an unpaired turn.started is closed at boot: outstanding permission.requests resolve cancelled_process_exit, then turn.ended/server_restart, at the next contiguous seq', async () => {
   const { config, store, checkpoints, storageRoot } = await makeManager('full');
   const sessionId = 'sess-crash-1';

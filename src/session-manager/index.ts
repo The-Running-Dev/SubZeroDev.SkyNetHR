@@ -207,8 +207,16 @@ export function createSessionManager(deps: {
     if (isWindows) {
       await new Promise<void>((resolve) => {
         const p = spawn('taskkill', ['/PID', String(pid), '/T', '/F']);
-        p.once('error', () => resolve());
-        p.once('exit', () => resolve());
+        p.once('error', (err) => {
+          console.warn(`[session-manager] boot: taskkill /PID ${pid} /T /F failed to start: ${err.message}; the process may still be running`);
+          resolve();
+        });
+        p.once('exit', (code) => {
+          if (code !== 0) {
+            console.warn(`[session-manager] boot: taskkill /PID ${pid} /T /F exited with code ${code}; the process may still be running`);
+          }
+          resolve();
+        });
       });
       return;
     }
@@ -628,6 +636,10 @@ export function createSessionManager(deps: {
       const entry = sessions.get(sessionId);
       if (!entry || entry.record.owner !== owner) return { ok: false, error: { code: 'no_such_session', sessionId } };
       if (entry.turn) return { ok: false, error: { code: 'turn_in_flight', sessionId, turnId: entry.turn.turnId } };
+      // Already ended (a rehydrated session, or a repeat `/end` call): a no-op, not a
+      // second `endedAt`/`session.ended` — the documented error set for this route has
+      // no `session_ended`, which only makes sense if a repeat call is safely inert.
+      if (entry.record.state === 'ended') return { ok: true, value: undefined };
 
       entry.record.state = 'ended';
       entry.record.endedAt = nowIso();
@@ -695,6 +707,10 @@ export function createSessionManager(deps: {
     async restore(sessionId, owner, sha) {
       const entry = sessions.get(sessionId);
       if (!entry || entry.record.owner !== owner) return { ok: false, error: { code: 'no_such_session', sessionId } };
+      // A rehydrated session has no adapter and its cwd may already be reclaimed by a
+      // new live session (`findLiveOverlap` only excludes `state === 'live'`) — restoring
+      // into it would run a git checkout against a workspace this entry no longer owns.
+      if (entry.record.state === 'ended') return { ok: false, error: { code: 'session_ended', sessionId } };
       // S6.5/D17: restore is a second consumer of the single-writer turn-slot invariant,
       // alongside `POST /message` — claimed synchronously here, before the first `await`
       // (I5), the same way `message()` claims it, so a concurrent `message()` or a second
