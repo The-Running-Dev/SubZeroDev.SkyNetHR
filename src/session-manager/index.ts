@@ -1,4 +1,10 @@
 import { randomUUID } from 'node:crypto';
+import { spawn, execFile } from 'node:child_process';
+import { readFile, rm, writeFile } from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import { platform } from 'node:process';
+import { promisify } from 'node:util';
 import { createAdapter } from '../adapters/index.js';
 import { pathsOverlap, resolveInsideRoot } from '../jail/index.js';
 import type {
@@ -20,6 +26,7 @@ import type {
   PayrollView,
   PermissionAnswer,
   PendingPermission,
+  ProcessRecord,
   RequestId,
   ResolvedPath,
   Result,
@@ -35,6 +42,9 @@ import type {
   SubscriberSink,
   TurnId,
 } from '../contract/index.js';
+
+const isWindows = platform === 'win32';
+const execFileAsync = promisify(execFile);
 import type { Checkpoints } from '../contract/index.js';
 import type { Records } from '../contract/index.js';
 
@@ -53,7 +63,11 @@ interface TurnState {
 
 interface SessionEntry {
   record: SessionRecord;
-  adapter: Adapter;
+  // `null` for a session rehydrated at boot (S7.2): no `--resume` is ever attempted on
+  // one (D20), so it never needs a child process, and every route that would reach the
+  // adapter for a live session already refuses first on `state === 'ended'` or on there
+  // being no live turn.
+  adapter: Adapter | null;
   turn: TurnState | null;
   seq: number;
   firstTurnAnnounced: boolean;
@@ -145,10 +159,224 @@ export function createSessionManager(deps: {
     await entry.writeQueue;
   }
 
+  // S7.10: proves the storage root is actually writable right now, not merely that it
+  // existed when `createStore` last touched it (permissions can change, a mount can go
+  // read-only, in between).
+  async function probeStorageWritable(storageRoot: string): Promise<Result<void, StartupError>> {
+    const marker = path.join(storageRoot, `.boot-write-check-${randomUUID()}`);
+    try {
+      await writeFile(marker, '');
+      await rm(marker, { force: true });
+      return { ok: true, value: undefined };
+    } catch (err) {
+      return { ok: false, error: { code: 'storage_unwritable', path: storageRoot, detail: (err as Error).message } };
+    }
+  }
+
+  // The OS-reported image name for a live pid, or `null` when nothing is running there
+  // (already exited, or never existed). Windows has no `/proc`; Linux does.
+  async function getProcessImage(pid: number): Promise<string | null> {
+    if (isWindows) {
+      try {
+        const { stdout } = await execFileAsync('tasklist', ['/FI', `PID eq ${pid}`, '/FO', 'CSV', '/NH']);
+        const firstLine = stdout.split(/\r?\n/).find((l) => l.trim().length > 0);
+        if (!firstLine) return null;
+        const match = /^"([^"]*)"/.exec(firstLine);
+        return match ? match[1]! : null;
+      } catch {
+        return null;
+      }
+    }
+    try {
+      const comm = await readFile(`/proc/${pid}/comm`, 'utf8');
+      return comm.trim();
+    } catch {
+      return null;
+    }
+  }
+
+  function imagesMatch(recorded: string, actual: string): boolean {
+    const strip = (s: string) => s.replace(/\.exe$/i, '');
+    return isWindows ? strip(recorded).toLowerCase() === strip(actual).toLowerCase() : strip(recorded) === strip(actual);
+  }
+
+  // D38: the tree, not the recorded pid — `taskkill /T /F` walks the live process table
+  // on Windows; on POSIX the recorded pid is the process-group leader (`detached: true`
+  // at spawn), so signalling the negated pid reaches everything it later spawned.
+  async function killProcessTree(pid: number, pgid: number | null): Promise<void> {
+    if (isWindows) {
+      await new Promise<void>((resolve) => {
+        const p = spawn('taskkill', ['/PID', String(pid), '/T', '/F']);
+        p.once('error', () => resolve());
+        p.once('exit', () => resolve());
+      });
+      return;
+    }
+    try {
+      process.kill(-(pgid ?? pid), 'SIGKILL');
+    } catch {
+      // Already gone — nothing left to kill.
+    }
+  }
+
+  // S7.5/S7.6 (D23, I19): the pid-reuse guard. An entry is reaped — tree killed, then
+  // tombstoned — only when it has no `exitedAt` (guaranteed by `readOpenPids`), its
+  // `startedAt` is later than the host's last boot, and the live process's image still
+  // matches. Anything failing either of the remaining two tests is logged and tombstoned
+  // without being touched: a stale record is bookkeeping, a wrong kill is an incident.
+  async function reapOne(record: ProcessRecord, hostBootAt: number): Promise<void> {
+    const startedAfterBoot = new Date(record.startedAt).getTime() > hostBootAt;
+    const actualImage = startedAfterBoot ? await getProcessImage(record.pid) : null;
+    const imageOk = actualImage !== null && imagesMatch(record.image, actualImage);
+
+    if (startedAfterBoot && imageOk) {
+      await killProcessTree(record.pid, record.pgid);
+    } else {
+      console.warn(
+        `[session-manager] boot: not reaping pid ${record.pid} (${record.image}): ` +
+          (startedAfterBoot ? `live image is ${actualImage ?? 'unknown'}, not ${record.image}` : 'recorded startedAt predates this host\'s last boot'),
+      );
+    }
+    await store.tombstonePid(record.pid, nowIso());
+  }
+
+  // S7.4/S7.9 (D39): a spill ending on an unpaired `turn.started` is closed on disk —
+  // every request still in `pending` when the log ran out resolved
+  // `cancelled_process_exit`, then `turn.ended { stopReason: 'server_restart' }` — before
+  // boot returns, using the same `emit` a live turn would, so the appended envelopes get
+  // real, spill-durable `seq` values continuing from wherever rehydration left off (S7.3).
+  async function closeUnterminatedTurn(entry: SessionEntry): Promise<void> {
+    let openTurnId: TurnId | null = null;
+    const pending = new Map<RequestId, { readonly tool: string; readonly input: Readonly<Record<string, unknown>> }>();
+
+    for await (const result of store.readEventsAfter(entry.record.id, 0)) {
+      if (!result.ok) break; // best-effort: an unreadable spill is reported elsewhere, not here
+      const envelope = result.value;
+      switch (envelope.kind) {
+        case 'turn.started':
+          openTurnId = (envelope.data as EventPayloadMap['turn.started']).turnId;
+          pending.clear();
+          break;
+        case 'turn.ended':
+          openTurnId = null;
+          pending.clear();
+          break;
+        case 'permission.request': {
+          const d = envelope.data as EventPayloadMap['permission.request'];
+          pending.set(d.requestId, { tool: d.tool, input: d.input });
+          break;
+        }
+        case 'permission.resolved': {
+          const d = envelope.data as EventPayloadMap['permission.resolved'];
+          pending.delete(d.requestId);
+          break;
+        }
+        default:
+          break;
+      }
+    }
+
+    if (openTurnId === null) return;
+    const turnId = openTurnId;
+
+    let anyAuditFailed = false;
+    for (const [requestId, p] of pending) {
+      await emit(entry, 'permission.resolved', {
+        turnId,
+        requestId,
+        decision: 'deny',
+        scope: 'once',
+        operator: null,
+        reason: 'cancelled_process_exit',
+      });
+      const appended = await store.appendAudit({
+        ts: nowIso(),
+        operator: null,
+        sessionId: entry.record.id,
+        vendor: entry.record.vendor,
+        sandbox: entry.record.sandbox,
+        tool: p.tool,
+        input: p.input,
+        decision: 'deny',
+        scope: 'once',
+        reason: 'cancelled_process_exit',
+      });
+      if (!appended.ok) anyAuditFailed = true;
+    }
+    if (anyAuditFailed) {
+      await emit(entry, 'session.notice', {
+        level: 'error',
+        code: 'audit_unavailable',
+        text: 'The audit record for one or more cancelled permissions could not be written.',
+      });
+    }
+
+    await emit(entry, 'turn.ended', { turnId, stopReason: 'server_restart', usage: null });
+  }
+
   const manager: SessionManager = {
     async boot(): Promise<Result<void, StartupError>> {
-      // Reap, rehydrate and open-turn closure are S7's. S1 has nothing to rehydrate: a
-      // fresh process starts with an empty in-memory registry.
+      // S7.10: a storage root that exists but cannot be written (permissions revoked,
+      // mounted read-only, since `createStore` last touched it) is refused here rather
+      // than discovered mid-rehydration.
+      const writable = await probeStorageWritable(config.storageRoot);
+      if (!writable.ok) return writable;
+
+      // Step 1 (D23, D38): reap orphaned children before anything is rehydrated, so no
+      // rehydrated session can be adopted by an orphan still holding its workspace.
+      const hostBootAt = Date.now() - os.uptime() * 1000;
+      const openPids = await store.readOpenPids();
+      for (const record of openPids) {
+        await reapOne(record, hostBootAt);
+      }
+
+      // Step 2 (D20, D37, D49): every session comes back `ended`; `lastSeq` is derived
+      // from the spill's tail, never trusted off `meta.json`.
+      const loaded = await store.readAllMeta();
+      for (const { sessionId, result } of loaded) {
+        if (!result.ok) {
+          // S7.7: a corrupt or newer-than-known meta.json is skipped, logged, and left
+          // untouched — one broken session must not deny every other one.
+          console.warn(`[session-manager] boot: skipping session ${sessionId}: ${JSON.stringify(result.error)}`);
+          continue;
+        }
+        const record = result.value;
+        const lastSeqResult = await store.readLastSeq(sessionId);
+        if (!lastSeqResult.ok) {
+          console.warn(`[session-manager] boot: skipping session ${sessionId}: ${JSON.stringify(lastSeqResult.error)}`);
+          continue;
+        }
+        const rehydrated: SessionRecord = {
+          ...record,
+          state: 'ended',
+          endedAt: record.endedAt ?? nowIso(),
+          lastSeq: lastSeqResult.value,
+        };
+        const entry: SessionEntry = {
+          record: rehydrated,
+          adapter: null,
+          turn: null,
+          seq: rehydrated.lastSeq as number,
+          firstTurnAnnounced: true,
+          hasRunATurn: true,
+          checkpointsAvailable: false,
+          subscribers: new Set(),
+          writeQueue: Promise.resolve(),
+        };
+        sessions.set(sessionId, entry);
+        // One of the three occasions `store`'s table names: a `state` transition.
+        await store.writeMeta(rehydrated);
+      }
+
+      // Step 3 (D39): a spill left on an unpaired `turn.started` is closed on disk —
+      // every outstanding `permission.request` resolved `cancelled_process_exit`, then
+      // `turn.ended { stopReason: 'server_restart' }` — before anything is served, so the
+      // ordering guarantees in `20-contract.md § Rules the renderer may rely on` hold
+      // unconditionally rather than acquiring a "the transcript might just stop" case.
+      for (const entry of sessions.values()) {
+        await closeUnterminatedTurn(entry);
+      }
+
       return { ok: true, value: undefined };
     },
 
@@ -286,7 +514,9 @@ export function createSessionManager(deps: {
         });
       }
 
-      const sendResult = await entry.adapter.send(text, entry.record.cliSessionId, turnId);
+      // `state === 'ended'` was refused above; only a live session's entry reaches here,
+      // and only `create` sets `state: 'live'`, always alongside a real adapter.
+      const sendResult = await entry.adapter!.send(text, entry.record.cliSessionId, turnId);
       if (!sendResult.ok) {
         // The `turn.started` above is already durable; pair it (I14, D39) before
         // freeing the slot, or the log carries an open turn no restart ever repairs.
@@ -338,7 +568,9 @@ export function createSessionManager(deps: {
       if (!appended.ok) {
         // S4.7: an audit append failure denies, regardless of what the operator asked
         // for — the turn continues and no tool runs.
-        entry.adapter.respond(answer.requestId, 'deny');
+        // A pending request exists only on a live turn, which only a live session (a
+        // real adapter) can have — a rehydrated session's `turn` is always null.
+        entry.adapter!.respond(answer.requestId, 'deny');
         await emit(entry, 'permission.resolved', {
           turnId: turn.turnId,
           requestId: answer.requestId,
@@ -360,7 +592,7 @@ export function createSessionManager(deps: {
       // benign race the `exited` handler resolves for every other outstanding request).
       // `permission.resolved` must fire either way, or this answer's own audit record
       // ends up with no paired resolution event (I9).
-      entry.adapter.respond(answer.requestId, answer.decision);
+      entry.adapter!.respond(answer.requestId, answer.decision);
       await emit(entry, 'permission.resolved', {
         turnId: turn.turnId,
         requestId: answer.requestId,
@@ -386,7 +618,9 @@ export function createSessionManager(deps: {
       // own `exited` notification once `kill` reaches it (S5.1, S5.4) — the same path
       // an unexpected crash already takes, and the vendor adapter is what tells the two
       // apart for `stopReason`.
-      await entry.adapter.kill();
+      // A live turn (checked above) exists only on a live session, which always has a
+      // real adapter — a rehydrated session's `turn` is always null.
+      await entry.adapter!.kill();
       return { ok: true, value: undefined };
     },
 
