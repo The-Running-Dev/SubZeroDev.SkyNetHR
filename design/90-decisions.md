@@ -2036,13 +2036,22 @@ schema change needing a migration story for a string that `reason` already holds
 Reversibility: cheap in every direction taken. Persisting later is additive; allowing standing
 denials later widens a refusal. Neither invalidates a record already written.
 
+### 2026-08-12 — D111 D105's freeze was decided but the marker was never written; the record is corrected, not the tree
+Context: D105 states `design/` is frozen for the rest of tier one. `design/FROZEN.md` is the
+whole mechanism (`AGENTS.md § The design freeze`) and no commit in this repository's history
+ever added it, so every authoring and tracking command since D105 — including the `/track` pass
+that found this — has in fact run unfrozen. The decision and the tree disagreed.
+Chosen: treat D105 as a decision that was made and never executed, and say so here, rather than
+retroactively making the tree match it. The marker is not created by this entry.
+Rejected: running `/freeze` now to make `design/FROZEN.md` match D105's intent. Tier two
+(S13–S18) is mid-flight with open design questions of its own (S13.1, S15.1) that `/design`
+would need to answer before a freeze could honestly claim the tree is settled, and gating
+`/design`, `/contract`, `/slices`, `/reconcile` and `/track` immediately, unasked, is a bigger
+change than this record needed to make. Freezing, if wanted, is a separate call for `/freeze` to
+make deliberately, not a side effect of correcting a stale log entry.
+Reversibility: cheap. Running `/freeze` later is unaffected by this entry; it only stops this
+particular discrepancy from being rediscovered as a bug.
+
 ## Open
 
 Staging only. Once an item becomes an issue it leaves this list.
-
-- **D105 declares `design/` frozen for the rest of tier one, but `design/FROZEN.md` has never
-  existed** — no commit in history adds it. The freeze mechanism was implemented (0659b65) and the
-  marker's existence is stated to be the whole mechanism, so the repository is *not* frozen and
-  the five gated commands do not refuse. Either the marker was never written or D105 is stale.
-  Worth resolving before the next authoring command runs, since this pass proceeded on the
-  marker's absence.
