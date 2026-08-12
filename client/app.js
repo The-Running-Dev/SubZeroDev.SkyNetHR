@@ -307,10 +307,21 @@ function openSseStream(sessionId) {
 // the SSE edge (`20-contract.md § edge/sse and edge/ws`). `WebSocket` has no built-in retry
 // the way `EventSource` does, so a lost connection reopens by hand, resuming from whatever
 // `state.lastSeq` this client last saw.
+// 4401/4404 are this edge's own close codes for a first-message refusal (S11.3): the
+// operator does not have a usable identity, or does not own this session. Neither
+// resolves itself on retry, so reconnecting on these codes would just repeat the same
+// refusal every 2 seconds forever with nothing telling the operator why.
+const WS_PERMANENT_FAILURE_CODES = new Set([4401, 4404]);
+
+function describeWsError(error) {
+  return error && error.code && error.message ? `${error.code}: ${error.message}` : 'connection refused';
+}
+
 function openWsStream(sessionId) {
   const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
   const stream = new WebSocket(`${proto}//${window.location.host}/api/sessions/${encodeURIComponent(sessionId)}/events`);
   state.stream = stream;
+  let lastError = null;
 
   stream.onopen = () => {
     stream.send(JSON.stringify({ after: state.lastSeq }));
@@ -324,12 +335,19 @@ function openWsStream(sessionId) {
     } catch {
       return;
     }
-    if (envelope.type === 'error') return; // a first-message auth/ownership refusal, not an Envelope
+    if (envelope.type === 'error') {
+      lastError = envelope.error; // a first-message auth/ownership refusal, not an Envelope
+      return;
+    }
     handleEnvelope(sessionId, envelope);
   };
   stream.onerror = () => status('reconnecting…', 'warn');
-  stream.onclose = () => {
+  stream.onclose = (event) => {
     if (state.stream !== stream || state.sessionId !== sessionId) return; // superseded by a newer stream
+    if (WS_PERMANENT_FAILURE_CODES.has(event.code)) {
+      status(describeWsError(lastError), 'error');
+      return;
+    }
     status('reconnecting…', 'warn');
     setTimeout(() => {
       if (state.stream === stream && state.sessionId === sessionId) openWsStream(sessionId);
