@@ -428,6 +428,19 @@ test('S12.5 — the cursor is opaque and server-minted: an altered cursor is ref
   assert.equal(stillWorks.ok, true);
 });
 
+test('S12.5 — a tampered cursor is refused even when audit.ndjson does not exist yet', async () => {
+  const storageRoot = await mkdtemp(path.join(tmpdir(), 'skynet-store-'));
+  const storeResult = await createStore(baseConfig(storageRoot));
+  if (!storeResult.ok) return;
+  const store = storeResult.value;
+
+  // No writeAuditFixture call — audit.ndjson is never created.
+  const refused = await store.readAuditPage(emptyAuditQuery({ before: 'not-a-real-cursor' as AuditCursor, limit: 2 }));
+  assert.equal(refused.ok, false);
+  if (refused.ok) return;
+  assert.equal(refused.error.code, 'corrupt', 'a tampered cursor must not be silently accepted just because the file is missing');
+});
+
 test('S12.6 — sessionId, operator, since and until each narrow the window, and combine', async () => {
   const storageRoot = await mkdtemp(path.join(tmpdir(), 'skynet-store-'));
   const storeResult = await createStore(baseConfig(storageRoot));

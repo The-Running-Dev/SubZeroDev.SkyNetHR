@@ -134,6 +134,18 @@ function encodeAuditCursor(offset: number, secret: Buffer): AuditCursor {
   return Buffer.from(`${payload}.${mac}`, 'utf8').toString('base64url') as AuditCursor;
 }
 
+// Constant-time in the same shape as `edge/http-common`'s `constantTimeEquals` — that
+// module compares a caller-supplied secret and this one a caller-supplied MAC, and `store`
+// cannot import from `edge/http-common` (nor the reverse: neither is the other's dependency
+// per `10-design.md § Module boundaries`), so the technique is kept identical by hand rather
+// than shared. Keep both in sync if either changes.
+function macEquals(a: string, b: string): boolean {
+  const left = Buffer.from(a, 'utf8');
+  const right = Buffer.from(b, 'utf8');
+  const same = left.length === right.length;
+  return timingSafeEqual(left, same ? right : left) && same;
+}
+
 function decodeAuditCursor(cursor: AuditCursor, secret: Buffer): number | null {
   let raw: string;
   try {
@@ -146,9 +158,7 @@ function decodeAuditCursor(cursor: AuditCursor, secret: Buffer): number | null {
   const payload = raw.slice(0, dot);
   const mac = raw.slice(dot + 1);
   const expectedMac = createHmac('sha256', secret).update(payload).digest('hex').slice(0, 32);
-  const macBuf = Buffer.from(mac, 'utf8');
-  const expectedBuf = Buffer.from(expectedMac, 'utf8');
-  if (macBuf.length !== expectedBuf.length || !timingSafeEqual(macBuf, expectedBuf)) return null;
+  if (!macEquals(mac, expectedMac)) return null;
   if (!/^\d+$/.test(payload)) return null;
   const offset = Number(payload);
   if (!Number.isSafeInteger(offset) || offset < 0) return null;
@@ -183,17 +193,19 @@ async function readAuditPageImpl(
   const requested = Number.isFinite(query.limit) && query.limit > 0 ? Math.floor(query.limit) : auditPageMax;
   const limit = Math.min(requested, auditPageMax);
 
+  // A missing file is an empty file for cursor-validation purposes — an altered cursor
+  // must be refused the same way regardless of whether `audit.ndjson` happens to exist
+  // yet, so this does not return before `decodeAuditCursor` runs (S12.5).
   let handle;
   try {
     handle = await open(filePath, 'r');
   } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return { ok: true, value: { records: [], nextCursor: null } };
-    return ioError(filePath, (err as Error).message);
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') return ioError(filePath, (err as Error).message);
+    handle = null;
   }
 
   try {
-    const fileStat = await handle.stat();
-    const fileSize = fileStat.size;
+    const fileSize = handle === null ? 0 : (await handle.stat()).size;
 
     let upperBound: number; // exclusive — bytes at [0, upperBound) remain unread
     if (query.before === null) {
@@ -206,6 +218,8 @@ async function readAuditPageImpl(
       upperBound = decoded;
     }
 
+    if (handle === null || upperBound === 0) return { ok: true, value: { records: [], nextCursor: null } };
+
     const records: AuditRecord[] = [];
     let nextCursor: AuditCursor | null = null;
     let tailFragment: Buffer = Buffer.alloc(0); // an incomplete line, held until its start is read
@@ -216,7 +230,10 @@ async function readAuditPageImpl(
       const readLen = Math.min(AUDIT_READ_CHUNK_BYTES, cursor);
       const readStart = cursor - readLen;
       const raw = Buffer.alloc(readLen);
-      await handle.read(raw, 0, readLen, readStart);
+      const { bytesRead } = await handle.read(raw, 0, readLen, readStart);
+      if (bytesRead !== readLen) {
+        return ioError(filePath, `short read at offset ${readStart}: expected ${readLen} bytes, got ${bytesRead}`);
+      }
       const buf = tailFragment.length > 0 ? Buffer.concat([raw, tailFragment]) : raw;
       tailFragment = Buffer.alloc(0);
       const isFileStart = readStart === 0;
@@ -276,7 +293,7 @@ async function readAuditPageImpl(
 
     return { ok: true, value: { records, nextCursor } };
   } finally {
-    await handle.close();
+    if (handle !== null) await handle.close();
   }
 }
 

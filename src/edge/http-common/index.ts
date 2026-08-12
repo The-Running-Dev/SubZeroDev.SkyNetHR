@@ -144,6 +144,21 @@ export function isMutating(method: string): boolean {
   return method === 'POST' || method === 'PUT' || method === 'PATCH' || method === 'DELETE';
 }
 
+// `contract/index.ts`'s `IsoTimestamp` brand: "ISO 8601, UTC, millisecond precision, `Z`
+// suffix". `handleAudit`'s `since`/`until` are the one place an `IsoTimestamp` is minted
+// from caller input rather than the server's own clock, so this is the one place that shape
+// is checked rather than assumed.
+const ISO_TIMESTAMP_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
+
+export function parseIsoTimestamp(value: string): string | null {
+  if (!ISO_TIMESTAMP_PATTERN.test(value)) return null;
+  return Number.isNaN(Date.parse(value)) ? null : value;
+}
+
+// Kept identical to `store`'s `macEquals` by hand — the two modules cannot share a runtime
+// helper (`store` depends only on `config`/`contract`; `contract` is types-only) but both
+// compare a caller-supplied secret in constant time, so the technique must not drift between
+// them even though the code does. Keep both in sync if either changes.
 export function constantTimeEquals(a: string, b: string): boolean {
   const left = Buffer.from(a, 'utf8');
   const right = Buffer.from(b, 'utf8');
@@ -409,13 +424,22 @@ export function createHttpHandlers(deps: EdgeDeps) {
 
     const nonEmpty = (value: string | null): string | null => (value === null || value === '' ? null : value);
 
+    const since = nonEmpty(params.get('since'));
+    if (since !== null && parseIsoTimestamp(since) === null) {
+      return sendError(res, 'bad_request', 'since must be an ISO 8601 UTC timestamp', { field: 'since' });
+    }
+    const until = nonEmpty(params.get('until'));
+    if (until !== null && parseIsoTimestamp(until) === null) {
+      return sendError(res, 'bad_request', 'until must be an ISO 8601 UTC timestamp', { field: 'until' });
+    }
+
     const query: AuditQuery = {
       before: nonEmpty(params.get('before')) as AuditCursor | null,
       limit,
       sessionId: nonEmpty(params.get('sessionId')) as SessionId | null,
       operator: nonEmpty(params.get('operator')) as OperatorId | null,
-      since: nonEmpty(params.get('since')) as IsoTimestamp | null,
-      until: nonEmpty(params.get('until')) as IsoTimestamp | null,
+      since: since as IsoTimestamp | null,
+      until: until as IsoTimestamp | null,
       incidentsOnly: params.get('incidentsOnly') === 'true',
     };
 

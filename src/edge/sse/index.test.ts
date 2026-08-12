@@ -1097,4 +1097,21 @@ describe('S12 — GET /api/audit', () => {
     assert.equal(body.records.length, 1);
     assert.equal(body.records[0]!.operator, 'bob');
   });
+
+  it('S12.6 — a malformed since or until is refused 422 bad_request rather than silently matching nothing', async () => {
+    const h = await makeEdge();
+    await writeFile(path.join(h.storageRoot, 'audit.ndjson'), auditLine() + '\n', 'utf8');
+
+    const badSince = await get(h, '/api/audit?since=not-a-date');
+    assert.equal(badSince.status, 422);
+    const sinceBody = (await badSince.json()) as { error: { code: string; detail: { field: string } } };
+    assert.equal(sinceBody.error.code, 'bad_request');
+    assert.equal(sinceBody.error.detail.field, 'since');
+
+    const badUntil = await get(h, '/api/audit?until=2026-08-13');
+    assert.equal(badUntil.status, 422);
+    const untilBody = (await badUntil.json()) as { error: { code: string; detail: { field: string } } };
+    assert.equal(untilBody.error.code, 'bad_request');
+    assert.equal(untilBody.error.detail.field, 'until');
+  });
 });
