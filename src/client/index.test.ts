@@ -39,6 +39,7 @@ function makeDoc() {
       get(target, prop) {
         if (prop === 'appendChild') return (child: StubNode) => { target.children.push(child); return child; };
         if (prop === 'setAttribute') return (k: string, v: string) => { target.attrs[k] = String(v); };
+        if (prop === 'addEventListener') return () => {}; // renderers wire click handlers; not exercised here
         if (prop === 'textContent') return target.text;
         return (target as unknown as Record<string, unknown>)[prop as string];
       },
@@ -75,6 +76,13 @@ async function loadAuditRowRenderer() {
     renderAuditRow: (doc: unknown, record: unknown) => StubNode;
   };
   return mod.renderAuditRow;
+}
+
+async function loadRequisitionRowRenderer() {
+  const mod = (await import(pathToFileURL(path.join(CLIENT, 'render.js')).href)) as {
+    renderRequisitionRow: (doc: unknown, requisition: unknown, onDecide?: unknown) => StubNode;
+  };
+  return mod.renderRequisitionRow;
 }
 
 const XSS = '<img src=x onerror=alert(1)>';
@@ -207,6 +215,48 @@ describe('S12.10 — the audit screen renders every field as a text node', () =>
     };
     const row = renderAuditRow(doc, record);
     assert.ok(allText(row).includes('server'));
+  });
+});
+
+describe('S13.15 — a requisition\'s title, justification and workspace render as text nodes', () => {
+  it('renders an XSS payload in justification as literal characters, in a different operator\'s browser', async () => {
+    const renderRequisitionRow = await loadRequisitionRowRenderer();
+    const { doc, created } = makeDoc();
+    const requisition = {
+      requisitionId: 'req-1',
+      raisedBy: 'alice',
+      title: 'a workspace',
+      justification: XSS,
+      workspace: '/w',
+      vendor: 'claude',
+      state: 'open',
+      decidedBy: null,
+      decidedAt: null,
+      sessionId: null,
+      raisedAt: 'x',
+    };
+    // `bob` reads a requisition `alice` raised — D70's open read, exercised here as the
+    // "different operator's browser" the criterion names.
+    const row = renderRequisitionRow(doc, requisition);
+    const rendered = allText(row).join(' ');
+    assert.ok(rendered.includes(XSS), 'the exact XSS characters survive as a text node');
+    assert.ok(rendered.includes('alice'));
+    assert.ok(!created.some((n) => n.tag.toLowerCase() === 'img'), 'no img element was ever created');
+  });
+
+  it('offers Approve/Reject only while state is open', async () => {
+    const renderRequisitionRow = await loadRequisitionRowRenderer();
+    const base = {
+      requisitionId: 'req-1', raisedBy: 'alice', title: 't', justification: 'j', workspace: '/w',
+      vendor: 'claude', decidedBy: null, decidedAt: null, sessionId: null, raisedAt: 'x',
+    };
+    const { doc: doc1 } = makeDoc();
+    const open = renderRequisitionRow(doc1, { ...base, state: 'open' }, () => {});
+    assert.equal(findAll(open, 'button').length, 2);
+
+    const { doc: doc2 } = makeDoc();
+    const approved = renderRequisitionRow(doc2, { ...base, state: 'approved', decidedBy: 'bob' }, () => {});
+    assert.equal(findAll(approved, 'button').length, 0);
   });
 });
 

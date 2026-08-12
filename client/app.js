@@ -1,4 +1,4 @@
-import { renderAuditRow, renderEvent } from './render.js';
+import { renderAuditRow, renderEvent, renderRequisitionRow } from './render.js';
 
 const $ = (id) => document.getElementById(id);
 
@@ -518,31 +518,6 @@ async function filterAudit(event) {
 // like every other operator-authored string this client shows (S13.15, I26).
 // ---------------------------------------------------------------------------
 
-function renderRequisitionRow(requisition) {
-  const row = document.createElement('tr');
-  row.appendChild(text('td', '', requisition.title));
-  row.appendChild(text('td', '', requisition.justification));
-  row.appendChild(text('td', '', requisition.workspace));
-  row.appendChild(text('td', '', requisition.vendor));
-  row.appendChild(text('td', '', requisition.raisedBy));
-  row.appendChild(text('td', '', requisition.state));
-  row.appendChild(text('td', '', requisition.decidedBy ?? ''));
-
-  const actions = document.createElement('td');
-  if (requisition.state === 'open') {
-    const approve = text('button', 'button button--quiet', 'Approve');
-    approve.type = 'button';
-    approve.addEventListener('click', () => void decideRequisition(requisition.requisitionId, 'approve'));
-    const reject = text('button', 'button button--quiet', 'Reject');
-    reject.type = 'button';
-    reject.addEventListener('click', () => void decideRequisition(requisition.requisitionId, 'reject'));
-    actions.appendChild(approve);
-    actions.appendChild(reject);
-  }
-  row.appendChild(actions);
-  return row;
-}
-
 async function loadRequisitions() {
   const result = await api('GET', '/api/requisitions');
   if (result.status === 401) return;
@@ -550,7 +525,9 @@ async function loadRequisitions() {
 
   const tbody = $('requisition-rows');
   clear(tbody);
-  for (const requisition of result.payload.requisitions) tbody.appendChild(renderRequisitionRow(requisition));
+  for (const requisition of result.payload.requisitions) {
+    tbody.appendChild(renderRequisitionRow(document, requisition, (id, decision) => void decideRequisition(id, decision)));
+  }
   $('requisitions-empty').hidden = tbody.children.length > 0;
 }
 
