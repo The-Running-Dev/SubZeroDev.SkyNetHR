@@ -2215,6 +2215,28 @@ credentials" (S11.3) true without inventing a second credential.
 Reversibility: cheap. `edge: 'sse'` is the default, so no existing deployment's behaviour
 changes; a deployment that sets `EDGE=ws` can revert by unsetting it.
 
+### 2026-08-13 — D118 Kit re-install: AGENTS.md merged forward, cores taken outright
+Context: `/install` against `SubZeroDev.AgentKit` at `2b706ca` (previously synced at `af610a6`,
+25 commits behind). `Sync-Kit.ps1 -DryRun` found zero target edits to any command file, so all
+21 `.claude/commands/*.md` plus `tools/Sync-Kit.ps1` applied outright, and `.claude/COMPANIONS.md`
+plus the four new `tools/Test-*.ps1` validators (Companion, DesignDrift, VerifyReport,
+WriteSurface, each with its `.Tests.ps1`) were added new. `AGENTS.md` had drifted from the kit's
+content since the last install — missing the Vendor model aliases table, the Third-party text
+rule, the descriptive-drift clause in *Source of truth* and *Hard rules*, and the
+*Single ownership* "a document states only what the tree cannot" bullet.
+Chosen: merged the missing kit sections into the existing structure, keeping this repository's
+`## Project identity` section and its `Hard rules`-after-`The design freeze` ordering untouched.
+Also adopted the kit's newer `20-contract.md` line ("invariants, error semantics, and the
+surface the tree cannot state") in place of this repo's older "types, schemas, signatures,
+error semantics" phrasing, for consistency with the kit's current standard description of that
+document's role.
+Rejected: leaving `AGENTS.md` as-is for this install — would have left the newer vendor-alias
+and third-party-text gating rules unenforced here with no record of why. Rejected reordering
+`Hard rules` to match the kit's current position (before `The design freeze`) — pure structural
+churn with no rule content behind it; not worth the diff.
+Reversibility: cheap. Wording only; no behavioural change to code, and a later install can
+re-merge or re-word freely.
+
 ## Open
 
 Staging only. Once an item becomes an issue it leaves this list.
