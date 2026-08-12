@@ -1303,13 +1303,27 @@ type ApiErrorCode =
 | 500 | `record_write_failed` *(tier two)* | The record-log append failed; nothing changed anywhere |
 | 500 | `payroll_unavailable` *(tier two)* | The fold could not read the spill; the session itself is unaffected |
 
-**`no_such_session` is also the answer to an unknown route, and that is a forced overload
-rather than a chosen one.** This union carries no route-level not-found, so a request to a
-path this build does not serve — and a `POST /api/login` under a header auth mode — answers
-`404 no_such_session`. The consequence is stated so a client does not read more into it than
-it holds: a `404 no_such_session` distinguishes "no such session", "not your session" and "no
-such route" from each other in none of the three cases. Adding a code to separate the third
-is additive and is not done here.
+**An unknown route has no code of its own, so it borrows one — and which one it borrows
+depends on where the path falls.** This union carries no route-level not-found, and the two
+overloads that result are forced rather than chosen:
+
+| Unserved path | Answer |
+|---|---|
+| Outside `/api/` entirely | `404 no_such_session` |
+| `POST /api/login` under either header auth mode | `404 no_such_session` |
+| Any unserved path under `/api/`, including an unrecognised segment under a session id | `422 bad_request`, naming the path or segment as the offending field |
+
+The last row is deliberate rather than incidental: a route under `/api/sessions/:id` that this
+build does not serve must not answer `404`, because a client cannot then tell an unbuilt route
+from a session that does not exist — and the session in question may exist and be the caller's.
+`422` is the wrong word for it (the body was not malformed) and is retained for the same reason
+the rows above are: adding a code to separate "no such route" from both is additive, correct,
+and not done here.
+
+The consequences are stated so a client does not read more into either answer than it holds.
+A `404 no_such_session` distinguishes "no such session", "not your session" and "no such route
+outside `/api/`" in none of the three cases. A `422 bad_request` on a route under `/api/`
+distinguishes a malformed body from an unserved path in neither.
 
 **`SessionError.storage` reaching an edge is reported as `503 agent_unavailable`.** Every
 storage failure the error table below routes by call site — a spill append ends the session,

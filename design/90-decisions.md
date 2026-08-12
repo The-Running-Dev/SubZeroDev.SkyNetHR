@@ -2179,6 +2179,31 @@ Rejected a `storage_unavailable` variant for the second: one path would use it, 
 already the right status for a transient failure the caller should retry.
 Reversibility: cheap in both directions — these are text today and a variant tomorrow.
 
+### 2026-08-12 — D117 D116's unknown-route overload is one code in the contract and two in the code
+Context: D116, written one commit ago, states that a path this build does not serve answers
+`404 no_such_session`. That holds for a path outside `/api/` (`src/edge/sse/index.ts:547`) and
+for `POST /api/login` under a header auth mode (`:507`), and it is false everywhere else: an
+unserved path under `/api/` answers `422 bad_request`, at `:611` and `:614`. The first of those
+carries a comment arguing the choice deliberately — a route under `/api/sessions/:id` that
+answered `404` would let a client read "this build does not serve that" as "this session does
+not exist", about a session that may exist and be theirs. So D116 did not merely miss a case;
+it recorded one overload where there are two, and the one it missed is the reasoned one. No
+test pinned either behaviour, so both sides were equally cheap to change.
+Chosen: the contract is the defect. `20-contract.md § Error semantics` now states both
+overloads as a table, says which paths take which, and keeps D116's ruling that neither gets a
+code of its own. The code is unchanged.
+Rejected: changing the two edge sites to `404 no_such_session` so the contract's existing
+sentence becomes true. It is a small diff and it discards the `:611` comment's argument, which
+is correct — collapsing "unbuilt route" into "no such session" under a session id is the one
+place this overload actively misleads. It is also `/fix`'s tier, not `/contract`'s.
+Rejected: adding a `no_such_route` variant to `ApiErrorCode`. D116 weighed exactly this one
+commit ago and rejected it on the ground that the code change is small and the contract
+amendment is not; nothing found here is new evidence against that, and relitigating a
+one-commit-old decision to avoid writing down a consequence is the failure D116 exists to
+prevent.
+Reversibility: cheap. This is text, and the variant D116 and this entry both decline stays
+available.
+
 ## Open
 
 Staging only. Once an item becomes an issue it leaves this list.
