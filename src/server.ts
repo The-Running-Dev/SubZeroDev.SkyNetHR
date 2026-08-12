@@ -1,5 +1,6 @@
 import { createServer } from 'node:http';
 import { createSseEdge } from './edge/sse/index.js';
+import { createWsEdge } from './edge/ws/index.js';
 import { resolverFor } from './identity/index.js';
 import { createSessionManager } from './session-manager/index.js';
 import { createStore } from './store/index.js';
@@ -78,17 +79,27 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  const listener = createSseEdge({
+  const edgeDeps = {
     config: config.value,
     identity: resolverFor(config.value.auth, config.value.trustProxy),
     manager,
     records: notBuiltYet<Records>('records', 'S13'),
-  });
+  };
 
-  const server = createServer(listener);
+  // D10/D117: exactly one edge binds (S11.5).
+  const server = createServer();
+  if (config.value.edge === 'ws') {
+    const listener = createWsEdge(edgeDeps);
+    server.on('request', listener);
+    server.on('upgrade', listener.handleUpgrade);
+  } else {
+    server.on('request', createSseEdge(edgeDeps));
+  }
+
   server.listen(config.value.bind.port, config.value.bind.host, () => {
     console.log(`SkyNet HR listening on http://${config.value.bind.host}:${config.value.bind.port}`);
     console.log(`auth mode: ${config.value.auth.mode}`);
+    console.log(`edge: ${config.value.edge}`);
   });
 }
 

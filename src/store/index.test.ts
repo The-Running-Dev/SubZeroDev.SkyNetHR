@@ -28,6 +28,7 @@ function baseConfig(storageRoot: string): Config {
     includeRaw: false,
     sessionTokenBudget: null,
     checklist: [],
+    edge: 'sse',
   };
 }
 

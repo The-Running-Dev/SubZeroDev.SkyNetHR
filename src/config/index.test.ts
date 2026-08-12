@@ -104,3 +104,25 @@ describe('config — the login cookie lifetime (D115)', () => {
     assert.equal(r.ok && r.value.sessionCookieMaxAgeSeconds, 30 * 24 * 60 * 60);
   });
 });
+
+describe('config — which edge binds (S11.5, D117)', () => {
+  it("defaults to 'sse', so an existing deployment's behaviour is unchanged", () => {
+    const r = loadConfig(env());
+    assert.equal(r.ok && r.value.edge, 'sse');
+  });
+
+  it("takes 'ws' from EDGE", () => {
+    const r = loadConfig(env({ EDGE: 'ws' }));
+    assert.equal(r.ok && r.value.edge, 'ws');
+  });
+
+  it('refuses any other value, naming the field', () => {
+    const r = loadConfig(env({ EDGE: 'polling' }));
+    assert.equal(r.ok === false && r.error.code === 'invalid_field' && r.error.field, 'EDGE');
+  });
+
+  it('treats an empty variable as unset, taking the default', () => {
+    const r = loadConfig(env({ EDGE: '' }));
+    assert.equal(r.ok && r.value.edge, 'sse');
+  });
+});

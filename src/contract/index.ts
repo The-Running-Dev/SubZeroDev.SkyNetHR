@@ -529,6 +529,8 @@ export interface Config {
   readonly includeRaw: boolean;
   readonly sessionTokenBudget: number | null; // (tier two) per session; null disables the view's budget
   readonly checklist: readonly ChecklistItemTemplate[]; // (tier two) empty disables the checklist
+  // D10/D117: which transport edge this deployment binds. Exactly one binds (S11.5).
+  readonly edge: 'sse' | 'ws';
 }
 
 // ---------------------------------------------------------------------------

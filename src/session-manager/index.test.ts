@@ -97,6 +97,7 @@ async function makeManager(
     includeRaw: false,
     sessionTokenBudget: null,
     checklist: [],
+    edge: 'sse',
   };
   const storeResult = await createStore(config);
   if (!storeResult.ok) throw new Error('store failed to init');

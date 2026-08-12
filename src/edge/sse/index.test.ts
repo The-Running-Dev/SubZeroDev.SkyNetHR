@@ -92,6 +92,7 @@ async function makeEdge(
     includeRaw: false,
     sessionTokenBudget: null,
     checklist: [],
+    edge: 'sse',
     ...over,
   };
   const storeResult = await createStore(config);
