@@ -1,9 +1,10 @@
-import { randomBytes } from 'node:crypto';
+import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import { createReadStream } from 'node:fs';
 import { mkdir, open, readdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { createInterface } from 'node:readline';
 import path from 'node:path';
 import type {
+  AuditCursor,
   AuditPage,
   AuditQuery,
   AuditRecord,
@@ -28,13 +29,6 @@ import type {
 
 function ioError(filePath: string, detail: string): Result<never, StoreError> {
   return { ok: false, error: { code: 'io', path: filePath, detail } };
-}
-
-function notImplemented(filePath: string, ownedBySlice: string): Result<never, StoreError> {
-  return {
-    ok: false,
-    error: { code: 'io', path: filePath, detail: `not implemented before ${ownedBySlice}` },
-  };
 }
 
 function sessionDir(storageRoot: string, sessionId: SessionId): string {
@@ -129,6 +123,163 @@ async function foldLatestById<T>(filePath: string, idField: keyof T): Promise<re
   return Array.from(byId.values());
 }
 
+// D86: `AuditCursor` is opaque and server-minted. It encodes a byte offset into
+// `audit.ndjson` — where the next page resumes reading backward from — but no caller may
+// construct or decode one, so it carries an HMAC over that offset, keyed on a secret this
+// store mints once at boot and never persists. A cursor from a different process boot, or
+// one a caller has altered, fails the check and is reported `corrupt` (S12.5).
+function encodeAuditCursor(offset: number, secret: Buffer): AuditCursor {
+  const payload = String(offset);
+  const mac = createHmac('sha256', secret).update(payload).digest('hex').slice(0, 32);
+  return Buffer.from(`${payload}.${mac}`, 'utf8').toString('base64url') as AuditCursor;
+}
+
+function decodeAuditCursor(cursor: AuditCursor, secret: Buffer): number | null {
+  let raw: string;
+  try {
+    raw = Buffer.from(cursor, 'base64url').toString('utf8');
+  } catch {
+    return null;
+  }
+  const dot = raw.lastIndexOf('.');
+  if (dot === -1) return null;
+  const payload = raw.slice(0, dot);
+  const mac = raw.slice(dot + 1);
+  const expectedMac = createHmac('sha256', secret).update(payload).digest('hex').slice(0, 32);
+  const macBuf = Buffer.from(mac, 'utf8');
+  const expectedBuf = Buffer.from(expectedMac, 'utf8');
+  if (macBuf.length !== expectedBuf.length || !timingSafeEqual(macBuf, expectedBuf)) return null;
+  if (!/^\d+$/.test(payload)) return null;
+  const offset = Number(payload);
+  if (!Number.isSafeInteger(offset) || offset < 0) return null;
+  return offset;
+}
+
+function auditRecordMatches(record: AuditRecord, query: AuditQuery): boolean {
+  if (query.sessionId !== null && record.sessionId !== query.sessionId) return false;
+  if (query.operator !== null && record.operator !== query.operator) return false;
+  if (query.since !== null && record.ts < query.since) return false;
+  if (query.until !== null && record.ts > query.until) return false;
+  if (query.incidentsOnly) {
+    const isIncident = record.decision === 'deny' || record.operator === null || record.scope === 'standing';
+    if (!isIncident) return false;
+  }
+  return true;
+}
+
+// Bounded, cursor-resumed, never-a-whole-file read (S12.9, I39). `audit.ndjson` is
+// append-only and every line ends `\n` (`appendLine` always adds it), so any offset this
+// function has itself handed out as a cursor is guaranteed to land on a line boundary —
+// which is what lets it read backward in fixed-size chunks from that offset instead of
+// scanning from the start of the file on every page.
+const AUDIT_READ_CHUNK_BYTES = 64 * 1024;
+
+async function readAuditPageImpl(
+  filePath: string,
+  query: AuditQuery,
+  auditPageMax: number,
+  cursorSecret: Buffer,
+): Promise<Result<AuditPage, StoreError>> {
+  const requested = Number.isFinite(query.limit) && query.limit > 0 ? Math.floor(query.limit) : auditPageMax;
+  const limit = Math.min(requested, auditPageMax);
+
+  let handle;
+  try {
+    handle = await open(filePath, 'r');
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return { ok: true, value: { records: [], nextCursor: null } };
+    return ioError(filePath, (err as Error).message);
+  }
+
+  try {
+    const fileStat = await handle.stat();
+    const fileSize = fileStat.size;
+
+    let upperBound: number; // exclusive — bytes at [0, upperBound) remain unread
+    if (query.before === null) {
+      upperBound = fileSize;
+    } else {
+      const decoded = decodeAuditCursor(query.before, cursorSecret);
+      if (decoded === null || decoded > fileSize) {
+        return { ok: false, error: { code: 'corrupt', path: filePath, detail: 'invalid audit cursor' } };
+      }
+      upperBound = decoded;
+    }
+
+    const records: AuditRecord[] = [];
+    let nextCursor: AuditCursor | null = null;
+    let tailFragment: Buffer = Buffer.alloc(0); // an incomplete line, held until its start is read
+    let cursor = upperBound;
+    let stopped = false;
+
+    while (cursor > 0 && !stopped) {
+      const readLen = Math.min(AUDIT_READ_CHUNK_BYTES, cursor);
+      const readStart = cursor - readLen;
+      const raw = Buffer.alloc(readLen);
+      await handle.read(raw, 0, readLen, readStart);
+      const buf = tailFragment.length > 0 ? Buffer.concat([raw, tailFragment]) : raw;
+      tailFragment = Buffer.alloc(0);
+      const isFileStart = readStart === 0;
+
+      // Newline offsets within `buf`, ascending. `buf`'s own tail is a real line
+      // boundary only when nothing has been carried forward yet — the first read of a
+      // page always starts at a self-minted or file-length offset, both of which are
+      // guaranteed to sit immediately after a `\n` (`AUDIT_READ_CHUNK_BYTES`'s comment).
+      // Once a fragment is being carried, `buf`'s tail is just wherever the previous
+      // chunk happened to be cut, so a trailing newline is checked for rather than
+      // assumed, which is what keeps this correct on every later chunk of a deep page.
+      const newlineIdx: number[] = [];
+      {
+        let searchFrom = 0;
+        for (;;) {
+          const nl = buf.indexOf(0x0a, searchFrom);
+          if (nl === -1) break;
+          newlineIdx.push(nl);
+          searchFrom = nl + 1;
+        }
+      }
+      const hasTrailingNewline = newlineIdx.length > 0 && newlineIdx[newlineIdx.length - 1] === buf.length - 1;
+      const lineStarts: number[] = [0, ...newlineIdx.map((nl) => nl + 1).filter((s) => s < buf.length)];
+
+      for (let i = lineStarts.length - 1; i >= 0; i--) {
+        const start = lineStarts[i]!;
+        if (i === 0 && !isFileStart) {
+          const fragmentEnd = lineStarts.length > 1 ? lineStarts[1]! - 1 : buf.length;
+          tailFragment = Buffer.from(buf.subarray(0, fragmentEnd));
+          break;
+        }
+        const end = i + 1 < lineStarts.length ? lineStarts[i + 1]! - 1 : hasTrailingNewline ? buf.length - 1 : buf.length;
+        if (end <= start) continue; // an empty line — nothing to parse
+        const absoluteStart = readStart + start;
+        const lineBuf = buf.subarray(start, end);
+        let record: AuditRecord | null = null;
+        try {
+          record = JSON.parse(lineBuf.toString('utf8')) as AuditRecord;
+        } catch {
+          record = null; // a torn or corrupt line, dropped rather than surfaced as fatal
+        }
+        if (record !== null && auditRecordMatches(record, query)) {
+          records.push(record);
+          if (records.length >= limit) {
+            nextCursor = absoluteStart === 0 ? null : encodeAuditCursor(absoluteStart, cursorSecret);
+            stopped = true;
+            break;
+          }
+        }
+      }
+
+      if (!stopped) {
+        if (isFileStart) break;
+        cursor = readStart;
+      }
+    }
+
+    return { ok: true, value: { records, nextCursor } };
+  } finally {
+    await handle.close();
+  }
+}
+
 export async function createStore(config: Config): Promise<Result<Store, StoreError>> {
   const storageRoot = config.storageRoot;
   try {
@@ -139,6 +290,7 @@ export async function createStore(config: Config): Promise<Result<Store, StoreEr
   }
 
   const ring = new Map<SessionId, Envelope[]>();
+  const auditCursorSecret = randomBytes(32);
 
   const store: Store = {
     async createSession(record: SessionRecord) {
@@ -345,11 +497,8 @@ export async function createStore(config: Config): Promise<Result<Store, StoreEr
       return appendLine(path.join(storageRoot, 'audit.ndjson'), JSON.stringify(record), true);
     },
 
-    async readAuditPage(_query: AuditQuery): Promise<Result<AuditPage, StoreError>> {
-      // Bounded, cursor-resumed, never-a-full-scan reads are S12's acceptance criteria
-      // (S12.9, I39) and its route (`GET /api/audit`) does not exist before then. S1's
-      // Touches names only `meta.json` and `events.ndjson`.
-      return notImplemented(path.join(storageRoot, 'audit.ndjson'), 'S12');
+    async readAuditPage(query: AuditQuery): Promise<Result<AuditPage, StoreError>> {
+      return readAuditPageImpl(path.join(storageRoot, 'audit.ndjson'), query, config.caps.auditPageMax, auditCursorSecret);
     },
 
     async appendPid(record: ProcessRecord) {

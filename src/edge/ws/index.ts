@@ -164,6 +164,7 @@ export function createWsEdge(deps: EdgeDeps): WsRequestListener {
     handleToolOutput,
     handleListCheckpoints,
     handleCheckpointRestore,
+    handleAudit,
     handleLogin,
   } = createHttpHandlers(deps);
 
@@ -379,6 +380,9 @@ export function createWsEdge(deps: EdgeDeps): WsRequestListener {
         }
         if (method === 'POST' && pathname === '/api/sessions') {
           return handleCreate(req, res, owner);
+        }
+        if (method === 'GET' && pathname === '/api/audit') {
+          return handleAudit(req, res);
         }
 
         const sessionRoute = /^\/api\/sessions\/([^/]+)(\/[^?]*)?$/.exec(pathname);

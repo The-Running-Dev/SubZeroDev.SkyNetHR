@@ -195,3 +195,28 @@ export function renderEvent(doc, envelope, handlers) {
   if (renderer === undefined) return null;
   return renderer(doc, envelope.data ?? {}, handlers);
 }
+
+// S12.10: an `AuditRecord.input` is attacker-influenceable exactly like a `tool.call`'s
+// (I12: never truncated, summarised or derived — the operator sees the real bytes), so it
+// goes through `textContent` the same way, never assembled markup.
+export function renderAuditRow(doc, record) {
+  const tr = doc.createElement('tr');
+  tr.className = 'audit-row';
+  const cell = (className, text) => {
+    const td = doc.createElement('td');
+    td.className = className;
+    td.textContent = text === null || text === undefined ? '' : String(text);
+    return td;
+  };
+  tr.appendChild(cell('audit-row__ts', record.ts));
+  tr.appendChild(cell('audit-row__operator', record.operator === null ? 'server' : record.operator));
+  tr.appendChild(cell('audit-row__session', record.sessionId));
+  tr.appendChild(cell('audit-row__tool', record.tool));
+  const inputCell = doc.createElement('td');
+  inputCell.className = 'audit-row__input';
+  inputCell.appendChild(el(doc, 'pre', 'audit-row__input-pre', pretty(record.input)));
+  tr.appendChild(inputCell);
+  tr.appendChild(cell('audit-row__decision', record.decision));
+  tr.appendChild(cell('audit-row__scope', record.scope));
+  return tr;
+}

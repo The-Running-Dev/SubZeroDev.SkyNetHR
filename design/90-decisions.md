@@ -2237,6 +2237,26 @@ churn with no rule content behind it; not worth the diff.
 Reversibility: cheap. Wording only; no behavioural change to code, and a later install can
 re-merge or re-word freely.
 
+### 2026-08-13 — D119 `GET /api/audit` served by `session-manager.readAudit`
+Context: S12.1 (`30-slices.md`) and `## Unresolved` 5 (`20-contract.md`) left `GET /api/audit`'s
+owner undecided: `10-design.md § Module boundaries` gives the audit/incident read to `records`,
+but `records` is tier two and does not exist yet when tier one's `GET /api/audit` must already
+work, and an edge may not call `store` directly. The slice itself stops until this lands.
+Chosen: `session-manager.readAudit(query)`, a pure delegation to `Store.readAuditPage`. It takes
+no `owner` and applies no ownership check, unlike every other method on that interface —
+D70 already opens this read to every authenticated operator regardless of session ownership.
+S17 (tier two) reuses the same method with `incidentsOnly: true` rather than duplicating it
+on `records`.
+Rejected: giving the route to `records` early — would mean building part of tier two's
+registry module just to serve a tier-one read, which is exactly what S12.1 says tier one must
+not need. Rejected letting `edge/sse`/`edge/ws` depend on `store` directly for this one route
+— every edge's dependency set is `config`, `session-manager`, `records`, `identity`, `contract`
+(`10-design.md § Module boundaries`), and carving out a single-route exception there is a
+bigger, less local change than one extra method on a module edges already depend on.
+Reversibility: cheap. `readAudit` is a one-line delegation; moving it onto `records` once that
+module exists (if `## Unresolved` 5's tier-two duplication concern is ever revisited) touches
+one call site in each edge and nothing else.
+
 ## Open
 
 Staging only. Once an item becomes an issue it leaves this list.

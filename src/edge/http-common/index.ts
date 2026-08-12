@@ -4,9 +4,12 @@ import { timingSafeEqual } from 'node:crypto';
 import { Readable } from 'node:stream';
 import type {
   ApiErrorCode,
+  AuditCursor,
+  AuditQuery,
   CallId,
   EdgeDeps,
   IdentityResolver,
+  IsoTimestamp,
   OperatorId,
   SessionError,
   SessionId,
@@ -386,6 +389,44 @@ export function createHttpHandlers(deps: EdgeDeps) {
     stream.pipe(res);
   }
 
+  // `GET /api/audit` (D73, D119): not session-scoped, open to every authenticated
+  // operator (D70) — the route table declares only `401 unauthenticated` and
+  // `422 bad_request` as refusals, so a storage failure falls back to the same
+  // `503 agent_unavailable` `SessionError.storage` maps to elsewhere in this file.
+  async function handleAudit(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    const url = new URL(req.url ?? '/', 'http://placeholder');
+    const params = url.searchParams;
+
+    let limit = config.caps.auditPageMax;
+    const limitRaw = params.get('limit');
+    if (limitRaw !== null) {
+      const parsed = Number.parseInt(limitRaw, 10);
+      if (!Number.isFinite(parsed) || parsed <= 0) {
+        return sendError(res, 'bad_request', 'limit must be a positive integer', { field: 'limit' });
+      }
+      limit = Math.min(parsed, config.caps.auditPageMax);
+    }
+
+    const nonEmpty = (value: string | null): string | null => (value === null || value === '' ? null : value);
+
+    const query: AuditQuery = {
+      before: nonEmpty(params.get('before')) as AuditCursor | null,
+      limit,
+      sessionId: nonEmpty(params.get('sessionId')) as SessionId | null,
+      operator: nonEmpty(params.get('operator')) as OperatorId | null,
+      since: nonEmpty(params.get('since')) as IsoTimestamp | null,
+      until: nonEmpty(params.get('until')) as IsoTimestamp | null,
+      incidentsOnly: params.get('incidentsOnly') === 'true',
+    };
+
+    const result = await manager.readAudit(query);
+    if (!result.ok) {
+      if (result.error.code === 'corrupt') return sendError(res, 'bad_request', 'audit cursor is invalid', { field: 'before' });
+      return sendError(res, 'agent_unavailable', 'audit storage is unavailable');
+    }
+    sendJson(res, 200, result.value);
+  }
+
   async function handleListCheckpoints(_req: IncomingMessage, res: ServerResponse, owner: OperatorId, sessionId: SessionId): Promise<void> {
     const listed = await manager.listCheckpoints(sessionId, owner);
     if (!listed.ok) return failWith(res, listed.error);
@@ -452,6 +493,7 @@ export function createHttpHandlers(deps: EdgeDeps) {
     handleToolOutput,
     handleListCheckpoints,
     handleCheckpointRestore,
+    handleAudit,
     handleLogin,
   };
 }

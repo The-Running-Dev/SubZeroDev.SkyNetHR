@@ -6,7 +6,52 @@
 <header class="masthead">
   <h1 class="masthead__title">SkyNet HR</h1>
   <p id="status" class="masthead__status"></p>
+  <button id="audit-open" class="button button--quiet" type="button">Audit log</button>
 </header>
+
+<section id="audit" class="panel panel--audit" hidden>
+  <div class="audit__header">
+    <h2 class="panel__heading">Audit log</h2>
+    <button id="audit-close" class="button button--quiet" type="button">Close</button>
+  </div>
+  <form id="audit-filters" class="form form--row">
+    <label class="field">
+      <span class="field__label">Session id</span>
+      <input id="audit-filter-session" class="field__input" type="text">
+    </label>
+    <label class="field">
+      <span class="field__label">Operator</span>
+      <input id="audit-filter-operator" class="field__input" type="text">
+    </label>
+    <label class="field">
+      <span class="field__label">Since</span>
+      <input id="audit-filter-since" class="field__input" type="datetime-local">
+    </label>
+    <label class="field">
+      <span class="field__label">Until</span>
+      <input id="audit-filter-until" class="field__input" type="datetime-local">
+    </label>
+    <button class="button" type="submit">Filter</button>
+  </form>
+  <div class="audit__table-wrap">
+    <table class="audit-table">
+      <thead>
+        <tr>
+          <th>When</th>
+          <th>Operator</th>
+          <th>Session</th>
+          <th>Tool</th>
+          <th>Input</th>
+          <th>Decision</th>
+          <th>Scope</th>
+        </tr>
+      </thead>
+      <tbody id="audit-rows"></tbody>
+    </table>
+  </div>
+  <p id="audit-empty" class="audit__empty" hidden>no audit records match this filter</p>
+  <button id="audit-load-more" class="button button--quiet" type="button" hidden>Load older</button>
+</section>
 
 <section id="login" class="panel panel--login" hidden>
   <h2 class="panel__heading">Sign in</h2>

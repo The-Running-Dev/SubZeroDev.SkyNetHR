@@ -1076,6 +1076,10 @@ export function createSessionManager(deps: {
     async tickChecklistItem() {
       notImplemented('tickChecklistItem');
     },
+
+    async readAudit(query) {
+      return store.readAuditPage(query);
+    },
   };
 
   // Shared by `answerPermission` and `resolvePreapproved`: persist the audit record,

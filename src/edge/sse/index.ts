@@ -41,6 +41,7 @@ export function createSseEdge(deps: EdgeDeps): RequestListener {
     handleToolOutput,
     handleListCheckpoints,
     handleCheckpointRestore,
+    handleAudit,
     handleLogin,
   } = createHttpHandlers(deps);
 
@@ -174,6 +175,9 @@ export function createSseEdge(deps: EdgeDeps): RequestListener {
         }
         if (method === 'POST' && pathname === '/api/sessions') {
           return handleCreate(req, res, owner);
+        }
+        if (method === 'GET' && pathname === '/api/audit') {
+          return handleAudit(req, res);
         }
 
         const sessionRoute = /^\/api\/sessions\/([^/]+)(\/[^?]*)?$/.exec(pathname);
