@@ -301,14 +301,15 @@ interface ToolResult {
   readonly bytes: number;     // pre-truncation size
 }
 
-// Opaque pending open question 8; see `## Unresolved`. Equality and storage only —
-// no component may parse one until a grammar is decided.
+// `"<tool>:<pattern>"`. Constrained: /^[A-Za-z0-9_][A-Za-z0-9_.-]*:[^\r\n]+$/ , and no
+// longer than `Caps.standingRuleBytes` as UTF-8. The half before the first colon is compared
+// for equality against `PermissionRequest.tool`; every later colon belongs to the pattern.
+// The pattern is matched against `PermissionRequest.matchTarget` in full, anchored at both
+// ends, byte for byte and case-sensitively, with no normalisation on either side. `*` is the
+// only metacharacter: it matches any run of characters, including the empty run, except
+// `;` `&` `|` `<` `>` `` ` `` `$` CR LF. There is no escape, so no rule matches a literal
+// `*`. Nothing else in the pattern is special. Minted only by `parseStandingRule`.
 type StandingRuleExpression = Brand<string, 'StandingRuleExpression'>;
-
-interface PermissionSuggestion {
-  readonly label: string;
-  readonly rule: StandingRuleExpression;
-}
 
 interface PermissionRequest {
   readonly turnId: TurnId;
@@ -316,7 +317,13 @@ interface PermissionRequest {
   readonly callId: CallId;
   readonly tool: string;
   readonly input: Readonly<Record<string, unknown>>;   // exactly what will run, never a summary
-  readonly suggestions: readonly PermissionSuggestion[];
+  // The one string a rule's pattern is matched against, projected from `input` by the adapter
+  // and emitted verbatim. `null` where the adapter defines no projection for this tool, and
+  // then no standing rule may be created against this request (I38).
+  readonly matchTarget: string | null;
+  // The vendor's `permission_suggestions`, forwarded exactly as it arrived (D104). Unverified
+  // on this transport; no module narrows, parses, or indexes it (I39).
+  readonly suggestions: readonly unknown[];
 }
 
 type PermissionDecision = 'allow' | 'deny';
@@ -442,6 +449,8 @@ interface AuditRecord {
   readonly input: Readonly<Record<string, unknown>>;   // never truncated, never summarised
   readonly decision: PermissionDecision;
   readonly scope: ResolvedScope;
+  // On `scope === 'standing'` this is the matched `StandingRuleExpression`, verbatim. That
+  // is what makes an auto-approval explain itself without a new persisted field.
   readonly reason: string | null;
 }
 ```
@@ -587,6 +596,7 @@ interface Caps {
   readonly subscriberQueueHighWater: number; // envelopes queued per subscriber before it is dropped
   readonly keepaliveMs: number;              // SSE comment interval
   readonly auditPageMax: number;             // largest window `GET /api/audit` will serve
+  readonly standingRuleBytes: number;        // rejection threshold for one StandingRuleExpression
   readonly reviewBodyBytes: number;          // (tier two) rejection threshold for Review.body
   readonly requisitionTextBytes: number;     // (tier two) per field: title, justification
 }
@@ -927,7 +937,10 @@ interface PermissionAnswer {
   readonly requestId: RequestId;
   readonly decision: PermissionDecision;
   readonly scope: AnswerScope;
-  readonly rule: StandingRuleExpression | null;   // required when scope === 'always'
+  // Required, and only permitted, when scope === 'always'. Operator-typed at answer time and
+  // never parsed from a vendor suggestion. `scope === 'always'` additionally requires
+  // `decision === 'allow'` and a non-null `matchTarget` on the named request (I38).
+  readonly rule: StandingRuleExpression | null;
   readonly reason: string | null;                 // the operator's stated reason
 }
 
@@ -971,10 +984,33 @@ declare function createSessionManager(deps: {
   readonly checkpoints: Checkpoints;
   readonly records: Records;   // (tier two) for the requisition claim during create, only
 }): SessionManager;
+
+// The grammar, owned by `session-manager` per D35. Both are pure and total: no I/O, no state,
+// no tool knowledge, no vendor knowledge.
+declare function parseStandingRule(text: string, caps: Caps): StandingRuleExpression | null;
+declare function match(rule: StandingRuleExpression, request: PermissionRequest): boolean;
 ```
 
 `tickChecklistItem` is idempotent: a second tick for an item already complete emits no second
 envelope and still succeeds.
+
+**Standing rules.** `parseStandingRule` is the only way to mint a `StandingRuleExpression`; it
+returns `null` for anything failing the constraint on that type, which `answerPermission` maps
+to `bad_request` naming `rule`. `match` reads `rule`, `request.tool` and `request.matchTarget`
+and nothing else — never `input` — which is what keeps tool-shape knowledge inside `adapters/*`
+where `## Unresolved` 4 says it belongs (I41). It returns `false` whenever `matchTarget` is
+`null`, so an unprojectable tool is unmatched rather than universally matched.
+
+A rule lives in its session's in-memory state and nowhere else: no field on `SessionRecord`, no
+line in any file, no entry in `meta.json`. **There is therefore no persisted schema and no
+migration story for standing rules — that is the ruling, not an omission.** A session rehydrated
+at boot holds none, and the operator is asked again (I40). This is narrower than S10.5, which
+only requires that a *new* session on the same workspace asks again; the stronger form is chosen
+because a grant that outlives the process holding it cannot be revoked by ending the session,
+which is the only revocation this design offers.
+
+A standing rule is never handed to the child. `updatedPermissions` is not written to stdin under
+any decision (I42) — that is the whole of D35 and the reason this grammar exists at all.
 
 The `records` dependency is one-directional and exists for the claim during `create`. Nothing
 else in the manager may call it, and `records` may never call back.
@@ -1280,7 +1316,7 @@ type SessionError =
 | `SessionError.turn_in_flight` | A second message, or a restore, end, or delete during a turn | Yes, once the turn ends | `409 turn_in_flight` |
 | `SessionError.workspace_busy` | The resolved path overlaps a live session's `cwd` | Yes, once that session ends | `409 workspace_busy`, naming the holding path and operator |
 | `SessionError.no_such_item` | A tick for an `itemId` absent from the configured template | No | `404 no_such_item` |
-| `SessionError.bad_request` | A malformed or missing field | No | `422 bad_request` |
+| `SessionError.bad_request` | A malformed or missing field. On `answerPermission` this is four distinct cases, each naming the offending field: `scope: 'always'` with no `rule` (`rule`); a `rule` `parseStandingRule` refuses (`rule`); `scope: 'always'` with `decision: 'deny'` (`decision`); `scope: 'always'` against a request whose `matchTarget` is `null` (`scope`) | No | `422 bad_request`, naming the field |
 | `SessionError.jail` / `adapter` / `checkpoint` / `storage` / `records` | A dependency's error, wrapped | Per the cause | Map the cause, per the rows above |
 
 Three error paths are decisions rather than mappings, and are stated so they are not
@@ -1344,6 +1380,11 @@ it; where two are named, the second is where a violation would first be observab
 | I35 | *(tier two)* PIP status is the `pip` of the `final` review for that subject with the greatest `updatedAt`, ties broken by the later line. Drafts never contribute | `records` |
 | I36 | *(tier two)* At most one `checklist.item.completed` envelope exists per `(sessionId, itemId)`; a second tick emits nothing and still succeeds | `session-manager` |
 | I37 | *(tier two)* A record-log append that fails leaves the in-memory registry and the file agreeing, with nothing changed in either | `records` |
+| I38 | A standing rule is created only where `decision === 'allow'`, `rule` parses, and the named request's `matchTarget` is non-null. Every other `scope: 'always'` is `bad_request`; none is silently downgraded to `once` | `session-manager` |
+| I39 | `PermissionRequest.suggestions` is the vendor's array forwarded verbatim. No module narrows, parses, indexes, or derives a `StandingRuleExpression` from it | `adapters/*`, `client` |
+| I40 | A standing rule exists only in its session's in-memory state. Nothing writes one to disk, and a session rehydrated at boot holds none | `session-manager` |
+| I41 | `match` reads only `rule`, `request.tool` and `request.matchTarget`. It never reads `input`, and no tool name appears in `session-manager` | `session-manager` |
+| I42 | `updatedPermissions` is never written to a child's stdin, under any decision or scope | `adapters/*`, `session-manager` |
 | I38 | *(tier two)* An unreadable or partly corrupt record log yields an empty or shortened registry and a log line. It never aborts boot, and never denies an operator tier one | `records` |
 | I39 | Every read of `audit.ndjson` is bounded by `Caps.auditPageMax` and resumed by cursor. Nothing scans the whole file | `store` |
 
@@ -1384,17 +1425,39 @@ Anything outside both the twelve rows and that list still raises `adapter_unknow
 non-fatally, with the record preserved in `raw`. The list is a vendor fact and lives with the
 vendor's adapter; adding to it is an adapter change, never a change to `ErrorEventKind`.
 
-`updatedPermissions` is never sent. Standing approvals are held by this server and matched
+`updatedPermissions` is never sent (I42). Standing approvals are held by this server and matched
 here, so that every match still produces a `permission.request` / `permission.resolved` pair
 and an audit record.
 
-**`permission_suggestions` is forwarded unmapped, and no consumer may read a forwarded element
-as a `PermissionSuggestion`** (D104). `PermissionSuggestion` names `{ label, rule }` against a
-`StandingRuleExpression` whose grammar is undecided — `## Unresolved` 2, issue #16 — so there is
-nothing here to map onto yet, and inventing one would be inventing that grammar. The adapter
-therefore passes the vendor's array through as it arrived. Nothing exercises this today: no
-observed CLI run has produced a `control_request` at all (D88), and the fixture sends an empty
-array. This paragraph is deleted when #16 lands and the mapping is written.
+**`permission_suggestions` stays forwarded unmapped, now permanently rather than pending a
+decision** (D104, D108). The grammar is decided and is deliberately not the vendor's: `#16`'s
+finding established that this field is not merely un-mapped but **unobservable** — the
+`control_request` that would carry it has never appeared on this transport across two
+independent probes three days apart, and the upstream defect was stale-closed without a fix.
+A mapping cannot be written against a shape nobody has seen, so the adapter passes the array
+through as `readonly unknown[]` and nothing narrows it (I39). The fixture sends an empty array.
+Deleting the field was considered and rejected: forwarding costs nothing and keeps the payload
+from being dropped silently if the channel ever starts firing.
+
+**`matchTarget` is this adapter's projection table**, and it is the only place tool-shape
+knowledge is permitted to live (I41). It is emitted verbatim — no case folding, no separator
+rewriting, no trimming:
+
+| `tool` | `matchTarget` |
+|---|---|
+| `Bash` | `input.command` |
+| `Read`, `Edit`, `Write` | `input.file_path` |
+| anything else, including every `mcp__*` | `null` |
+
+**Four rows, because four are what the finding names.** Every other tool in the CLI's vocabulary
+projects `null` — not because a projection would be wrong, but because none has been observed
+and this table is not the place to guess one. Adding a row is an adapter change carrying the
+same obligation as any other row here: an observed request showing the field. It never changes
+`StandingRuleExpression`.
+
+A tool in the table whose named field is absent or is not a string projects `null` rather than a
+coerced string. `null` is not a failure and raises nothing: it means a standing rule cannot be
+created against that request, which the route refuses with `422 bad_request` on `scope` (I38).
 
 Policy for every Claude session: `{ mode: 'interactive', sandbox: null, banner: null }`.
 
@@ -1495,6 +1558,11 @@ reported, not acted on, and D5 is `/design`'s. The row is marked unreachable und
 policy rather than deleted, because the mapping it would need is one decision away, not one
 experiment away.
 
+This adapter therefore has **no `matchTarget` projection table**, and needs none: it constructs
+no `PermissionRequest` at all. Should the `on-request` row ever be mapped, a projection table is
+part of that work — `item/commandExecution/requestApproval` carries `command`, so the row exists
+in evidence already — and it is that adapter's, never `session-manager`'s (I41).
+
 ### Usage
 
 **`app-server` needs no arithmetic.** `turn/completed` and `thread/tokenUsage/updated` both carry
@@ -1560,15 +1628,21 @@ are new in this pass and each names the issue that carries it.
    not the byte cap, not the audit consequence of a file reaching an agent. The field is
    removed from the route rather than left dangling. Restoring it needs a design decision
    first. (#22)
-2. **The standing-rule grammar, and where a standing rule lives.**
-   `StandingRuleExpression` is opaque here because open question 8 is open: whether
-   `permission_suggestions` from the Claude CLI is a sufficient grammar for "always allow",
-   or whether a local rule language is needed. D35 makes this blocking for the slice that
-   ships standing approvals — the server does the matching, so it needs a grammar it can
-   evaluate. Separately, the design describes the behaviour and gives the rule no home: no
-   entity, no field, no file, and no statement of its lifetime across session end or restart.
-   Until both are decided, no `match(rule, request)` signature can be written, `scope:
-   'always'` cannot be implemented, and `ResolvedScope: 'standing'` is unreachable. (#16, #37)
+2. **Resolved by S10.1 and this pass** (D108–D110). Open question 8 is answered, and the answer
+   is narrower than "insufficient": `permission_suggestions` is **unobservable** — the
+   `control_request` carrying it has never appeared on this transport across two independent
+   probes, and the upstream defect was stale-closed unfixed. `StandingRuleExpression` is
+   therefore a local grammar, `"<tool>:<pattern>"`, declared above with its full constraint;
+   `parseStandingRule` and `match` are declared under `session-manager`; the tool-shape
+   knowledge `match` would have needed moved to the adapter as `PermissionRequest.matchTarget`,
+   which is what keeps `## Unresolved` 4's boundary intact. The rule's home is in-memory
+   session state and its lifetime ends with the process — stated as a ruling, so there is no
+   persisted schema and no migration story to write. `scope: 'always'` is implementable and
+   `ResolvedScope: 'standing'` is reachable. (#16, #37)
+
+   Two things this deliberately did **not** settle, neither blocking: whether a standing
+   *denial* is ever wanted (`always` + `deny` is refused today, D110, and relaxing it is
+   additive), and whether a rule should be revocable other than by ending the session.
 3. **Resolved by S8.1.** The Codex event mapping had three normalised kinds with no source
    record. Both transports are now mapped from observation in `## Vendor mapping — Codex`, and
    the three rows are filled: there is no wire-level `tool.call` / `tool.result` pair on either
