@@ -80,7 +80,9 @@ interface PermissionPolicy {
   readonly banner: string | null;   // non-null exactly when mode === 'preauthorised'
 }
 
-// The full in-memory session record. `meta.json` persists every field below.
+// The persisted session record: exactly what `meta.json` carries, and nothing more. The
+// live turn is deliberately absent — `meta.json` is the session minus turn, buffer and
+// subscribers (D49) — and `LiveSession` below is where it lives instead.
 interface SessionRecord {
   readonly id: SessionId;
   readonly owner: OperatorId;
@@ -110,6 +112,19 @@ interface SessionSummary {
   readonly state: SessionState;
   readonly createdAt: IsoTimestamp;
   readonly endedAt: IsoTimestamp | null;
+}
+
+// The session manager's registry entry: the persisted record plus the one piece of state
+// that is never written. `turn === null` means idle, and it is always null once
+// `state === 'ended'` — which is what makes I8 assertable against a declared field rather
+// than against a field only `10-design.md § Data model — Session` names.
+//
+// The ring buffer and the subscriber set are the other two things `meta.json` excludes and
+// neither is declared here: the ring is `store`'s, reached by `pushRing` / `readRingAfter`
+// on a `SessionId`, and the subscriber set never leaves the manager's fan-out.
+interface LiveSession {
+  readonly record: SessionRecord;
+  turn: Turn | null;
 }
 
 // The denormalised session identity a review copies at authorship (D67). It is a copy,
@@ -145,6 +160,13 @@ interface PendingPermission {
   readonly input: Readonly<Record<string, unknown>>;
 }
 ```
+
+A live `Turn` hangs off `LiveSession.turn` and nowhere else. **It carries no child-process
+handle, and that is a divergence from `10-design.md § Data model — Turn`, which lists one**
+— stated rather than reconciled. The child is spawned inside `Adapter.send` and terminated
+through `Adapter.kill`, so the handle never crosses into `session-manager`, and declaring a
+second reference to it here would give the manager a way to reach a process the adapter is
+the only declared owner of. Which document is wrong is `/reconcile`'s to decide.
 
 ### Process record
 
@@ -770,13 +792,42 @@ interface Checkpoints {
   init(sessionId: SessionId, cwd: ResolvedPath): Promise<Result<void, CheckpointError>>;
   commit(sessionId: SessionId, cwd: ResolvedPath, label: string): Promise<Result<Checkpoint, CheckpointError>>;
   list(sessionId: SessionId, cwd: ResolvedPath): Promise<Result<readonly Checkpoint[], CheckpointError>>;
-  // commit(safety) → checkout <sha> -- . → clean -fd. Returns the safety checkpoint.
+  // commit(safety) → read-tree --reset -u <sha> → clean -fd → verify. Returns the safety
+  // checkpoint, never the target. See below for why the middle operation is not D31's.
   restore(sessionId: SessionId, cwd: ResolvedPath, sha: GitSha): Promise<Result<Checkpoint, CheckpointError>>;
   destroy(sessionId: SessionId): Promise<Result<void, CheckpointError>>;
 }
 
 declare function createCheckpoints(config: Config): Checkpoints;
 ```
+
+**Restore's middle operation is `read-tree --reset -u`, not D31's `checkout <sha> -- .`**
+(D112). D31 pairs `checkout` with `clean -fd` so that a file created after the target is
+removed rather than left behind, and against untracked files that holds. It does not hold
+against tracked ones, and the safety checkpoint is what makes them tracked: `commit` runs
+`add -A` first, so every file the agent created is in the index by the time `checkout` runs.
+`checkout <sha> -- .` writes only paths present in the target's tree and `clean` never
+removes a tracked path, so such a file survives both operations — the exact failure D31 was
+written to close, reintroduced by D31's own first step. `read-tree --reset -u` makes index
+and work-tree match the target exactly, additions, edits and removals alike, without moving
+`HEAD`, so the shadow history stays linear and `list`'s `git log` still walks it.
+
+`clean -fd` is retained behind it, for the directories `read-tree` empties but does not
+remove. No `-x` under either operation, so a path the workspace's own `.gitignore` covers is
+untouched — D31's symmetry argument is unchanged, and a restore still cannot force a
+dependency reinstall.
+
+**Success is verified, not inferred from an exit code.** `read-tree` exits 0 with a warning
+when it cannot remove a directory an embedded repository occupies, and `clean` declines such
+a directory unless forced twice, which this deliberately never does. So the sequence ends
+with `diff --quiet <sha>` for tracked content and `ls-files --others --exclude-standard` for
+what was left behind; either coming back dirty is `CheckpointError.restore_incomplete`. The
+partially-restored row in `10-design.md § Failure modes` is unchanged and is now *detected*
+rather than assumed absent.
+
+`10-design.md § Data model — Checkpoint` and D31 still name `checkout <sha> -- .`. **They are
+the stale side and this is the amendment, not a drift to be resolved downward** — carried
+here so the next `/reconcile` writes the design to match rather than the reverse.
 
 ### `adapters/*`
 
@@ -1350,7 +1401,7 @@ it; where two are named, the second is where a violation would first be observab
 | I5 | A guard is claimed in the same synchronous block that tests it: no `await` sits between a check and the mutation it protects. It governs four guards — the turn slot, the workspace claim, a requisition's decision, and a requisition's consumption | `session-manager`, `records` |
 | I6 | No two `live` sessions have `cwd` values where one equals, contains, or is contained by the other | `session-manager` |
 | I7 | `cwd` is a `ResolvedPath` inside a configured root, resolved exactly once at session creation and never re-resolved | `jail`, `session-manager` |
-| I8 | `state === 'ended'` implies `turn === null` and `endedAt !== null`; `state === 'live'` implies `endedAt === null` | `session-manager` |
+| I8 | `state === 'ended'` implies `LiveSession.turn === null` and `endedAt !== null`; `state === 'live'` implies `endedAt === null` | `session-manager` |
 | I9 | Every `permission.request` is followed by exactly one `permission.resolved` with the same `requestId`, in the same session, before or at `turn.ended` | `session-manager` |
 | I10 | An `AuditRecord` is fsync'd before the corresponding `control_response` is written to the child's stdin | `session-manager`, `store` |
 | I11 | Every `permission.resolved` has exactly one `AuditRecord`, including auto-answers with `scope: 'standing'` | `session-manager` |

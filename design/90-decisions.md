@@ -2052,6 +2052,52 @@ make deliberately, not a side effect of correcting a stale log entry.
 Reversibility: cheap. Running `/freeze` later is unaffected by this entry; it only stops this
 particular discrepancy from being rediscovered as a bug.
 
+### 2026-08-12 — D112 Checkpoint restore resets the work-tree with `read-tree`, not `checkout <sha> -- .`
+Context: D31 specifies `commit` → `checkout <sha> -- .` → `clean -fd`, and argues the `clean`
+is what removes files created after the target. That argument fails against its own first
+step. The safety commit runs `add -A`, so every file the agent created is tracked by the time
+`checkout` runs; `checkout <sha> -- .` writes only paths the target's tree holds, and `clean`
+never removes a tracked path. A file created after the target therefore survives both
+operations — the precise failure D31 exists to close, reintroduced by D31's own sequence. S6
+found this while implementing and shipped the correction (`src/checkpoints/index.ts`); nothing
+in `design/` recorded it, so both `10-design.md` and `20-contract.md` still described a restore
+that is known not to restore.
+Chosen: `read-tree --reset -u <sha>` as the middle operation, making index and work-tree match
+the target exactly — additions, edits and removals alike — without moving `HEAD`, so `list`'s
+`git log` still walks a linear shadow history. `clean -fd` is retained behind it for the
+directories `read-tree` empties but does not remove. Neither takes `-x`, so D31's symmetry
+between what a checkpoint captures and what a restore removes is unchanged. The sequence then
+verifies rather than trusting exit codes — `diff --quiet <sha>` for tracked content,
+`ls-files --others --exclude-standard` for what was left behind — because `read-tree` exits 0
+with only a warning when an embedded repository blocks a directory removal. `20-contract.md`
+is amended now; `10-design.md § Data model — Checkpoint` and D31 are the stale side and are
+left for `/reconcile`.
+Rejected: keeping `checkout <sha> -- .` and widening the `clean` to `-x`. It removes the
+tracked-file case only by accident, and it deletes `node_modules`, build output and local env
+files — the failure D31 names as the one that would make operators stop using restores.
+Rejected `checkout` followed by an explicit removal pass computed from `diff --name-only`:
+that is `read-tree --reset -u` reimplemented in this repository, with a race between the two
+git invocations that the single builtin does not have. Rejected recording the divergence and
+changing neither document: a contract that describes a restore leaving the offending file on
+disk would have the implementing agent "fix" the code back to the defect.
+Reversibility: cheap in the mechanism, expensive in the evidence — reverting means re-earning
+S6's verification that a file created after the target is actually gone.
+
 ## Open
 
 Staging only. Once an item becomes an issue it leaves this list.
+
+- **`10-design.md` is the stale side of `20-contract.md` in eight named places, and a
+  `/contract` run can no longer derive anything.** Both files were last in sync at `4e79b04`;
+  the contract has since taken three slice-time amendments (`bb1bcae` S6, `f24e13e` S8.2/D107,
+  `ec6d59f` S10/D108–D110) that the design has never absorbed, while the design has not moved.
+  Stale: (1) "Codex's live stdio protocol is unverified" — falsified, two live transports
+  observed at `codex-cli 0.146.0`; (2) "neither vendor's runtime approval is observed on a live
+  wire" — Codex's `requestApproval` is, under `app-server`; (3) open question 4, answered yes;
+  (4) open question 6, answered — two interfaces; (5) open question 7, measured — holds on
+  `app-server`, collides on `exec --json`; (6) open question 8, answered — the field is
+  unobservable and the grammar is local; (7) open question 14's Codex half, no longer blocked
+  behind S8.1; (8) § Data model — Checkpoint and D31's restore sequence, superseded by D112.
+  This is `/reconcile`'s work, in the direction design ← contract, and it is the reason a
+  `/contract` pass now finds nothing to derive. Raised by the `/contract` run of 2026-08-12,
+  which amended only the two defects that were the contract's own.
