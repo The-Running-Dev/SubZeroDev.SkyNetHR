@@ -319,10 +319,10 @@ interface PermissionRequest {
   readonly input: Readonly<Record<string, unknown>>;   // exactly what will run, never a summary
   // The one string a rule's pattern is matched against, projected from `input` by the adapter
   // and emitted verbatim. `null` where the adapter defines no projection for this tool, and
-  // then no standing rule may be created against this request (I38).
+  // then no standing rule may be created against this request (I43).
   readonly matchTarget: string | null;
   // The vendor's `permission_suggestions`, forwarded exactly as it arrived (D104). Unverified
-  // on this transport; no module narrows, parses, or indexes it (I39).
+  // on this transport; no module narrows, parses, or indexes it (I44).
   readonly suggestions: readonly unknown[];
 }
 
@@ -939,7 +939,7 @@ interface PermissionAnswer {
   readonly scope: AnswerScope;
   // Required, and only permitted, when scope === 'always'. Operator-typed at answer time and
   // never parsed from a vendor suggestion. `scope === 'always'` additionally requires
-  // `decision === 'allow'` and a non-null `matchTarget` on the named request (I38).
+  // `decision === 'allow'` and a non-null `matchTarget` on the named request (I43).
   readonly rule: StandingRuleExpression | null;
   readonly reason: string | null;                 // the operator's stated reason
 }
@@ -998,19 +998,19 @@ envelope and still succeeds.
 returns `null` for anything failing the constraint on that type, which `answerPermission` maps
 to `bad_request` naming `rule`. `match` reads `rule`, `request.tool` and `request.matchTarget`
 and nothing else — never `input` — which is what keeps tool-shape knowledge inside `adapters/*`
-where `## Unresolved` 4 says it belongs (I41). It returns `false` whenever `matchTarget` is
+where `## Unresolved` 4 says it belongs (I46). It returns `false` whenever `matchTarget` is
 `null`, so an unprojectable tool is unmatched rather than universally matched.
 
 A rule lives in its session's in-memory state and nowhere else: no field on `SessionRecord`, no
 line in any file, no entry in `meta.json`. **There is therefore no persisted schema and no
 migration story for standing rules — that is the ruling, not an omission.** A session rehydrated
-at boot holds none, and the operator is asked again (I40). This is narrower than S10.5, which
+at boot holds none, and the operator is asked again (I45). This is narrower than S10.5, which
 only requires that a *new* session on the same workspace asks again; the stronger form is chosen
 because a grant that outlives the process holding it cannot be revoked by ending the session,
 which is the only revocation this design offers.
 
 A standing rule is never handed to the child. `updatedPermissions` is not written to stdin under
-any decision (I42) — that is the whole of D35 and the reason this grammar exists at all.
+any decision (I47) — that is the whole of D35 and the reason this grammar exists at all.
 
 The `records` dependency is one-directional and exists for the claim during `create`. Nothing
 else in the manager may call it, and `records` may never call back.
@@ -1380,11 +1380,11 @@ it; where two are named, the second is where a violation would first be observab
 | I35 | *(tier two)* PIP status is the `pip` of the `final` review for that subject with the greatest `updatedAt`, ties broken by the later line. Drafts never contribute | `records` |
 | I36 | *(tier two)* At most one `checklist.item.completed` envelope exists per `(sessionId, itemId)`; a second tick emits nothing and still succeeds | `session-manager` |
 | I37 | *(tier two)* A record-log append that fails leaves the in-memory registry and the file agreeing, with nothing changed in either | `records` |
-| I38 | A standing rule is created only where `decision === 'allow'`, `rule` parses, and the named request's `matchTarget` is non-null. Every other `scope: 'always'` is `bad_request`; none is silently downgraded to `once` | `session-manager` |
-| I39 | `PermissionRequest.suggestions` is the vendor's array forwarded verbatim. No module narrows, parses, indexes, or derives a `StandingRuleExpression` from it | `adapters/*`, `client` |
-| I40 | A standing rule exists only in its session's in-memory state. Nothing writes one to disk, and a session rehydrated at boot holds none | `session-manager` |
-| I41 | `match` reads only `rule`, `request.tool` and `request.matchTarget`. It never reads `input`, and no tool name appears in `session-manager` | `session-manager` |
-| I42 | `updatedPermissions` is never written to a child's stdin, under any decision or scope | `adapters/*`, `session-manager` |
+| I43 | A standing rule is created only where `decision === 'allow'`, `rule` parses, and the named request's `matchTarget` is non-null. Every other `scope: 'always'` is `bad_request`; none is silently downgraded to `once` | `session-manager` |
+| I44 | `PermissionRequest.suggestions` is the vendor's array forwarded verbatim. No module narrows, parses, indexes, or derives a `StandingRuleExpression` from it | `adapters/*`, `client` |
+| I45 | A standing rule exists only in its session's in-memory state. Nothing writes one to disk, and a session rehydrated at boot holds none | `session-manager` |
+| I46 | `match` reads only `rule`, `request.tool` and `request.matchTarget`. It never reads `input`, and no tool name appears in `session-manager` | `session-manager` |
+| I47 | `updatedPermissions` is never written to a child's stdin, under any decision or scope | `adapters/*`, `session-manager` |
 | I38 | *(tier two)* An unreadable or partly corrupt record log yields an empty or shortened registry and a log line. It never aborts boot, and never denies an operator tier one | `records` |
 | I39 | Every read of `audit.ndjson` is bounded by `Caps.auditPageMax` and resumed by cursor. Nothing scans the whole file | `store` |
 
@@ -1425,7 +1425,7 @@ Anything outside both the twelve rows and that list still raises `adapter_unknow
 non-fatally, with the record preserved in `raw`. The list is a vendor fact and lives with the
 vendor's adapter; adding to it is an adapter change, never a change to `ErrorEventKind`.
 
-`updatedPermissions` is never sent (I42). Standing approvals are held by this server and matched
+`updatedPermissions` is never sent (I47). Standing approvals are held by this server and matched
 here, so that every match still produces a `permission.request` / `permission.resolved` pair
 and an audit record.
 
@@ -1435,12 +1435,12 @@ finding established that this field is not merely un-mapped but **unobservable**
 `control_request` that would carry it has never appeared on this transport across two
 independent probes three days apart, and the upstream defect was stale-closed without a fix.
 A mapping cannot be written against a shape nobody has seen, so the adapter passes the array
-through as `readonly unknown[]` and nothing narrows it (I39). The fixture sends an empty array.
+through as `readonly unknown[]` and nothing narrows it (I44). The fixture sends an empty array.
 Deleting the field was considered and rejected: forwarding costs nothing and keeps the payload
 from being dropped silently if the channel ever starts firing.
 
 **`matchTarget` is this adapter's projection table**, and it is the only place tool-shape
-knowledge is permitted to live (I41). It is emitted verbatim — no case folding, no separator
+knowledge is permitted to live (I46). It is emitted verbatim — no case folding, no separator
 rewriting, no trimming:
 
 | `tool` | `matchTarget` |
@@ -1457,7 +1457,7 @@ same obligation as any other row here: an observed request showing the field. It
 
 A tool in the table whose named field is absent or is not a string projects `null` rather than a
 coerced string. `null` is not a failure and raises nothing: it means a standing rule cannot be
-created against that request, which the route refuses with `422 bad_request` on `scope` (I38).
+created against that request, which the route refuses with `422 bad_request` on `scope` (I43).
 
 Policy for every Claude session: `{ mode: 'interactive', sandbox: null, banner: null }`.
 
@@ -1561,7 +1561,7 @@ experiment away.
 This adapter therefore has **no `matchTarget` projection table**, and needs none: it constructs
 no `PermissionRequest` at all. Should the `on-request` row ever be mapped, a projection table is
 part of that work — `item/commandExecution/requestApproval` carries `command`, so the row exists
-in evidence already — and it is that adapter's, never `session-manager`'s (I41).
+in evidence already — and it is that adapter's, never `session-manager`'s (I46).
 
 ### Usage
 

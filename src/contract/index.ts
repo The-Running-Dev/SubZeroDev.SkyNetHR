@@ -286,10 +286,10 @@ export interface PermissionRequest {
   readonly input: Readonly<Record<string, unknown>>; // exactly what will run, never a summary
   // The one string a rule's pattern is matched against, projected from `input` by the
   // adapter and emitted verbatim. `null` where the adapter defines no projection for
-  // this tool, and then no standing rule may be created against this request (I38).
+  // this tool, and then no standing rule may be created against this request (I43).
   readonly matchTarget: string | null;
   // The vendor's `permission_suggestions`, forwarded exactly as it arrived (D104).
-  // Unverified on this transport; no module narrows, parses, or indexes it (I39).
+  // Unverified on this transport; no module narrows, parses, or indexes it (I44).
   readonly suggestions: readonly unknown[];
 }
 

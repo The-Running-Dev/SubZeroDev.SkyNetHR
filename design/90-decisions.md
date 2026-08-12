@@ -1992,8 +1992,8 @@ tool names: a table there hard-codes Claude's vocabulary into vendor-neutral cod
 moment another adapter ships standing rules. The two rulings could not both hold as drawn.
 Chosen: the adapter projects. `PermissionRequest` gains `matchTarget: string | null`, emitted
 verbatim, and `match(rule, request)` reads only `rule`, `request.tool` and `request.matchTarget` —
-never `input` (I41). `null` means the adapter defines no projection, and a `scope: 'always'`
-against such a request is `422 bad_request` on `scope` (I38) rather than a rule that matches
+never `input` (I46). `null` means the adapter defines no projection, and a `scope: 'always'`
+against such a request is `422 bad_request` on `scope` (I43) rather than a rule that matches
 everything or nothing by accident. The Claude table carries **four rows**, the four S10.1 names
 from observation; every other tool projects `null`, because guessing a field name is the thing
 this project stops for. Codex needs no table: it is `preauthorised` and constructs no
@@ -2019,7 +2019,7 @@ whatever the implementing slice happened to do.
 Chosen: in-memory session state only — no field on `SessionRecord`, no line in any file, no entry
 in `meta.json`. **There is therefore no persisted schema and no migration story, and that is the
 ruling rather than an omission.** A session rehydrated at boot holds no rules and the operator is
-asked again (I40). `scope: 'always'` additionally requires `decision: 'allow'`; `always` + `deny`
+asked again (I45). `scope: 'always'` additionally requires `decision: 'allow'`; `always` + `deny`
 is `422 bad_request` naming `decision`, so the store holds only allow-rules, `match` returns a
 boolean, and there is no precedence question to state or test. An auto-approval records the
 matched rule verbatim in the existing `AuditRecord.reason`, which lets the record explain itself
