@@ -2226,6 +2226,33 @@ disagreeing about a status code, which is the failure the module was extracted t
 Reversibility: cheap. A declared module is withdrawn by deleting a section; nothing outside
 `edge/*` may reach it, so no client can come to depend on it.
 
+### 2026-08-12 — D119 `shared-secret` has exactly one operator, and the contract now says so
+Context: `resolverFor` returns a fixed `OperatorId` — `SHARED_OPERATOR`, the literal `'shared'`
+— for every caller authenticated by the shared secret (`src/identity/index.ts:15,108`). The
+reasoning is sound and is in a comment there: a shared secret authenticates the deployment, not
+a person, and minting a per-browser identity would be the operator record D3 refuses. It is
+written down nowhere in `design/`. That matters twice over: I23's ownership check *passes* for
+every caller under this mode rather than being bypassed, and `10-design.md § Threat model`
+lists *An operator reading another's session* as in scope with the ownership check as its
+control — which is true of the two header modes and vacuous under this one. The constant was
+also exported and imported by nothing, which is how the gap surfaced.
+Chosen: declare the operator cardinality per auth mode in `20-contract.md § identity`, declare
+`SHARED_OPERATOR` with its value, and state both consequences — the vacuous ownership check and
+the unreachable `404` — beside the signature they qualify. The threat-model row is named as
+affected and left unedited.
+Rejected: treating the collapse as an implementation detail of a fallback mode. The number of
+distinct operators a mode admits is the meaning of every ownership rule in this document; a
+contract that declares `Result<OperatorId, IdentityError>` and stops has not said whether
+`owner` discriminates anything.
+Rejected: minting a per-browser identity under `shared-secret` so the threat-model row holds
+uniformly. It reopens D3 by introducing the first per-person state on this server, and it is
+`/design`'s to decide, not a contract derivation's.
+Rejected: amending the threat-model row here. It is `10-design.md`'s and the correct wording is
+a judgement about what the row was ever claiming — `/design`'s call, flagged in the contract so
+it is not rediscovered.
+Reversibility: cheap as text. The behaviour it describes is not new and is unchanged by this
+entry.
+
 ## Open
 
 Staging only. Once an item becomes an issue it leaves this list.

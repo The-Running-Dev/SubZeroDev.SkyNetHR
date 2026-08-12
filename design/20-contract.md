@@ -733,7 +733,32 @@ interface IdentityRequest {
 type IdentityResolver = (req: IdentityRequest) => Result<OperatorId, IdentityError>;
 
 declare function resolverFor(auth: AuthConfig, trustProxy: readonly string[]): IdentityResolver;
+
+// The single operator every `shared-secret` caller resolves to. Declared because the value
+// is a contract fact, not an implementation choice — see below.
+declare const SHARED_OPERATOR: OperatorId;   // 'shared'
 ```
+
+**The three auth modes do not all yield the same number of operators, and that is a property
+of the contract rather than of the implementation.** Under `proxy-header` and `open-webui` the
+`OperatorId` is whatever the upstream identity header carries, so operators are distinct.
+**Under `shared-secret` there is exactly one operator for the whole deployment**: a shared
+secret authenticates the deployment, not a person, and nothing mints a per-browser identity
+because a per-browser identity is an operator record, which D3 refuses. Every holder of the
+secret resolves to `SHARED_OPERATOR`.
+
+Two consequences follow, and they are stated here because a reader of the ownership rules
+elsewhere in this document would otherwise assume they hold in every mode:
+
+- **I23's ownership check admits every authenticated caller to every session under
+  `shared-secret`**, because every session's `owner` is the same string. The check is not
+  bypassed — it passes. Likewise `404 no_such_session` for "not the caller's" is unreachable
+  in that mode, and `SessionSummary.owner` is the same value on every row.
+- **`10-design.md § Threat model` lists *An operator reading another's session* as in scope,
+  controlled by the ownership check.** That row is true of the two header modes and vacuous
+  under `shared-secret`. This document states the consequence; **amending the threat-model row
+  is `/design`'s and is not done here** — the honest reading is that the mode the design calls
+  "for a bare LAN box" has one operator by construction, not that a control is missing.
 
 ### `jail`
 
