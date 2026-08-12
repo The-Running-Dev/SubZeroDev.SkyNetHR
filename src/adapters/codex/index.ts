@@ -18,6 +18,11 @@ import { summariseCommand } from './summarise.js';
 
 const isWindows = platform === 'win32';
 const KILL_GRACE_MS = 2000; // mirrors the Claude adapter's SIGTERM-then-SIGKILL grace (D38)
+// `detectTransport` below runs up to two of these, synchronously, in the middle of session
+// creation (D107 — transport selection happens once, at create). A `--help` on a responsive
+// binary returns near-instantly; this bounds how long a slow-to-respond one can block the
+// whole server's single thread — and therefore every other operator's session — per probe.
+const PROBE_TIMEOUT_MS = 2000;
 
 type Transport = 'app-server' | 'exec';
 
@@ -39,6 +44,8 @@ function sandboxBanner(mode: SandboxMode): string {
   return `Codex is preauthorised, running under the '${mode}' sandbox`;
 }
 
+const SANDBOX_MODES = new Set<SandboxMode>(['read-only', 'workspace-write', 'unrestricted']);
+
 interface ResolvedSpawn {
   readonly command: string;
   readonly args: string[];
@@ -59,7 +66,7 @@ function resolveSpawn(executable: string, extraArgs: string[]): ResolvedSpawn {
 
 function probeOk(executable: string, cwd: string, subcommand: string): boolean {
   const resolved = resolveSpawn(executable, [subcommand, '--help']);
-  const result = spawnSync(resolved.command, resolved.args, { cwd, shell: resolved.shell, timeout: 5000 });
+  const result = spawnSync(resolved.command, resolved.args, { cwd, shell: resolved.shell, timeout: PROBE_TIMEOUT_MS });
   return result.error === undefined && result.status === 0;
 }
 
@@ -152,11 +159,33 @@ const IGNORED_APP_SERVER_METHODS = new Set([
 // MCP tool call, a web search, …) and must fail loudly rather than vanish.
 const IGNORED_ITEM_TYPES = new Set(['userMessage']);
 
+// Shared by both transports' `failSchemaMismatch`: emits the fatal error event, then hands
+// off to `onFail` to settle the transport's own `send()` promise and terminate its child.
+// `onFail` must mark the turn as seen — a schema mismatch is a resolution the `close`
+// handler already knows about, not a bare process exit — so the two don't independently
+// disagree about whether a `turn.ended` still needs synthesising once the child actually exits.
+function makeFailSchemaMismatch(
+  emitEvent: (kind: string, data: unknown, raw: unknown) => void,
+  onFail: (detail: string) => void,
+): (detail: string, rec: unknown) => void {
+  return (detail, rec) => {
+    emitEvent('error', { kind: 'adapter_schema_mismatch', message: detail, fatal: true }, rec);
+    onFail(detail);
+  };
+}
+
 export function createCodexAdapter(
   opts: AdapterOptions & { readonly executable?: string },
 ): Result<Adapter, AdapterError> {
   const executable = opts.executable ?? process.env['SKYNET_CODEX_EXECUTABLE'] ?? 'codex';
-  const sandbox = opts.sandbox as SandboxMode; // non-null: the dispatcher (../index.ts) refuses null before this runs
+  // The dispatcher (../index.ts) refuses `sandbox: null`, but does not validate a non-null
+  // value against the enum — a caller that reaches this function directly (a test, or a
+  // future caller) must still fail closed on a malformed value rather than let it fall
+  // through `cliSandboxValue`'s switch as `undefined`.
+  if (opts.sandbox === null || !SANDBOX_MODES.has(opts.sandbox)) {
+    return { ok: false, error: { code: 'unsupported_sandbox', sandbox: String(opts.sandbox) } };
+  }
+  const sandbox = opts.sandbox;
   const transport = detectTransport(executable, opts.cwd);
   if (transport === null) {
     return { ok: false, error: { code: 'agent_unavailable', image: executable, detail: 'neither `codex app-server` nor `codex exec` responded to --help' } };
@@ -164,7 +193,6 @@ export function createCodexAdapter(
 
   let child: ChildProcess | null = null;
   let killRequested = false;
-  let currentTurnId: TurnId | null = null;
 
   function notify(n: AdapterNotification): void {
     opts.notify(n);
@@ -208,7 +236,7 @@ export function createCodexAdapter(
   // `codex app-server` — JSON-RPC 2.0 over stdio (primary, D107).
   // -------------------------------------------------------------------------
 
-  function runAppServer(text: string, resume: CliSessionId | null, turnId: TurnId): Promise<Result<void, AdapterError>> {
+  function runAppServer(text: string, resume: CliSessionId | null): Promise<Result<void, AdapterError>> {
     return new Promise((resolve) => {
       let settled = false;
       let resultSeen = false;
@@ -247,14 +275,14 @@ export function createCodexAdapter(
         });
       }
 
-      function failSchemaMismatch(detail: string, rec: unknown): void {
-        emitEvent('error', { kind: 'adapter_schema_mismatch', message: detail, fatal: true }, rec);
+      const failSchemaMismatch = makeFailSchemaMismatch(emitEvent, (detail) => {
+        resultSeen = true; // this failure, not a bare process exit, is why the child is about to die
         if (!settled) {
           settled = true;
           resolve({ ok: false, error: { code: 'schema_mismatch', detail } });
         }
         if (child) terminate(child);
-      }
+      });
 
       function handleItemStarted(params: Record<string, unknown>, rec: unknown): void {
         const item = params['item'] as Record<string, unknown> | undefined;
@@ -458,7 +486,6 @@ export function createCodexAdapter(
         if (!resultSeen) {
           emitEvent('turn.ended', { stopReason: killRequested ? 'interrupted' : 'process_exit', usage: null }, null);
         }
-        currentTurnId = null;
         for (const pending of pendingOutgoing.values()) pending.reject(new Error('process exited'));
         pendingOutgoing.clear();
       });
@@ -518,20 +545,20 @@ export function createCodexAdapter(
   // not turn into a `tool.call`/`tool.result` pair.
   // -------------------------------------------------------------------------
 
-  function runExec(text: string, resume: CliSessionId | null, turnId: TurnId): Promise<Result<void, AdapterError>> {
+  function runExec(text: string, resume: CliSessionId | null): Promise<Result<void, AdapterError>> {
     return new Promise((resolve) => {
       let settled = false;
       let resultSeen = false;
       killRequested = false;
 
-      function failSchemaMismatch(detail: string, rec: unknown): void {
-        emitEvent('error', { kind: 'adapter_schema_mismatch', message: detail, fatal: true }, rec);
+      const failSchemaMismatch = makeFailSchemaMismatch(emitEvent, (detail) => {
+        resultSeen = true; // this failure, not a bare process exit, is why the child is about to die
         if (!settled) {
           settled = true;
           resolve({ ok: false, error: { code: 'schema_mismatch', detail } });
         }
         if (child) terminate(child);
-      }
+      });
 
       function handleLine(line: string): void {
         let rec: Record<string, unknown>;
@@ -597,10 +624,13 @@ export function createCodexAdapter(
       }
 
       const splitter = new NdjsonSplitter();
-      const args = ['exec', '--json', '--skip-git-repo-check'];
-      if (resume !== null) args.push('resume', '--last');
-      else args.push('-s', cliSandboxValue(sandbox));
-      args.push(text);
+      // `-s` applies on every turn, including a resume — mirrors `runAppServer`'s
+      // `thread/start` call, which sets `sandbox` regardless of fresh vs. resumed.
+      const args = ['exec', '--json', '--skip-git-repo-check', '-s', cliSandboxValue(sandbox)];
+      // The specific thread, not `--last`: `--last` names whichever thread the CLI
+      // considers most recent on the whole host, which a concurrent exec-transport
+      // session elsewhere on the same host could make the wrong one.
+      if (resume !== null) args.push('resume', resume);
 
       let proc: ChildProcess;
       try {
@@ -617,6 +647,12 @@ export function createCodexAdapter(
         return;
       }
       child = proc;
+      // The prompt goes over stdin (as the real CLI was probed: `echo <prompt> | codex exec
+      // --json ...`, `design/findings/S8-codex-adapter.md` §2), never argv — the resolved
+      // spawn command runs through a Windows shell for a bare `codex`/`.cmd` executable
+      // (`resolveSpawn`, above), and shell:true joins argv into one unescaped command line,
+      // so operator-authored chat text must never be an argument.
+      proc.stdin?.end(text);
 
       proc.once('spawn', () => {
         notify({ kind: 'spawned', pid: proc.pid ?? -1, pgid: isWindows ? null : (proc.pid ?? null), image: executable });
@@ -646,7 +682,6 @@ export function createCodexAdapter(
           settled = true;
           resolve({ ok: false, error: { code: 'agent_unavailable', image: executable, detail: 'the process exited before reporting thread.started' } });
         }
-        currentTurnId = null;
       });
     });
   }
@@ -657,9 +692,8 @@ export function createCodexAdapter(
     vendor: 'codex',
     policy: { mode: 'preauthorised', sandbox, banner },
 
-    send(text: string, resume: CliSessionId | null, turnId: TurnId): Promise<Result<void, AdapterError>> {
-      currentTurnId = turnId;
-      return transport === 'app-server' ? runAppServer(text, resume, turnId) : runExec(text, resume, turnId);
+    send(text: string, resume: CliSessionId | null, _turnId: TurnId): Promise<Result<void, AdapterError>> {
+      return transport === 'app-server' ? runAppServer(text, resume) : runExec(text, resume);
     },
 
     // I25: the shipped policy is `preauthorised`, so the manager's `pending` map — the
@@ -678,6 +712,5 @@ export function createCodexAdapter(
     },
   };
 
-  void currentTurnId;
   return { ok: true, value: adapter };
 }
