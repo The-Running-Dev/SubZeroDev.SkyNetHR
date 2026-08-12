@@ -1830,11 +1830,13 @@ are new in this pass and each names the issue that carries it.
     two files are not under it. Adding fields is safe today; removing or retyping one has no
     stated rule and no discriminator to hang one on.
 
-Items 12 and 13 arrived with S8.2. Item 12 is carried by #29 and #30, named in its own text;
-**item 13 has no issue yet**, and opening one is `/track`'s. The note that stood here said both
-were un-issued because `/track` was suspended under D105 — D111 established that D105's freeze
-was decided and never executed, so nothing was suspended and that reason was never true. Both
-items belong to the `exec --json` fallback alone; neither affects a session on `app-server`.
+Items 12 and 13 arrived with S8.2, and both are now carried by an issue: 12 by #29 and #30,
+13 by #93. The note that stood here said both were un-issued because `/track` was suspended
+under D105 — D111 established that D105's freeze was decided and never executed, so nothing
+was suspended and that reason was never true. `/track`'s own mandate covers `30-slices.md` and
+`90-decisions.md § Open` only, never this section directly, which is why item 13 sat unissued
+even after D111 — it needed opening by hand rather than by `/track`'s next run. Both items
+belong to the `exec --json` fallback alone; neither affects a session on `app-server`.
 
 12. **What basis `codex exec --json` reports usage on.** Its `turn.completed.usage` was observed
     roughly doubling across two resumed turns of one thread, which fits a running total and fits a
@@ -1851,4 +1853,4 @@ items belong to the `exec --json` fallback alone; neither affects a session on `
     routes it to `/design` as open question 7's correlation half. The obvious fix — the adapter
     composing a session-unique `CallId` from `(turnId, itemId)` — is deliberately **not** taken
     here: it is invisible above the adapter boundary and may well be right, but S8.7 reserves the
-    choice, and writing it into the mapping table would decide it by omission.
+    choice, and writing it into the mapping table would decide it by omission. (#93)
