@@ -180,6 +180,15 @@ through `Adapter.kill`, so the handle never crosses into `session-manager`, and 
 second reference to it here would give the manager a way to reach a process the adapter is
 the only declared owner of. Which document is wrong is `/reconcile`'s to decide.
 
+**`pending`'s value type is a second divergence in the same table, and it is stated here for
+the same reason.** The design types it `Map<RequestId, {callId}>`; this contract needs all four
+fields of `PendingPermission`, because `answerPermission` must enforce I43 — `scope: 'always'`
+against a request whose `matchTarget` is `null` is `bad_request` — and append I11's audit
+record carrying `tool` and `input`, without re-reading the originating request. Re-reading it
+is what would put tool-shape knowledge in `session-manager` and break I46 (D109). Unlike the
+child handle above, this one has a settled direction: the contract is the amendment and the
+design is the stale side.
+
 ### Process record
 
 ```ts
@@ -263,6 +272,13 @@ interface SessionStarted {
   readonly createdAt: IsoTimestamp;
 }
 
+// The three ways into `ended` (D45): D36 operator, D20 restart, D41 storage failure. **No
+// envelope carries `server_restart`.** Boot appending one was D45's rejected alternative,
+// dropped with the derive-state-from-the-stream proposal it belonged to, and nothing has
+// added it since — so this value names a real transition that is never on the wire. It is
+// retained knowingly, exactly as `SessionStarted.state` is, and an implementer must not close
+// the apparent gap by emitting one at boot. A rehydrated session's state is read from
+// `SessionSummary.state`.
 type SessionEndReason = 'operator' | 'server_restart' | 'storage_failure';
 
 interface SessionEnded {
@@ -1412,7 +1428,7 @@ type SessionError =
 | `CheckpointError.locked` | `ckpt.git/index.lock` exists | Yes, after the lock clears | Pre-turn: `session.notice / warn` (`checkpoint_skipped`); the turn proceeds with no restore point |
 | `CheckpointError.commit_failed` | A commit fails for any other reason | Sometimes | As above |
 | `CheckpointError.no_such_checkpoint` | Restore names an unknown `sha` | No | `404 no_such_checkpoint`; the workspace is untouched |
-| `CheckpointError.restore_incomplete` | `checkout` or `clean` fails part-way | No | `error / checkpoint_restore_failed`, non-fatal, plus `500 checkpoint_failed`. **The workspace is partially restored**; the safety checkpoint is the way back |
+| `CheckpointError.restore_incomplete` | `read-tree` or `clean` fails, **or the verification pass comes back dirty** — `diff --quiet <sha>` for tracked content, `ls-files --others --exclude-standard` for what was left behind. Never an exit code alone: `read-tree` exits 0 with a warning on the embedded-repository case (D112) | No | `error / checkpoint_restore_failed`, non-fatal, plus `500 checkpoint_failed`. **The workspace is partially restored**; the safety checkpoint is the way back |
 | `AdapterError.agent_unavailable` | `spawn` returns `ENOENT` | Yes, once installed | `503 agent_unavailable`; `error / agent_unavailable`, fatal to the turn; clear the turn. The session stays live |
 | `AdapterError.unsupported_vendor` | An unknown vendor string | No | `422 bad_request` |
 | `AdapterError.unsupported_sandbox` | A sandbox the vendor does not offer | No | `422 bad_request` |
@@ -1496,13 +1512,19 @@ it; where two are named, the second is where a violation would first be observab
 | I35 | *(tier two)* PIP status is the `pip` of the `final` review for that subject with the greatest `updatedAt`, ties broken by the later line. Drafts never contribute | `records` |
 | I36 | *(tier two)* At most one `checklist.item.completed` envelope exists per `(sessionId, itemId)`; a second tick emits nothing and still succeeds | `session-manager` |
 | I37 | *(tier two)* A record-log append that fails leaves the in-memory registry and the file agreeing, with nothing changed in either | `records` |
+| I38 | *(tier two)* An unreadable or partly corrupt record log yields an empty or shortened registry and a log line. It never aborts boot, and never denies an operator tier one | `records` |
+| I39 | Every read of `audit.ndjson` is bounded by `Caps.auditPageMax` and resumed by cursor. Nothing scans the whole file | `store` |
 | I43 | A standing rule is created only where `decision === 'allow'`, `rule` parses, and the named request's `matchTarget` is non-null. Every other `scope: 'always'` is `bad_request`; none is silently downgraded to `once` | `session-manager` |
 | I44 | `PermissionRequest.suggestions` is the vendor's array forwarded verbatim. No module narrows, parses, indexes, or derives a `StandingRuleExpression` from it | `adapters/*`, `client` |
 | I45 | A standing rule exists only in its session's in-memory state. Nothing writes one to disk, and a session rehydrated at boot holds none | `session-manager` |
 | I46 | `match` reads only `rule`, `request.tool` and `request.matchTarget`. It never reads `input`, and no tool name appears in `session-manager` | `session-manager` |
 | I47 | `updatedPermissions` is never written to a child's stdin, under any decision or scope | `adapters/*`, `session-manager` |
-| I38 | *(tier two)* An unreadable or partly corrupt record log yields an empty or shortened registry and a log line. It never aborts boot, and never denies an operator tier one | `records` |
-| I39 | Every read of `audit.ndjson` is bounded by `Caps.auditPageMax` and resumed by cursor. Nothing scans the whole file | `store` |
+
+**I40, I41 and I42 were never allocated, and the gap is left open rather than closed.** The
+numbering jumps from I39 to I43 and nothing is missing. Ids here are cited by number in
+`90-decisions.md`, in this document's own prose, and in `src/`, so renumbering to close a gap
+would silently repoint every one of those citations — the same reason `AGENTS.md § Tracking
+work` compares drift on ids and never on position.
 
 ## Vendor mapping — Claude
 
@@ -1808,9 +1830,11 @@ are new in this pass and each names the issue that carries it.
     two files are not under it. Adding fields is safe today; removing or retyping one has no
     stated rule and no discriminator to hang one on.
 
-Items 12 and 13 are new in this pass (S8.2) and carry no issue number: `/track` is suspended
-under D105, so they are opened at the reconciliation pass tier one ends with. Both belong to the
-`exec --json` fallback alone; neither affects a session on `app-server`.
+Items 12 and 13 arrived with S8.2. Item 12 is carried by #29 and #30, named in its own text;
+**item 13 has no issue yet**, and opening one is `/track`'s. The note that stood here said both
+were un-issued because `/track` was suspended under D105 — D111 established that D105's freeze
+was decided and never executed, so nothing was suspended and that reason was never true. Both
+items belong to the `exec --json` fallback alone; neither affects a session on `app-server`.
 
 12. **What basis `codex exec --json` reports usage on.** Its `turn.completed.usage` was observed
     roughly doubling across two resumed turns of one thread, which fits a running total and fits a
