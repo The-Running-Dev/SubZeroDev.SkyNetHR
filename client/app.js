@@ -1,4 +1,4 @@
-import { renderAuditRow, renderEvent } from './render.js';
+import { renderAuditRow, renderEvent, renderRequisitionRow } from './render.js';
 
 const $ = (id) => document.getElementById(id);
 
@@ -383,6 +383,7 @@ async function createSession(event) {
   const vendor = $('vendor').value.trim();
   const model = $('model').value.trim();
   const sandbox = $('sandbox').value.trim();
+  const requisitionId = $('requisition-id').value.trim();
   if (cwd === '' || vendor === '') return status('a folder and an agent are both required', 'error');
 
   status('starting…', 'info');
@@ -391,11 +392,19 @@ async function createSession(event) {
     cwd,
     model: model === '' ? null : model,
     sandbox: sandbox === '' ? null : sandbox,
+    requisitionId: requisitionId === '' ? null : requisitionId,
   });
   if (result.status === 401) return;
-  if (result.status !== 201) return status(describe(result), 'error');
+  if (result.status !== 201) {
+    // A requisition-claim refusal (already decided, consumed by someone else) means the
+    // option the operator just picked is stale — drop it from the picker rather than
+    // leaving a dead option there to fail identically on retry.
+    if (requisitionId !== '') await refreshRequisitionOptions();
+    return status(describe(result), 'error');
+  }
   status('session started', 'ok');
   await refreshSessions();
+  if (requisitionId !== '') await refreshRequisitionOptions();
   selectSession(result.payload.sessionId);
 }
 
@@ -510,6 +519,109 @@ async function filterAudit(event) {
 }
 
 // ---------------------------------------------------------------------------
+// Requisitions (S13) — open to every authenticated operator (D70): a requisition cannot
+// be approved by someone who cannot see it. `workspace` is rendered as text only, exactly
+// like every other operator-authored string this client shows (S13.15, I26).
+// ---------------------------------------------------------------------------
+
+// Fetches the requisition list once; `loadRequisitions` and `refreshRequisitionOptions`
+// both render from the same response instead of each issuing their own GET.
+async function fetchRequisitions() {
+  const result = await api('GET', '/api/requisitions');
+  if (result.status === 401) return null;
+  if (result.status !== 200) {
+    status(describe(result), 'error');
+    return null;
+  }
+  return result.payload.requisitions;
+}
+
+function renderRequisitionRows(requisitions) {
+  const tbody = $('requisition-rows');
+  clear(tbody);
+  for (const requisition of requisitions) {
+    tbody.appendChild(renderRequisitionRow(document, requisition, (id, decision) => void decideRequisition(id, decision)));
+  }
+  $('requisitions-empty').hidden = tbody.children.length > 0;
+}
+
+// Repopulates the new-session form's requisition picker with the currently approved ones
+// — the only state `POST /api/sessions` can spend (S13.7). Refreshed whenever the
+// requisitions panel changes and after a session claims one, so a spent or since-decided
+// requisition cannot linger as a selectable option.
+function renderRequisitionOptions(requisitions) {
+  const select = $('requisition-id');
+  const previous = select.value;
+  clear(select);
+  const none = text('option', '', 'none');
+  none.value = '';
+  select.appendChild(none);
+  let previousStillOffered = false;
+  for (const requisition of requisitions) {
+    if (requisition.state !== 'approved') continue;
+    const option = text('option', '', `${requisition.title} (${requisition.workspace})`);
+    option.value = requisition.requisitionId;
+    if (option.value === previous) previousStillOffered = true;
+    select.appendChild(option);
+  }
+  select.value = previousStillOffered ? previous : '';
+}
+
+async function loadRequisitions() {
+  const requisitions = await fetchRequisitions();
+  if (requisitions === null) return;
+  renderRequisitionRows(requisitions);
+}
+
+async function refreshRequisitionOptions() {
+  const requisitions = await fetchRequisitions();
+  if (requisitions === null) return;
+  renderRequisitionOptions(requisitions);
+}
+
+// The table and the picker both change on a decision — one fetch feeds both renders
+// instead of `loadRequisitions` and `refreshRequisitionOptions` each fetching their own.
+async function refreshRequisitionsPanel() {
+  const requisitions = await fetchRequisitions();
+  if (requisitions === null) return;
+  renderRequisitionRows(requisitions);
+  renderRequisitionOptions(requisitions);
+}
+
+async function raiseRequisition(event) {
+  event.preventDefault();
+  const title = $('requisition-title').value.trim();
+  const justification = $('requisition-justification').value.trim();
+  const workspace = $('requisition-workspace').value.trim();
+  const vendor = $('requisition-vendor').value.trim();
+  if (title === '' || justification === '' || workspace === '' || vendor === '') {
+    return status('title, justification, workspace and agent are all required', 'error');
+  }
+  const result = await api('POST', '/api/requisitions', { title, justification, workspace, vendor });
+  if (result.status === 401) return;
+  if (result.status !== 201) return status(describe(result), 'error');
+  $('raise-requisition').reset();
+  status('requisition raised', 'ok');
+  await loadRequisitions();
+}
+
+async function decideRequisition(requisitionId, decision) {
+  const result = await api('POST', `/api/requisitions/${encodeURIComponent(requisitionId)}/decision`, { decision });
+  if (result.status === 401) return;
+  if (result.status !== 200) return status(describe(result), 'error');
+  await refreshRequisitionsPanel();
+}
+
+function openRequisitions() {
+  $('requisitions').hidden = false;
+  void loadRequisitions();
+}
+
+function closeRequisitions() {
+  $('requisitions').hidden = true;
+}
+
+// ---------------------------------------------------------------------------
 // The shared-secret exchange. In the header-trust modes the proxy has already
 // authenticated the operator and this panel is never shown.
 // ---------------------------------------------------------------------------
@@ -541,7 +653,11 @@ function start() {
   $('audit-close').addEventListener('click', closeAudit);
   $('audit-filters').addEventListener('submit', filterAudit);
   $('audit-load-more').addEventListener('click', () => void loadAuditPage(false));
+  $('requisitions-open').addEventListener('click', openRequisitions);
+  $('requisitions-close').addEventListener('click', closeRequisitions);
+  $('raise-requisition').addEventListener('submit', raiseRequisition);
   void refreshSessions();
+  void refreshRequisitionOptions();
 }
 
 start();

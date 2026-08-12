@@ -1838,11 +1838,13 @@ are new in this pass and each names the issue that carries it.
    session is deliberately open, while the only route to a session is the ownership check that
    answers `404` to a non-owner. The two cannot both be true, and the resolution decides
    whether `POST /api/reviews` needs a manager method that does not apply that check. (#32)
-7. **The write-protocol ordering for record-log mutations.** The design states two orders in
-   two places — the registry claimed synchronously before the append, and the append landing
-   before any registry mutation — and they cannot both hold. The signatures above are
-   deliberately compatible with either, and `RecordsError.storage` says only that a failure
-   leaves the registry and the file agreeing. (#31)
+7. **Resolved by D120.** The two orders were each partly right: a requisition's decision and a
+   review's mutation claim an exclusivity lock synchronously, before the append — which is what
+   D32's guard rule requires — but that lock is distinct from `state`, and `state` itself
+   changes only after the append durably succeeds, never before. The signatures above needed no
+   change; `decide`, `appendReview` and `finaliseReview` already return only once the store call
+   settles, and `RecordsError.storage`'s "the registry is not mutated" already said the right
+   thing. (#31, and #35 for the review half)
 8. **What "burn" is measured in for `remainingTokens`.** `PayrollView.burn` is a component-wise
    sum and is determined. The subtraction is not: brief item 8's "budget remaining" needs one
    scalar, and nothing says whether cache reads and cache creation count against a budget

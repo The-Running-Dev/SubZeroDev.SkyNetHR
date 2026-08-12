@@ -1,5 +1,5 @@
 import type { IncomingMessage, RequestListener, ServerResponse } from 'node:http';
-import type { CallId, Envelope, OperatorId, Seq, SessionId, Subscription, TurnId } from '../../contract/index.js';
+import type { CallId, Envelope, OperatorId, RequisitionId, Seq, SessionId, Subscription, TurnId } from '../../contract/index.js';
 import { sendError } from '../error-envelope/index.js';
 import {
   type EdgeDeps,
@@ -29,7 +29,6 @@ function stampEdgeTag(html: string): string {
 
 export function createSseEdge(deps: EdgeDeps): RequestListener {
   const { config, identity, manager } = deps;
-  void deps.records; // tier two composes through it (D77); nothing in this slice reads it.
 
   const {
     handleCreate,
@@ -43,6 +42,9 @@ export function createSseEdge(deps: EdgeDeps): RequestListener {
     handleCheckpointRestore,
     handleAudit,
     handleLogin,
+    handleRaiseRequisition,
+    handleListRequisitions,
+    handleDecideRequisition,
   } = createHttpHandlers(deps);
 
   async function handleEvents(req: IncomingMessage, res: ServerResponse, owner: OperatorId, sessionId: SessionId): Promise<void> {
@@ -178,6 +180,23 @@ export function createSseEdge(deps: EdgeDeps): RequestListener {
         }
         if (method === 'GET' && pathname === '/api/audit') {
           return handleAudit(req, res);
+        }
+        if (method === 'GET' && pathname === '/api/requisitions') {
+          return handleListRequisitions(req, res);
+        }
+        if (method === 'POST' && pathname === '/api/requisitions') {
+          return handleRaiseRequisition(req, res, owner);
+        }
+
+        const requisitionRoute = /^\/api\/requisitions\/([^/]+)\/decision$/.exec(pathname);
+        if (method === 'POST' && requisitionRoute !== null) {
+          let decoded: string;
+          try {
+            decoded = decodeURIComponent(requisitionRoute[1]!);
+          } catch {
+            return sendError(res, 'bad_request', 'requisition id is not a valid path segment', { field: 'requisitionId' });
+          }
+          return handleDecideRequisition(req, res, owner, decoded as RequisitionId);
         }
 
         const sessionRoute = /^\/api\/sessions\/([^/]+)(\/[^?]*)?$/.exec(pathname);

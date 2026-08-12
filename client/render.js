@@ -220,3 +220,44 @@ export function renderAuditRow(doc, record) {
   tr.appendChild(cell('audit-row__scope', record.scope));
   return tr;
 }
+
+// S13.15: `title`, `justification` and `workspace` are one operator's free text read by
+// another (D74) — the same `textContent`-only discipline as `renderAuditRow`'s `input`,
+// never assembled markup. `onDecide`, when given, receives `(requisitionId, decision)` and
+// is wired to Approve/Reject buttons shown only while `state === 'open'`.
+export function renderRequisitionRow(doc, requisition, onDecide) {
+  const tr = doc.createElement('tr');
+  tr.className = 'requisition-row';
+  const cell = (className, text) => {
+    const td = doc.createElement('td');
+    td.className = className;
+    td.textContent = text === null || text === undefined ? '' : String(text);
+    return td;
+  };
+  tr.appendChild(cell('requisition-row__title', requisition.title));
+  tr.appendChild(cell('requisition-row__justification', requisition.justification));
+  tr.appendChild(cell('requisition-row__workspace', requisition.workspace));
+  tr.appendChild(cell('requisition-row__vendor', requisition.vendor));
+  tr.appendChild(cell('requisition-row__raised-by', requisition.raisedBy));
+  tr.appendChild(cell('requisition-row__state', requisition.state));
+  tr.appendChild(cell('requisition-row__decided-by', requisition.decidedBy));
+
+  const actions = doc.createElement('td');
+  actions.className = 'requisition-row__actions';
+  if (requisition.state === 'open' && onDecide) {
+    const approve = doc.createElement('button');
+    approve.type = 'button';
+    approve.className = 'button button--quiet';
+    approve.textContent = 'Approve';
+    approve.addEventListener('click', () => onDecide(requisition.requisitionId, 'approve'));
+    const reject = doc.createElement('button');
+    reject.type = 'button';
+    reject.className = 'button button--quiet';
+    reject.textContent = 'Reject';
+    reject.addEventListener('click', () => onDecide(requisition.requisitionId, 'reject'));
+    actions.appendChild(approve);
+    actions.appendChild(reject);
+  }
+  tr.appendChild(actions);
+  return tr;
+}

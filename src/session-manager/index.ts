@@ -45,6 +45,7 @@ import type {
   StandingRuleExpression,
   StartupError,
   Store,
+  StoreError,
   Subscription,
   SubscriberSink,
   Turn,
@@ -200,7 +201,7 @@ export function createSessionManager(deps: {
   readonly checkpoints: Checkpoints;
   readonly records: Records;
 }): SessionManager {
-  const { config, store, checkpoints } = deps;
+  const { config, store, checkpoints, records } = deps;
   const sessions = new Map<SessionId, SessionEntry>();
 
   function findLiveOverlap(candidate: ResolvedPath): SessionEntry | null {
@@ -208,6 +209,21 @@ export function createSessionManager(deps: {
       if (entry.record.state === 'live' && pathsOverlap(candidate, entry.record.cwd)) return entry;
     }
     return null;
+  }
+
+  // S6.10: `checkpoints.destroy` before `store.deleteSession`, not concurrently — `ckpt.git`
+  // sits inside the very directory `store.deleteSession` recursively removes, and two
+  // concurrent `fs.rm({recursive: true})` calls over overlapping trees can trip each other
+  // (an `ENOTEMPTY` mid-walk, on the loser). Shared by `remove()` and `create()`'s
+  // requisition-attach unwind — the only two places a session's storage is torn down —
+  // so this ordering lives in one place rather than two comments pointing at each other.
+  async function destroySessionStorage(sessionId: SessionId): Promise<{
+    readonly destroyed: Result<void, CheckpointError>;
+    readonly deleted: Result<void, StoreError>;
+  }> {
+    const destroyed = await checkpoints.destroy(sessionId);
+    const deleted = await store.deleteSession(sessionId);
+    return { destroyed, deleted };
   }
 
   // S9.8: delivers a completion envelope live-only, bypassing the ring and the spill —
@@ -591,6 +607,15 @@ export function createSessionManager(deps: {
         return { ok: false, error: { code: 'workspace_busy', holder: { cwd: overlap.record.cwd, owner: overlap.record.owner } } };
       }
 
+      // S13.8/D68: the jail and busy checks above run before this. The claim itself is
+      // synchronous (`records.claim`'s own contract) and sits in the same unbroken block
+      // as the workspace claim below — no `await` between either check and what it
+      // protects (I5).
+      if (input.requisitionId !== null) {
+        const claimed = records.claim(input.requisitionId);
+        if (!claimed.ok) return { ok: false, error: { code: 'records', cause: claimed.error } };
+      }
+
       const sessionId = randomUUID() as SessionId;
       const adapterResult = createAdapter(input.vendor, {
         cwd,
@@ -598,7 +623,12 @@ export function createSessionManager(deps: {
         sandbox: input.sandbox,
         notify: (n) => handleNotification(sessionId, n),
       });
-      if (!adapterResult.ok) return { ok: false, error: { code: 'adapter', cause: adapterResult.error } };
+      if (!adapterResult.ok) {
+        // S13.9: any failure after the claim releases it — the requisition reads
+        // `approved` again and a retry can spend it.
+        if (input.requisitionId !== null) records.release(input.requisitionId);
+        return { ok: false, error: { code: 'adapter', cause: adapterResult.error } };
+      }
 
       const record: SessionRecord = {
         id: sessionId,
@@ -633,6 +663,7 @@ export function createSessionManager(deps: {
       const created = await store.createSession(record);
       if (!created.ok) {
         sessions.delete(sessionId);
+        if (input.requisitionId !== null) records.release(input.requisitionId);
         return { ok: false, error: { code: 'storage', cause: created.error } };
       }
 
@@ -648,7 +679,20 @@ export function createSessionManager(deps: {
         });
       }
 
-      // Requisition attachment is S13's.
+      if (input.requisitionId !== null) {
+        const attached = await records.attachSession(input.requisitionId, sessionId);
+        if (!attached.ok) {
+          // The claim held since the synchronous block above never became durable as
+          // `consumed` — release it and unwind the session this attempt already created,
+          // so a retry lands on a clean requisition and a clean workspace (S13.9's "release
+          // both claims" extended to the one failure that can strike after them both).
+          records.release(input.requisitionId);
+          sessions.delete(sessionId);
+          await destroySessionStorage(sessionId); // best-effort, like remove()'s
+          await entry.adapter!.kill();
+          return { ok: false, error: { code: 'records', cause: attached.error } };
+        }
+      }
 
       return { ok: true, value: { sessionId } };
     },
@@ -846,13 +890,9 @@ export function createSessionManager(deps: {
       if (entry.turn) return { ok: false, error: { code: 'turn_in_flight', sessionId, turnId: entry.turn.turnId } };
 
       // S6.10: ckpt.git comes out alongside everything else `store.deleteSession`
-      // already owns removing. Sequential, not concurrent — `ckpt.git` sits inside the
-      // very directory `store.deleteSession` recursively removes, and two concurrent
-      // `fs.rm({recursive: true})` calls over overlapping trees can trip each other
-      // (an `ENOTEMPTY` mid-walk, on the loser). Any failure from either still folds
-      // into the same non-fatal notice below (S5.11).
-      const destroyed = await checkpoints.destroy(sessionId);
-      const deleted = await store.deleteSession(sessionId);
+      // already owns removing — see `destroySessionStorage`'s comment for the ordering.
+      // Any failure from either still folds into the same non-fatal notice below (S5.11).
+      const { destroyed, deleted } = await destroySessionStorage(sessionId);
       // S5.11: the registry entry comes out regardless of whether storage cleanup fully
       // succeeded — a partial failure must not leave a session an operator asked to
       // remove still listed.

@@ -1555,6 +1555,9 @@ happen. A review or a requisition decision is not irreversible and nothing downs
 it, so the file is written first and the registry follows: a crash between them loses an edit
 the operator can retype, where the other order would leave a registry claiming a state the
 disk does not have — and after the next boot, which reads the disk, it would silently revert.
+What stays synchronous, per *The single-writer invariant*, is an exclusivity lock distinct
+from `state` itself — that lock is what stops two decisions or two edits racing; it is not
+what this paragraph's ordering governs (D120).
 
 ### Platform divergence (tier one)
 
@@ -1736,24 +1739,36 @@ So the rule, and it is the only concurrency rule in this design beyond `emit`:
 > **A guard is claimed in the same synchronous block that tests it. No `await` may sit
 > between a check and the mutation that check protects.**
 
-Concretely, there are four guards and they all follow it:
+Concretely, there are five guards and they all follow it:
 
 | Guard | Tested and claimed before | Released on |
 |---|---|---|
 | The turn slot | `await checkpoints.commit` | Any failure in control flow 2 |
 | The workspace claim | `await store.mkdir` | Any failure in control flow 1 |
-| A requisition's decision *(tier two)* | `await store.appendRequisition` | Nothing — a decision is terminal |
+| A requisition's decision *(tier two)* | `await store.appendRequisition` | The append settling, success or failure |
 | A requisition's consumption *(tier two)* | `await store.mkdir`, with the workspace claim | Any failure in control flow 1, with the workspace claim |
+| A review's mutation *(tier two)* | `await store.appendReview` | The append settling, success or failure |
 
 The turn slot is occupied by a `Turn` in phase `starting` before the checkpoint is awaited,
 and the workspace claim is registered before storage is touched. Distinguish *the slot is
 claimed* from *`turn.started` is emitted*: the event still follows the checkpoint, so the
 ordering guarantee that a turn's checkpoint precedes its `turn.started` is untouched.
 
-**Tier two adds two rows to this table and no new mechanism, and that is the test it had to
-pass.** Both new guards have the identical shape to the two that were already here — a state
-check followed by an `await` on a file write — so if the rule had needed an exception for
-either, the rule would have been the thing to re-examine. It did not.
+**Tier two adds three guards to this table, and one of them is not the same shape as the two
+that were already here** (D120). The turn slot and the workspace claim set their guard to the
+value that *is* the record's own visible state — `turn` assigned, the path occupied — and
+revert that same value on failure. A requisition's decision and a review's mutation cannot work
+that way: *Records boundary*, below, requires a failed append to leave the registry
+unmutated — the reverse of the audit path's ordering (D26), because neither write is
+irreversible and losing a retypable edit is a smaller failure than the registry claiming a
+`state` the disk does not have. So what these two guards claim, synchronously and before their
+`await`, is an **exclusivity lock separate from `state`** — a marker that a decision or a
+review append is in flight for this id, tested the same way `turn == null` is tested, but never
+itself written back as the answer. The lock releases when the write settles either way;
+`state` (a requisition's `decidedBy`/`decidedAt`, a review's appended line and `final`) changes
+only once that write has durably succeeded. D32 still holds without exception — no `await`
+sits between a check and the thing it protects — the correction is naming the protected thing
+correctly as the lock, not the state it will eventually hold.
 
 This is why the races table below can name "manager turn state" as an enforcer and be
 telling the truth. Without the rule, that column describes an intention.

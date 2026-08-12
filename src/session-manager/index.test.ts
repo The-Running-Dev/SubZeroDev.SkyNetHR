@@ -9,6 +9,7 @@ import { promisify } from 'node:util';
 import { createSessionManager, match, parseStandingRule } from './index.js';
 import { createStore } from '../store/index.js';
 import { createCheckpoints } from '../checkpoints/index.js';
+import { createRecords } from '../records/index.js';
 import type { AuditRecord, Caps, Checkpoints, Config, Envelope, IsoTimestamp, OperatorId, PermissionRequest, ProcessRecord, Records, SessionId, Store, TurnId } from '../contract/index.js';
 
 const execFileAsync = promisify(execFile);
@@ -69,6 +70,7 @@ async function makeManager(
   capsOverride: Partial<Config['caps']> = {},
   wrapStore: (store: Store) => Store = (s) => s,
   checkpointsOverride: ((config: Config) => Checkpoints) | null = null,
+  recordsOverride: ((config: Config, store: Store) => Records) | null = null,
 ) {
   process.env['SKYNET_TEST_SCENARIO'] = scenario;
   process.env['SKYNET_CLAUDE_EXECUTABLE'] = FIXTURE;
@@ -102,13 +104,15 @@ async function makeManager(
   const storeResult = await createStore(config);
   if (!storeResult.ok) throw new Error('store failed to init');
   const checkpoints = (checkpointsOverride ?? createCheckpoints)(config);
+  const wrappedStore = wrapStore(storeResult.value);
+  const records = recordsOverride ? recordsOverride(config, wrappedStore) : notImplementedProxy<Records>('records');
   const manager = createSessionManager({
     config,
-    store: wrapStore(storeResult.value),
+    store: wrappedStore,
     checkpoints,
-    records: notImplementedProxy<Records>('records'),
+    records,
   });
-  return { manager, workspaceRoot, storageRoot, store: storeResult.value, checkpoints, config };
+  return { manager, workspaceRoot, storageRoot, store: storeResult.value, checkpoints, config, records };
 }
 
 async function waitUntil(predicate: () => boolean | Promise<boolean>, timeoutMs = 5000): Promise<void> {
@@ -2222,4 +2226,131 @@ test('S9.5 — a blob the store cannot write does not undo the envelope\'s trunc
   const data = result.data as { truncated: boolean; bytes: number };
   assert.equal(data.truncated, true, 'the envelope is still truncated even though the blob write failed');
   assert.equal(data.bytes, 2000);
+});
+
+// ---------------------------------------------------------------------------
+// S13 — requisitions
+// ---------------------------------------------------------------------------
+
+test('S13.6/S13.8 — create() with an approved requisitionId consumes it, and the jail runs before the claim', async () => {
+  const { manager, workspaceRoot, config, records } = await makeManager('full', {}, undefined, undefined, (c, s) => createRecords({ config: c, store: s }));
+  const owner = 'operator-1' as OperatorId;
+  const projectDir = path.join(workspaceRoot, 'proj-s136');
+  await mkdir(projectDir);
+
+  const raised = await records.raise(owner, { title: 't', justification: 'j', workspace: projectDir, vendor: 'claude' });
+  assert.equal(raised.ok, true);
+  if (!raised.ok) return;
+  const decided = await records.decide(raised.value.requisitionId, owner, 'approve');
+  assert.equal(decided.ok, true);
+
+  const created = await manager.create(owner, { vendor: 'claude', cwd: projectDir, model: null, sandbox: null, requisitionId: raised.value.requisitionId });
+  assert.equal(created.ok, true);
+  if (!created.ok) return;
+
+  const after = records.getRequisition(raised.value.requisitionId);
+  assert.equal(after.ok, true);
+  if (after.ok) {
+    assert.equal(after.value.state, 'consumed');
+    assert.equal(after.value.sessionId, created.value.sessionId);
+  }
+
+  // S13.8: a requisition whose workspace is outside every root is refused by the jail —
+  // never taken as a claim, and the requisition stays spendable.
+  const raisedOutside = await records.raise(owner, { title: 't2', justification: 'j2', workspace: '/nowhere', vendor: 'claude' });
+  assert.equal(raisedOutside.ok, true);
+  if (!raisedOutside.ok) return;
+  await records.decide(raisedOutside.value.requisitionId, owner, 'approve');
+  const refused = await manager.create(owner, { vendor: 'claude', cwd: '/nowhere', model: null, sandbox: null, requisitionId: raisedOutside.value.requisitionId });
+  assert.equal(refused.ok, false);
+  if (!refused.ok) assert.equal(refused.error.code, 'jail');
+  const stillApproved = records.getRequisition(raisedOutside.value.requisitionId);
+  assert.equal(stillApproved.ok, true);
+  if (stillApproved.ok) assert.equal(stillApproved.value.state, 'approved');
+  void config;
+});
+
+test('S13.7 — a claim against the wrong state, or an unknown id, is refused and takes nothing', async () => {
+  const { manager, workspaceRoot, records } = await makeManager('full', {}, undefined, undefined, (c, s) => createRecords({ config: c, store: s }));
+  const owner = 'operator-1' as OperatorId;
+  const projectDir = path.join(workspaceRoot, 'proj-s137');
+  await mkdir(projectDir);
+
+  const raised = await records.raise(owner, { title: 't', justification: 'j', workspace: projectDir, vendor: 'claude' });
+  assert.equal(raised.ok, true);
+  if (!raised.ok) return;
+
+  // Still 'open' — never approved.
+  const notApproved = await manager.create(owner, { vendor: 'claude', cwd: projectDir, model: null, sandbox: null, requisitionId: raised.value.requisitionId });
+  assert.equal(notApproved.ok, false);
+  if (!notApproved.ok) {
+    assert.equal(notApproved.error.code, 'records');
+    if (notApproved.error.code === 'records') assert.equal(notApproved.error.cause.code, 'requisition_not_approved');
+  }
+
+  const unknown = await manager.create(owner, { vendor: 'claude', cwd: projectDir, model: null, sandbox: null, requisitionId: 'no-such-id' as never });
+  assert.equal(unknown.ok, false);
+  if (!unknown.ok) {
+    assert.equal(unknown.error.code, 'records');
+    if (unknown.error.code === 'records') assert.equal(unknown.error.cause.code, 'no_such_requisition');
+  }
+});
+
+test('S13.9 — a creation that fails after the requisition claim releases it; a retry succeeds', async () => {
+  const { manager, workspaceRoot, records } = await makeManager('full', {}, (store) => ({
+    ...store,
+    async createSession() {
+      return { ok: false, error: { code: 'io', path: 'meta.json', detail: 'disk full' } };
+    },
+  }), undefined, (c, s) => createRecords({ config: c, store: s }));
+  const owner = 'operator-1' as OperatorId;
+  const projectDir = path.join(workspaceRoot, 'proj-s139');
+  await mkdir(projectDir);
+
+  const raised = await records.raise(owner, { title: 't', justification: 'j', workspace: projectDir, vendor: 'claude' });
+  assert.equal(raised.ok, true);
+  if (!raised.ok) return;
+  await records.decide(raised.value.requisitionId, owner, 'approve');
+
+  const failed = await manager.create(owner, { vendor: 'claude', cwd: projectDir, model: null, sandbox: null, requisitionId: raised.value.requisitionId });
+  assert.equal(failed.ok, false);
+
+  const stillApproved = records.getRequisition(raised.value.requisitionId);
+  assert.equal(stillApproved.ok, true);
+  if (stillApproved.ok) assert.equal(stillApproved.value.state, 'approved');
+});
+
+test('S13.6 — two creates naming the same approved requisition in the same tick: exactly one wins, the other is requisition_consumed', async () => {
+  const { manager, workspaceRoot, records } = await makeManager('full', {}, undefined, undefined, (c, s) => createRecords({ config: c, store: s }));
+  const owner = 'operator-1' as OperatorId;
+  const dirA = path.join(workspaceRoot, 'proj-s136a');
+  const dirB = path.join(workspaceRoot, 'proj-s136b');
+  await mkdir(dirA);
+  await mkdir(dirB);
+
+  const raised = await records.raise(owner, { title: 't', justification: 'j', workspace: dirA, vendor: 'claude' });
+  assert.equal(raised.ok, true);
+  if (!raised.ok) return;
+  await records.decide(raised.value.requisitionId, owner, 'approve');
+
+  const [a, b] = await Promise.all([
+    manager.create(owner, { vendor: 'claude', cwd: dirA, model: null, sandbox: null, requisitionId: raised.value.requisitionId }),
+    manager.create(owner, { vendor: 'claude', cwd: dirB, model: null, sandbox: null, requisitionId: raised.value.requisitionId }),
+  ]);
+  const winners = [a, b].filter((r) => r.ok);
+  assert.equal(winners.length, 1);
+  const loser = [a, b].find((r) => !r.ok)!;
+  if (!loser.ok) {
+    assert.equal(loser.error.code, 'records');
+    if (loser.error.code === 'records') assert.equal(loser.error.cause.code, 'requisition_consumed');
+  }
+});
+
+test('S13.10 — POST /api/sessions with no requisitionId behaves exactly as before', async () => {
+  const { manager, workspaceRoot } = await makeManager('full', {}, undefined, undefined, (c, s) => createRecords({ config: c, store: s }));
+  const owner = 'operator-1' as OperatorId;
+  const projectDir = path.join(workspaceRoot, 'proj-s1310');
+  await mkdir(projectDir);
+  const created = await manager.create(owner, { vendor: 'claude', cwd: projectDir, model: null, sandbox: null, requisitionId: null });
+  assert.equal(created.ok, true);
 });

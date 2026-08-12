@@ -2,6 +2,11 @@ import type { Adapter, AdapterError, AdapterOptions, Result, Vendor } from '../c
 import { createClaudeAdapter } from './claude/index.js';
 import { createCodexAdapter } from './codex/index.js';
 
+// The one enumeration of `Vendor`'s members — `createAdapter`'s switch below is what makes
+// each of these actually runnable, so this list and that switch are kept in the same file
+// rather than letting a second, independently-typed copy drift elsewhere.
+export const VENDORS: readonly Vendor[] = ['claude', 'codex'];
+
 export function createAdapter(vendor: Vendor, opts: AdapterOptions): Result<Adapter, AdapterError> {
   switch (vendor) {
     case 'claude':
