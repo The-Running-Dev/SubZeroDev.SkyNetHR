@@ -134,8 +134,14 @@ or the injected script the rollback was invoked to remove. Our restore semantics
 *Data model § Checkpoint*.
 
 **Coarse "always allow" patterns.** Deriving `npm run *` from a concrete command so a
-standing approval is a shape rather than a string. We need this and should not invent our
-own grammar before looking at what `permission_suggestions` already offers on the wire.
+standing approval is a shape rather than a string. We need this, and the instruction that
+stood here — do not invent a grammar before looking at what `permission_suggestions` offers
+on the wire — was followed and returned nothing. **The field is not merely un-mapped, it is
+unobservable**: the `control_request` that would carry it has never appeared on this
+transport across two independent probes three days apart, and the upstream defect was
+stale-closed without a fix. So the grammar is ours after all, and it is a local one —
+`"<tool>:<pattern>"`, declared in `20-contract.md § Event payloads` (D108). The vendor's
+array is still forwarded verbatim and read by nothing (D104, I44).
 
 ### Leave
 
@@ -165,25 +171,31 @@ implementation starts rather than discovered in it.
 | | Claude CLI | Codex CLI |
 |---|---|---|
 | When policy is set | Per tool call, at runtime | `sandbox_mode` at launch; `approval_policy` decides whether it *also* asks at runtime |
-| Mechanism | `control_request` / `control_response` over stdio | `approval_policy`, `sandbox_mode` in config. The channel a runtime prompt arrives on is **unverified** |
-| Granularity | This command, this path, now | The sandbox is whole-session. An `on-request` prompt would be per call, if it is reachable at all |
-| Operator sees | A prompt they answer | A sandbox chosen in advance, plus whatever `on-request` surfaces |
-| Source | Documented by the vendor and observed in the fork — **not** against the shipping CLI, where it does not fire (D88) | `codex/PROFILES.md` in this repository; live behaviour unverified |
+| Mechanism | `control_request` / `control_response` over stdio | `approval_policy`, `sandbox_mode` in config. Under `app-server` a runtime prompt arrives as a JSON-RPC **request**, `item/commandExecution/requestApproval`; `exec --json` has no such channel and cannot have one |
+| Granularity | This command, this path, now | The sandbox is whole-session. An `on-request` prompt is per call, and is reachable on one of the two transports |
+| Operator sees | A prompt they answer | A sandbox chosen in advance. Nothing more under the shipped policy, which is `preauthorised` |
+| Source | Documented by the vendor and observed in the fork — **not** against the shipping CLI, where it does not fire (D88) | Observed against `codex-cli 0.146.0`, both transports — `design/findings/S8-codex-adapter.md` (S8.1) |
 
-**Codex has a runtime approval concept of its own.** Every profile in `codex/PROFILES.md`
-carries `approval_policy = "on-request"`. What is unverified is whether that prompt is
-reachable over a programmatic stream, or exists only inside its terminal UI where a browser
-console cannot answer it (D27).
+**Codex has a runtime approval concept of its own, and S8.1 established that it is
+reachable.** Every profile in `codex/PROFILES.md` carries `approval_policy = "on-request"`,
+and the question D27 asked — whether that prompt reaches a programmatic stream at all, or
+lives only inside the terminal UI where a browser console cannot answer it — now has an
+answer. Under `codex app-server` with `approvalPolicy: 'on-request'`, the server sends a
+genuine JSON-RPC request, `item/commandExecution/requestApproval`, carrying `reason`,
+`command` and an `availableDecisions` enum, which a client can answer. Under `exec --json`
+it sends nothing of the kind and structurally cannot: that transport is non-interactive by
+construction and represents a sandbox denial only as the model narrating its own failure.
 
-So the asymmetry is one of **verification, not of capability** — and S1 narrowed it further,
-in the uncomfortable direction. **Neither vendor's runtime approval is observed on a live wire
-today** (D88). Claude's handshake was read out of the fork and is documented by the vendor;
-run against the installed CLI at 2.1.226, `--permission-prompt-tool stdio` emits no
-`can_use_tool` of any subtype and the tool simply executes. That is an open upstream defect —
-anthropics/claude-code#34046, tracked since 2.1.6 — with three probes recorded in
-`design/findings/S1-claude-adapter.md`. Codex's is documented in config and equally
-unobserved. The column that reads "verified" above therefore means *verified in someone else's
-code*, which is not the same thing and cost this project a slice to find out. A
+So the asymmetry is one of **verification, not of capability**, and the two slices that
+probed it moved it in opposite directions. **Claude's runtime approval is the one not
+observed on a live wire** (D88). Its handshake was read out of the fork and is documented by
+the vendor; run against the installed CLI at 2.1.226, `--permission-prompt-tool stdio` emits
+no `can_use_tool` of any subtype and the tool simply executes. That is an open upstream
+defect — anthropics/claude-code#34046, tracked since 2.1.6 — with three probes recorded in
+`design/findings/S1-claude-adapter.md`. **Codex's is now the observed one**, which is the
+reverse of what this section assumed when it was written. The Claude column that reads
+"verified" above therefore means *verified in someone else's code*, which is not the same
+thing and cost this project a slice to find out. A
 lowest-common-denominator design — launch-time policy only — would throw away the single
 most valuable thing the console offers, which is approving a tool call from somewhere that
 is not the server's terminal, and it would do so on the strength of an assumption nobody has
@@ -193,18 +205,30 @@ tested.
 against it, visibly.** See `90-decisions.md` D5, D27 for the corrected premise above, and D96
 for why the broken Claude handshake does not reopen D5 — a vendor defect in a documented
 mechanism is behaviour to be restored, not a capability that was never there.
-Until an experiment says otherwise, a Codex session launches with an explicit `sandbox_mode`,
-surfaces that mode in the UI as a standing banner, and emits no `permission.request` events.
-The client must therefore treat "no permission events" as a normal state for a session, not
-as a stuck turn. If `on-request` turns out to be reachable programmatically, D5 is revisited
-and Codex stops under-delivering — that is the shape open question 4 is looking for.
+A Codex session launches with an explicit `sandbox_mode`, surfaces that mode in the UI as a
+standing banner, and emits no `permission.request` events. The client must therefore treat
+"no permission events" as a normal state for a session, not as a stuck turn.
 
-**Stated as plainly as it deserves: Codex's live stdio protocol is unverified.** What is
-verified is its *on-disk rollout schema* — `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`,
+**The experiment open question 4 asked for has run, and D5 is not revised here.** S8.1 found
+`on-request` reachable on `app-server`, so the asymmetry D5 accepted is measurably narrower
+than when it was accepted — but S8's *Out of scope* says a reachable prompt is reported, not
+acted on, and revising D5 is `/design`'s call, not a reconciliation's.
+`20-contract.md § Vendor mapping — Codex` therefore carries the row marked *unreachable under
+the shipped policy* rather than deleting it: the mapping it would need is one decision away,
+not one experiment away.
+
+**Codex's live stdio protocol was unverified when this was written and now is not, and what
+it turned out to be is not what this section predicted.** The prediction was that the live
+stream might match the *on-disk rollout schema* — `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`,
 records wrapped in `payload`, opening with `session_meta`, usage as `token_count` events
-under `payload.info` (`tools/Measure-Session.ps1:28-29,181,454`). Whether the
-live stream matches that schema is an assumption, and the first slice of the Codex adapter
-is an experiment to find out, not an implementation. Budget for it accordingly.
+under `payload.info` (`tools/Measure-Session.ps1:28-29,181,454`). **It does not.** S8.1
+observed two live interfaces at `codex-cli 0.146.0` and neither emits `session_meta`,
+`payload.info` or `token_count`; that schema describes a file on disk, which S8's *Out of
+scope* forbids scraping, and it is not what the CLI puts on a wire. Both interfaces are
+mapped from observation in `20-contract.md § Vendor mapping — Codex`, with `app-server`
+primary and `exec --json` the fallback (D107). The instruction that stood here — budget the
+first Codex slice as an experiment rather than an implementation — was right and was
+followed; what it bought is recorded in `design/findings/S8-codex-adapter.md`.
 
 ## Data model
 
@@ -432,11 +456,25 @@ server-side alias for a vendor id buys nothing but a mapping table to get wrong.
 opaque**: no code above the adapter may parse, compare-for-ordering, or infer structure
 from them. Equality is the only permitted operation.
 
-The two "(assumed)" rows are assumptions about Claude that hold in the observed stream and
-are **unverified for Codex**. If Codex mints `callId`s unique only within a turn, tool
-correlation across a session breaks. That belongs in S8's experiment report. Storage no
-longer rests on the assumption — the blob path carries `turnId`, so a turn-scoped `callId`
-cannot overwrite anything — but correlation still does, and no path scheme fixes that.
+The two "(assumed)" rows are assumptions about Claude that hold in the observed stream. **For
+Codex they are no longer assumptions and no longer one answer** — S8.1 measured them, and the
+result splits by transport:
+
+- **`codex app-server`: UUID-based** (`exec-a2215fa5-…`), distinct across two sequential
+  turns of one thread. That is evidence of the scheme rather than proof it never collides —
+  two turns were probed, and only for `commandExecution` items — so it is treated exactly as
+  Claude's is: assumed, and stated as an assumption.
+- **`codex exec --json`: a per-turn counter** — `item_0`, `item_1`, `item_2` — that
+  **restarts on every turn of the same thread**, reproduced across two independent
+  `codex exec resume --last` runs. On that transport the `callId` row's "unique within:
+  session" is **false**, measured rather than doubted.
+
+So tool correlation across a session does break on the fallback, exactly as the old wording
+feared it might. Storage does not rest on the assumption — the blob path carries `turnId`, so
+a turn-scoped `callId` cannot overwrite anything (D22, I22) — but correlation does, and no
+path scheme fixes that. S8.7 stopped the slice before implementing correlation on that
+transport rather than inventing an alias for it; the choice is reserved in
+`20-contract.md § Unresolved` 13, and open question 7 below carries the design half.
 
 ### Checkpoint
 
@@ -450,34 +488,53 @@ cannot overwrite anything — but correlation still does, and no path scheme fix
 mirror is kept. Git is the store, and a second copy would be a second thing to fall out of
 sync.
 
-**Restore is three operations, and the third is the one that makes it a restore** (D31):
+**Restore is four operations, and the middle one is not the one D31 named** (D112):
 
 ```
-commit  --allow-empty -m "before restore to <sha>"    a way back
-checkout <sha> -- .                                   revert what changed
-clean   -fd                                           remove what appeared
+commit   --allow-empty -m "before restore to <sha>"   a way back
+read-tree --reset -u <sha>                            make the work-tree match, exactly
+clean    -fd                                          remove directories read-tree emptied
+verify   diff --quiet <sha>, ls-files --others        prove it, do not infer it
 ```
 
-`checkout <sha> -- .` writes the target tree over the work-tree and removes nothing absent
-from it. Creating files is the common case for a coding agent, so without the `clean` an
-operator who rolls back to undo a bad migration gets their edited files reverted and the
-migration left on disk — with the console reporting success. The brief's DoD #6 says "roll
-the workspace back to its state before any earlier message", and half a rollback is not
-that.
+**D31 specified `checkout <sha> -- .` here, and that sequence cannot do what D31 says it
+does.** The argument was that `clean -fd` removes what the agent created since the target.
+It does not, because D31's own first step prevents it: the safety commit runs `add -A`, so
+every file the agent created is *tracked* by the time the second step runs. `checkout
+<sha> -- .` writes only paths the target's tree holds, and `clean` never removes a tracked
+path — so such a file survives both operations. That is precisely the failure D31 exists to
+close, reintroduced by D31's own opening move. S6 found it while implementing and shipped
+the correction; this section is the last place that still described the broken sequence.
 
-Two properties make this safe enough to do without a confirmation dialog carrying a warning:
+`read-tree --reset -u <sha>` makes the index and, through `-u`, the work-tree match the
+target exactly — additions, edits and removals alike — **without moving `HEAD`**, so the
+shadow history stays linear and `list`'s `git log` still walks it. Creating files is the
+common case for a coding agent, and the brief's DoD #6 says "roll the workspace back to its
+state before any earlier message"; half a rollback is not that.
 
-- **The safety checkpoint comes first.** `clean -fd` deletes work, including work never
+Three properties make this safe enough to do without a confirmation dialog carrying a
+warning:
+
+- **The safety checkpoint comes first.** The reset deletes work, including work never
   checkpointed, and an operator who restores to the wrong `sha` would otherwise have no way
   back. Committing the current state first means the mistake is itself a checkpoint.
 - **Ignored paths are neither checkpointed nor cleaned.** `add -A` reads the workspace's own
   `.gitignore`, so `node_modules`, build output and local env files never enter the shadow
-  repo — and `clean -fd` without `-x` leaves exactly the same set alone. The pair is
-  deliberate and symmetric: `clean` can only remove things a checkpoint could have restored.
-  A restore therefore does not force a dependency reinstall, which is the failure that would
-  make operators stop using restores.
+  repo — and neither `read-tree` nor `clean -fd` takes `-x`, so exactly the same set is left
+  alone. The pair is deliberate and symmetric: a restore can only remove things a checkpoint
+  could have restored, so it never forces a dependency reinstall — the failure that would
+  make operators stop using restores. D31's symmetry argument survives the change of
+  mechanism unaltered.
+- **Success is verified rather than inferred from an exit code.** `read-tree` exits 0 with
+  only a warning when it cannot remove a directory an embedded repository occupies, and
+  `clean` declines such a directory unless forced twice, which this deliberately never does.
+  So the sequence ends with `diff --quiet <sha>` for tracked content and
+  `ls-files --others --exclude-standard` for what was left behind. Either coming back dirty
+  is `CheckpointError.restore_incomplete`.
 
-`checkout -- .` is still not atomic, so *Failure modes* keeps its partially-restored row.
+None of these operations is atomic, so *Failure modes* keeps its partially-restored row —
+but that row now describes a state this code **detects and reports**, rather than one it
+accepts silently.
 
 ### Audit record
 
@@ -658,7 +715,15 @@ per-operator budget needs the operator record D3 refuses.
 
 - **Burn** is the sum of the normalised `usage` events for the session. It is a sum only
   because the adapter guarantees the numbers are summable — see D75 below and open question
-  14, which is the unverified half of it.
+  14, which is where each vendor's answer is recorded.
+- **A session on `codex exec --json` reports a burn of zero, and that is not a bug in this
+  fold.** That transport's usage basis is undetermined, I28 forbids guessing, and the
+  adapter therefore emits no `usage` events at all (`20-contract.md § Usage`,
+  `## Unresolved` 12). The fold sums what it is given and is given nothing. Whether a
+  session that reports no burn should *say* so is undecided: it needs a `SessionNoticeCode`
+  that does not exist, and the design's *fail loudly, never degrade quietly* rule argues for
+  adding one. Until then this screen shows a zero it cannot distinguish from an idle
+  session, which is the one number on it that must not be silently wrong.
 - **Idle** is wall-clock time the session was `live` with no turn: the gaps between
   `turn.ended` and the next `turn.started`, plus creation-to-first-turn and last-turn-to-end.
 - **Idle excludes any interval containing a restart** (D76). A crash mid-turn is closed at
@@ -1067,9 +1132,14 @@ session-scoped state and auto-answers matching requests itself, emitting the ful
 `permission.request` / `permission.resolved` pair with `scope: 'standing'` and appending an
 audit record **every time**. That is what makes DoD #7's "every tool approval" literally
 true, and it keeps a standing grant enumerable and revocable by the server that granted it.
-The cost is that we need a matching grammar of our own — open question 8 stops being
-optional for the slice that ships standing approvals, and `permission_suggestions` is where
-the shape comes from even though the CLI no longer does the matching.
+The cost is that we need a matching grammar of our own — open question 8 stopped being
+optional for the slice that ships standing approvals, and the expectation recorded here, that
+`permission_suggestions` would supply the shape, was **falsified**: the field never arrives
+on this transport at all. The grammar is local, `"<tool>:<pattern>"`, and the tool-shape
+knowledge it needs lives in the adapter as `PermissionRequest.matchTarget` rather than in the
+manager (D108, D109, I46). A rule is in-memory, session-scoped and allow-only, and dies with
+the process — so "revocable by the server that granted it" is literally true and needs no
+persisted schema to be (D110, I45).
 
 The child exits at the end of a normal turn. That is the design, not a failure — see
 *Concurrency § Process lifetime*.
@@ -1440,7 +1510,7 @@ a client tell a silent agent from a dead connection, so this costs nothing on th
 | `ckpt.git` init fails | git exit code | `session.notice / warn`; session proceeds **without** checkpoints | Banner: no checkpoints | Session usable, DoD #6 unavailable |
 | Pre-turn `checkpoint.commit` fails | git exit code | `session.notice / warn` naming the cause; **the turn proceeds** with no restore point (D42) | "This turn has no checkpoint", and `ckpt.git/index.lock` named when that is the cause | Turn runs. Earlier checkpoints intact; this turn is not rollback-able |
 | Restore while a turn is in flight | Manager turn state | `409 turn_in_flight` | "Finish or interrupt first" | Workspace untouched |
-| Restore fails part-way | git exit code | `error`, non-fatal | Failure named | **Workspace is partially restored.** Git's `checkout -- .` is not atomic; this is a known and accepted exposure. The safety checkpoint (D31) is already committed, so the pre-restore state is still reachable |
+| Restore fails part-way | **The verification pass, not the exit code** — `diff --quiet <sha>` for tracked content, `ls-files --others --exclude-standard` for what was left behind (D112) | `error / checkpoint_restore_failed`, non-fatal, plus `500 checkpoint_failed` | Failure named, with the paths left behind | **Workspace is partially restored.** No step in the sequence is atomic, and `read-tree` exits 0 on the embedded-repository case, which is why this is detected rather than assumed absent. The safety checkpoint (D31) is already committed, so the pre-restore state is still reachable |
 | Disk full or write error on spill | Write error | **Fatal to the session** (D41): interrupt the live turn with `stopReason: 'storage_failure'`, mark the session ended | "Storage failed; this session has ended" | Transcript ends at the last durable event. The ring never outruns the spill, so replay stays truthful |
 | Audit append fails | Write error on `audit.ndjson` | **Deny** the permission with the failure as its reason; `session.notice / error` (D33) | "Denied — the approval could not be recorded" | Turn continues. No tool ran unaudited |
 | Torn trailing line in `events.ndjson` | Last line fails to parse at read | Drop it, log it, serve the rest (D20 made the spill a read path, so this is now reachable) | Transcript one event short | File untouched; the next append starts a fresh line |
@@ -1952,9 +2022,12 @@ From the structural review pass (D29–D43):
   D19 freed from it. Rejected accepting the nesting hazard — it is the silent data loss D19
   exists to close.
 - **D31 — restore removes files created after the target, behind a safety checkpoint.**
-  Chosen: commit, `checkout <sha> -- .`, `clean -fd`. Rejected: `checkout` alone — leaves
-  every file the agent created, which is half of DoD #6 reported as success. Rejected `clean`
-  without the preceding commit — a mistaken restore then has no way back.
+  Chosen: commit, then a reset of the work-tree to the target, then `clean -fd`. Rejected:
+  `checkout` alone — leaves every file the agent created, which is half of DoD #6 reported as
+  success. Rejected `clean` without the preceding commit — a mistaken restore then has no way
+  back. **Superseded in its mechanism by D112**: the reset is `read-tree --reset -u <sha>`,
+  because D31's own `checkout <sha> -- .` cannot remove a file the safety commit's `add -A`
+  has just tracked. The goal and both rejections stand.
 - **D32 — a guard is claimed in the same synchronous block that tests it.** Chosen: state the
   rule once and apply it to the turn slot and the workspace claim. Rejected: a per-session
   async mutex — solves it and makes "no mutex anywhere" false, in five call sites instead of
@@ -2131,6 +2204,15 @@ be revoked; **D84**, the contract declares the tier-two text caps and the audit 
 no values; **D85**, the checklist fold is served by the server rather than assembled in the
 client.
 
+**From implementation, D87 to D116, and this section indexes them rather than restating
+them.** They were taken while `design/` was frozen (D105), so each is a fact this document
+learned late rather than a choice it made: D88 and D96 on Claude's broken handshake, D89 to
+D95 and D97 to D104 on what S1 exposed about `emit`, argv, spawning and the vendor mapping,
+D107 on Codex's two transports, D108 to D110 on the standing-rule grammar, D112 on restore,
+and D113 to D116 from the reconciliation that lifted the freeze. Where one of them and this
+document disagree, `90-decisions.md` wins and this document is the defect — which is what
+D113 was written to stop being true eleven times over.
+
 Standing decisions this design rests on, all in `90-decisions.md`: D1/D10 transport,
 D2 sequencing, D3 delegated auth, D4 the jail, D5 the permission asymmetry, D6 shadow git,
 D7 no database, D8 reference-only prior art, D9/D11/D12 the Open WebUI evaluations.
@@ -2196,21 +2278,45 @@ these are cited by number elsewhere in this document and in the slices.
 
 **Needing an experiment:**
 
-4. Is Codex's `approval_policy = "on-request"` reachable over a programmatic stream, or only
-   inside its terminal UI? D27 corrected the premise; this is the question that was hiding
-   behind the old wording, and a yes revisits D5 outright.
+4. **Answered by S8.1: yes, on one of the two transports.** Under `codex app-server` with
+   `approvalPolicy: 'on-request'` the runtime prompt is a genuine JSON-RPC request,
+   `item/commandExecution/requestApproval`, carrying `reason`, `command` and an
+   `availableDecisions` enum. Under `exec --json` it does not exist and cannot. **A yes
+   revisits D5, and this pass does not revisit it** — S8's *Out of scope* reports a reachable
+   prompt rather than acting on one, and D5 is `/design`'s. What the answer changes today is
+   the honesty of *The hard problem*, not the shipped policy: Codex sessions stay
+   `preauthorised` and still emit zero `permission.request` events.
 5. Does `--include-partial-messages` give usable token-level deltas, and does it change the
    event contract? Cheap to test, and the answer changes the renderer.
-6. Does the Codex CLI expose a live NDJSON stream at all, and does it match the rollout
-   schema? First Codex slice answers this (S8.1).
-7. Are Codex's `callId`s unique within a session, or only within a turn? If the latter,
-   tool correlation breaks and *Data model § Identity spaces* needs a server-side alias
-   after all. The *storage* half of this is closed — the blob path carries `turnId` — but
-   correlation is not, and no path scheme closes it.
-8. Whether `permission_suggestions` from the Claude CLI is a sufficient grammar for
-   "always allow", or whether a local rule language is needed. Look before inventing.
-   **D35 makes this blocking for the slice that ships standing approvals** rather than a
-   nice-to-know: the server now does the matching, so it needs a grammar it can evaluate.
+6. **Answered by S8.1: two live interfaces, and neither matches the rollout schema.**
+   `codex app-server` is JSON-RPC 2.0 over stdio, marked `[experimental]` by the CLI itself
+   and schema-generated rather than hand-transcribed; `codex exec --json` is newline-delimited
+   JSON with no deltas of any kind. Neither emits `session_meta`, `payload.info` or
+   `token_count` — that schema describes `~/.codex/sessions/**/rollout-*.jsonl` on disk, which
+   S8's *Out of scope* forbids scraping. Both are mapped in
+   `20-contract.md § Vendor mapping — Codex`, `app-server` primary (D107). Transport selection
+   is the adapter's alone; `createAdapter` takes no transport parameter, because a transport
+   is a vendor fact and I20 forbids one above `adapters/*`.
+7. **Measured by S8.1, and the answer differs by transport.** On `app-server` the ids are
+   UUID-based and distinct across turns — assumed session-unique, exactly as Claude's are. On
+   `exec --json` they are a per-turn counter that restarts each turn, so `CallId` is **not**
+   session-unique there; that is a known collision, not an assumption that might fail. The
+   *storage* half stays closed — the blob path carries `turnId` (D22) — and the *correlation*
+   half is open on the fallback only. S8.7 stopped before implementing it rather than
+   inventing an alias; the obvious fix, composing a `CallId` from `(turnId, itemId)` inside
+   the adapter, is invisible above the boundary and may well be right, but choosing it is this
+   question's to answer, not a mapping table's. Carried as `20-contract.md § Unresolved` 13.
+8. **Answered by S10.1, and more narrowly than it was asked.** The question was whether
+   `permission_suggestions` is a *sufficient* grammar. It is not merely insufficient, it is
+   **unobservable**: the `control_request` that would carry it has never appeared on this
+   transport across two independent probes three days apart, and the upstream defect was
+   stale-closed without a fix. "Look before inventing" was followed and there was nothing to
+   look at. So the grammar is local — `"<tool>:<pattern>"`, with `parseStandingRule` and
+   `match` owned by `session-manager` and the tool-shape knowledge pushed into the adapter as
+   `PermissionRequest.matchTarget` (D108–D110). The vendor's array is still forwarded verbatim
+   and narrowed by nothing (D104, I44). Two things this did not settle, neither blocking:
+   whether a standing *denial* is ever wanted, and whether a rule should be revocable other
+   than by ending the session.
 
 **Known drift, not a question:**
 
@@ -2260,8 +2366,8 @@ these are cited by number elsewhere in this document and in the slices.
 
 **Needing an experiment (tier two):**
 
-14. **Are a vendor's `usage` numbers cumulative or incremental? Answered for Claude by S1;
-    still open for Codex.** D75 makes the adapter responsible for emitting something summable,
+14. **Are a vendor's `usage` numbers cumulative or incremental? Answered for Claude by S1,
+    and for Codex by S8.1 — on one transport.** D75 makes the adapter responsible for emitting something summable,
     which is the right place for the knowledge. The suspicion recorded here was that Claude
     reports per-context cumulative figures, in which case summing raw values would double-count
     across a turn and again across a compaction. **It does not.** Two probes against the real
@@ -2271,8 +2377,22 @@ these are cited by number elsewhere in this document and in the slices.
     one: **one logical message is streamed as several `assistant` records sharing a `message.id`
     and repeating byte-identical usage**, so a naive sum double-counts by duplication rather
     than by accumulation. The adapter emits once per `message.id` and ignores the `result`
-    record's usage, which is a materially larger and differently-based figure. Codex's
-    `token_count` under `payload.info` is unverified for the same question and is unverified for
-    whether it appears on a live stream at all (open question 6), so brief item 8's "token burn
-    to date" is demonstrable for Claude and still merely plausible for Codex. Blocked behind
-    S8.1 for the remainder.
+    record's usage, which is a materially larger and differently-based figure.
+
+    **Codex's half is no longer blocked behind S8.1, and it splits.** `token_count` under
+    `payload.info` turned out to be the on-disk rollout schema and to appear on neither live
+    transport (open question 6). What `app-server` does carry is explicit `total` and `last`
+    sub-objects on both `turn/completed` and `thread/tokenUsage/updated`; the adapter reads
+    `last`, which is that turn's own marginal figure, so D75's summability is met **by reading
+    rather than by subtracting** — the same shape of answer S1 reached for Claude, arrived at
+    independently. **`exec --json` is undetermined and stays that way.** Its
+    `turn.completed.usage` was observed roughly doubling across two sequential resumed turns of
+    one thread — `input_tokens` 46276 → 93393, `cached_input_tokens` 33280 → 66560 — which fits
+    a running total and fits each call resending a growing context equally well. I28 forbids
+    guessing, because a cumulative figure summed as a delta double-counts burn on the one
+    screen headed *payroll*, so that transport emits no `usage` at all and its payroll view
+    reads zero (*Derived views*). Two questions ride on the answer and neither is settled:
+    whether a session reporting no burn says so — which needs a `SessionNoticeCode` this design
+    does not have — and whether `reasoning_output_tokens` counts toward `Usage.outputTokens`.
+    Carried as `20-contract.md § Unresolved` 12. So brief item 8's "token burn to date" is
+    demonstrable for Claude and for Codex on `app-server`, and unavailable on the fallback.

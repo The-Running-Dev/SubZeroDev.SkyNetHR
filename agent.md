@@ -41,6 +41,31 @@ and preferences belong in `AGENTS.md`.
   silently when a document is restructured. Positional numbering makes this worse: inserting
   a document between existing ones means renumbering everything after it and rewriting every
   link. **Prefer appending.**
+- **A decision recorded is not a decision executed.** D105 froze `design/`; `design/FROZEN.md`
+  is the whole mechanism and no commit ever added it, so every command the freeze was supposed
+  to gate ran unfrozen until a `/track` pass noticed three days later. **Cost: three slices'
+  worth of authoring ran under a regime nobody had established, and the gap had to be
+  adjudicated as a record correction (D111) rather than caught at the moment of the freeze.**
+  Where a decision's mechanism is a file, the file lands in the same commit as the entry, or
+  the decision has not been made.
+
+## Sequences and arguments
+
+- **A safety step can reintroduce the failure the sequence exists to prevent.** D31 specified
+  `commit` → `checkout <sha> -- .` → `clean -fd` and argued the `clean` removes what the agent
+  created. It cannot: the safety commit's `add -A` makes those files *tracked*, and `clean`
+  never removes a tracked path — step 1 defeating step 3, in an entry written to close exactly
+  that failure. **Cost: the design and the contract both described a restore known not to
+  restore, inherited intact from the prior art, and it surfaced only when a slice implemented
+  it.** When a sequence's steps have preconditions on each other, state each step's effect on
+  the next one's inputs, and check the argument against its own first line.
+- **"Unverified" and "unobservable" are different findings, and the cheap probe separates
+  them.** An open question asked whether a vendor's `permission_suggestions` was a *sufficient*
+  grammar. Two probes three days apart found the record carrying it never fires at all, and the
+  upstream defect was stale-closed unfixed. **Cost: a slice opened with a criterion that spent
+  its budget establishing there was nothing to look at.** When the question is "is vendor field
+  X good enough", probe "does X ever arrive" first — a negative there answers the question at a
+  fraction of the cost, and it changes the answer from "insufficient" to "build your own".
 
 ## Verification
 

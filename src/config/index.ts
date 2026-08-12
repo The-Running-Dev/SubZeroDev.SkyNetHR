@@ -197,6 +197,14 @@ export function loadConfig(env: Readonly<Record<string, string | undefined>>): R
 
   const includeRaw = env['INCLUDE_RAW'] === 'true';
 
+  // The `Max-Age` on the cookie `POST /api/login` mints. Read only under `shared-secret`;
+  // the header modes' credential belongs to the upstream proxy and its lifetime is not
+  // ours to set. Thirty days is the default rather than a constant, because shortening a
+  // session lifetime is what a deployment does after an incident and it must not need a
+  // release (D103's argument for the caps, applied to the one value that is a credential).
+  const sessionCookieMaxAgeSeconds = parseIntEnv(env, 'SESSION_COOKIE_MAX_AGE_SECONDS', 30 * 24 * 60 * 60);
+  if (!sessionCookieMaxAgeSeconds.ok) return sessionCookieMaxAgeSeconds;
+
   let sessionTokenBudget: number | null = null;
   const budgetRaw = env['SESSION_TOKEN_BUDGET'];
   if (budgetRaw !== undefined && budgetRaw !== '') {
@@ -228,6 +236,7 @@ export function loadConfig(env: Readonly<Record<string, string | undefined>>): R
       allowedOrigins,
       trustProxy,
       caps,
+      sessionCookieMaxAgeSeconds: sessionCookieMaxAgeSeconds.value,
       includeRaw,
       sessionTokenBudget,
       checklist: checklist.value,

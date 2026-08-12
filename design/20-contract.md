@@ -114,14 +114,21 @@ interface SessionSummary {
   readonly endedAt: IsoTimestamp | null;
 }
 
-// The session manager's registry entry: the persisted record plus the one piece of state
-// that is never written. `turn === null` means idle, and it is always null once
-// `state === 'ended'` — which is what makes I8 assertable against a declared field rather
-// than against a field only `10-design.md § Data model — Session` names.
+// The two fields of the session manager's registry entry that the invariants are stated
+// over: the persisted record, plus the one piece of state that is never written.
+// `turn === null` means idle, and it is always null once `state === 'ended'` — which is what
+// makes I8 assertable against a declared field rather than against a field only
+// `10-design.md § Data model — Session` names.
 //
-// The ring buffer and the subscriber set are the other two things `meta.json` excludes and
-// neither is declared here: the ring is `store`'s, reached by `pushRing` / `readRingAfter`
-// on a `SessionId`, and the subscriber set never leaves the manager's fan-out.
+// **The manager's actual entry extends this**, and the extension is deliberately not
+// declared: fan-out bookkeeping, the per-session append chain, the standing-rule list and
+// the flags that decide whether a later turn retries a doomed checkpoint are scheduling
+// state that crosses no module boundary, and a contract that enumerated them would have to
+// be amended every time the manager learned a new thing about its own turns. What is
+// declared is what something outside `session-manager` may assume. The ring buffer and the
+// subscriber set are named here only to say they are *not* it: the ring is `store`'s,
+// reached by `pushRing` / `readRingAfter` on a `SessionId`, and the subscriber set never
+// leaves the manager's fan-out.
 interface LiveSession {
   readonly record: SessionRecord;
   turn: Turn | null;
@@ -158,6 +165,11 @@ interface PendingPermission {
   readonly callId: CallId;
   readonly tool: string;
   readonly input: Readonly<Record<string, unknown>>;
+  // Carried from the originating `PermissionRequest` so that `answerPermission` can enforce
+  // I43 — `scope: 'always'` against an unprojectable request is `bad_request` — without
+  // re-reading `input`, which would put tool-shape knowledge in `session-manager` and break
+  // I46. It is a copy of the adapter's projection, never a second projection.
+  readonly matchTarget: string | null;
 }
 ```
 
@@ -426,7 +438,8 @@ interface ErrorEvent {
 - `session.started` is emitted once per session, on the first turn only, even though the CLI
   reports `system/init` on every turn.
 - **`SessionStarted.state` is the state at emission and is therefore always `'live'`.** The
-  authoritative current state is `SessionSummary.state` from `GET /api/sessions`, or the
+  authoritative current state is `SessionSummary.state` from `GET /api/sessions` or
+  `GET /api/sessions/:id`, or the
   presence of a `session.ended` later in the stream. A client that reads `state` off a
   replayed `session.started` will show an enabled compose box for an ended session. The field
   is retained knowingly (D45).
@@ -631,6 +644,13 @@ interface Config {
   readonly allowedOrigins: readonly string[];
   readonly trustProxy: readonly string[];    // upstream addresses permitted to set the identity header
   readonly caps: Caps;
+  // `Max-Age` on the cookie `POST /api/login` mints. Only read under
+  // `auth.mode === 'shared-secret'`; ignored under either header mode, where the credential
+  // is the upstream proxy's and its lifetime is not ours to set. A session lifetime is a
+  // deployment's security posture, not a constant — a literal here is the buried-constant
+  // failure `10-design.md § Module boundaries` names for caps, and it applies harder to
+  // this, because shortening it is what a deployment does after an incident.
+  readonly sessionCookieMaxAgeSeconds: number;
   readonly includeRaw: boolean;
   readonly sessionTokenBudget: number | null;              // (tier two) per session; null disables the view's budget
   readonly checklist: readonly ChecklistItemTemplate[];    // (tier two) empty disables the checklist
@@ -1093,9 +1113,31 @@ storage and never sent here (D60, D78).
 
 ## HTTP routes
 
-All request and response bodies are JSON unless stated. All routes require authentication.
+All request and response bodies are JSON unless stated. **Every route under `/api/` requires
+authentication, with exactly one exception — `POST /api/login`, which cannot, because it is
+what mints the credential.** The static client assets the same listener serves — `/`,
+`/app.js`, `/render.js`, `/app.css` — are outside `/api/` and outside this rule: they are the
+console's own code, they carry no operator's data, and a page that refused to load before
+authentication would have nothing left to authenticate with.
+
 Every `POST` and `DELETE` under `/api/` requires an origin match, checked before identity is
-resolved.
+resolved — `POST /api/login` included, since the origin check precedes both.
+
+### Identity
+
+| Method | Path | Request | Success | Refusals |
+|---|---|---|---|---|
+| `POST` | `/api/login` | `{ secret: string }` | `200 { ok: true }` + `Set-Cookie` | `403 bad_origin`, `401 unauthenticated`, `404 no_such_session`, `422 bad_request` |
+
+**Served only under `auth.mode === 'shared-secret'`**; under either header mode the route does
+not exist and answers `404`, because the credential it would mint is one the deployment has
+said it does not use. The secret is compared in constant time. The cookie is
+`<auth.cookieName>=<secret>; SameSite=Strict; HttpOnly; Path=/; Max-Age=<Config.sessionCookieMaxAgeSeconds>`
+— the attributes are defence in depth and the origin check is the control (D29,
+`10-design.md § Security controls`).
+
+The `404` is `no_such_session` because `ApiErrorCode` carries no route-level not-found; see
+*Error semantics*.
 
 ### Sessions
 
@@ -1109,9 +1151,16 @@ resolved.
 | `POST` | `/api/sessions/:id/checkpoint/restore` | `{ sha: GitSha }` | `200 { ok: true }` | `403 bad_origin`, `404 no_such_session`, `404 no_such_checkpoint`, `409 turn_in_flight`, `422 bad_request`, `500 checkpoint_failed` |
 | `DELETE` | `/api/sessions/:id` | — | `200 { ok: true }` | `403 bad_origin`, `404 no_such_session`, `409 turn_in_flight` |
 | `GET` | `/api/sessions` | — | `200 { sessions: SessionSummary[] }`, caller's own only | `401 unauthenticated` |
+| `GET` | `/api/sessions/:id` | — | `200 { session: SessionSummary }` | `401 unauthenticated`, `404 no_such_session` |
 | `GET` | `/api/sessions/:id/events` | `Last-Event-ID` header | `200 text/event-stream` | `404 no_such_session` |
 | `GET` | `/api/sessions/:id/checkpoints` | — | `200 { checkpoints: Checkpoint[] }` | `404 no_such_session` |
 | `GET` | `/api/sessions/:id/tool-output/:turnId/:callId` | — | `200 text/plain; charset=utf-8` | `404 no_such_session`, `404 no_such_output` |
+
+`GET /api/sessions/:id` is the single-resource read of the same `SessionSummary` the list
+route returns, under the same ownership check, and it exists so that a client holding one
+`sessionId` can re-read that session's authoritative `state` without fetching every session
+it owns. It answers `404 no_such_session` for a session that is not the caller's, exactly as
+every other route under `/api/sessions/:id` does.
 
 The permission route resolves identity and the ownership check like every other session
 route; the operator it resolves is the one written to `AuditRecord.operator`.
@@ -1253,6 +1302,22 @@ type ApiErrorCode =
 | 404 | `no_such_item` *(tier two)* | No such `itemId` in the configured checklist template |
 | 500 | `record_write_failed` *(tier two)* | The record-log append failed; nothing changed anywhere |
 | 500 | `payroll_unavailable` *(tier two)* | The fold could not read the spill; the session itself is unaffected |
+
+**`no_such_session` is also the answer to an unknown route, and that is a forced overload
+rather than a chosen one.** This union carries no route-level not-found, so a request to a
+path this build does not serve — and a `POST /api/login` under a header auth mode — answers
+`404 no_such_session`. The consequence is stated so a client does not read more into it than
+it holds: a `404 no_such_session` distinguishes "no such session", "not your session" and "no
+such route" from each other in none of the three cases. Adding a code to separate the third
+is additive and is not done here.
+
+**`SessionError.storage` reaching an edge is reported as `503 agent_unavailable`.** Every
+storage failure the error table below routes by call site — a spill append ends the session,
+an audit append denies the permission, a blob read is `404 no_such_output`, a record-log
+append is `500 record_write_failed` — and what is left is a storage failure during `create`,
+where no more specific declared refusal exists. `503` is right (it is transient and the
+caller should retry); the code name is not, and it is retained rather than multiplied because
+the alternative is a `storage_unavailable` variant whose only caller is this one path.
 
 `404` rather than `403` for another operator's session is deliberate: session existence is
 not something a non-owner should be able to probe. There is no `403 forbidden` for session
