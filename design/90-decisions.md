@@ -2204,6 +2204,28 @@ prevent.
 Reversibility: cheap. This is text, and the variant D116 and this entry both decline stays
 available.
 
+### 2026-08-12 — D118 `edge/error-envelope` is declared as a thirteenth module
+Context: `src/edge/error-envelope/index.ts` exports `sendError`, `statusForCode` and
+`FALLBACK_STATUS`. `edge/sse` imports it today and its own comment reserves it for `edge/ws`
+from S11, so it crosses a module boundary — and it appeared in neither `10-design.md § Module
+boundaries`, which names twelve modules, nor `20-contract.md § Public signatures`. That is the
+hard rule against public interfaces the contract does not carry, broken a third time after
+D115 found two.
+Chosen: declare it in the contract with its three signatures, stating why it exists — one
+status mapping serving two transports, so they cannot answer one failure two ways. The design's
+module table is left saying twelve and the discrepancy is stated in the new section rather than
+fixed, because a module table is `/reconcile`'s.
+Rejected: reading it as an internal helper the contract's preamble already excludes. It is the
+cheapest option and it is not true — the module is imported across a boundary today, so the
+reading would turn "every signature below crosses a module boundary" into "every signature
+below is one we chose to write down", which is not a checkable claim.
+Rejected: deleting the module and duplicating `STATUS_FOR` in each edge. It removes the
+undeclared boundary by removing the boundary, and it produces exactly the two copies of one
+rule that *Single ownership* forbids — with the divergence landing as two transports
+disagreeing about a status code, which is the failure the module was extracted to prevent.
+Reversibility: cheap. A declared module is withdrawn by deleting a section; nothing outside
+`edge/*` may reach it, so no client can come to depend on it.
+
 ## Open
 
 Staging only. Once an item becomes an issue it leaves this list.

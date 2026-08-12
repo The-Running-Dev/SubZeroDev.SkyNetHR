@@ -1086,6 +1086,39 @@ any decision (I47) — that is the whole of D35 and the reason this grammar exis
 The `records` dependency is one-directional and exists for the claim during `create`. Nothing
 else in the manager may call it, and `records` may never call back.
 
+### `edge/error-envelope`
+
+Shared by every edge that speaks `ApiErrorCode` — `edge/sse` today, `edge/ws` from S11. It is
+declared rather than left as an internal helper because it crosses a module boundary: two
+transports answering one failure with two different statuses is the defect a single mapping
+exists to prevent, and a rule enforced by a module nothing declares is a rule nobody can check
+against.
+
+```ts
+declare const FALLBACK_STATUS: 500;
+
+// Total over `ApiErrorCode`. The mapping it implements is the HTTP column of the table above,
+// which stays this document's; this module is where the code reads it from, not a second copy
+// with standing to disagree.
+declare function statusForCode(code: ApiErrorCode): number;
+
+declare function sendError(
+  res: import('node:http').ServerResponse,
+  code: ApiErrorCode,
+  message: string,
+  detail?: unknown,
+): void;
+```
+
+`sendError` writes the `ApiError` body declared above, sets
+`X-Content-Type-Options: nosniff`, and is the only way an edge answers a refusal.
+`FALLBACK_STATUS` is named so a fallback is visibly one rather than a `500` that happens to
+match `checkpoint_failed`'s; it is unreachable while the mapping stays total.
+
+**`10-design.md § Module boundaries` names twelve modules and this is a thirteenth.** The
+design is the stale side and the correction is not made here — a module table is `/reconcile`'s
+to rewrite, not this document's to overrule.
+
 ### `edge/sse` and `edge/ws`
 
 ```ts
