@@ -70,6 +70,13 @@ async function loadRenderer() {
   return mod.renderEvent;
 }
 
+async function loadAuditRowRenderer() {
+  const mod = (await import(pathToFileURL(path.join(CLIENT, 'render.js')).href)) as {
+    renderAuditRow: (doc: unknown, record: unknown) => StubNode;
+  };
+  return mod.renderAuditRow;
+}
+
 const XSS = '<img src=x onerror=alert(1)>';
 
 describe('S2.11 — the client renders normalised events only', () => {
@@ -163,6 +170,43 @@ describe('S2.12 — untrusted content is text, never markup', () => {
     assert.doesNotMatch(html, /style\s*=/i, 'an inline style attribute');
     assert.match(html, /<script[^>]+type="module"[^>]+src="\/app\.js"/, 'the script is external');
     assert.match(html, /<link[^>]+rel="stylesheet"[^>]+href="\/app\.css"/, 'the stylesheet is external');
+  });
+});
+
+describe('S12.10 — the audit screen renders every field as a text node', () => {
+  it('renders operator, tool, input, decision and ts as literal text, including an XSS payload in input', async () => {
+    const renderAuditRow = await loadAuditRowRenderer();
+    const { doc, created } = makeDoc();
+    const record = {
+      ts: '2026-08-13T00:00:00.000Z',
+      operator: 'ben',
+      sessionId: 's-1',
+      vendor: 'x',
+      sandbox: null,
+      tool: XSS,
+      input: { command: XSS },
+      decision: 'allow',
+      scope: 'once',
+      reason: null,
+    };
+    const row = renderAuditRow(doc, record);
+    const rendered = allText(row).join(' ');
+    assert.ok(rendered.includes('2026-08-13T00:00:00.000Z'), 'ts');
+    assert.ok(rendered.includes('ben'), 'operator');
+    assert.ok(rendered.includes('allow'), 'decision');
+    assert.ok(rendered.includes(XSS), 'the exact XSS characters survive as text — in both the tool name and the input');
+    assert.ok(!created.some((n) => n.tag.toLowerCase() === 'img'), 'no img element was ever created');
+  });
+
+  it('renders "server" for a server-forced decision (operator: null)', async () => {
+    const renderAuditRow = await loadAuditRowRenderer();
+    const { doc } = makeDoc();
+    const record = {
+      ts: 'x', operator: null, sessionId: 's-1', vendor: 'x', sandbox: null,
+      tool: 'bash', input: {}, decision: 'deny', scope: 'standing', reason: 'no matching rule',
+    };
+    const row = renderAuditRow(doc, record);
+    assert.ok(allText(row).includes('server'));
   });
 });
 
@@ -270,7 +314,13 @@ interface FakeStream {
 
 async function runConsole(sessions: ReadonlyArray<Record<string, unknown>>) {
   const byId = new Map<string, FakeEl>();
-  for (const id of ['status', 'login', 'console', 'sessions', 'transcript', 'compose', 'new-session', 'login-form', 'refresh', 'cwd', 'vendor', 'model', 'sandbox', 'text', 'secret', 'checkpoints', 'checkpoint-list', 'policy-banner']) {
+  for (const id of [
+    'status', 'login', 'console', 'sessions', 'transcript', 'compose', 'new-session', 'login-form',
+    'refresh', 'cwd', 'vendor', 'model', 'sandbox', 'text', 'secret', 'checkpoints', 'checkpoint-list',
+    'policy-banner', 'audit', 'audit-open', 'audit-close', 'audit-filters', 'audit-filter-session',
+    'audit-filter-operator', 'audit-filter-since', 'audit-filter-until', 'audit-rows', 'audit-empty',
+    'audit-load-more',
+  ]) {
     byId.set(id, fakeEl('div'));
   }
   const streams: FakeStream[] = [];

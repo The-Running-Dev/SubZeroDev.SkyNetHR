@@ -1066,6 +1066,11 @@ interface SessionManager {
   payroll(sessionId: SessionId, owner: OperatorId): Promise<Result<PayrollView, SessionError>>;
   checklist(sessionId: SessionId, owner: OperatorId): Promise<Result<readonly ChecklistItemState[], SessionError>>;
   tickChecklistItem(sessionId: SessionId, owner: OperatorId, itemId: ChecklistItemId): Promise<Result<void, SessionError>>;
+
+  // Not session-scoped and takes no owner, like `boot`: D70 opens this read to every
+  // authenticated operator. A pure delegation to `Store.readAuditPage` — it exists here,
+  // not on `records`, because `records` is tier two and this route is tier one (`## Unresolved` 5).
+  readAudit(query: AuditQuery): Promise<Result<AuditPage, StoreError>>;
 }
 
 declare function createSessionManager(deps: {
@@ -1818,12 +1823,15 @@ are new in this pass and each names the issue that carries it.
    producing a display string — the one place that reading is uncomfortable. It is not
    moved here because moving it would put tool-shape knowledge in the session manager, which
    is exactly what the vendor boundary forbids. (#23)
-5. **Which module serves `GET /api/audit`.** The route is determined and is tier one; its
-   owner is not. `10-design.md § Module boundaries` gives the incident read to `records`,
-   which is tier two, so as drawn tier one cannot serve brief item 7 without building part of
-   tier two. `Store.readAuditPage` is written above because reading `audit.ndjson` is
-   unambiguously `store`'s, and an edge may not call `store` directly — so the missing piece
-   is exactly one method on one module, and this contract does not choose which. (#34)
+5. **Resolved by S12.** `session-manager.readAudit` serves the route, delegating straight to
+   `Store.readAuditPage`; `session-manager` was chosen over `records` because `records` is
+   tier two and does not exist when tier one's `GET /api/audit` must already work, and every
+   edge already depends on `session-manager` and never on `store` directly. The method takes
+   no owner and applies no ownership check, unlike every other method on that interface,
+   because D70 opens this read to every authenticated operator regardless of session
+   ownership — it sits on `session-manager` only because that module already bridges edges to
+   `store`, not because the read is about sessions. S17 (tier two) reuses the same method with
+   `incidentsOnly: true` rather than duplicating it on `records`. (#34)
 6. **How the edge obtains a `SessionSnapshot` for a review about a session the author does
    not own.** `records.createReview` takes the snapshot as a parameter (D77) and that part is
    settled. What is not: the threat model says writing a review about another operator's

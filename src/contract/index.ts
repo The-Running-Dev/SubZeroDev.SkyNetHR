@@ -717,6 +717,10 @@ export interface SessionManager {
     owner: OperatorId,
     itemId: ChecklistItemId,
   ): Promise<Result<void, SessionError>>;
+
+  // Not session-scoped and takes no owner, like `boot`: D70 opens this read to every
+  // authenticated operator. A pure delegation to `Store.readAuditPage` (D119).
+  readAudit(query: AuditQuery): Promise<Result<AuditPage, StoreError>>;
 }
 
 // ---------------------------------------------------------------------------

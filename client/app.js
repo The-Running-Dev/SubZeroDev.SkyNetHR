@@ -1,4 +1,4 @@
-import { renderEvent } from './render.js';
+import { renderAuditRow, renderEvent } from './render.js';
 
 const $ = (id) => document.getElementById(id);
 
@@ -15,6 +15,18 @@ const state = {
   // restart, or closed by its operator — refuses every message with `409 session_ended`,
   // and a box that still invites typing turns that refusal into a surprise.
   sessionsById: new Map(),
+  // S12: the opaque `nextCursor` from the last audit page fetched, round-tripped verbatim
+  // — nothing here parses, decodes or constructs one (D86, S12.5).
+  auditCursor: null,
+  // S12: the filter values the current `auditCursor` was fetched under, pinned at reset
+  // time (open / submit Filter) — "Load older" reuses these rather than re-reading the
+  // filter inputs live, so an edited-but-unsubmitted filter cannot be silently combined
+  // with a cursor minted under the old one.
+  auditFilters: null,
+  // S12: bumped on every `loadAuditPage` call so a slower, superseded response (a filter
+  // reset that outruns an in-flight "Load older") can never overwrite state a newer call
+  // already reset — mirrors `refreshCheckpoints`'s `requestedSessionId` guard.
+  auditRequestToken: 0,
 };
 
 function currentSession() {
@@ -426,6 +438,78 @@ async function sendMessage(event) {
 }
 
 // ---------------------------------------------------------------------------
+// Audit log (S12) — open to every authenticated operator, not scoped to the caller's own
+// sessions (D70, S12.7), so this panel is independent of `state.sessionId`.
+// ---------------------------------------------------------------------------
+
+function isoFromLocalInput(value) {
+  if (!value) return null;
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? null : parsed.toISOString();
+}
+
+function readAuditFilters() {
+  return {
+    sessionId: $('audit-filter-session').value.trim(),
+    operator: $('audit-filter-operator').value.trim(),
+    since: isoFromLocalInput($('audit-filter-since').value),
+    until: isoFromLocalInput($('audit-filter-until').value),
+  };
+}
+
+function auditQueryParams(filters, before) {
+  const params = new URLSearchParams();
+  params.set('limit', '50');
+  if (before !== null) params.set('before', before);
+  if (filters.sessionId !== '') params.set('sessionId', filters.sessionId);
+  if (filters.operator !== '') params.set('operator', filters.operator);
+  if (filters.since !== null) params.set('since', filters.since);
+  if (filters.until !== null) params.set('until', filters.until);
+  return params;
+}
+
+async function loadAuditPage(reset) {
+  if (reset) {
+    state.auditCursor = null;
+    state.auditFilters = readAuditFilters();
+    clear($('audit-rows'));
+    $('audit-empty').hidden = true;
+  }
+  // Pinned at the last reset — "Load older" resumes the same query its cursor was minted
+  // under, never whatever the filter inputs currently hold.
+  const filters = state.auditFilters ?? readAuditFilters();
+  const requestToken = ++state.auditRequestToken;
+  const params = auditQueryParams(filters, state.auditCursor);
+  const result = await api('GET', `/api/audit?${params.toString()}`);
+  if (state.auditRequestToken !== requestToken) return; // superseded by a newer request
+  if (result.status === 401) return;
+  if (result.status !== 200) return status(describe(result), 'error');
+
+  const tbody = $('audit-rows');
+  for (const record of result.payload.records) {
+    tbody.appendChild(renderAuditRow(document, record));
+  }
+  // D86/S12.5: round-tripped exactly as received — nothing here parses or constructs it.
+  state.auditCursor = result.payload.nextCursor;
+  $('audit-load-more').hidden = state.auditCursor === null;
+  if (tbody.children.length === 0) $('audit-empty').hidden = false;
+}
+
+function openAudit() {
+  $('audit').hidden = false;
+  void loadAuditPage(true);
+}
+
+function closeAudit() {
+  $('audit').hidden = true;
+}
+
+async function filterAudit(event) {
+  event.preventDefault();
+  await loadAuditPage(true);
+}
+
+// ---------------------------------------------------------------------------
 // The shared-secret exchange. In the header-trust modes the proxy has already
 // authenticated the operator and this panel is never shown.
 // ---------------------------------------------------------------------------
@@ -433,6 +517,9 @@ async function sendMessage(event) {
 function showLogin() {
   $('login').hidden = false;
   $('console').hidden = true;
+  // The audit panel is a fixed full-viewport overlay independent of `#console` (S12.7) —
+  // left open, it paints above `#login` and hides the very form this function exists to show.
+  $('audit').hidden = true;
 }
 
 async function submitLogin(event) {
@@ -450,6 +537,10 @@ function start() {
   $('compose').addEventListener('submit', sendMessage);
   $('login-form').addEventListener('submit', submitLogin);
   $('refresh').addEventListener('click', () => void refreshSessions());
+  $('audit-open').addEventListener('click', openAudit);
+  $('audit-close').addEventListener('click', closeAudit);
+  $('audit-filters').addEventListener('submit', filterAudit);
+  $('audit-load-more').addEventListener('click', () => void loadAuditPage(false));
   void refreshSessions();
 }
 

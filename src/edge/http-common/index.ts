@@ -4,9 +4,12 @@ import { timingSafeEqual } from 'node:crypto';
 import { Readable } from 'node:stream';
 import type {
   ApiErrorCode,
+  AuditCursor,
+  AuditQuery,
   CallId,
   EdgeDeps,
   IdentityResolver,
+  IsoTimestamp,
   OperatorId,
   SessionError,
   SessionId,
@@ -141,6 +144,21 @@ export function isMutating(method: string): boolean {
   return method === 'POST' || method === 'PUT' || method === 'PATCH' || method === 'DELETE';
 }
 
+// `contract/index.ts`'s `IsoTimestamp` brand: "ISO 8601, UTC, millisecond precision, `Z`
+// suffix". `handleAudit`'s `since`/`until` are the one place an `IsoTimestamp` is minted
+// from caller input rather than the server's own clock, so this is the one place that shape
+// is checked rather than assumed.
+const ISO_TIMESTAMP_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
+
+export function parseIsoTimestamp(value: string): string | null {
+  if (!ISO_TIMESTAMP_PATTERN.test(value)) return null;
+  return Number.isNaN(Date.parse(value)) ? null : value;
+}
+
+// Kept identical to `store`'s `macEquals` by hand — the two modules cannot share a runtime
+// helper (`store` depends only on `config`/`contract`; `contract` is types-only) but both
+// compare a caller-supplied secret in constant time, so the technique must not drift between
+// them even though the code does. Keep both in sync if either changes.
 export function constantTimeEquals(a: string, b: string): boolean {
   const left = Buffer.from(a, 'utf8');
   const right = Buffer.from(b, 'utf8');
@@ -386,6 +404,53 @@ export function createHttpHandlers(deps: EdgeDeps) {
     stream.pipe(res);
   }
 
+  // `GET /api/audit` (D73, D119): not session-scoped, open to every authenticated
+  // operator (D70) — the route table declares only `401 unauthenticated` and
+  // `422 bad_request` as refusals, so a storage failure falls back to the same
+  // `503 agent_unavailable` `SessionError.storage` maps to elsewhere in this file.
+  async function handleAudit(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    const url = new URL(req.url ?? '/', 'http://placeholder');
+    const params = url.searchParams;
+
+    let limit = config.caps.auditPageMax;
+    const limitRaw = params.get('limit');
+    if (limitRaw !== null) {
+      const parsed = Number.parseInt(limitRaw, 10);
+      if (!Number.isFinite(parsed) || parsed <= 0) {
+        return sendError(res, 'bad_request', 'limit must be a positive integer', { field: 'limit' });
+      }
+      limit = Math.min(parsed, config.caps.auditPageMax);
+    }
+
+    const nonEmpty = (value: string | null): string | null => (value === null || value === '' ? null : value);
+
+    const since = nonEmpty(params.get('since'));
+    if (since !== null && parseIsoTimestamp(since) === null) {
+      return sendError(res, 'bad_request', 'since must be an ISO 8601 UTC timestamp', { field: 'since' });
+    }
+    const until = nonEmpty(params.get('until'));
+    if (until !== null && parseIsoTimestamp(until) === null) {
+      return sendError(res, 'bad_request', 'until must be an ISO 8601 UTC timestamp', { field: 'until' });
+    }
+
+    const query: AuditQuery = {
+      before: nonEmpty(params.get('before')) as AuditCursor | null,
+      limit,
+      sessionId: nonEmpty(params.get('sessionId')) as SessionId | null,
+      operator: nonEmpty(params.get('operator')) as OperatorId | null,
+      since: since as IsoTimestamp | null,
+      until: until as IsoTimestamp | null,
+      incidentsOnly: params.get('incidentsOnly') === 'true',
+    };
+
+    const result = await manager.readAudit(query);
+    if (!result.ok) {
+      if (result.error.code === 'corrupt') return sendError(res, 'bad_request', 'audit cursor is invalid', { field: 'before' });
+      return sendError(res, 'agent_unavailable', 'audit storage is unavailable');
+    }
+    sendJson(res, 200, result.value);
+  }
+
   async function handleListCheckpoints(_req: IncomingMessage, res: ServerResponse, owner: OperatorId, sessionId: SessionId): Promise<void> {
     const listed = await manager.listCheckpoints(sessionId, owner);
     if (!listed.ok) return failWith(res, listed.error);
@@ -452,6 +517,7 @@ export function createHttpHandlers(deps: EdgeDeps) {
     handleToolOutput,
     handleListCheckpoints,
     handleCheckpointRestore,
+    handleAudit,
     handleLogin,
   };
 }

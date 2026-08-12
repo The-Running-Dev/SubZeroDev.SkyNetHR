@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { createServer, type Server } from 'node:http';
-import { mkdtemp, mkdir, readFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { after, describe, it } from 'node:test';
@@ -59,6 +59,7 @@ after(async () => {
 interface Harness {
   readonly base: string;
   readonly workspaceRoot: string;
+  readonly storageRoot: string;
 }
 
 async function makeEdge(
@@ -109,7 +110,7 @@ async function makeEdge(
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   const addr = server.address();
   if (addr === null || typeof addr === 'string') throw new Error('no port');
-  return { base: `http://127.0.0.1:${addr.port}`, workspaceRoot };
+  return { base: `http://127.0.0.1:${addr.port}`, workspaceRoot, storageRoot };
 }
 
 /** A same-origin browser POST from an authenticated operator. */
@@ -1014,5 +1015,103 @@ describe('S9.2/S9.3/S9.5 — GET .../tool-output/:turnId/:callId', () => {
     const secondBody = await (await get(h, `/api/sessions/${id}/tool-output/${second.turnId}/${second.callId}`)).text();
     assert.equal(firstBody.length, 5000);
     assert.equal(secondBody.length, 6000);
+  });
+});
+
+describe('S12 — GET /api/audit', () => {
+  function auditLine(overrides: Record<string, unknown> = {}): string {
+    return JSON.stringify({
+      ts: '2026-08-13T00:00:00.000Z',
+      operator: 'alice',
+      sessionId: 'sess-owned-by-alice',
+      vendor: 'claude',
+      sandbox: null,
+      tool: 'Bash',
+      input: { command: 'ls' },
+      decision: 'allow',
+      scope: 'once',
+      reason: null,
+      ...overrides,
+    });
+  }
+
+  it('S12.1/S12.2 — is wired and serves 200 AuditPage', async () => {
+    const h = await makeEdge();
+    await writeFile(path.join(h.storageRoot, 'audit.ndjson'), auditLine() + '\n', 'utf8');
+    const res = await get(h, '/api/audit');
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as { records: unknown[]; nextCursor: string | null };
+    assert.equal(body.records.length, 1);
+    assert.equal(body.nextCursor, null);
+  });
+
+  it('S12.7 — is readable by every authenticated operator, not scoped to the caller — and refuses no identity with 401', async () => {
+    const h = await makeEdge();
+    // Written by "alice", never a session "bob" owns or created.
+    await writeFile(path.join(h.storageRoot, 'audit.ndjson'), auditLine({ operator: 'alice', sessionId: 'sess-owned-by-alice' }) + '\n', 'utf8');
+
+    const asBob = await get(h, '/api/audit', 'bob');
+    assert.equal(asBob.status, 200);
+    const body = (await asBob.json()) as { records: Array<{ operator: string; sessionId: string }> };
+    assert.equal(body.records.length, 1, 'bob reads alice\'s record in full (D70)');
+    assert.equal(body.records[0]!.operator, 'alice');
+    assert.equal(body.records[0]!.sessionId, 'sess-owned-by-alice');
+
+    const noIdentity = await fetch(`${h.base}/api/audit`, { headers: {} });
+    assert.equal(noIdentity.status, 401);
+    assert.equal(((await noIdentity.json()) as { error: { code: string } }).error.code, 'unauthenticated');
+  });
+
+  it('S12.5 — an altered cursor is refused 422 bad_request rather than followed', async () => {
+    const h = await makeEdge();
+    await writeFile(path.join(h.storageRoot, 'audit.ndjson'), [auditLine(), auditLine()].join('\n') + '\n', 'utf8');
+    const res = await get(h, '/api/audit?before=not-a-real-cursor');
+    assert.equal(res.status, 422);
+    assert.equal(((await res.json()) as { error: { code: string } }).error.code, 'bad_request');
+  });
+
+  it('S12.3 — a limit above caps.auditPageMax is clamped rather than refused', async () => {
+    const smallCap: Config['caps'] = { ...S9_CAPS, auditPageMax: 3 };
+    const h = await makeEdge(undefined, { caps: smallCap });
+    const lines = Array.from({ length: 10 }, (_, i) => auditLine({ sessionId: `s-${i}` }));
+    await writeFile(path.join(h.storageRoot, 'audit.ndjson'), lines.join('\n') + '\n', 'utf8');
+    const res = await get(h, '/api/audit?limit=1000');
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as { records: unknown[] };
+    assert.equal(body.records.length, 3, 'clamped to auditPageMax rather than refused');
+  });
+
+  it('S12.6 — sessionId and operator filter the served page', async () => {
+    const h = await makeEdge();
+    await writeFile(
+      path.join(h.storageRoot, 'audit.ndjson'),
+      [
+        auditLine({ operator: 'alice', sessionId: 's-a' }),
+        auditLine({ operator: 'bob', sessionId: 's-b' }),
+      ].join('\n') + '\n',
+      'utf8',
+    );
+    const res = await get(h, '/api/audit?operator=bob');
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as { records: Array<{ operator: string }> };
+    assert.equal(body.records.length, 1);
+    assert.equal(body.records[0]!.operator, 'bob');
+  });
+
+  it('S12.6 — a malformed since or until is refused 422 bad_request rather than silently matching nothing', async () => {
+    const h = await makeEdge();
+    await writeFile(path.join(h.storageRoot, 'audit.ndjson'), auditLine() + '\n', 'utf8');
+
+    const badSince = await get(h, '/api/audit?since=not-a-date');
+    assert.equal(badSince.status, 422);
+    const sinceBody = (await badSince.json()) as { error: { code: string; detail: { field: string } } };
+    assert.equal(sinceBody.error.code, 'bad_request');
+    assert.equal(sinceBody.error.detail.field, 'since');
+
+    const badUntil = await get(h, '/api/audit?until=2026-08-13');
+    assert.equal(badUntil.status, 422);
+    const untilBody = (await badUntil.json()) as { error: { code: string; detail: { field: string } } };
+    assert.equal(untilBody.error.code, 'bad_request');
+    assert.equal(untilBody.error.detail.field, 'until');
   });
 });
