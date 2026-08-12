@@ -2179,6 +2179,42 @@ Rejected a `storage_unavailable` variant for the second: one path would use it, 
 already the right status for a transient failure the caller should retry.
 Reversibility: cheap in both directions — these are text today and a variant tomorrow.
 
+### 2026-08-12 — D117 `Config.edge` names which transport binds; `edge/ws`'s upgrade handler rides on the returned function
+Context: D10 chose transport by deployment mode back in the design phase, but no signature
+ever carried the choice — `interface Config` had no field for it, `loadConfig`'s declared
+shape was that same `Config`, and `EdgeDeps` gave `edge/sse` and `edge/ws` no discriminator.
+`/slice S11` found this mid-implementation: S11.5 ("the edge is chosen by configuration")
+names a signature that did not exist. Stopped and reported rather than widening `Config`
+unilaterally; directed to proceed anyway rather than route it through `/contract` first.
+A second gap surfaced alongside it: `createWsEdge`'s declared return type is
+`RequestListener`, but a WebSocket handshake arrives on the `http.Server`'s `'upgrade'`
+event, which no `RequestListener` is ever given — `server.on('request', listener)` alone
+cannot serve one.
+Chosen: add `readonly edge: 'sse' | 'ws'` to `Config`, read from an `EDGE` env var in
+`loadConfig` (default `'sse'`, matching every existing deployment's behaviour unchanged).
+`createWsEdge` attaches its `'upgrade'`-event handler to the returned function as
+`.handleUpgrade`, an implementation-only property that leaves the value still exactly a
+valid `RequestListener` to every caller that only calls it as one; `server.ts` reads the
+property off and wires `server.on('upgrade', ...)` only when `config.edge === 'ws'`. The
+client learns which edge is live from a `<meta name="skynet-edge">` tag on the served
+`index.html`, per S11.5's "not by probing" — a meta tag rather than a script, so it costs
+the strict CSP nothing.
+Rejected: a second contract function (e.g. `createWsUpgradeHandler`) returning the
+`'upgrade'`-event handler directly — rejected because it forces every caller to know it
+must call two functions and wire two listeners to get one edge working, where a single
+factory that hands back both faces is one fewer thing to get wrong at the composition
+root. Rejected probing (client tries `EventSource`, falls back to `WebSocket` on failure)
+for S11.5's own stated reason: it is probing, and it means the client's first attempt on a
+proxied deployment is always a failure. Rejected a `first-message` auth token scheme
+distinct from the existing header/cookie identity (the Open WebUI precedent in D10 uses
+`{"type":"auth","token":"<jwt>"}`) — this deployment's WebSocket handshake carries the same
+headers and cookies any other request does, so `edge/ws` resolves `OperatorId` from those,
+deferred to just after the first client frame arrives rather than at the handshake itself,
+which is what makes "first-message auth resolves the same `OperatorId` ... from the same
+credentials" (S11.3) true without inventing a second credential.
+Reversibility: cheap. `edge: 'sse'` is the default, so no existing deployment's behaviour
+changes; a deployment that sets `EDGE=ws` can revert by unsetting it.
+
 ## Open
 
 Staging only. Once an item becomes an issue it leaves this list.

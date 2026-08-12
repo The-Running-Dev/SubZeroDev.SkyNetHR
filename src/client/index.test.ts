@@ -281,6 +281,10 @@ async function runConsole(sessions: ReadonlyArray<Record<string, unknown>>) {
   globals['document'] = {
     getElementById: (id: string) => byId.get(id) ?? null,
     createElement: (tag: string) => fakeEl(tag),
+    // No `<meta name="skynet-edge">` in this fake document: `activeEdge()` reads that as
+    // the SSE edge (S11.5's default), which is what every test here except S11's own
+    // exercises.
+    querySelector: () => null,
   };
   globals['EventSource'] = class {
     url: string;

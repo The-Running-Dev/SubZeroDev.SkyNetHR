@@ -210,12 +210,69 @@ function handleReplayGap() {
   return true;
 }
 
-function openStream(sessionId) {
-  if (state.stream) state.stream.close();
-  state.lastSeq = 0;
-  state.pendingPermissions = new Map();
-  clear($('transcript'));
+// Shared by both transports (S11.1: the envelope sequence is the same regardless of which
+// one delivered it) — an `EventSource` `event.data` string and a WebSocket text frame carry
+// the identical JSON, so both hand it here rather than duplicating the dispatch.
+function handleEnvelope(sessionId, envelope) {
+  const handlers = {
+    onAnswerPermission: answerPermission,
+    onRequestRendered: (requestId, controls) => state.pendingPermissions.set(requestId, controls),
+    // S9.2: the download link on a truncated `tool.result` — not part of the wire
+    // vocabulary any event carries, so it comes from this stream's own session rather
+    // than the envelope.
+    sessionId,
+  };
 
+  if (envelope.kind === 'error' && envelope.data?.kind === 'replay_gap') {
+    if (handleReplayGap()) return;
+  }
+  if (envelope.kind === 'session.started' && envelope.sessionId === state.sessionId && envelope.data && envelope.data.policy) {
+    // Replayed from the spill on every reconnect, including after a gap refetch —
+    // the banner must survive that the same way the rest of the transcript does,
+    // not just the initial live delivery.
+    applyPolicyBanner(envelope.data.policy.banner);
+  }
+  if (envelope.kind === 'session.ended' && envelope.sessionId === state.sessionId) {
+    // Withdrawn the moment it happens rather than at the next refresh: the session may
+    // have been ended from another tab, or by a storage failure, and the operator must
+    // not be left typing into a box whose next send is a `409`. The event still renders
+    // below, so the transcript says what happened as well as the status bar.
+    const session = currentSession();
+    if (session !== null) state.sessionsById.set(state.sessionId, { ...session, state: 'ended' });
+    applySessionAvailability();
+  }
+  if (envelope.kind === 'checkpoint.created') {
+    // A new checkpoint invalidates the list this session already fetched, whether it
+    // came from this client's own turn or a restore issued elsewhere.
+    void refreshCheckpoints();
+  }
+  if (envelope.kind === 'permission.resolved') {
+    const controls = state.pendingPermissions.get(envelope.data.requestId);
+    if (controls) {
+      // The request row this client already rendered is updated in place; a
+      // separate standalone row would just repeat the same outcome right below it.
+      const who = envelope.data.operator ? envelope.data.operator : `server (${envelope.data.reason})`;
+      controls.setResolved(`${envelope.data.decision} — ${who}`);
+      state.pendingPermissions.delete(envelope.data.requestId);
+      state.lastSeq = envelope.seq;
+      return;
+    }
+  }
+  state.lastSeq = envelope.seq;
+  const node = renderEvent(document, envelope, handlers);
+  if (node === null) return;
+  const transcript = $('transcript');
+  transcript.appendChild(node);
+  transcript.scrollTop = transcript.scrollHeight;
+}
+
+// S11.5: the client learns which edge is live from the served page, never by probing.
+function activeEdge() {
+  const meta = document.querySelector('meta[name="skynet-edge"]');
+  return meta && meta.content === 'ws' ? 'ws' : 'sse';
+}
+
+function openSseStream(sessionId) {
   // The browser's own EventSource retry handles a dropped connection, replaying from the
   // `Last-Event-ID` it kept; only a reported gap needs anything from this side.
   const stream = new EventSource(`/api/sessions/${encodeURIComponent(sessionId)}/events`);
@@ -226,15 +283,6 @@ function openStream(sessionId) {
   // would overwrite the one message explaining why they cannot type.
   stream.onopen = () => (sessionIsEnded() ? applySessionAvailability() : status('connected', 'ok'));
   stream.onerror = () => status('reconnecting…', 'warn');
-
-  const handlers = {
-    onAnswerPermission: answerPermission,
-    onRequestRendered: (requestId, controls) => state.pendingPermissions.set(requestId, controls),
-    // S9.2: the download link on a truncated `tool.result` — not part of the wire
-    // vocabulary any event carries, so it comes from this stream's own session rather
-    // than the envelope.
-    sessionId,
-  };
 
   for (const kind of [
     'session.started', 'session.ended', 'session.notice',
@@ -249,49 +297,54 @@ function openStream(sessionId) {
       } catch {
         return;
       }
-      if (envelope.kind === 'error' && envelope.data?.kind === 'replay_gap') {
-        if (handleReplayGap()) return;
-      }
-      if (envelope.kind === 'session.started' && envelope.sessionId === state.sessionId && envelope.data && envelope.data.policy) {
-        // Replayed from the spill on every reconnect, including after a gap refetch —
-        // the banner must survive that the same way the rest of the transcript does,
-        // not just the initial live delivery.
-        applyPolicyBanner(envelope.data.policy.banner);
-      }
-      if (envelope.kind === 'session.ended' && envelope.sessionId === state.sessionId) {
-        // Withdrawn the moment it happens rather than at the next refresh: the session may
-        // have been ended from another tab, or by a storage failure, and the operator must
-        // not be left typing into a box whose next send is a `409`. The event still renders
-        // below, so the transcript says what happened as well as the status bar.
-        const session = currentSession();
-        if (session !== null) state.sessionsById.set(state.sessionId, { ...session, state: 'ended' });
-        applySessionAvailability();
-      }
-      if (envelope.kind === 'checkpoint.created') {
-        // A new checkpoint invalidates the list this session already fetched, whether it
-        // came from this client's own turn or a restore issued elsewhere.
-        void refreshCheckpoints();
-      }
-      if (envelope.kind === 'permission.resolved') {
-        const controls = state.pendingPermissions.get(envelope.data.requestId);
-        if (controls) {
-          // The request row this client already rendered is updated in place; a
-          // separate standalone row would just repeat the same outcome right below it.
-          const who = envelope.data.operator ? envelope.data.operator : `server (${envelope.data.reason})`;
-          controls.setResolved(`${envelope.data.decision} — ${who}`);
-          state.pendingPermissions.delete(envelope.data.requestId);
-          state.lastSeq = envelope.seq;
-          return;
-        }
-      }
-      state.lastSeq = envelope.seq;
-      const node = renderEvent(document, envelope, handlers);
-      if (node === null) return;
-      const transcript = $('transcript');
-      transcript.appendChild(node);
-      transcript.scrollTop = transcript.scrollHeight;
+      handleEnvelope(sessionId, envelope);
     });
   }
+}
+
+// S11.4: a WebSocket carries no `Last-Event-ID` equivalent, so the resume point travels as
+// `{ after }` on the first frame this client sends — read exactly as `Last-Event-ID` is on
+// the SSE edge (`20-contract.md § edge/sse and edge/ws`). `WebSocket` has no built-in retry
+// the way `EventSource` does, so a lost connection reopens by hand, resuming from whatever
+// `state.lastSeq` this client last saw.
+function openWsStream(sessionId) {
+  const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const stream = new WebSocket(`${proto}//${window.location.host}/api/sessions/${encodeURIComponent(sessionId)}/events`);
+  state.stream = stream;
+
+  stream.onopen = () => {
+    stream.send(JSON.stringify({ after: state.lastSeq }));
+    if (sessionIsEnded()) applySessionAvailability();
+    else status('connected', 'ok');
+  };
+  stream.onmessage = (event) => {
+    let envelope;
+    try {
+      envelope = JSON.parse(event.data);
+    } catch {
+      return;
+    }
+    if (envelope.type === 'error') return; // a first-message auth/ownership refusal, not an Envelope
+    handleEnvelope(sessionId, envelope);
+  };
+  stream.onerror = () => status('reconnecting…', 'warn');
+  stream.onclose = () => {
+    if (state.stream !== stream || state.sessionId !== sessionId) return; // superseded by a newer stream
+    status('reconnecting…', 'warn');
+    setTimeout(() => {
+      if (state.stream === stream && state.sessionId === sessionId) openWsStream(sessionId);
+    }, 2000);
+  };
+}
+
+function openStream(sessionId) {
+  if (state.stream) state.stream.close();
+  state.lastSeq = 0;
+  state.pendingPermissions = new Map();
+  clear($('transcript'));
+
+  if (activeEdge() === 'ws') openWsStream(sessionId);
+  else openSseStream(sessionId);
 }
 
 async function createSession(event) {

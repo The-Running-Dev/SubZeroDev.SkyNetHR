@@ -670,6 +670,9 @@ interface Config {
   readonly includeRaw: boolean;
   readonly sessionTokenBudget: number | null;              // (tier two) per session; null disables the view's budget
   readonly checklist: readonly ChecklistItemTemplate[];    // (tier two) empty disables the checklist
+  // D10/D113: which transport edge this deployment binds. `server.ts` constructs
+  // `createSseEdge` or `createWsEdge` accordingly; exactly one binds (S11.5).
+  readonly edge: 'sse' | 'ws';
 }
 ```
 
@@ -1118,6 +1121,30 @@ declare function createWsEdge(deps: EdgeDeps): import('node:http').RequestListen
 
 Both edges apply the origin allow-list before resolving identity. `edge/ws` applies it at the
 handshake, not at first-message auth.
+
+`createWsEdge`'s `RequestListener` serves the whole `## HTTP routes` table exactly as
+`edge/sse`'s does, with one substitution: `GET /api/sessions/:id/events` is not reachable as a
+plain request under this edge — a client that tries it is refused `400 bad_request`, naming
+the field `upgrade` — because that route's real handler runs on the `http.Server`'s
+`'upgrade'` event, which a bare `RequestListener` is never given. `createWsEdge` attaches its
+upgrade handler to the returned function as `.handleUpgrade` — `(req, socket, head) => void`,
+Node's own `'upgrade'` listener signature — and `server.ts` reads it off and wires
+`server.on('upgrade', listener.handleUpgrade)` whenever `config.edge === 'ws'`. This is an
+implementation-only extension of the returned value, not a widened contract signature: the
+function is still exactly a `RequestListener` to every caller that only calls it as one.
+
+The WebSocket connection, once the handshake and first-message auth (S11.3) both succeed,
+carries the same `Envelope` stream `edge/sse` writes as SSE `data:` lines — one JSON-encoded
+`Envelope` per text frame, in `seq` order, nothing else multiplexed onto the same socket. The
+first client frame is JSON `{ after?: Seq }`, read exactly as `Last-Event-ID` is on the SSE
+edge (S11.4): omitted or `0` replays from the start, otherwise from `after + 1`, including the
+spill-served case (S3.2) and the gap case (S3.3), where `error / replay_gap` is sent as a
+frame carrying no resumable position, exactly as SSE's gap frame carries no `id:`.
+
+**How the client learns which edge is live (S11.5).** `index.html` carries
+`<meta name="skynet-edge" content="sse">` or `content="ws"`, set by whichever edge serves the
+document — this is a `<meta>` tag, not a `<script>`, so it costs the strict CSP nothing. The
+client reads it once at load and never probes.
 
 ### `client`
 

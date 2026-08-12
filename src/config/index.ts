@@ -216,6 +216,15 @@ export function loadConfig(env: Readonly<Record<string, string | undefined>>): R
   const checklist = parseChecklist(env);
   if (!checklist.ok) return checklist;
 
+  // D10/D117: standalone deployments stream over SSE; a deployment sitting behind a proxy
+  // that buffers or does not pass through `text/event-stream` sets `EDGE=ws` instead.
+  const edgeEnv = env['EDGE'];
+  const edgeRaw = edgeEnv === undefined || edgeEnv === '' ? 'sse' : edgeEnv;
+  if (edgeRaw !== 'sse' && edgeRaw !== 'ws') {
+    return invalid('EDGE', `must be 'sse' or 'ws', got '${edgeRaw}'`);
+  }
+  const edge = edgeRaw;
+
   // Fail closed on startup. A missing auth mode never reaches here: D93 makes one
   // mandatory and `parseAuth` above already refused with `missing_field`. What is left is
   // the bind, and it only bites the modes that trust a header the client could otherwise
@@ -240,6 +249,7 @@ export function loadConfig(env: Readonly<Record<string, string | undefined>>): R
       includeRaw,
       sessionTokenBudget,
       checklist: checklist.value,
+      edge,
     },
   };
 }
