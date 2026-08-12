@@ -1,8 +1,10 @@
 import { readFile } from 'node:fs/promises';
 import type { IncomingMessage, RequestListener, ServerResponse } from 'node:http';
 import { timingSafeEqual } from 'node:crypto';
+import { Readable } from 'node:stream';
 import type {
   ApiErrorCode,
+  CallId,
   Config,
   Envelope,
   IdentityResolver,
@@ -341,6 +343,42 @@ export function createSseEdge(deps: EdgeDeps): RequestListener {
     sendJson(res, 200, { ok: true });
   }
 
+  // S9.3: the ownership check is `openToolOutput`'s (`no_such_session`, indistinguishable
+  // from a session that never existed); every other failure — a missing or unreadable
+  // blob — is `no_such_output` (S9.5), which the generic `storage` mapping in
+  // `apiErrorFor` does not produce, so this route maps it itself rather than routing
+  // through `failWith`.
+  async function handleToolOutput(
+    req: IncomingMessage,
+    res: ServerResponse,
+    owner: OperatorId,
+    sessionId: SessionId,
+    turnId: TurnId,
+    callId: CallId,
+  ): Promise<void> {
+    const opened = await manager.openToolOutput(sessionId, owner, turnId, callId);
+    if (!opened.ok) {
+      if (opened.error.code === 'no_such_session') return failWith(res, opened.error);
+      return sendError(res, 'no_such_output', 'the tool-output blob is missing or unreadable');
+    }
+    const stream = opened.value;
+    // `.pipe()` alone only unpipes on an early `res` close, it does not destroy `stream`
+    // — without this, a client that aborts mid-download (the large-blob case this route
+    // exists for) leaks the open file handle. `Store.openToolOutput` is typed to the
+    // minimal `NodeJS.ReadableStream`, but every implementation hands back a real
+    // `Readable` (an `fs.ReadStream`), which is what actually owns the file descriptor.
+    if (stream instanceof Readable) req.on('close', () => stream.destroy());
+    res.writeHead(200, {
+      'content-type': 'text/plain; charset=utf-8',
+      'x-content-type-options': 'nosniff',
+      'content-disposition': 'attachment',
+    });
+    stream.on('error', () => {
+      if (!res.writableEnded) res.end();
+    });
+    stream.pipe(res);
+  }
+
   async function handleListCheckpoints(_req: IncomingMessage, res: ServerResponse, owner: OperatorId, sessionId: SessionId): Promise<void> {
     const listed = await manager.listCheckpoints(sessionId, owner);
     if (!listed.ok) return failWith(res, listed.error);
@@ -547,6 +585,22 @@ export function createSseEdge(deps: EdgeDeps): RequestListener {
           if (method === 'DELETE' && rest === '') return handleDelete(req, res, owner, sessionId);
           if (method === 'GET' && rest === '/events') return handleEvents(req, res, owner, sessionId);
           if (method === 'GET' && rest === '/checkpoints') return handleListCheckpoints(req, res, owner, sessionId);
+          const toolOutputMatch = /^\/tool-output\/([^/]+)\/([^/]+)$/.exec(rest);
+          if (method === 'GET' && toolOutputMatch) {
+            let decodedTurnId: string;
+            try {
+              decodedTurnId = decodeURIComponent(toolOutputMatch[1]!);
+            } catch {
+              return sendError(res, 'bad_request', 'turnId is not a valid path segment', { field: 'turnId' });
+            }
+            let decodedCallId: string;
+            try {
+              decodedCallId = decodeURIComponent(toolOutputMatch[2]!);
+            } catch {
+              return sendError(res, 'bad_request', 'callId is not a valid path segment', { field: 'callId' });
+            }
+            return handleToolOutput(req, res, owner, sessionId, decodedTurnId as TurnId, decodedCallId as CallId);
+          }
           if (method === 'GET' && rest === '') {
             const got = manager.get(sessionId, owner);
             return got.ok ? sendJson(res, 200, { session: got.value }) : failWith(res, got.error);

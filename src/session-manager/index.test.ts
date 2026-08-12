@@ -1734,9 +1734,10 @@ test('S7.10 — a storage root that cannot be written at boot refuses to start w
   if (!booted.ok) assert.equal(booted.error.code, 'storage_unwritable');
 });
 
-// D41/D100 — the spill-failure row's first half. The second half (killing the child,
-// resolving outstanding permissions, and the `turn.ended` / `session.ended` /
-// `session.notice` envelopes) is S5's and is deliberately not asserted here.
+// D41/D100 — the spill-failure row's first half: the invariants (I8, I16) that hold
+// regardless of whether a turn was live. The second half — killing the child, resolving
+// outstanding permissions, and the `turn.ended` / `session.ended` / `session.notice`
+// envelopes — is S9.8's and is asserted separately below.
 test('D100 — a failed spill append ends the session, clears the turn slot (I8) and rewrites meta.json (I16)', async () => {
   let failAppends = false;
   const { manager, workspaceRoot, storageRoot } = await makeManager('many', {}, (store) => ({
@@ -1778,4 +1779,199 @@ test('D100 — a failed spill append ends the session, clears the turn slot (I8)
   const meta = JSON.parse(await readFile(path.join(storageRoot, 'sessions', sessionId, 'meta.json'), 'utf8')) as { session: { state: string; endedAt: string | null } };
   assert.equal(meta.session.state, 'ended');
   assert.notEqual(meta.session.endedAt, null);
+});
+
+test('S9.8 — a spill failure mid-turn kills the child, resolves the outstanding permission cancelled_process_exit, and ends the turn and session with storage_failure', async () => {
+  let failNextPermissionRequest = false;
+  const { manager, workspaceRoot, storageRoot } = await makeManager('full', {}, (store) => ({
+    ...store,
+    async appendEvent(sessionId, envelope) {
+      if (failNextPermissionRequest && envelope.kind === 'permission.request') {
+        failNextPermissionRequest = false;
+        return { ok: false, error: { code: 'io', path: 'events.ndjson', detail: 'disk full' } };
+      }
+      return store.appendEvent(sessionId, envelope);
+    },
+  }));
+
+  const owner = 'operator-1' as OperatorId;
+  const projectDir = path.join(workspaceRoot, 'proj-s98');
+  await mkdir(projectDir);
+  const created = await manager.create(owner, { vendor: 'claude', cwd: projectDir, model: null, sandbox: null, requisitionId: null });
+  assert.equal(created.ok, true);
+  if (!created.ok) return;
+  const { sessionId } = created.value;
+
+  const received: Envelope[] = [];
+  await manager.subscribe(sessionId, owner, 0, { deliver: (e) => received.push(e), close: () => {} });
+
+  failNextPermissionRequest = true;
+  const sent = await manager.message(sessionId, owner, 'go');
+  assert.equal(sent.ok, true);
+
+  await waitUntil(() => received.some((e) => e.kind === 'session.ended'), 5000);
+
+  const permResolved = received.find((e) => e.kind === 'permission.resolved');
+  assert.ok(permResolved, 'the outstanding permission is resolved');
+  const permData = permResolved!.data as { decision: string; reason: string; operator: string | null };
+  assert.equal(permData.decision, 'deny');
+  assert.equal(permData.reason, 'cancelled_process_exit');
+  assert.equal(permData.operator, null);
+
+  const turnEnded = received.find((e) => e.kind === 'turn.ended');
+  assert.ok(turnEnded, 'turn.ended was delivered');
+  assert.equal((turnEnded!.data as { stopReason: string }).stopReason, 'storage_failure');
+
+  const sessionEnded = received.find((e) => e.kind === 'session.ended');
+  assert.ok(sessionEnded, 'session.ended was delivered');
+  assert.equal((sessionEnded!.data as { reason: string }).reason, 'storage_failure');
+
+  const notice = received.find((e) => e.kind === 'session.notice' && (e.data as { code: string }).code === 'storage_failure');
+  assert.ok(notice, 'a session.notice / error named storage_failure was delivered');
+  assert.equal((notice!.data as { level: string }).level, 'error');
+
+  // turn.ended precedes session.ended, which precedes the notice — the order a client
+  // needs to render "this turn stopped because the session just ended, and here is why".
+  const kinds = received.map((e) => e.kind);
+  assert.ok(kinds.indexOf('turn.ended') < kinds.indexOf('session.ended'));
+  assert.ok(kinds.indexOf('session.ended') < kinds.lastIndexOf('session.notice'));
+
+  const audit = await readAudit(storageRoot);
+  assert.ok(
+    audit.some((r) => r.sessionId === sessionId && r.reason === 'cancelled_process_exit' && r.decision === 'deny'),
+    'the cancelled permission still gets one AuditRecord (I11)',
+  );
+
+  const summary = manager.get(sessionId, owner);
+  assert.equal(summary.ok, true);
+  if (summary.ok) assert.equal(summary.value.state, 'ended');
+});
+
+test('S9.1/S9.2/S9.4 — a tool.result over the byte cap is truncated before its envelope is built, the full bytes are fetchable, and two turns sharing a callId keep separate blobs', async () => {
+  const { manager, workspaceRoot, storageRoot } = await makeManager('big-tool-result', { toolResultBytes: 1024 });
+  const owner = 'operator-1' as OperatorId;
+  const projectDir = path.join(workspaceRoot, 'proj-s91');
+  await mkdir(projectDir);
+  const created = await manager.create(owner, { vendor: 'claude', cwd: projectDir, model: null, sandbox: null, requisitionId: null });
+  assert.equal(created.ok, true);
+  if (!created.ok) return;
+  const { sessionId } = created.value;
+
+  const received: Envelope[] = [];
+  await manager.subscribe(sessionId, owner, 0, { deliver: (e) => received.push(e), close: () => {} });
+
+  async function runOneTurn(bigBytes: number): Promise<{ turnId: string; result: Envelope }> {
+    process.env['SKYNET_BIG_TOOL_RESULT_BYTES'] = String(bigBytes);
+    const before = received.length;
+    const messaged = await manager.message(sessionId, owner, 'go');
+    assert.equal(messaged.ok, true);
+    await waitUntil(() => received.some((e, i) => i >= before && e.kind === 'permission.request'));
+    const requestId = (received.find((e, i) => i >= before && e.kind === 'permission.request')!.data as { requestId: string }).requestId;
+    const answered = await manager.answerPermission(sessionId, owner, { requestId: requestId as never, decision: 'allow', scope: 'once', rule: null, reason: null });
+    assert.equal(answered.ok, true);
+    await waitUntil(() => received.slice(before).some((e) => e.kind === 'tool.result'));
+    const result = received.slice(before).find((e) => e.kind === 'tool.result')!;
+    if (messaged.ok) return { turnId: messaged.value.turnId as unknown as string, result };
+    throw new Error('unreachable');
+  }
+
+  const first = await runOneTurn(5000);
+  const firstData = first.result.data as { callId: string; turnId: string; output: string; truncated: boolean; bytes: number };
+  assert.equal(firstData.truncated, true, 'S9.1: over the cap, truncated is set');
+  assert.equal(firstData.bytes, 5000, 'S9.1: bytes carries the pre-truncation size');
+  assert.equal(Buffer.byteLength(firstData.output, 'utf8') <= 1024, true, 'the envelope output never exceeds the cap');
+  assert.equal(firstData.callId, 'call-1');
+
+  const second = await runOneTurn(6000);
+  const secondData = second.result.data as { callId: string; turnId: string; output: string; truncated: boolean; bytes: number };
+  assert.equal(secondData.callId, 'call-1', 'the fake CLI reuses call-1 on every turn (S9.4 setup)');
+  assert.notEqual(secondData.turnId, firstData.turnId, 'a fresh turnId per turn is what keeps the blobs apart');
+
+  // S9.2: the untruncated bytes are fetchable, and are the full pre-truncation payload —
+  // not the capped envelope's `output`.
+  const openedFirst = await manager.openToolOutput(sessionId, owner, firstData.turnId as never, firstData.callId as never);
+  assert.equal(openedFirst.ok, true);
+  if (openedFirst.ok) {
+    const chunks: Buffer[] = [];
+    for await (const c of openedFirst.value) chunks.push(c as Buffer);
+    assert.equal(Buffer.concat(chunks).length, 5000, 'S9.2: the blob holds the full pre-truncation size');
+  }
+
+  // S9.4: two turns emitted the same callId; each turn's link fetches only its own blob.
+  const openedSecond = await manager.openToolOutput(sessionId, owner, secondData.turnId as never, secondData.callId as never);
+  assert.equal(openedSecond.ok, true);
+  if (openedSecond.ok) {
+    const chunks: Buffer[] = [];
+    for await (const c of openedSecond.value) chunks.push(c as Buffer);
+    assert.equal(Buffer.concat(chunks).length, 6000, "S9.4: the second turn's blob is its own size, not the first turn's");
+  }
+
+  // Another operator gets no_such_session, not a distinguishable no_such_output (I23/D43).
+  const stranger = await manager.openToolOutput(sessionId, 'operator-2' as OperatorId, firstData.turnId as never, firstData.callId as never);
+  assert.equal(stranger.ok, false);
+  if (!stranger.ok) assert.equal(stranger.error.code, 'no_such_session');
+
+  void storageRoot;
+});
+
+test('S9.5 — a tool.result under the byte cap is never truncated and writes no blob, so openToolOutput reports not_found', async () => {
+  const { manager, workspaceRoot } = await makeManager('big-tool-result', { toolResultBytes: 1_000_000 });
+  const owner = 'operator-1' as OperatorId;
+  const projectDir = path.join(workspaceRoot, 'proj-s95');
+  await mkdir(projectDir);
+  const created = await manager.create(owner, { vendor: 'claude', cwd: projectDir, model: null, sandbox: null, requisitionId: null });
+  assert.equal(created.ok, true);
+  if (!created.ok) return;
+  const { sessionId } = created.value;
+
+  const received: Envelope[] = [];
+  await manager.subscribe(sessionId, owner, 0, { deliver: (e) => received.push(e), close: () => {} });
+
+  process.env['SKYNET_BIG_TOOL_RESULT_BYTES'] = '500';
+  const messaged = await manager.message(sessionId, owner, 'go');
+  assert.equal(messaged.ok, true);
+  await waitUntil(() => received.some((e) => e.kind === 'permission.request'));
+  const requestId = (received.find((e) => e.kind === 'permission.request')!.data as { requestId: string }).requestId;
+  await manager.answerPermission(sessionId, owner, { requestId: requestId as never, decision: 'allow', scope: 'once', rule: null, reason: null });
+  await waitUntil(() => received.some((e) => e.kind === 'tool.result'));
+  const result = received.find((e) => e.kind === 'tool.result')!;
+  const data = result.data as { callId: string; turnId: string; truncated: boolean; bytes: number };
+  assert.equal(data.truncated, false);
+  assert.equal(data.bytes, 500);
+
+  const opened = await manager.openToolOutput(sessionId, owner, data.turnId as never, data.callId as never);
+  assert.equal(opened.ok, false);
+  if (!opened.ok) assert.equal(opened.error.code, 'storage');
+  if (!opened.ok && opened.error.code === 'storage') assert.equal(opened.error.cause.code, 'not_found');
+});
+
+test('S9.5 — a blob the store cannot write does not undo the envelope\'s truncation', async () => {
+  const { manager, workspaceRoot } = await makeManager('big-tool-result', { toolResultBytes: 100 }, (store) => ({
+    ...store,
+    async writeToolOutput() {
+      return { ok: false, error: { code: 'io', path: 'tool-output', detail: 'disk full' } };
+    },
+  }));
+  const owner = 'operator-1' as OperatorId;
+  const projectDir = path.join(workspaceRoot, 'proj-s95b');
+  await mkdir(projectDir);
+  const created = await manager.create(owner, { vendor: 'claude', cwd: projectDir, model: null, sandbox: null, requisitionId: null });
+  assert.equal(created.ok, true);
+  if (!created.ok) return;
+  const { sessionId } = created.value;
+
+  const received: Envelope[] = [];
+  await manager.subscribe(sessionId, owner, 0, { deliver: (e) => received.push(e), close: () => {} });
+
+  process.env['SKYNET_BIG_TOOL_RESULT_BYTES'] = '2000';
+  const messaged = await manager.message(sessionId, owner, 'go');
+  assert.equal(messaged.ok, true);
+  await waitUntil(() => received.some((e) => e.kind === 'permission.request'));
+  const requestId = (received.find((e) => e.kind === 'permission.request')!.data as { requestId: string }).requestId;
+  await manager.answerPermission(sessionId, owner, { requestId: requestId as never, decision: 'allow', scope: 'once', rule: null, reason: null });
+  await waitUntil(() => received.some((e) => e.kind === 'tool.result'));
+  const result = received.find((e) => e.kind === 'tool.result')!;
+  const data = result.data as { truncated: boolean; bytes: number };
+  assert.equal(data.truncated, true, 'the envelope is still truncated even though the blob write failed');
+  assert.equal(data.bytes, 2000);
 });

@@ -216,6 +216,47 @@ test('S3.5 — the ring buffer is a strict suffix of the spill, envelope for env
   assert.deepEqual(ringTail, spillTail);
 });
 
+test('S9.7 — over 50,000 envelopes the ring never exceeds caps.ringCapacity; peak RSS is measured and reported', async () => {
+  const storageRoot = await mkdtemp(path.join(tmpdir(), 'skynet-store-'));
+  const config = baseConfig(storageRoot);
+  const capped: Config = { ...config, caps: { ...config.caps, ringCapacity: 500 } };
+  const storeResult = await createStore(capped);
+  if (!storeResult.ok) return;
+  const store = storeResult.value;
+  const record = sessionRecord('sess-9-7');
+  await store.createSession(record);
+
+  const N = 50_000;
+  let peakRss = 0;
+  for (let seq = 1; seq <= N; seq++) {
+    const e = envelope('sess-9-7', seq);
+    // Mirrors `session-manager.emit`'s order (S3.5).
+    store.pushRing(record.id, e);
+    await store.appendEvent(record.id, e);
+    if (seq % 1000 === 0) {
+      peakRss = Math.max(peakRss, process.memoryUsage().rss);
+      const tail = store.readRingAfter(record.id, (seq - 1) as never);
+      assert.ok(tail === null || tail.length <= capped.caps.ringCapacity, `ring held ${tail?.length} envelopes at seq ${seq}, over capacity ${capped.caps.ringCapacity}`);
+    }
+  }
+
+  // Not `after: 0` — a ring trimmed past the start of the run correctly answers that
+  // with `null` (S3.5's "cannot serve"), which is not what this assertion is after.
+  const finalTail = store.readRingAfter(record.id, (N - capped.caps.ringCapacity) as never);
+  assert.notEqual(finalTail, null);
+  assert.equal(finalTail!.length, capped.caps.ringCapacity, `the ring holds exactly ringCapacity (${capped.caps.ringCapacity}) envelopes after ${N}`);
+
+  const spillTail: Envelope[] = [];
+  for await (const result of store.readEventsAfter(record.id, (N - capped.caps.ringCapacity) as never)) {
+    if (result.ok) spillTail.push(result.value);
+  }
+  assert.deepEqual(finalTail, spillTail, 'the ring is still a strict suffix of the spill at this scale (S3.5)');
+
+  // S9.7: "server peak RSS is stated in the slice report" — measured here, in the process
+  // actually holding the ring and driving the appends, and printed for that report.
+  console.log(`[S9.7] ${N} envelopes at ringCapacity ${capped.caps.ringCapacity}: peak RSS ${(peakRss / (1024 * 1024)).toFixed(1)} MiB`);
+});
+
 test('S3.5 — an empty ring cannot serve any range, including after: 0, so replay falls through to the spill', async () => {
   const storageRoot = await mkdtemp(path.join(tmpdir(), 'skynet-store-'));
   const config = baseConfig(storageRoot);

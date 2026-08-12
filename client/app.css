@@ -338,6 +338,13 @@ body {
 
 .tool__status { color: var(--ok); }
 
+.tool__truncated-link {
+  display: inline-block;
+  margin-top: var(--space-1);
+  color: var(--accent);
+  font-size: var(--text-xs);
+}
+
 /* S4.14/S4.16 — the approve-and-deny screen. Wrapping keeps both actions reachable
  * without horizontal scroll at a 375 px viewport; `.permission__input` above already
  * wraps and scrolls its own overflow rather than the row. */
