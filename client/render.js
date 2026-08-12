@@ -51,13 +51,24 @@ function toolCallNode(doc, data) {
   return row(doc, 'tool-call', 'tool', body);
 }
 
-function toolResultNode(doc, data) {
+// S9.2/Delivers: a truncated result's full bytes are one click away at the tool-output
+// route. `sessionId` comes from `handlers` rather than `data` — it is not part of the
+// wire vocabulary any event carries (I20) — so this is the one renderer that reads it.
+function toolResultNode(doc, data, handlers) {
   const body = el(doc, 'div', 'tool');
   const status = el(doc, 'div', 'tool__status', data.ok ? 'ok' : 'failed');
   body.appendChild(status);
   body.appendChild(el(doc, 'pre', 'tool__output', data.output));
   if (data.truncated) {
     body.appendChild(el(doc, 'div', 'tool__truncated', `truncated — ${data.bytes} bytes in full`));
+    if (handlers && handlers.sessionId) {
+      const link = el(doc, 'a', 'tool__truncated-link', 'download full output');
+      link.setAttribute(
+        'href',
+        `/api/sessions/${encodeURIComponent(handlers.sessionId)}/tool-output/${encodeURIComponent(data.turnId)}/${encodeURIComponent(data.callId)}`,
+      );
+      body.appendChild(link);
+    }
   }
   return row(doc, 'tool-result', 'result', body);
 }

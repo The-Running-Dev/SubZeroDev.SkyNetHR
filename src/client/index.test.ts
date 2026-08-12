@@ -56,9 +56,16 @@ function allText(node: StubNode): string[] {
   return out;
 }
 
+function findAll(node: StubNode, tag: string): StubNode[] {
+  const out: StubNode[] = [];
+  if (node.tag.toLowerCase() === tag) out.push(node);
+  for (const c of node.children) out.push(...findAll(c, tag));
+  return out;
+}
+
 async function loadRenderer() {
   const mod = (await import(pathToFileURL(path.join(CLIENT, 'render.js')).href)) as {
-    renderEvent: (doc: unknown, envelope: unknown) => StubNode | null;
+    renderEvent: (doc: unknown, envelope: unknown, handlers?: unknown) => StubNode | null;
   };
   return mod.renderEvent;
 }
@@ -94,6 +101,25 @@ describe('S2.11 — the client renders normalised events only', () => {
     const renderEvent = await loadRenderer();
     const { doc } = makeDoc();
     assert.equal(renderEvent(doc, { seq: 1, sessionId: 's', ts: 'x', kind: 'nonesuch', data: {} }), null);
+  });
+});
+
+describe('S9.2 — a truncated tool.result offers its full output one click away', () => {
+  it('renders a download link to the tool-output route when truncated, and none when it is not', async () => {
+    const renderEvent = await loadRenderer();
+    const envelope = {
+      seq: 1, sessionId: 's', ts: 'x', kind: 'tool.result',
+      data: { turnId: 't-1', callId: 'call-1', ok: true, output: 'partial', truncated: true, bytes: 99999 },
+    };
+    const { doc: doc1 } = makeDoc();
+    const truncated = renderEvent(doc1, envelope, { sessionId: 'sess-abc' })!;
+    const links = findAll(truncated, 'a');
+    assert.equal(links.length, 1, 'a truncated result renders exactly one link');
+    assert.equal(links[0]!.attrs['href'], '/api/sessions/sess-abc/tool-output/t-1/call-1');
+
+    const { doc: doc2 } = makeDoc();
+    const untruncated = renderEvent(doc2, { ...envelope, data: { ...envelope.data, truncated: false } }, { sessionId: 'sess-abc' })!;
+    assert.equal(findAll(untruncated, 'a').length, 0, 'an untruncated result has nothing to fetch');
   });
 });
 

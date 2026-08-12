@@ -115,6 +115,18 @@ function notImplemented(method: string): never {
   throw new Error(`session-manager.${method} is not implemented before its owning slice`);
 }
 
+// S9.1: truncates to at most `maxBytes` UTF-8 bytes, backing up over a partial
+// multi-byte code point at the boundary rather than splitting it — 0x80-0xBF are UTF-8
+// continuation bytes, so trimming while the byte at `end` is one never cuts a character
+// in half.
+function truncateUtf8(text: string, maxBytes: number): string {
+  const buf = Buffer.from(text, 'utf8');
+  if (buf.length <= maxBytes) return text;
+  let end = maxBytes;
+  while (end > 0 && (buf[end]! & 0xc0) === 0x80) end--;
+  return buf.subarray(0, end).toString('utf8');
+}
+
 export function createSessionManager(deps: {
   readonly config: Config;
   readonly store: Store;
@@ -131,7 +143,22 @@ export function createSessionManager(deps: {
     return null;
   }
 
+  // S9.8: delivers a completion envelope live-only, bypassing the ring and the spill —
+  // both belong to `emit`, and by the time this is called the spill has already failed
+  // to hold the envelope that triggered the failure. Pushing these to the ring anyway
+  // would put something in it the spill does not hold (D41); the same reasoning as
+  // `remove()`'s post-registry notice, which has nothing left to replay it from either.
+  function deliverDirect<K extends EventKind>(entry: SessionEntry, kind: K, data: EventPayloadMap[K]): void {
+    entry.seq += 1;
+    const envelope = { seq: entry.seq as Seq, sessionId: entry.record.id, ts: nowIso(), kind, data } as Envelope;
+    for (const sub of entry.subscribers) sub.deliver(envelope);
+  }
+
   async function emit<K extends EventKind>(entry: SessionEntry, kind: K, data: EventPayloadMap[K], raw?: unknown): Promise<void> {
+    // S9.8: once the spill has failed the session is already ended, and no further
+    // envelope may reach the ring it can no longer back — the completion envelopes for
+    // the failure itself go out through `deliverDirect` instead, not this path.
+    if (entry.storageFailed) return;
     entry.seq += 1;
     const envelope = {
       seq: entry.seq as Seq,
@@ -154,18 +181,15 @@ export function createSessionManager(deps: {
     // in seq order despite that (I1, I27).
     //
     // A spill-append failure is fatal to the session (D41), and D100 splits the handling
-    // in two. This is the first half: restore the invariants the rest of the server reads
-    // as unconditional. `state` moves to `ended` *and the turn slot is cleared with it*,
+    // in two. The first half restores the invariants the rest of the server reads as
+    // unconditional: `state` moves to `ended` *and the turn slot is cleared with it*,
     // because I8 says `ended` implies `turn === null` and every consumer of that
     // implication assumes no child is running; `meta.json` is rewritten because a `state`
-    // transition is one of the three occasions I16 names.
-    //
-    // The second half is S5's and is **not implemented**: killing the turn's child,
-    // resolving each outstanding `permission.request` `cancelled_process_exit` (I9), and
-    // emitting `turn.ended { storage_failure }`, `session.ended` and
-    // `session.notice / error`. Until it lands, a session struck by a spill failure stops
-    // accepting turns and says nothing on the wire about why, which is exactly what
-    // `10-design.md § Failure modes` describes for that interim.
+    // transition is one of the three occasions I16 names. The second half (S9.8) kills
+    // the turn's child, resolves each outstanding `permission.request`
+    // `cancelled_process_exit` (I9), and emits `turn.ended { storage_failure }`,
+    // `session.ended` and `session.notice / error` — live-only, via `deliverDirect`,
+    // since the spill that just failed cannot hold these either.
     //
     // Nothing here may call `emit`: this callback *is* the write queue, so an `emit`
     // inside it would await a promise that cannot settle until it returns.
@@ -173,6 +197,7 @@ export function createSessionManager(deps: {
       const appended = await store.appendEvent(entry.record.id, envelope as Envelope);
       if (appended.ok || entry.storageFailed) return;
       entry.storageFailed = true;
+      const turn = entry.turn;
       entry.turn = null;
       entry.record.state = 'ended';
       entry.record.endedAt = nowIso();
@@ -184,6 +209,45 @@ export function createSessionManager(deps: {
       // this writes to, and the in-memory record — which `findLiveOverlap` reads, and which
       // therefore frees the workspace — is already `ended` regardless.
       await store.writeMeta(entry.record);
+
+      if (turn) {
+        for (const [requestId, pending] of turn.pending) {
+          deliverDirect(entry, 'permission.resolved', {
+            turnId: turn.turnId,
+            requestId,
+            decision: 'deny',
+            scope: 'once',
+            operator: null,
+            reason: 'cancelled_process_exit',
+          });
+          // Best-effort, like every other write in this branch (I11 still owes one
+          // `AuditRecord` per resolution, but the decision above is already final —
+          // an append failure here has nothing left to deny).
+          await store.appendAudit({
+            ts: nowIso(),
+            operator: null,
+            sessionId: entry.record.id,
+            vendor: entry.record.vendor,
+            sandbox: entry.record.sandbox,
+            tool: pending.tool,
+            input: pending.input,
+            decision: 'deny',
+            scope: 'once',
+            reason: 'cancelled_process_exit',
+          });
+        }
+        deliverDirect(entry, 'turn.ended', { turnId: turn.turnId, stopReason: 'storage_failure', usage: null });
+        // A live turn (the only case this branch had one to clear) always has a real
+        // adapter — a rehydrated session's `turn` is always null and never reaches here.
+        await entry.adapter!.kill();
+      }
+
+      deliverDirect(entry, 'session.ended', { reason: 'storage_failure', endedAt: entry.record.endedAt });
+      deliverDirect(entry, 'session.notice', {
+        level: 'error',
+        code: 'storage_failure',
+        text: 'The event log could not be written; this session has ended.',
+      });
     });
     await entry.writeQueue;
   }
@@ -787,8 +851,15 @@ export function createSessionManager(deps: {
       }
     },
 
-    async openToolOutput() {
-      notImplemented('openToolOutput');
+    async openToolOutput(sessionId, owner, turnId, callId) {
+      // S9.3/I23/D43: the ownership check is the same as every other session route —
+      // another operator gets `no_such_session`, not a distinguishable `no_such_output`
+      // that would confirm the session exists.
+      const entry = sessions.get(sessionId);
+      if (!entry || entry.record.owner !== owner) return { ok: false, error: { code: 'no_such_session', sessionId } };
+      const opened = await store.openToolOutput(sessionId, turnId, callId);
+      if (!opened.ok) return { ok: false, error: { code: 'storage', cause: opened.error } };
+      return { ok: true, value: opened.value };
     },
 
     async subscribe(sessionId, owner, after, sink: SubscriberSink): Promise<Result<Subscription, SessionError>> {
@@ -1023,9 +1094,29 @@ export function createSessionManager(deps: {
           const d = data as unknown as { requestId: RequestId; callId: CallId; tool: string; input: Readonly<Record<string, unknown>> };
           turn.pending.set(d.requestId, { callId: d.callId, tool: d.tool, input: d.input });
         }
+        // S9.1: truncated before the envelope naming it is constructed (I3, D22). The
+        // adapter always reports the pre-truncation `bytes` and `truncated: false` (S9
+        // is explicitly out of its scope) — this is the one place `caps.toolResultBytes`
+        // is enforced. A write failure for the untruncated blob does not undo the
+        // truncation decision (S9.5): the envelope stays truncated either way, and the
+        // fetch route reports the blob missing if the write never landed.
+        let eventData: Record<string, unknown> = data;
+        if (kind === 'tool.result' && turn) {
+          const d = data as unknown as { callId: CallId; output: string; bytes: number };
+          if (d.bytes > config.caps.toolResultBytes) {
+            const written = await store.writeToolOutput(entry.record.id, turn.turnId, d.callId, Buffer.from(d.output, 'utf8'));
+            if (!written.ok) {
+              console.warn(
+                `[session-manager] session ${entry.record.id}: failed to write the tool-output blob for ` +
+                  `${turn.turnId}/${d.callId}: ${JSON.stringify(written.error)}`,
+              );
+            }
+            eventData = { ...d, output: truncateUtf8(d.output, config.caps.toolResultBytes), truncated: true };
+          }
+        }
         // The adapter omits `turnId` from every payload that carries one (contract
         // `AdapterEvent`); the manager, which owns `Turn`, is what stamps it back on.
-        const payload = turn && KINDS_CARRYING_TURN_ID.has(kind) ? { ...data, turnId: turn.turnId } : data;
+        const payload = turn && KINDS_CARRYING_TURN_ID.has(kind) ? { ...eventData, turnId: turn.turnId } : eventData;
         // Cleared before the event is emitted, not after: `emit` delivers to
         // subscribers synchronously but then awaits the spill write, so a caller
         // reacting to the delivered `turn.ended` (e.g. sending the next message) must

@@ -28,6 +28,9 @@ import { spawn } from 'node:child_process';
 //                   writes its own pid to SKYNET_GRANDCHILD_MARKER and then idles
 //                   forever, and never sends a result — a turn that stays live until
 //                   something kills the tree (S5.2).
+//   big-tool-result — one tool call whose result is SKYNET_BIG_TOOL_RESULT_BYTES bytes
+//                   of untruncated 'x' repeated, for S9's truncation-before-envelope
+//                   assertions.
 
 const scenario = process.env.SKYNET_TEST_SCENARIO ?? 'full';
 const sessionId = 'fake-cli-session-' + Math.random().toString(36).slice(2);
@@ -112,6 +115,15 @@ function onLine(msg) {
       line({ type: 'result', subtype: 'success' });
       return;
     }
+    if (scenario === 'big-tool-result') {
+      const size = Number(process.env.SKYNET_BIG_TOOL_RESULT_BYTES || 200000);
+      line({
+        type: 'user',
+        message: { content: [{ type: 'tool_result', tool_use_id: currentCallId, content: 'x'.repeat(size), is_error: false }] },
+      });
+      line({ type: 'result', subtype: 'success' });
+      return;
+    }
     toolResultFor(behavior, currentCallId);
     line({ type: 'result', subtype: 'success' });
     return;
@@ -175,6 +187,10 @@ function runScenario() {
       return;
     }
     case 'many-permissions': {
+      sendControlRequest('req-1', 'call-1');
+      return;
+    }
+    case 'big-tool-result': {
       sendControlRequest('req-1', 'call-1');
       return;
     }

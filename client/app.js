@@ -230,6 +230,10 @@ function openStream(sessionId) {
   const handlers = {
     onAnswerPermission: answerPermission,
     onRequestRendered: (requestId, controls) => state.pendingPermissions.set(requestId, controls),
+    // S9.2: the download link on a truncated `tool.result` — not part of the wire
+    // vocabulary any event carries, so it comes from this stream's own session rather
+    // than the envelope.
+    sessionId,
   };
 
   for (const kind of [

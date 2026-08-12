@@ -915,3 +915,98 @@ describe('S6 — GET .../checkpoints, POST .../checkpoint/restore', () => {
     assert.equal(res.status, 403);
   });
 });
+
+const S9_CAPS: Config['caps'] = {
+  ringCapacity: 500,
+  toolResultBytes: 1024,
+  subscriberQueueHighWater: 1000,
+  keepaliveMs: 15000,
+  auditPageMax: 200,
+  reviewBodyBytes: 1024,
+  requisitionTextBytes: 1024,
+};
+
+describe('S9.2/S9.3/S9.5 — GET .../tool-output/:turnId/:callId', () => {
+  // A fresh GET /events replays the whole spill (D40), so a second call on the same
+  // session sees the first turn's history too — filtering every frame by this turn's own
+  // `turnId` (from the POST /message response, not the stream) is what keeps a second
+  // truncated turn on the same session from picking up the first one's frames instead.
+  function findOwnFrame(frames: string[], kind: string, turnId: string): string {
+    return frames.find((f) => f.includes(`event: ${kind}`) && f.includes(`"turnId":"${turnId}"`))!;
+  }
+
+  /** Runs one turn whose tool.result is over the cap, and returns its (turnId, callId, bytes). */
+  async function runTruncatedTurn(h: Harness, id: string, bigBytes: number): Promise<{ turnId: string; callId: string; bytes: number }> {
+    process.env['SKYNET_BIG_TOOL_RESULT_BYTES'] = String(bigBytes);
+    const events = await get(h, `/api/sessions/${id}/events`);
+    const sent = await post(h, `/api/sessions/${id}/message`, { text: 'go' });
+    const { turnId } = (await sent.json()) as { turnId: string };
+
+    const { frames: reqFrames } = await readFrames(events, (f) => findOwnFrame(f, 'permission.request', turnId) !== undefined);
+    const reqFrame = findOwnFrame(reqFrames, 'permission.request', turnId);
+    const requestId = (JSON.parse(reqFrame.split('\n').find((l) => l.startsWith('data: '))!.slice(6)) as { data: { requestId: string } }).data.requestId;
+    await post(h, `/api/sessions/${id}/permission`, { requestId, decision: 'allow', scope: 'once', rule: null, reason: null });
+
+    // `readFrames` cancels the reader it hands back, so the same connection cannot be
+    // read twice — this is a fresh one, replaying history filtered by `turnId` again.
+    const events2 = await get(h, `/api/sessions/${id}/events`);
+    const { frames } = await readFrames(events2, (f) => findOwnFrame(f, 'tool.result', turnId) !== undefined);
+    const frame = findOwnFrame(frames, 'tool.result', turnId);
+    const dataLine = frame.split('\n').find((l) => l.startsWith('data: '))!;
+    const envelope = JSON.parse(dataLine.slice('data: '.length)) as { data: { turnId: string; callId: string; truncated: boolean; bytes: number } };
+    assert.equal(envelope.data.truncated, true, 'the fixture emitted enough bytes to cross the cap');
+    return { turnId: envelope.data.turnId, callId: envelope.data.callId, bytes: envelope.data.bytes };
+  }
+
+  it('serves 200 text/plain with nosniff and attachment, and the full pre-truncation byte count', async () => {
+    const h = await makeEdge(undefined, { caps: S9_CAPS }, 'big-tool-result');
+    const id = await newSession(h, 't1');
+    const { turnId, callId, bytes } = await runTruncatedTurn(h, id, 5000);
+
+    const res = await get(h, `/api/sessions/${id}/tool-output/${turnId}/${callId}`);
+    assert.equal(res.status, 200);
+    assert.match(res.headers.get('content-type') ?? '', /^text\/plain; charset=utf-8/);
+    assert.equal(res.headers.get('x-content-type-options'), 'nosniff');
+    assert.equal(res.headers.get('content-disposition'), 'attachment');
+    const body = await res.text();
+    assert.equal(body.length, bytes, 'the fetched body is the untruncated size, not the capped envelope');
+  });
+
+  it('is 404 no_such_session for another operator, indistinguishable from a session that never existed (I23/D43)', async () => {
+    const h = await makeEdge(undefined, { caps: S9_CAPS }, 'big-tool-result');
+    const id = await newSession(h, 't2', 'ben');
+    const { turnId, callId } = await runTruncatedTurn(h, id, 5000);
+
+    const res = await get(h, `/api/sessions/${id}/tool-output/${turnId}/${callId}`, 'mallory');
+    assert.equal(res.status, 404);
+    assert.equal(((await res.json()) as { error: { code: string } }).error.code, 'no_such_session');
+  });
+
+  it('is 404 no_such_output for a callId that was never truncated, and for a turnId that never ran (S9.5)', async () => {
+    const h = await makeEdge(undefined, { caps: S9_CAPS }, 'big-tool-result');
+    const id = await newSession(h, 't3');
+    const { turnId } = await runTruncatedTurn(h, id, 5000);
+
+    const wrongCall = await get(h, `/api/sessions/${id}/tool-output/${turnId}/call-does-not-exist`);
+    assert.equal(wrongCall.status, 404);
+    assert.equal(((await wrongCall.json()) as { error: { code: string } }).error.code, 'no_such_output');
+
+    const wrongTurn = await get(h, `/api/sessions/${id}/tool-output/turn-does-not-exist/call-1`);
+    assert.equal(wrongTurn.status, 404);
+    assert.equal(((await wrongTurn.json()) as { error: { code: string } }).error.code, 'no_such_output');
+  });
+
+  it('two turns emitting the same callId keep separate blobs, each fetchable only by its own turnId (S9.4)', async () => {
+    const h = await makeEdge(undefined, { caps: S9_CAPS }, 'big-tool-result');
+    const id = await newSession(h, 't4');
+    const first = await runTruncatedTurn(h, id, 5000);
+    const second = await runTruncatedTurn(h, id, 6000);
+    assert.equal(first.callId, second.callId, 'the fixture reuses call-1 on every turn (test setup)');
+    assert.notEqual(first.turnId, second.turnId);
+
+    const firstBody = await (await get(h, `/api/sessions/${id}/tool-output/${first.turnId}/${first.callId}`)).text();
+    const secondBody = await (await get(h, `/api/sessions/${id}/tool-output/${second.turnId}/${second.callId}`)).text();
+    assert.equal(firstBody.length, 5000);
+    assert.equal(secondBody.length, 6000);
+  });
+});
