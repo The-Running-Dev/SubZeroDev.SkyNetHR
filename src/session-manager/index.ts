@@ -118,10 +118,10 @@ function notImplemented(method: string): never {
 // S9.1: truncates to at most `maxBytes` UTF-8 bytes, backing up over a partial
 // multi-byte code point at the boundary rather than splitting it — 0x80-0xBF are UTF-8
 // continuation bytes, so trimming while the byte at `end` is one never cuts a character
-// in half.
-function truncateUtf8(text: string, maxBytes: number): string {
-  const buf = Buffer.from(text, 'utf8');
-  if (buf.length <= maxBytes) return text;
+// in half. Takes the already-encoded bytes rather than re-encoding the string, since the
+// one caller also needs those same bytes for the untruncated blob.
+function truncateUtf8(buf: Buffer, maxBytes: number): string {
+  if (buf.length <= maxBytes) return buf.toString('utf8');
   let end = maxBytes;
   while (end > 0 && (buf[end]! & 0xc0) === 0x80) end--;
   return buf.subarray(0, end).toString('utf8');
@@ -151,6 +151,12 @@ export function createSessionManager(deps: {
   function deliverDirect<K extends EventKind>(entry: SessionEntry, kind: K, data: EventPayloadMap[K]): void {
     entry.seq += 1;
     const envelope = { seq: entry.seq as Seq, sessionId: entry.record.id, ts: nowIso(), kind, data } as Envelope;
+    // `entry.record.lastSeq` is what `subscribe`'s reconnect-gap check compares an
+    // incoming `Last-Event-ID` against (I1). The edge writes this envelope's `seq` as
+    // that SSE `id:`, so a later reconnect must find it already accounted for here —
+    // otherwise a client that saw this envelope live gets told it is past the end of
+    // history it already has.
+    entry.record.lastSeq = envelope.seq;
     for (const sub of entry.subscribers) sub.deliver(envelope);
   }
 
@@ -211,32 +217,47 @@ export function createSessionManager(deps: {
       await store.writeMeta(entry.record);
 
       if (turn) {
-        for (const [requestId, pending] of turn.pending) {
-          deliverDirect(entry, 'permission.resolved', {
-            turnId: turn.turnId,
-            requestId,
-            decision: 'deny',
-            scope: 'once',
-            operator: null,
-            reason: 'cancelled_process_exit',
-          });
+        // `turn.started` is only durable once `phase` leaves 'starting' (`message`, just
+        // above `entry.turn.phase = 'running'`). A failure struck before that point means
+        // no subscriber was ever told this turn began, so `turn.ended` must not claim one
+        // ended either (I14) — and with no `turn.started`, no `permission.request` could
+        // have arrived yet, so `turn.pending` is empty regardless.
+        if (turn.phase !== 'starting') {
+          const cancelled = [...turn.pending];
+          for (const [requestId] of cancelled) {
+            deliverDirect(entry, 'permission.resolved', {
+              turnId: turn.turnId,
+              requestId,
+              decision: 'deny',
+              scope: 'once',
+              operator: null,
+              reason: 'cancelled_process_exit',
+            });
+          }
           // Best-effort, like every other write in this branch (I11 still owes one
-          // `AuditRecord` per resolution, but the decision above is already final —
-          // an append failure here has nothing left to deny).
-          await store.appendAudit({
-            ts: nowIso(),
-            operator: null,
-            sessionId: entry.record.id,
-            vendor: entry.record.vendor,
-            sandbox: entry.record.sandbox,
-            tool: pending.tool,
-            input: pending.input,
-            decision: 'deny',
-            scope: 'once',
-            reason: 'cancelled_process_exit',
-          });
+          // `AuditRecord` per resolution, but the decision above is already final — an
+          // append failure here has nothing left to deny). Parallel, not sequential: every
+          // `seq` above was already assigned synchronously by `deliverDirect`, so — unlike
+          // the `'exited'` handler's equivalent cleanup, which serializes deliberately to
+          // protect seq order — nothing here depends on these awaits interleaving.
+          await Promise.all(
+            cancelled.map(([, pending]) =>
+              store.appendAudit({
+                ts: nowIso(),
+                operator: null,
+                sessionId: entry.record.id,
+                vendor: entry.record.vendor,
+                sandbox: entry.record.sandbox,
+                tool: pending.tool,
+                input: pending.input,
+                decision: 'deny',
+                scope: 'once',
+                reason: 'cancelled_process_exit',
+              }),
+            ),
+          );
+          deliverDirect(entry, 'turn.ended', { turnId: turn.turnId, stopReason: 'storage_failure', usage: null });
         }
-        deliverDirect(entry, 'turn.ended', { turnId: turn.turnId, stopReason: 'storage_failure', usage: null });
         // A live turn (the only case this branch had one to clear) always has a real
         // adapter — a rehydrated session's `turn` is always null and never reaches here.
         await entry.adapter!.kill();
@@ -1099,19 +1120,26 @@ export function createSessionManager(deps: {
         // is explicitly out of its scope) — this is the one place `caps.toolResultBytes`
         // is enforced. A write failure for the untruncated blob does not undo the
         // truncation decision (S9.5): the envelope stays truncated either way, and the
-        // fetch route reports the blob missing if the write never landed.
+        // fetch route reports the blob missing if the write never landed. The blob write
+        // is not awaited here: this handler runs synchronously per notification (no
+        // queueing between them), and blocking on disk I/O before `emit` would let a
+        // later, unrelated notification for the same turn (e.g. `turn.ended`, which has
+        // no await before its own `emit`) claim a lower `seq` than this one (I1, I27).
         let eventData: Record<string, unknown> = data;
         if (kind === 'tool.result' && turn) {
           const d = data as unknown as { callId: CallId; output: string; bytes: number };
           if (d.bytes > config.caps.toolResultBytes) {
-            const written = await store.writeToolOutput(entry.record.id, turn.turnId, d.callId, Buffer.from(d.output, 'utf8'));
-            if (!written.ok) {
-              console.warn(
-                `[session-manager] session ${entry.record.id}: failed to write the tool-output blob for ` +
-                  `${turn.turnId}/${d.callId}: ${JSON.stringify(written.error)}`,
-              );
-            }
-            eventData = { ...d, output: truncateUtf8(d.output, config.caps.toolResultBytes), truncated: true };
+            const outputBytes = Buffer.from(d.output, 'utf8');
+            const { turnId } = turn;
+            void store.writeToolOutput(entry.record.id, turnId, d.callId, outputBytes).then((written) => {
+              if (!written.ok) {
+                console.warn(
+                  `[session-manager] session ${entry.record.id}: failed to write the tool-output blob for ` +
+                    `${turnId}/${d.callId}: ${JSON.stringify(written.error)}`,
+                );
+              }
+            });
+            eventData = { ...d, output: truncateUtf8(outputBytes, config.caps.toolResultBytes), truncated: true };
           }
         }
         // The adapter omits `turnId` from every payload that carries one (contract

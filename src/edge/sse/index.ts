@@ -1,6 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import type { IncomingMessage, RequestListener, ServerResponse } from 'node:http';
 import { timingSafeEqual } from 'node:crypto';
+import { Readable } from 'node:stream';
 import type {
   ApiErrorCode,
   CallId,
@@ -348,7 +349,7 @@ export function createSseEdge(deps: EdgeDeps): RequestListener {
   // `apiErrorFor` does not produce, so this route maps it itself rather than routing
   // through `failWith`.
   async function handleToolOutput(
-    _req: IncomingMessage,
+    req: IncomingMessage,
     res: ServerResponse,
     owner: OperatorId,
     sessionId: SessionId,
@@ -360,12 +361,18 @@ export function createSseEdge(deps: EdgeDeps): RequestListener {
       if (opened.error.code === 'no_such_session') return failWith(res, opened.error);
       return sendError(res, 'no_such_output', 'the tool-output blob is missing or unreadable');
     }
+    const stream = opened.value;
+    // `.pipe()` alone only unpipes on an early `res` close, it does not destroy `stream`
+    // — without this, a client that aborts mid-download (the large-blob case this route
+    // exists for) leaks the open file handle. `Store.openToolOutput` is typed to the
+    // minimal `NodeJS.ReadableStream`, but every implementation hands back a real
+    // `Readable` (an `fs.ReadStream`), which is what actually owns the file descriptor.
+    if (stream instanceof Readable) req.on('close', () => stream.destroy());
     res.writeHead(200, {
       'content-type': 'text/plain; charset=utf-8',
       'x-content-type-options': 'nosniff',
       'content-disposition': 'attachment',
     });
-    const stream = opened.value;
     stream.on('error', () => {
       if (!res.writableEnded) res.end();
     });
@@ -581,12 +588,16 @@ export function createSseEdge(deps: EdgeDeps): RequestListener {
           const toolOutputMatch = /^\/tool-output\/([^/]+)\/([^/]+)$/.exec(rest);
           if (method === 'GET' && toolOutputMatch) {
             let decodedTurnId: string;
-            let decodedCallId: string;
             try {
               decodedTurnId = decodeURIComponent(toolOutputMatch[1]!);
+            } catch {
+              return sendError(res, 'bad_request', 'turnId is not a valid path segment', { field: 'turnId' });
+            }
+            let decodedCallId: string;
+            try {
               decodedCallId = decodeURIComponent(toolOutputMatch[2]!);
             } catch {
-              return sendError(res, 'bad_request', 'turnId or callId is not a valid path segment', { field: 'turnId' });
+              return sendError(res, 'bad_request', 'callId is not a valid path segment', { field: 'callId' });
             }
             return handleToolOutput(req, res, owner, sessionId, decodedTurnId as TurnId, decodedCallId as CallId);
           }

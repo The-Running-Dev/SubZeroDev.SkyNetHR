@@ -187,8 +187,8 @@ const RENDERERS = {
  * draw. `null` rather than a placeholder: an event a later slice introduces should be
  * invisible here, not rendered as damage.
  *
- * `handlers` is optional and reaches only `permission.request` today (see above); every
- * other renderer ignores it.
+ * `handlers` is optional and reaches only `permission.request` and `tool.result` today
+ * (see above); every other renderer ignores it.
  */
 export function renderEvent(doc, envelope, handlers) {
   const renderer = RENDERERS[envelope.kind];
