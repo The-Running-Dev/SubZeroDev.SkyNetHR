@@ -41,11 +41,21 @@
         <span class="field__label">Model <span class="field__hint">optional</span></span>
         <input id="model" class="field__input" type="text">
       </label>
+      <label class="field">
+        <span class="field__label">Sandbox <span class="field__hint">optional, not every agent offers one</span></span>
+        <select id="sandbox" class="field__input">
+          <option value="">none</option>
+          <option value="read-only">read-only</option>
+          <option value="workspace-write">workspace-write</option>
+          <option value="unrestricted">unrestricted</option>
+        </select>
+      </label>
       <button class="button" type="submit">Start</button>
     </form>
   </aside>
 
   <section class="transcript-pane">
+    <div id="policy-banner" class="policy-banner" hidden></div>
     <div id="transcript" class="transcript"></div>
     <section id="checkpoints" class="checkpoints" hidden>
       <h2 class="panel__heading">Checkpoints</h2>

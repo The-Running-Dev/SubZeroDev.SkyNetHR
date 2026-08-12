@@ -244,7 +244,7 @@ interface FakeStream {
 
 async function runConsole(sessions: ReadonlyArray<Record<string, unknown>>) {
   const byId = new Map<string, FakeEl>();
-  for (const id of ['status', 'login', 'console', 'sessions', 'transcript', 'compose', 'new-session', 'login-form', 'refresh', 'cwd', 'vendor', 'model', 'text', 'secret', 'checkpoints', 'checkpoint-list']) {
+  for (const id of ['status', 'login', 'console', 'sessions', 'transcript', 'compose', 'new-session', 'login-form', 'refresh', 'cwd', 'vendor', 'model', 'sandbox', 'text', 'secret', 'checkpoints', 'checkpoint-list', 'policy-banner']) {
     byId.set(id, fakeEl('div'));
   }
   const streams: FakeStream[] = [];

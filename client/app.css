@@ -264,6 +264,18 @@ body {
   overflow-y: auto;
 }
 
+/* S8.3: the standing sandbox banner — visible for the life of a preauthorised session,
+   not just the moment `session.started` scrolls past in the transcript. */
+.policy-banner {
+  padding: var(--space-2) var(--space-5);
+  border-bottom: var(--border-width) solid var(--line);
+  background: var(--surface-raised, transparent);
+  color: var(--warn);
+  font-size: var(--text-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
 .event {
   display: grid;
   grid-template-columns: 5rem 1fr;

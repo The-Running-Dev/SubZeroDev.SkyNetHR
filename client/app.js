@@ -36,6 +36,28 @@ function applySessionAvailability() {
   if (ended) status('this session has ended — the transcript is read-only', 'warn');
 }
 
+// S8.3: the standing sandbox banner is a fact about the session (`policy.banner`, set
+// once at create and immutable for its life), not about a single event — so it is
+// re-derived from whichever source is freshest whenever the session might have changed:
+// selecting it (from `GET /api/sessions`, survives a reload) and a live `session.started`
+// envelope (survives a replay from the spill, S8.3's other half — `banner` is passed
+// explicitly there rather than re-read from `sessionsById`, which a fresh `create()` may
+// not have caught up with yet). A `null` banner (an interactive-policy session, D5) hides
+// the bar — no branch reads which vendor that is (I20).
+function applyPolicyBanner(bannerOverride) {
+  const bar = $('policy-banner');
+  const session = currentSession();
+  const banner = bannerOverride !== undefined ? bannerOverride : session && session.policy ? session.policy.banner : null;
+  if (banner === null || banner === undefined) {
+    bar.hidden = true;
+    clear(bar);
+    return;
+  }
+  bar.hidden = false;
+  clear(bar);
+  bar.appendChild(text('span', 'policy-banner__text', banner));
+}
+
 function text(tag, className, value) {
   const node = document.createElement(tag);
   if (className) node.className = className;
@@ -116,12 +138,14 @@ async function refreshSessions() {
   // closing it from another tab — so the refresh that discovers that is also what has to
   // withdraw the compose box.
   applySessionAvailability();
+  applyPolicyBanner();
 }
 
 function selectSession(sessionId) {
   state.sessionId = sessionId;
   state.refetched = false;
   applySessionAvailability();
+  applyPolicyBanner();
   $('checkpoints').hidden = false;
   openStream(sessionId);
   void refreshSessions();
@@ -224,6 +248,12 @@ function openStream(sessionId) {
       if (envelope.kind === 'error' && envelope.data?.kind === 'replay_gap') {
         if (handleReplayGap()) return;
       }
+      if (envelope.kind === 'session.started' && envelope.sessionId === state.sessionId && envelope.data && envelope.data.policy) {
+        // Replayed from the spill on every reconnect, including after a gap refetch —
+        // the banner must survive that the same way the rest of the transcript does,
+        // not just the initial live delivery.
+        applyPolicyBanner(envelope.data.policy.banner);
+      }
       if (envelope.kind === 'session.ended' && envelope.sessionId === state.sessionId) {
         // Withdrawn the moment it happens rather than at the next refresh: the session may
         // have been ended from another tab, or by a storage failure, and the operator must
@@ -265,6 +295,7 @@ async function createSession(event) {
   const cwd = $('cwd').value.trim();
   const vendor = $('vendor').value.trim();
   const model = $('model').value.trim();
+  const sandbox = $('sandbox').value.trim();
   if (cwd === '' || vendor === '') return status('a folder and an agent are both required', 'error');
 
   status('starting…', 'info');
@@ -272,7 +303,7 @@ async function createSession(event) {
     vendor,
     cwd,
     model: model === '' ? null : model,
-    sandbox: null,
+    sandbox: sandbox === '' ? null : sandbox,
   });
   if (result.status === 401) return;
   if (result.status !== 201) return status(describe(result), 'error');
