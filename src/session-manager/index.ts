@@ -200,7 +200,7 @@ export function createSessionManager(deps: {
   readonly checkpoints: Checkpoints;
   readonly records: Records;
 }): SessionManager {
-  const { config, store, checkpoints } = deps;
+  const { config, store, checkpoints, records } = deps;
   const sessions = new Map<SessionId, SessionEntry>();
 
   function findLiveOverlap(candidate: ResolvedPath): SessionEntry | null {
@@ -591,6 +591,15 @@ export function createSessionManager(deps: {
         return { ok: false, error: { code: 'workspace_busy', holder: { cwd: overlap.record.cwd, owner: overlap.record.owner } } };
       }
 
+      // S13.8/D68: the jail and busy checks above run before this. The claim itself is
+      // synchronous (`records.claim`'s own contract) and sits in the same unbroken block
+      // as the workspace claim below — no `await` between either check and what it
+      // protects (I5).
+      if (input.requisitionId !== null) {
+        const claimed = records.claim(input.requisitionId);
+        if (!claimed.ok) return { ok: false, error: { code: 'records', cause: claimed.error } };
+      }
+
       const sessionId = randomUUID() as SessionId;
       const adapterResult = createAdapter(input.vendor, {
         cwd,
@@ -598,7 +607,12 @@ export function createSessionManager(deps: {
         sandbox: input.sandbox,
         notify: (n) => handleNotification(sessionId, n),
       });
-      if (!adapterResult.ok) return { ok: false, error: { code: 'adapter', cause: adapterResult.error } };
+      if (!adapterResult.ok) {
+        // S13.9: any failure after the claim releases it — the requisition reads
+        // `approved` again and a retry can spend it.
+        if (input.requisitionId !== null) records.release(input.requisitionId);
+        return { ok: false, error: { code: 'adapter', cause: adapterResult.error } };
+      }
 
       const record: SessionRecord = {
         id: sessionId,
@@ -633,6 +647,7 @@ export function createSessionManager(deps: {
       const created = await store.createSession(record);
       if (!created.ok) {
         sessions.delete(sessionId);
+        if (input.requisitionId !== null) records.release(input.requisitionId);
         return { ok: false, error: { code: 'storage', cause: created.error } };
       }
 
@@ -648,7 +663,21 @@ export function createSessionManager(deps: {
         });
       }
 
-      // Requisition attachment is S13's.
+      if (input.requisitionId !== null) {
+        const attached = await records.attachSession(input.requisitionId, sessionId);
+        if (!attached.ok) {
+          // The claim held since the synchronous block above never became durable as
+          // `consumed` — release it and unwind the session this attempt already created,
+          // so a retry lands on a clean requisition and a clean workspace (S13.9's "release
+          // both claims" extended to the one failure that can strike after them both).
+          records.release(input.requisitionId);
+          sessions.delete(sessionId);
+          await checkpoints.destroy(sessionId); // best-effort, like remove()'s
+          await store.deleteSession(sessionId); // best-effort, like remove()'s
+          await entry.adapter!.kill();
+          return { ok: false, error: { code: 'records', cause: attached.error } };
+        }
+      }
 
       return { ok: true, value: { sessionId } };
     },

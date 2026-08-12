@@ -9,7 +9,8 @@ import { resolverFor } from '../../identity/index.js';
 import { createSessionManager } from '../../session-manager/index.js';
 import { createStore } from '../../store/index.js';
 import { createCheckpoints } from '../../checkpoints/index.js';
-import type { AuthConfig, Config, Records } from '../../contract/index.js';
+import { createRecords } from '../../records/index.js';
+import type { AuthConfig, Config, Records, Store } from '../../contract/index.js';
 
 const FIXTURE = path.join(process.cwd(), 'src', 'adapters', 'claude', 'fixtures', 'fake-claude-cli.mjs');
 
@@ -60,12 +61,14 @@ interface Harness {
   readonly base: string;
   readonly workspaceRoot: string;
   readonly storageRoot: string;
+  readonly records: Records;
 }
 
 async function makeEdge(
   auth: AuthConfig = { mode: 'proxy-header', userHeader: 'x-forwarded-user' },
   over: Partial<Config> = {},
   scenario = 'full',
+  recordsOverride: ((config: Config, store: Store) => Records) | null = null,
 ): Promise<Harness> {
   process.env['SKYNET_TEST_SCENARIO'] = scenario;
   process.env['SKYNET_CLAUDE_EXECUTABLE'] = FIXTURE;
@@ -98,19 +101,20 @@ async function makeEdge(
   };
   const storeResult = await createStore(config);
   if (!storeResult.ok) throw new Error('store failed to init');
+  const records = recordsOverride ? recordsOverride(config, storeResult.value) : notImplementedProxy<Records>('records');
   const manager = createSessionManager({
     config,
     store: storeResult.value,
     checkpoints: createCheckpoints(config),
-    records: notImplementedProxy<Records>('records'),
+    records,
   });
-  const listener = createSseEdge({ config, identity: resolverFor(config.auth, config.trustProxy), manager, records: notImplementedProxy<Records>('records') });
+  const listener = createSseEdge({ config, identity: resolverFor(config.auth, config.trustProxy), manager, records });
   const server = createServer(listener);
   servers.push(server);
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   const addr = server.address();
   if (addr === null || typeof addr === 'string') throw new Error('no port');
-  return { base: `http://127.0.0.1:${addr.port}`, workspaceRoot, storageRoot };
+  return { base: `http://127.0.0.1:${addr.port}`, workspaceRoot, storageRoot, records };
 }
 
 /** A same-origin browser POST from an authenticated operator. */
@@ -191,14 +195,101 @@ describe('S2.1 — POST /api/sessions', () => {
     assert.equal(res.status, 422);
   });
 
-  it('refuses a tier-two requisitionId rather than accepting and ignoring it (D94)', async () => {
-    const h = await makeEdge();
+  it('S13.6 — an approved requisitionId is accepted, claimed and consumed', async () => {
+    const h = await makeEdge(undefined, undefined, undefined, (c, s) => createRecords({ config: c, store: s }));
     const cwd = path.join(h.workspaceRoot, 'c');
     await mkdir(cwd);
-    const res = await post(h, '/api/sessions', { vendor: 'claude', cwd, model: null, sandbox: null, requisitionId: 'req-1' });
+    const raised = await h.records.raise('ben' as never, { title: 't', justification: 'j', workspace: cwd, vendor: 'claude' });
+    assert.equal(raised.ok, true);
+    if (!raised.ok) return;
+    await h.records.decide(raised.value.requisitionId, 'ben' as never, 'approve');
+
+    const res = await post(h, '/api/sessions', { vendor: 'claude', cwd, model: null, sandbox: null, requisitionId: raised.value.requisitionId });
+    assert.equal(res.status, 201, `create failed: ${await res.clone().text()}`);
+    const body = (await res.json()) as { sessionId?: string };
+    assert.equal(typeof body.sessionId, 'string');
+
+    const after = h.records.getRequisition(raised.value.requisitionId);
+    assert.equal(after.ok, true);
+    if (after.ok) assert.equal(after.value.state, 'consumed');
+  });
+
+  it('S13.7 — an unapproved requisitionId is refused 409 requisition_not_approved', async () => {
+    const h = await makeEdge(undefined, undefined, undefined, (c, s) => createRecords({ config: c, store: s }));
+    const cwd = path.join(h.workspaceRoot, 'c2');
+    await mkdir(cwd);
+    const raised = await h.records.raise('ben' as never, { title: 't', justification: 'j', workspace: cwd, vendor: 'claude' });
+    assert.equal(raised.ok, true);
+    if (!raised.ok) return;
+
+    const res = await post(h, '/api/sessions', { vendor: 'claude', cwd, model: null, sandbox: null, requisitionId: raised.value.requisitionId });
+    assert.equal(res.status, 409);
+    assert.equal(((await res.json()) as { error: { code: string } }).error.code, 'requisition_not_approved');
+  });
+
+  it('an unknown requisitionId is refused 404 no_such_requisition', async () => {
+    const h = await makeEdge(undefined, undefined, undefined, (c, s) => createRecords({ config: c, store: s }));
+    const cwd = path.join(h.workspaceRoot, 'c3');
+    await mkdir(cwd);
+    const res = await post(h, '/api/sessions', { vendor: 'claude', cwd, model: null, sandbox: null, requisitionId: 'no-such-id' });
+    assert.equal(res.status, 404);
+    assert.equal(((await res.json()) as { error: { code: string } }).error.code, 'no_such_requisition');
+  });
+});
+
+describe('S13 — POST/GET /api/requisitions, POST /api/requisitions/:id/decision', () => {
+  it('S13.2/S13.3 — raise, then list, sees it in state open', async () => {
+    const h = await makeEdge(undefined, undefined, undefined, (c, s) => createRecords({ config: c, store: s }));
+    const raised = await post(h, '/api/requisitions', { title: 't', justification: 'j', workspace: '/outside/every/root', vendor: 'claude' });
+    assert.equal(raised.status, 201, `raise failed: ${await raised.clone().text()}`);
+    const body = (await raised.json()) as { requisition: { requisitionId: string; state: string; workspace: string } };
+    assert.equal(body.requisition.state, 'open');
+    assert.equal(body.requisition.workspace, '/outside/every/root'); // S13.2: no jail call
+
+    const listed = await get(h, '/api/requisitions');
+    assert.equal(listed.status, 200);
+    const listedBody = (await listed.json()) as { requisitions: Array<{ requisitionId: string }> };
+    assert.ok(listedBody.requisitions.some((r) => r.requisitionId === body.requisition.requisitionId));
+  });
+
+  it('S13.4/S13.5 — decision approves, and self-approval is recorded', async () => {
+    const h = await makeEdge(undefined, undefined, undefined, (c, s) => createRecords({ config: c, store: s }));
+    const raised = await post(h, '/api/requisitions', { title: 't', justification: 'j', workspace: '/w', vendor: 'claude' }, 'ben');
+    const { requisition } = (await raised.json()) as { requisition: { requisitionId: string } };
+
+    const decided = await post(h, `/api/requisitions/${requisition.requisitionId}/decision`, { decision: 'approve' }, 'ben');
+    assert.equal(decided.status, 200);
+    const decidedBody = (await decided.json()) as { requisition: { state: string; decidedBy: string } };
+    assert.equal(decidedBody.requisition.state, 'approved');
+    assert.equal(decidedBody.requisition.decidedBy, 'ben');
+
+    const second = await post(h, `/api/requisitions/${requisition.requisitionId}/decision`, { decision: 'reject' }, 'carol');
+    assert.equal(second.status, 409);
+    assert.equal(((await second.json()) as { error: { code: string } }).error.code, 'already_decided');
+  });
+
+  it('S13.11 — an oversized title is refused 422 bad_request naming the field', async () => {
+    const h = await makeEdge(
+      { mode: 'proxy-header', userHeader: 'x-forwarded-user' },
+      {
+        caps: {
+          ringCapacity: 500,
+          toolResultBytes: 65536,
+          subscriberQueueHighWater: 1000,
+          keepaliveMs: 15000,
+          auditPageMax: 200,
+          reviewBodyBytes: 1024,
+          requisitionTextBytes: 8,
+          standingRuleBytes: 1024,
+        },
+      },
+      undefined,
+      (c, s) => createRecords({ config: c, store: s }),
+    );
+    const res = await post(h, '/api/requisitions', { title: 'way too long for eight bytes', justification: 'ok', workspace: '/w', vendor: 'claude' });
     assert.equal(res.status, 422);
     const err = ((await res.json()) as { error: { code: string; detail?: { field?: string } } }).error;
-    assert.equal(err.detail?.field, 'requisitionId');
+    assert.equal(err.detail?.field, 'title');
   });
 });
 

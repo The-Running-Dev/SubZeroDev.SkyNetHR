@@ -383,6 +383,7 @@ async function createSession(event) {
   const vendor = $('vendor').value.trim();
   const model = $('model').value.trim();
   const sandbox = $('sandbox').value.trim();
+  const requisitionId = $('requisition-id').value.trim();
   if (cwd === '' || vendor === '') return status('a folder and an agent are both required', 'error');
 
   status('starting…', 'info');
@@ -391,11 +392,13 @@ async function createSession(event) {
     cwd,
     model: model === '' ? null : model,
     sandbox: sandbox === '' ? null : sandbox,
+    requisitionId: requisitionId === '' ? null : requisitionId,
   });
   if (result.status === 401) return;
   if (result.status !== 201) return status(describe(result), 'error');
   status('session started', 'ok');
   await refreshSessions();
+  if (requisitionId !== '') await refreshRequisitionOptions();
   selectSession(result.payload.sessionId);
 }
 
@@ -510,6 +513,106 @@ async function filterAudit(event) {
 }
 
 // ---------------------------------------------------------------------------
+// Requisitions (S13) — open to every authenticated operator (D70): a requisition cannot
+// be approved by someone who cannot see it. `workspace` is rendered as text only, exactly
+// like every other operator-authored string this client shows (S13.15, I26).
+// ---------------------------------------------------------------------------
+
+function renderRequisitionRow(requisition) {
+  const row = document.createElement('tr');
+  row.appendChild(text('td', '', requisition.title));
+  row.appendChild(text('td', '', requisition.justification));
+  row.appendChild(text('td', '', requisition.workspace));
+  row.appendChild(text('td', '', requisition.vendor));
+  row.appendChild(text('td', '', requisition.raisedBy));
+  row.appendChild(text('td', '', requisition.state));
+  row.appendChild(text('td', '', requisition.decidedBy ?? ''));
+
+  const actions = document.createElement('td');
+  if (requisition.state === 'open') {
+    const approve = text('button', 'button button--quiet', 'Approve');
+    approve.type = 'button';
+    approve.addEventListener('click', () => void decideRequisition(requisition.requisitionId, 'approve'));
+    const reject = text('button', 'button button--quiet', 'Reject');
+    reject.type = 'button';
+    reject.addEventListener('click', () => void decideRequisition(requisition.requisitionId, 'reject'));
+    actions.appendChild(approve);
+    actions.appendChild(reject);
+  }
+  row.appendChild(actions);
+  return row;
+}
+
+async function loadRequisitions() {
+  const result = await api('GET', '/api/requisitions');
+  if (result.status === 401) return;
+  if (result.status !== 200) return status(describe(result), 'error');
+
+  const tbody = $('requisition-rows');
+  clear(tbody);
+  for (const requisition of result.payload.requisitions) tbody.appendChild(renderRequisitionRow(requisition));
+  $('requisitions-empty').hidden = tbody.children.length > 0;
+}
+
+// Repopulates the new-session form's requisition picker with the currently approved ones
+// — the only state `POST /api/sessions` can spend (S13.7). Refreshed whenever the
+// requisitions panel changes and after a session claims one, so a spent or since-decided
+// requisition cannot linger as a selectable option.
+async function refreshRequisitionOptions() {
+  const result = await api('GET', '/api/requisitions');
+  if (result.status !== 200) return;
+  const select = $('requisition-id');
+  const previous = select.value;
+  clear(select);
+  const none = text('option', '', 'none');
+  none.value = '';
+  select.appendChild(none);
+  let previousStillOffered = false;
+  for (const requisition of result.payload.requisitions) {
+    if (requisition.state !== 'approved') continue;
+    const option = text('option', '', `${requisition.title} (${requisition.workspace})`);
+    option.value = requisition.requisitionId;
+    if (option.value === previous) previousStillOffered = true;
+    select.appendChild(option);
+  }
+  select.value = previousStillOffered ? previous : '';
+}
+
+async function raiseRequisition(event) {
+  event.preventDefault();
+  const title = $('requisition-title').value.trim();
+  const justification = $('requisition-justification').value.trim();
+  const workspace = $('requisition-workspace').value.trim();
+  const vendor = $('requisition-vendor').value.trim();
+  if (title === '' || justification === '' || workspace === '' || vendor === '') {
+    return status('title, justification, workspace and agent are all required', 'error');
+  }
+  const result = await api('POST', '/api/requisitions', { title, justification, workspace, vendor });
+  if (result.status === 401) return;
+  if (result.status !== 201) return status(describe(result), 'error');
+  $('raise-requisition').reset();
+  status('requisition raised', 'ok');
+  await loadRequisitions();
+}
+
+async function decideRequisition(requisitionId, decision) {
+  const result = await api('POST', `/api/requisitions/${encodeURIComponent(requisitionId)}/decision`, { decision });
+  if (result.status === 401) return;
+  if (result.status !== 200) return status(describe(result), 'error');
+  await loadRequisitions();
+  await refreshRequisitionOptions();
+}
+
+function openRequisitions() {
+  $('requisitions').hidden = false;
+  void loadRequisitions();
+}
+
+function closeRequisitions() {
+  $('requisitions').hidden = true;
+}
+
+// ---------------------------------------------------------------------------
 // The shared-secret exchange. In the header-trust modes the proxy has already
 // authenticated the operator and this panel is never shown.
 // ---------------------------------------------------------------------------
@@ -541,7 +644,11 @@ function start() {
   $('audit-close').addEventListener('click', closeAudit);
   $('audit-filters').addEventListener('submit', filterAudit);
   $('audit-load-more').addEventListener('click', () => void loadAuditPage(false));
+  $('requisitions-open').addEventListener('click', openRequisitions);
+  $('requisitions-close').addEventListener('click', closeRequisitions);
+  $('raise-requisition').addEventListener('submit', raiseRequisition);
   void refreshSessions();
+  void refreshRequisitionOptions();
 }
 
 start();

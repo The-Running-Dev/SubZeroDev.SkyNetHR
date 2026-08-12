@@ -6,8 +6,53 @@
 <header class="masthead">
   <h1 class="masthead__title">SkyNet HR</h1>
   <p id="status" class="masthead__status"></p>
+  <button id="requisitions-open" class="button button--quiet" type="button">Requisitions</button>
   <button id="audit-open" class="button button--quiet" type="button">Audit log</button>
 </header>
+
+<section id="requisitions" class="panel panel--audit" hidden>
+  <div class="audit__header">
+    <h2 class="panel__heading">Requisitions</h2>
+    <button id="requisitions-close" class="button button--quiet" type="button">Close</button>
+  </div>
+  <form id="raise-requisition" class="form">
+    <label class="field">
+      <span class="field__label">Title</span>
+      <input id="requisition-title" class="field__input" type="text" required>
+    </label>
+    <label class="field">
+      <span class="field__label">Justification</span>
+      <input id="requisition-justification" class="field__input" type="text" required>
+    </label>
+    <label class="field">
+      <span class="field__label">Workspace</span>
+      <input id="requisition-workspace" class="field__input" type="text" required>
+    </label>
+    <label class="field">
+      <span class="field__label">Agent</span>
+      <input id="requisition-vendor" class="field__input" type="text" required>
+    </label>
+    <button class="button" type="submit">Raise</button>
+  </form>
+  <div class="audit__table-wrap">
+    <table class="audit-table">
+      <thead>
+        <tr>
+          <th>Title</th>
+          <th>Justification</th>
+          <th>Workspace</th>
+          <th>Agent</th>
+          <th>Raised by</th>
+          <th>State</th>
+          <th>Decided by</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody id="requisition-rows"></tbody>
+    </table>
+  </div>
+  <p id="requisitions-empty" class="audit__empty" hidden>no requisitions yet</p>
+</section>
 
 <section id="audit" class="panel panel--audit" hidden>
   <div class="audit__header">
@@ -93,6 +138,12 @@
           <option value="read-only">read-only</option>
           <option value="workspace-write">workspace-write</option>
           <option value="unrestricted">unrestricted</option>
+        </select>
+      </label>
+      <label class="field">
+        <span class="field__label">Requisition <span class="field__hint">optional — a second way in, never a gate</span></span>
+        <select id="requisition-id" class="field__input">
+          <option value="">none</option>
         </select>
       </label>
       <button class="button" type="submit">Start</button>

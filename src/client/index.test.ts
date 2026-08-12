@@ -316,10 +316,12 @@ async function runConsole(sessions: ReadonlyArray<Record<string, unknown>>) {
   const byId = new Map<string, FakeEl>();
   for (const id of [
     'status', 'login', 'console', 'sessions', 'transcript', 'compose', 'new-session', 'login-form',
-    'refresh', 'cwd', 'vendor', 'model', 'sandbox', 'text', 'secret', 'checkpoints', 'checkpoint-list',
+    'refresh', 'cwd', 'vendor', 'model', 'sandbox', 'requisition-id', 'text', 'secret', 'checkpoints', 'checkpoint-list',
     'policy-banner', 'audit', 'audit-open', 'audit-close', 'audit-filters', 'audit-filter-session',
     'audit-filter-operator', 'audit-filter-since', 'audit-filter-until', 'audit-rows', 'audit-empty',
-    'audit-load-more',
+    'audit-load-more', 'requisitions', 'requisitions-open', 'requisitions-close', 'raise-requisition',
+    'requisition-title', 'requisition-justification', 'requisition-workspace', 'requisition-vendor',
+    'requisition-rows', 'requisitions-empty',
   ]) {
     byId.set(id, fakeEl('div'));
   }
@@ -355,7 +357,14 @@ async function runConsole(sessions: ReadonlyArray<Record<string, unknown>>) {
   };
   globals['fetch'] = async (input: string) => ({
     status: 200,
-    json: async () => (String(input).endsWith('/checkpoints') ? { checkpoints: [] } : String(input) === '/api/sessions' ? { sessions } : {}),
+    json: async () =>
+      String(input).endsWith('/checkpoints')
+        ? { checkpoints: [] }
+        : String(input) === '/api/sessions'
+          ? { sessions }
+          : String(input) === '/api/requisitions'
+            ? { requisitions: [] }
+            : {},
   });
 
   // A distinct query per load: `app.js` runs its bootstrap on import, so a cached module

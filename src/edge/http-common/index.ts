@@ -11,9 +11,12 @@ import type {
   IdentityResolver,
   IsoTimestamp,
   OperatorId,
+  RecordsError,
+  RequisitionId,
   SessionError,
   SessionId,
   TurnId,
+  Vendor,
 } from '../../contract/index.js';
 import { sendError } from '../error-envelope/index.js';
 
@@ -102,6 +105,44 @@ export function apiErrorFor(error: SessionError): { code: ApiErrorCode; message:
     case 'storage':
       return { code: 'agent_unavailable', message: 'session storage is unavailable' };
     case 'records':
+      return recordsApiError(error.cause);
+  }
+}
+
+/**
+ * `RecordsError`'s own vocabulary, shared between `apiErrorFor`'s `'records'` arm (a
+ * requisition claim failing during `session-manager.create`) and the requisition routes
+ * below, which call `records` directly and never see a `SessionError`.
+ */
+export function recordsApiError(cause: RecordsError): { code: ApiErrorCode; message: string; detail?: unknown } {
+  switch (cause.code) {
+    case 'no_such_requisition':
+      return { code: 'no_such_requisition', message: 'no such requisition', detail: { requisitionId: cause.requisitionId } };
+    case 'already_decided':
+      return {
+        code: 'already_decided',
+        message: 'this requisition has already been decided',
+        detail: { requisitionId: cause.requisitionId, decidedBy: cause.decidedBy, state: cause.state },
+      };
+    case 'requisition_not_approved':
+      return {
+        code: 'requisition_not_approved',
+        message: 'this requisition is not approved',
+        detail: { requisitionId: cause.requisitionId, state: cause.state },
+      };
+    case 'requisition_consumed':
+      return {
+        code: 'requisition_consumed',
+        message: 'this requisition has already been spent',
+        detail: { requisitionId: cause.requisitionId, sessionId: cause.sessionId },
+      };
+    case 'no_such_review':
+      return { code: 'no_such_review', message: 'no such review', detail: { reviewId: cause.reviewId } };
+    case 'review_final':
+      return { code: 'review_final', message: 'this review is already final', detail: { reviewId: cause.reviewId } };
+    case 'bad_request':
+      return { code: 'bad_request', message: cause.detail, detail: { field: cause.field } };
+    case 'storage':
       return { code: 'record_write_failed', message: 'a record-log write failed' };
   }
 }
@@ -258,10 +299,11 @@ export function createHttpHandlers(deps: EdgeDeps) {
     if (sandbox !== null && typeof sandbox !== 'string') {
       return sendError(res, 'bad_request', 'sandbox must be a string or null', { field: 'sandbox' });
     }
-    // D94: a tier-two field is refused, never accepted and ignored. Accepting it would
-    // silently drop the approval a requisition represents.
-    if (body['requisitionId'] !== undefined && body['requisitionId'] !== null) {
-      return sendError(res, 'bad_request', 'requisitions are not available in this build', { field: 'requisitionId' });
+    // S13.10: absent is the ordinary case and behaves exactly as it did before this field
+    // existed — a requisition is a second way in, never a gate (D68).
+    const requisitionId = body['requisitionId'] ?? null;
+    if (requisitionId !== null && typeof requisitionId !== 'string') {
+      return sendError(res, 'bad_request', 'requisitionId must be a string or null', { field: 'requisitionId' });
     }
 
     const created = await manager.create(owner, {
@@ -269,7 +311,7 @@ export function createHttpHandlers(deps: EdgeDeps) {
       cwd: body['cwd'],
       model: model as string | null,
       sandbox: sandbox as never,
-      requisitionId: null,
+      requisitionId: requisitionId as RequisitionId | null,
     });
     if (!created.ok) return failWith(res, created.error);
     sendJson(res, 201, { sessionId: created.value.sessionId });
@@ -451,6 +493,78 @@ export function createHttpHandlers(deps: EdgeDeps) {
     sendJson(res, 200, result.value);
   }
 
+  const VENDORS: readonly Vendor[] = ['claude', 'codex'];
+
+  // S13.2: `POST /api/requisitions` — `workspace` is stored as the caller's string with no
+  // jail call and no refusal; caps and everything else are `records.raise`'s to enforce.
+  async function handleRaiseRequisition(req: IncomingMessage, res: ServerResponse, owner: OperatorId): Promise<void> {
+    const raw = await readBody(req);
+    if (raw === null) return sendError(res, 'bad_request', 'request body too large', { field: 'body' });
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      return sendError(res, 'bad_request', 'body is not valid JSON', { field: 'body' });
+    }
+    if (typeof parsed !== 'object' || parsed === null) {
+      return sendError(res, 'bad_request', 'body must be an object', { field: 'body' });
+    }
+    const body = parsed as Record<string, unknown>;
+
+    if (typeof body['title'] !== 'string' || body['title'] === '') {
+      return sendError(res, 'bad_request', 'title is required', { field: 'title' });
+    }
+    if (typeof body['justification'] !== 'string' || body['justification'] === '') {
+      return sendError(res, 'bad_request', 'justification is required', { field: 'justification' });
+    }
+    if (typeof body['workspace'] !== 'string' || body['workspace'] === '') {
+      return sendError(res, 'bad_request', 'workspace is required', { field: 'workspace' });
+    }
+    if (typeof body['vendor'] !== 'string' || !VENDORS.includes(body['vendor'] as Vendor)) {
+      return sendError(res, 'bad_request', 'vendor must be one of claude, codex', { field: 'vendor' });
+    }
+
+    const raised = await deps.records.raise(owner, {
+      title: body['title'],
+      justification: body['justification'],
+      workspace: body['workspace'],
+      vendor: body['vendor'] as Vendor,
+    });
+    if (!raised.ok) {
+      const api = recordsApiError(raised.error);
+      return sendError(res, api.code, api.message, api.detail);
+    }
+    sendJson(res, 201, { requisition: raised.value });
+  }
+
+  // S13.3/D70: every authenticated operator, not scoped to the caller.
+  function handleListRequisitions(_req: IncomingMessage, res: ServerResponse): void {
+    sendJson(res, 200, { requisitions: deps.records.listRequisitions() });
+  }
+
+  async function handleDecideRequisition(req: IncomingMessage, res: ServerResponse, owner: OperatorId, requisitionId: RequisitionId): Promise<void> {
+    const raw = await readBody(req);
+    if (raw === null) return sendError(res, 'bad_request', 'request body too large', { field: 'body' });
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      return sendError(res, 'bad_request', 'body is not valid JSON', { field: 'body' });
+    }
+    const decision = (parsed as { decision?: unknown } | null)?.decision;
+    if (decision !== 'approve' && decision !== 'reject') {
+      return sendError(res, 'bad_request', "decision must be 'approve' or 'reject'", { field: 'decision' });
+    }
+
+    // S13.5/D69: self-approval is permitted and recorded — `owner` is used unconditionally.
+    const decided = await deps.records.decide(requisitionId, owner, decision);
+    if (!decided.ok) {
+      const api = recordsApiError(decided.error);
+      return sendError(res, api.code, api.message, api.detail);
+    }
+    sendJson(res, 200, { requisition: decided.value });
+  }
+
   async function handleListCheckpoints(_req: IncomingMessage, res: ServerResponse, owner: OperatorId, sessionId: SessionId): Promise<void> {
     const listed = await manager.listCheckpoints(sessionId, owner);
     if (!listed.ok) return failWith(res, listed.error);
@@ -519,5 +633,8 @@ export function createHttpHandlers(deps: EdgeDeps) {
     handleCheckpointRestore,
     handleAudit,
     handleLogin,
+    handleRaiseRequisition,
+    handleListRequisitions,
+    handleDecideRequisition,
   };
 }

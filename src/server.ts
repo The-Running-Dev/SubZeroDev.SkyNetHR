@@ -2,20 +2,12 @@ import { createServer } from 'node:http';
 import { createSseEdge } from './edge/sse/index.js';
 import { createWsEdge } from './edge/ws/index.js';
 import { resolverFor } from './identity/index.js';
+import { createRecords } from './records/index.js';
 import { createSessionManager } from './session-manager/index.js';
 import { createStore } from './store/index.js';
 import { createCheckpoints } from './checkpoints/index.js';
 import { loadConfig } from './config/index.js';
-import type { ConfigError, Records } from './contract/index.js';
-
-// Records (tier two) is not built. A proxy that throws names the slice rather than
-// failing as `undefined is not a function` three frames deeper.
-function notBuiltYet<T extends object>(name: string, slice: string): T {
-  return new Proxy(
-    {},
-    { get: () => () => { throw new Error(`${name} is not built until ${slice}`); } },
-  ) as T;
-}
+import type { ConfigError } from './contract/index.js';
 
 /** Fail closed, out loud, naming the fix. Never a warning (S2.8). */
 function refuseToStart(error: ConfigError): never {
@@ -64,26 +56,31 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
+  const records = createRecords({ config: config.value, store: store.value });
+
   const manager = createSessionManager({
     config: config.value,
     store: store.value,
     checkpoints: createCheckpoints(config.value),
-    records: notBuiltYet<Records>('records', 'S13'),
+    records,
   });
 
-  // I18: nothing is served until boot has finished. Reap and rehydrate arrive in S7; the
-  // ordering is established here so that slice has somewhere to land.
+  // I18: nothing is served until boot has finished. Boot ordering (`10-design.md § Boot
+  // ordering`) is reap → rehydrate → close open turns → load the record logs → listen;
+  // `records.boot` is step 4, after `manager.boot`'s three, because the requisition guards
+  // are synchronous (D32) and so the registry must be whole before any request can reach it.
   const booted = await manager.boot();
   if (!booted.ok) {
     console.error(`Refusing to start: boot failed — ${JSON.stringify(booted.error)}`);
     process.exit(1);
   }
+  await records.boot();
 
   const edgeDeps = {
     config: config.value,
     identity: resolverFor(config.value.auth, config.value.trustProxy),
     manager,
-    records: notBuiltYet<Records>('records', 'S13'),
+    records,
   };
 
   // D10/D117: exactly one edge binds (S11.5).
