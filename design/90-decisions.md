@@ -2257,6 +2257,53 @@ Reversibility: cheap. `readAudit` is a one-line delegation; moving it onto `reco
 module exists (if `## Unresolved` 5's tier-two duplication concern is ever revisited) touches
 one call site in each edge and nothing else.
 
+### 2026-08-13 — D120 A record-log mutation claims an exclusivity lock, never the state itself; the append settles first
+Context: `## Unresolved` 7 (`20-contract.md`, #31) named a real contradiction, and closing #31 and
+#35 did not fix it — both were closed citing decisions (D83, D87) that discuss unrelated topics
+(review ordering by `updatedAt`; the spike's contract divergence) and contain none of the
+resolution text their closing comments quote. The contradiction is still live in
+`10-design.md`: *The single-writer invariant* table said a requisition's decision claims its
+guard synchronously before `await store.appendRequisition` and releases on nothing, because "a
+decision is terminal" — meaning the guard's value is the decided `state` itself, set in memory
+before the write. *Records boundary*, four sections later, said the opposite for the same
+write: a failed append "must not mutate the registry", and the ordering is deliberately the
+reverse of the audit path's (D26) — file first, registry follows — because neither write is
+irreversible and a lost edit is a smaller failure than a registry claiming a `state` the disk
+does not have.
+Chosen: the two tables were each partly right and describing different things. A requisition's
+decision and a review's mutation each claim, synchronously and before the `await` on their
+append, an **exclusivity lock — a marker distinct from `state`** — so a second decision or a
+second append for the same id is refused before either write's `await` resolves (D32 still
+holds: no `await` sits between the check and the thing it protects, and the thing it protects is
+now named correctly as the lock, not the state). The lock releases when the append settles,
+success or failure alike. `state` (`decidedBy`/`decidedAt` on a requisition; the appended line
+and `final` on a review) changes only after the append durably succeeds — matching Records
+boundary's rule exactly, and matching `RecordsError.storage`'s existing text ("the registry is
+not mutated") and `Records.decide`/`Records.appendReview`/`Records.finaliseReview`'s async
+signatures in `20-contract.md`, which already return only after the store call settles. Nothing
+in the contract's shape needed to change; the design's prose was the only place carrying the
+contradiction.
+Rejected: the turn slot's and workspace claim's shape (state set synchronously, reverted on
+failure) applied unchanged to record decisions — this is what the original, uncorrected table
+row did, and it is exactly what Records boundary's rule forbids: a window exists, between the
+synchronous claim and the awaited append, where the registry disagrees with the disk, and a
+crash in that window is a torn-tail-shaped defect (#33's sibling) rather than the retypable loss
+Records boundary is written to guarantee.
+Rejected: dropping the synchronous guard and relying on the append's own ordering — two decisions
+dispatched in the same tick would both pass the in-memory `state == 'open'` check before either
+append lands, and both would append a decision. D32's rule exists precisely because "the file
+write settles it" is false when two writers can both start one.
+Reversibility: cheap. This corrects `10-design.md` prose (*The single-writer invariant* table and
+its surrounding paragraph) and `20-contract.md § Unresolved` 7's status; no signature in the
+contract changes, so no code built against the current signatures is affected.
+
 ## Open
 
 Staging only. Once an item becomes an issue it leaves this list.
+
+- **#31 and #35 were closed citing decisions that do not exist.** Both closing comments quote
+  resolution text attributed to `D83` and `D87` respectively; neither decision's actual content
+  (`design/90-decisions.md`) matches. D120 above supplies the resolution both issues claimed to
+  already have. Worth `/track` opening a bug: whatever closed these issues wrote a plausible
+  resolution comment without writing the decision it cites, and that pattern may not be confined
+  to these two.
