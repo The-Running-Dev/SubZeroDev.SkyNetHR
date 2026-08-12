@@ -57,7 +57,9 @@ export interface PermissionPolicy {
   readonly banner: string | null; // non-null exactly when mode === 'preauthorised'
 }
 
-// The full in-memory session record. `meta.json` persists every field below.
+// The persisted session record: exactly what `meta.json` carries, and nothing more. The
+// live turn is deliberately absent — `meta.json` is the session minus turn, buffer and
+// subscribers (D49) — and `LiveSession` below is where it lives instead.
 export interface SessionRecord {
   readonly id: SessionId;
   readonly owner: OperatorId;
@@ -99,6 +101,14 @@ export interface SessionSnapshot {
   readonly createdAt: IsoTimestamp;
 }
 
+// The two fields of the session manager's registry entry that the invariants are stated
+// over. The manager's actual entry extends this with scheduling state that crosses no
+// module boundary and is deliberately not declared — see `20-contract.md § Session`.
+export interface LiveSession {
+  readonly record: SessionRecord;
+  turn: Turn | null;
+}
+
 // ---------------------------------------------------------------------------
 // Turn (in memory only — reconstructed from the event log, never persisted)
 // ---------------------------------------------------------------------------
@@ -114,6 +124,10 @@ export interface PendingPermission {
   readonly callId: CallId;
   readonly tool: string;
   readonly input: Readonly<Record<string, unknown>>;
+  // Carried from the originating `PermissionRequest` so `answerPermission` can enforce I43
+  // without re-reading `input`, which would put tool-shape knowledge in `session-manager`
+  // and break I46. A copy of the adapter's projection, never a second projection.
+  readonly matchTarget: string | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -508,6 +522,10 @@ export interface Config {
   readonly allowedOrigins: readonly string[];
   readonly trustProxy: readonly string[]; // upstream addresses permitted to set the identity header
   readonly caps: Caps;
+  // `Max-Age` on the cookie `POST /api/login` mints. Read only under
+  // `auth.mode === 'shared-secret'`; under either header mode the credential is the
+  // upstream proxy's and its lifetime is not ours to set.
+  readonly sessionCookieMaxAgeSeconds: number;
   readonly includeRaw: boolean;
   readonly sessionTokenBudget: number | null; // (tier two) per session; null disables the view's budget
   readonly checklist: readonly ChecklistItemTemplate[]; // (tier two) empty disables the checklist

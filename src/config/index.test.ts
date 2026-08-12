@@ -72,3 +72,35 @@ describe('config — fail closed on startup (S2.8)', () => {
     assert.equal(r.ok && r.value.bind.host, '127.0.0.1');
   });
 });
+
+// D115: the `Max-Age` on the cookie `POST /api/login` mints is a deployment's, not a
+// literal in the edge — shortening a session lifetime is what a deployment does after an
+// incident and it must not need a release.
+describe('config — the login cookie lifetime (D115)', () => {
+  it('defaults to thirty days', () => {
+    const r = loadConfig(env());
+    assert.equal(r.ok && r.value.sessionCookieMaxAgeSeconds, 30 * 24 * 60 * 60);
+  });
+
+  it('takes an override from the environment', () => {
+    const r = loadConfig(env({ SESSION_COOKIE_MAX_AGE_SECONDS: '3600' }));
+    assert.equal(r.ok && r.value.sessionCookieMaxAgeSeconds, 3600);
+  });
+
+  it('refuses a value that is not a non-negative integer, naming the field', () => {
+    for (const bad of ['-1', 'forever', '1.5', '30d']) {
+      const r = loadConfig(env({ SESSION_COOKIE_MAX_AGE_SECONDS: bad }));
+      assert.equal(r.ok, false, `expected '${bad}' to be refused`);
+      assert.equal(r.ok === false && r.error.code, 'invalid_field', bad);
+      assert.equal(r.ok === false && r.error.code === 'invalid_field' && r.error.field, 'SESSION_COOKIE_MAX_AGE_SECONDS', bad);
+    }
+  });
+
+  // An empty variable is an unset one, here as for every cap: `FOO=` in a compose file or a
+  // shell profile is how a value gets un-overridden, and refusing it would make the one
+  // security-relevant knob behave differently from the eight beside it.
+  it('treats an empty variable as unset, taking the default', () => {
+    const r = loadConfig(env({ SESSION_COOKIE_MAX_AGE_SECONDS: '' }));
+    assert.equal(r.ok && r.value.sessionCookieMaxAgeSeconds, 30 * 24 * 60 * 60);
+  });
+});

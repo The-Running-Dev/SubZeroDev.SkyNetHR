@@ -93,6 +93,7 @@ async function makeManager(
       standingRuleBytes: 1024,
       ...capsOverride,
     },
+    sessionCookieMaxAgeSeconds: 2592000,
     includeRaw: false,
     sessionTokenBudget: null,
     checklist: [],

@@ -551,6 +551,11 @@ Reversibility: cheap while it is one predicate. Expensive after implementation, 
 everything downstream was built on the guarantee holding.
 
 ### 2026-08-08 — D31 Restore removes files created after the target, behind a safety checkpoint
+**Superseded in its mechanism by D112** — the goal below stands and the middle operation does
+not. `checkout <sha> -- .` cannot remove a file created after the target, because this entry's
+own safety commit runs `add -A` and tracks it first; `read-tree --reset -u <sha>` replaces it.
+The safety checkpoint and the `.gitignore` symmetry argued for here are unchanged.
+
 Context: `git checkout <sha> -- .` writes the target tree over the work-tree and deletes
 nothing absent from it. Creating files is the common case for a coding agent, so restoring to
 a checkpoint before turn N reverted modified files and left every file turn N created —
@@ -2052,6 +2057,141 @@ make deliberately, not a side effect of correcting a stale log entry.
 Reversibility: cheap. Running `/freeze` later is unaffected by this entry; it only stops this
 particular discrepancy from being rediscovered as a bug.
 
+### 2026-08-12 — D112 Checkpoint restore resets the work-tree with `read-tree`, not `checkout <sha> -- .`
+Context: D31 specifies `commit` → `checkout <sha> -- .` → `clean -fd`, and argues the `clean`
+is what removes files created after the target. That argument fails against its own first
+step. The safety commit runs `add -A`, so every file the agent created is tracked by the time
+`checkout` runs; `checkout <sha> -- .` writes only paths the target's tree holds, and `clean`
+never removes a tracked path. A file created after the target therefore survives both
+operations — the precise failure D31 exists to close, reintroduced by D31's own sequence. S6
+found this while implementing and shipped the correction (`src/checkpoints/index.ts`); nothing
+in `design/` recorded it, so both `10-design.md` and `20-contract.md` still described a restore
+that is known not to restore.
+Chosen: `read-tree --reset -u <sha>` as the middle operation, making index and work-tree match
+the target exactly — additions, edits and removals alike — without moving `HEAD`, so `list`'s
+`git log` still walks a linear shadow history. `clean -fd` is retained behind it for the
+directories `read-tree` empties but does not remove. Neither takes `-x`, so D31's symmetry
+between what a checkpoint captures and what a restore removes is unchanged. The sequence then
+verifies rather than trusting exit codes — `diff --quiet <sha>` for tracked content,
+`ls-files --others --exclude-standard` for what was left behind — because `read-tree` exits 0
+with only a warning when an embedded repository blocks a directory removal. `20-contract.md`
+is amended now; `10-design.md § Data model — Checkpoint` and D31 are the stale side and are
+left for `/reconcile`.
+Rejected: keeping `checkout <sha> -- .` and widening the `clean` to `-x`. It removes the
+tracked-file case only by accident, and it deletes `node_modules`, build output and local env
+files — the failure D31 names as the one that would make operators stop using restores.
+Rejected `checkout` followed by an explicit removal pass computed from `diff --name-only`:
+that is `read-tree --reset -u` reimplemented in this repository, with a race between the two
+git invocations that the single builtin does not have. Rejected recording the divergence and
+changing neither document: a contract that describes a restore leaving the offending file on
+disk would have the implementing agent "fix" the code back to the defect.
+Reversibility: cheap in the mechanism, expensive in the evidence — reverting means re-earning
+S6's verification that a file created after the target is actually gone.
+
+### 2026-08-12 — D113 `10-design.md` absorbs three slices' worth of contract amendments, in eleven passages
+Context: `10-design.md` and `20-contract.md` were last in sync at `4e79b04`. The contract has
+since taken three slice-time amendments — `bb1bcae` (S6), `f24e13e` (S8.2/D107), `ec6d59f`
+(S10/D108–D110) — plus D112, and the design absorbed none of them, because D105 froze the loop
+that would have. `## Open` staged eight places. Reading both documents against the tree found
+those eight reach into eleven passages: the five extra are § Prior art's "look at
+`permission_suggestions` before inventing", § Identity spaces' "unverified for Codex",
+§ Control flow 2's "`permission_suggestions` is where the shape comes from", § Failure modes'
+partially-restored row, and § Derived views' burn bullet.
+Chosen: rewrite all eleven, direction design ← contract, in one pass. The five unenumerated
+ones are included because leaving them means the design's body contradicts its own resolved
+open questions — § Identity spaces would still call a *measured* collision "unverified" while
+open question 7 four hundred lines below records the measurement.
+What each resolved to: open question 4 answered yes on `app-server` only; 6 answered — two
+live interfaces, neither matching the rollout schema; 7 measured and **split** — UUIDs on
+`app-server`, a colliding per-turn counter on `exec --json`; 8 answered more narrowly than
+asked, the field being *unobservable* rather than insufficient; 14's Codex half answered for
+`app-server` and left undetermined for the fallback, which now emits no `usage` at all.
+Two things this pass deliberately did **not** do. **D5 is not revised.** S8.1 found Codex's
+`on-request` prompt reachable, which narrows the asymmetry D5 accepted, but S8's *Out of
+scope* reports a reachable prompt rather than acting on one and D5 is `/design`'s; the design
+now says the experiment ran and says the decision is unchanged, which are different claims.
+And **no open question was closed that the code has not exercised** — 5 (partial messages), 2,
+3, 12 and 13 stand as they were.
+Rejected: editing only the eight staged places — the five reaching passages would be
+rediscovered by the next pass and `## Open` reopened. Rejected marking the open questions
+resolved without rewriting the body — the cheapest option, and it leaves a document whose
+prose argues against its own answers.
+Reversibility: cheap. Nothing here changes behaviour; it changes which of two documents a
+future session is misled by.
+
+### 2026-08-12 — D114 `LiveSession` and `Turn` become the shapes the manager actually holds
+Context: D112 added `LiveSession` two commits ago so I8 would assert against a declared field.
+It did not achieve that. The manager's registry entry is `SessionEntry` — eleven fields — and
+its turn was a private `TurnState` with no `startedAt` and a `PendingPermissionState` that
+added `matchTarget`. So `LiveSession` named nothing that existed, `Turn` was exported and
+imported by no module, and I8 was still stated over an undeclared shape.
+Chosen: make the declarations true rather than narrow them. `SessionEntry extends LiveSession`,
+so `record` and `turn` are the contract's; `TurnState` is deleted and the manager holds the
+contract's `Turn`, stamping the `startedAt` it had been ignoring; `matchTarget` moves onto
+`PendingPermission`, where the invariant that reads it (I43) and the field it reads are the
+same object. The contract additionally states that the manager's entry *extends* `LiveSession`
+with scheduling state deliberately left undeclared — fan-out bookkeeping, the append chain,
+the standing-rule list — so "the persisted record plus one field" is not read as exhaustive.
+Rejected: narrowing the contract's claim and changing no code. It is honest and it leaves two
+declared shapes nothing instantiates, which is how a type becomes decoration. Rejected
+reverting D112's first half and pointing I8 back at `10-design.md § Data model — Session` —
+relitigates a decision two commits old and restores the exact gap D112 closed.
+Rejected declaring `SessionEntry` in full: the contract's own preamble says internal helpers
+are out of scope, and a contract enumerating the manager's scheduling state must be amended
+every time the manager learns something new about its own turns.
+Reversibility: cheap. One field on a type nothing persists, and a rename.
+
+### 2026-08-12 — D115 `POST /api/login` and `GET /api/sessions/:id` are declared, and the cookie's lifetime becomes config
+Context: both routes have been served since S2 and appear in no route table — the hard rule
+against public interfaces the contract does not carry, broken in two places. The login
+exchange is what mints the shared-secret cookie `10-design.md § Security controls` describes
+the attributes of while naming no route that sets them. Its `Max-Age` was the literal
+`2592000` in the edge.
+Chosen: declare both. `POST /api/login` gets its own *Identity* section, stating that it is the
+one authenticated-route exception (it mints the credential), that it exists only under
+`shared-secret`, and that the origin check still precedes it. `GET /api/sessions/:id` joins the
+sessions table as the single-resource read of `SessionSummary` under the same ownership check.
+The cookie lifetime becomes `Config.sessionCookieMaxAgeSeconds`, defaulting to thirty days.
+The contract also scopes its "all routes require authentication" sentence, which was false of
+the four static client assets the same listener serves before any identity is resolved.
+Rejected: leaving the lifetime a literal. Shortening a session lifetime is what a deployment
+does after an incident, and D103's argument that a buried constant is a cap nobody can change
+without a release applies harder to a credential than to a ring size.
+Rejected deleting `GET /api/sessions/:id` instead of declaring it: it is the natural
+single-resource read, a test already covers it, and removing it means rewriting a passing test
+to avoid documenting a route S11's WebSocket edge would want anyway.
+Reversibility: cheap for the config field; a declared route is expensive to withdraw once a
+client depends on it, which is the argument for declaring the one that already exists.
+
+### 2026-08-12 — D116 Two error-code overloads at the edge are recorded as known, not fixed
+Context: `ApiErrorCode` carries no route-level not-found, so an unknown path — and
+`POST /api/login` under a header auth mode — answers `404 no_such_session`. Separately,
+`SessionError.storage` reaching an edge is reported as `503 agent_unavailable`; every other
+storage failure is routed by call site, and what is left is a failure during `create` with no
+more specific declared refusal.
+Chosen: state both in `20-contract.md § Error semantics` and change neither. The consequence
+is written down so a client does not read more into a `404 no_such_session` than it holds — it
+distinguishes "no such session", "not yours" and "no such route" in none of the three cases.
+Rejected: adding a not-found variant to `ApiErrorCode`. It is additive and correct and its
+only caller is a misrouted client; the code change is small and the contract amendment is not,
+and an undocumented overload is the defect here rather than the overload itself.
+Rejected a `storage_unavailable` variant for the second: one path would use it, and `503` is
+already the right status for a transient failure the caller should retry.
+Reversibility: cheap in both directions — these are text today and a variant tomorrow.
+
 ## Open
 
 Staging only. Once an item becomes an issue it leaves this list.
+
+- **The `usage` silence on `codex exec --json` is unsurfaced, and the design now says it should
+  not be.** A session on the fallback transport emits no `usage` events, so its payroll view
+  reads a burn of zero indistinguishable from an idle session. Surfacing it needs a
+  `SessionNoticeCode` that does not exist, which is a contract amendment rather than a
+  reconciliation. Raised by this pass while writing `10-design.md § Derived views`; it belongs
+  with `20-contract.md § Unresolved` 12 rather than replacing it, since 12 asks what the basis
+  *is* and this asks what to say while nobody knows.
+- **I20's executable check covers five directories; the invariant says "all".**
+  `src/vendor-neutrality.test.ts` scans `config`, `jail`, `store`, `session-manager` and
+  `contract` — the five S1.10 named — and does not scan `edge/*` or `client/`, both of which
+  are above `adapters/*`. Both are clean today, checked by hand during this pass. The gap is
+  that nothing keeps them so.

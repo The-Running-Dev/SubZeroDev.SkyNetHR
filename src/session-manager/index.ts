@@ -23,10 +23,11 @@ import type {
   EventPayloadMap,
   GitSha,
   IsoTimestamp,
+  LiveSession,
   OperatorId,
   PayrollView,
-  PermissionAnswer,
   PendingPermission,
+  PermissionAnswer,
   PermissionDecision,
   PermissionRequest,
   PermissionResolvedReason,
@@ -46,6 +47,7 @@ import type {
   Store,
   Subscription,
   SubscriberSink,
+  Turn,
   TurnId,
 } from '../contract/index.js';
 
@@ -61,20 +63,10 @@ function checkpointErrorDetail(e: CheckpointError): string {
   return e.code === 'no_such_checkpoint' ? `no such checkpoint: ${e.sha}` : e.detail;
 }
 
-// `PendingPermission` (20-contract.md § Turn) carries only what a manual answer needs.
-// I43's validation additionally needs the matchTarget the adapter projected for this
-// request — held here, in this module's own private turn-tracking shape, rather than as
-// a contract amendment: `TurnState` is in-memory-only and never crosses the
-// `SessionManager` boundary.
-interface PendingPermissionState extends PendingPermission {
-  readonly matchTarget: string | null;
-}
-
-interface TurnState {
-  readonly turnId: TurnId;
-  phase: 'starting' | 'running';
-  readonly pending: Map<RequestId, PendingPermissionState>;
-}
+// The live turn is the contract's own `Turn` (20-contract.md § Turn), not a private
+// look-alike: `PendingPermission.matchTarget` is what I43's validation reads, and it is
+// declared there rather than shadowed here so that the invariant and the field it is
+// stated over are the same object.
 
 // The grammar, owned by session-manager per D35 — pure and total, no I/O, no state, no
 // tool knowledge, no vendor knowledge (20-contract.md § session-manager).
@@ -129,14 +121,17 @@ export function match(rule: StandingRuleExpression, request: PermissionRequest):
   return matchesPattern(pattern, request.matchTarget);
 }
 
-interface SessionEntry {
+// `LiveSession` is the pair the contract's invariants are stated over — `record` and
+// `turn`, and I8 names them. Everything below it is scheduling state that crosses no
+// module boundary, which is why the contract declares the pair and not this shape.
+interface SessionEntry extends LiveSession {
   record: SessionRecord;
   // `null` for a session rehydrated at boot (S7.2): no `--resume` is ever attempted on
   // one (D20), so it never needs a child process, and every route that would reach the
   // adapter for a live session already refuses first on `state === 'ended'` or on there
   // being no live turn.
   adapter: Adapter | null;
-  turn: TurnState | null;
+  turn: Turn | null;
   seq: number;
   firstTurnAnnounced: boolean;
   // S4.15: whether a turn has ever been started on this session, tracked independently
@@ -680,7 +675,7 @@ export function createSessionManager(deps: {
       if (entry.turn) return { ok: false, error: { code: 'turn_in_flight', sessionId, turnId: entry.turn.turnId } };
 
       const turnId = randomUUID() as TurnId;
-      entry.turn = { turnId, phase: 'starting', pending: new Map() };
+      entry.turn = { turnId, phase: 'starting', startedAt: nowIso(), pending: new Map() };
       // Every check above this line completed before the first `await` (I5).
 
       // S6.2/D42: committed while the slot is claimed but before turn.started fires, so
@@ -908,7 +903,11 @@ export function createSessionManager(deps: {
       // (I5), the same way `message()` claims it, so a concurrent `message()` or a second
       // `restore()` can never interleave its own git operations with this one.
       if (entry.turn) return { ok: false, error: { code: 'turn_in_flight', sessionId, turnId: entry.turn.turnId } };
-      entry.turn = { turnId: randomUUID() as TurnId, phase: 'running', pending: new Map() };
+      // A restore holds the turn slot without being a turn the operator can see: nothing
+      // is emitted against this `turnId` and no child is spawned. `startedAt` is stamped
+      // anyway, because the field is `Turn`'s and a slot-holder that lied about when it
+      // was claimed would be the harder thing to reason about later.
+      entry.turn = { turnId: randomUUID() as TurnId, phase: 'running', startedAt: nowIso(), pending: new Map() };
 
       try {
         const restored = await checkpoints.restore(sessionId, entry.record.cwd, sha);
@@ -1088,7 +1087,7 @@ export function createSessionManager(deps: {
   // start auto-approving.
   async function finalizeResolution(
     entry: SessionEntry,
-    turn: TurnState,
+    turn: Turn,
     requestId: RequestId,
     record: AuditRecord,
     success: { decision: PermissionDecision; scope: ResolvedScope; operator: OperatorId | null; reason: PermissionResolvedReason },
@@ -1130,7 +1129,7 @@ export function createSessionManager(deps: {
   // the operator is `null` throughout and the grant behind it was already durable when
   // the rule was created — there is nothing left to validate here, only to record and
   // answer.
-  async function resolvePreapproved(entry: SessionEntry, turn: TurnState, request: PermissionRequest, matched: StandingRuleExpression): Promise<void> {
+  async function resolvePreapproved(entry: SessionEntry, turn: Turn, request: PermissionRequest, matched: StandingRuleExpression): Promise<void> {
     if (!turn.pending.has(request.requestId)) return; // already resolved by a race
     turn.pending.delete(request.requestId);
 

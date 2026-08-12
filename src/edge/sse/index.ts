@@ -524,7 +524,7 @@ export function createSseEdge(deps: EdgeDeps): RequestListener {
       'SameSite=Strict',
       'HttpOnly',
       'Path=/',
-      'Max-Age=2592000',
+      `Max-Age=${config.sessionCookieMaxAgeSeconds}`,
     ];
     res.writeHead(200, {
       'content-type': 'application/json; charset=utf-8',

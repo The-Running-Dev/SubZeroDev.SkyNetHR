@@ -88,6 +88,7 @@ async function makeEdge(
       requisitionTextBytes: 1024,
       standingRuleBytes: 1024,
     },
+    sessionCookieMaxAgeSeconds: 2592000,
     includeRaw: false,
     sessionTokenBudget: null,
     checklist: [],
