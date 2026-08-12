@@ -2040,16 +2040,6 @@ denials later widens a refusal. Neither invalidates a record already written.
 
 Staging only. Once an item becomes an issue it leaves this list.
 
-- **`10-design.md` now contradicts the contract on where the standing-rule shape comes from.**
-  Two statements were falsified by the finding the design itself commissioned. `10-design.md`
-  *Control flow § 2* ends "`permission_suggestions` is where the shape comes from even though the
-  CLI no longer does the matching" — it is not, and cannot be (D108). *Open questions* 8 still
-  reads as open — it is answered. `10-design.md` *The hard problem* also still lists "Coarse
-  'always allow' patterns … we should not invent our own grammar before looking at what
-  `permission_suggestions` already offers on the wire"; the looking has been done and the answer
-  was to invent one. **The contract is right and the design is stale here**, which is the expected
-  direction — the design predicted, the probe measured. Correcting it is `/design`'s (`opus`,
-  `high`), not `/contract`'s, and it is deliberately not done in this pass.
 - **D105 declares `design/` frozen for the rest of tier one, but `design/FROZEN.md` has never
   existed** — no commit in history adds it. The freeze mechanism was implemented (0659b65) and the
   marker's existence is stated to be the whole mechanism, so the repository is *not* frozen and
