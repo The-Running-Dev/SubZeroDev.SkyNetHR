@@ -2182,16 +2182,3 @@ Reversibility: cheap in both directions — these are text today and a variant t
 ## Open
 
 Staging only. Once an item becomes an issue it leaves this list.
-
-- **The `usage` silence on `codex exec --json` is unsurfaced, and the design now says it should
-  not be.** A session on the fallback transport emits no `usage` events, so its payroll view
-  reads a burn of zero indistinguishable from an idle session. Surfacing it needs a
-  `SessionNoticeCode` that does not exist, which is a contract amendment rather than a
-  reconciliation. Raised by this pass while writing `10-design.md § Derived views`; it belongs
-  with `20-contract.md § Unresolved` 12 rather than replacing it, since 12 asks what the basis
-  *is* and this asks what to say while nobody knows.
-- **I20's executable check covers five directories; the invariant says "all".**
-  `src/vendor-neutrality.test.ts` scans `config`, `jail`, `store`, `session-manager` and
-  `contract` — the five S1.10 named — and does not scan `edge/*` or `client/`, both of which
-  are above `adapters/*`. Both are clean today, checked by hand during this pass. The gap is
-  that nothing keeps them so.
