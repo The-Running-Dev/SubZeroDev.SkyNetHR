@@ -51,6 +51,9 @@ test('S1.1, S1.3, S1.9 — the twelve-row vendor mapping, and stdin stays writab
   const permissionEvent = eventsOf(notifications, 'permission.request')[0]!;
   const requestId = (permissionEvent.event.data as { requestId: string }).requestId;
 
+  // D109: matchTarget's projection table — Bash projects input.command, verbatim.
+  assert.equal((permissionEvent.event.data as { matchTarget: string | null }).matchTarget, 'echo hi');
+
   // S1.1: stdin is still writable here — this is the point in the real handshake where
   // a naive implementation would already have closed it.
   const respondResult = adapter.respond(requestId as never, 'allow');

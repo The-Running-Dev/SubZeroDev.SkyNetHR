@@ -37,6 +37,19 @@ const IGNORED_SYSTEM_SUBTYPES = new Set([
   'post_turn_summary',
 ]);
 
+// `PermissionRequest.matchTarget`'s projection table (D109) — the only place tool-shape
+// knowledge is permitted to live (I41). Four rows, because four are what
+// `design/findings/S1-claude-adapter.md` names; every other tool, including every
+// `mcp__*`, projects `null` rather than a guess. Emitted verbatim: no case folding, no
+// separator rewriting, no trimming, and a named field that is absent or not a string
+// projects `null` rather than a coerced string.
+function projectMatchTarget(tool: string, input: Readonly<Record<string, unknown>>): string | null {
+  const field = tool === 'Bash' ? 'command' : tool === 'Read' || tool === 'Edit' || tool === 'Write' ? 'file_path' : null;
+  if (field === null) return null;
+  const value = input[field];
+  return typeof value === 'string' ? value : null;
+}
+
 export function createClaudeAdapter(opts: AdapterOptions & { readonly executable?: string }): Adapter {
   // The env var is a test seam only: it lets a fixture CLI stand in for the real binary
   // without adding a field to `AdapterOptions`, which the contract fixes.
@@ -165,14 +178,17 @@ export function createClaudeAdapter(opts: AdapterOptions & { readonly executable
         if (request?.['subtype'] !== 'can_use_tool') return;
         const requestId = rec['request_id'] as RequestId;
         const callId = request['tool_use_id'] as CallId;
+        const tool = request['tool_name'] as string;
+        const input = (request['input'] as Record<string, unknown> | undefined) ?? {};
         pendingByRequestId.set(requestId, { callId });
         emitEvent(
           'permission.request',
           {
             requestId,
             callId,
-            tool: request['tool_name'],
-            input: request['input'] ?? {},
+            tool,
+            input,
+            matchTarget: projectMatchTarget(tool, input),
             suggestions: request['permission_suggestions'] ?? [],
           },
           rec,

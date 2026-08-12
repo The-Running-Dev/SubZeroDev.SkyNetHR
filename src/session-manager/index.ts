@@ -12,6 +12,7 @@ import type {
   AdapterNotification,
   AuditRecord,
   CallId,
+  Caps,
   Checkpoint,
   CheckpointError,
   ChecklistItemId,
@@ -26,6 +27,7 @@ import type {
   PayrollView,
   PermissionAnswer,
   PendingPermission,
+  PermissionRequest,
   ProcessRecord,
   RequestId,
   ResolvedPath,
@@ -36,6 +38,7 @@ import type {
   SessionManager,
   SessionRecord,
   SessionSummary,
+  StandingRuleExpression,
   StartupError,
   Store,
   Subscription,
@@ -55,10 +58,72 @@ function checkpointErrorDetail(e: CheckpointError): string {
   return e.code === 'no_such_checkpoint' ? `no such checkpoint: ${e.sha}` : e.detail;
 }
 
+// `PendingPermission` (20-contract.md § Turn) carries only what a manual answer needs.
+// I38's validation additionally needs the matchTarget the adapter projected for this
+// request — held here, in this module's own private turn-tracking shape, rather than as
+// a contract amendment: `TurnState` is in-memory-only and never crosses the
+// `SessionManager` boundary.
+interface PendingPermissionState extends PendingPermission {
+  readonly matchTarget: string | null;
+}
+
 interface TurnState {
   readonly turnId: TurnId;
   phase: 'starting' | 'running';
-  readonly pending: Map<RequestId, PendingPermission>;
+  readonly pending: Map<RequestId, PendingPermissionState>;
+}
+
+// The grammar, owned by session-manager per D35 — pure and total, no I/O, no state, no
+// tool knowledge, no vendor knowledge (20-contract.md § session-manager).
+const STANDING_RULE_PATTERN = /^[A-Za-z0-9_][A-Za-z0-9_.-]*:[^\r\n]+$/;
+
+export function parseStandingRule(text: string, caps: Caps): StandingRuleExpression | null {
+  if (Buffer.byteLength(text, 'utf8') > caps.standingRuleBytes) return null;
+  if (!STANDING_RULE_PATTERN.test(text)) return null;
+  return text as StandingRuleExpression;
+}
+
+// `*` matches any run of characters, including the empty run, except the shell
+// metacharacters below — so a rule's wildcard can never be stretched, by an unreviewed
+// request, across a character it was never shown matching. There is no escape: no rule
+// ever matches a literal `*`.
+const STANDING_RULE_WILDCARD_FORBIDS = new Set([';', '&', '|', '<', '>', '`', '$', '\r', '\n']);
+
+function matchesPattern(pattern: string, target: string): boolean {
+  let pi = 0;
+  let ti = 0;
+  let starAt = -1;
+  let starTi = 0;
+  while (ti < target.length) {
+    if (pi < pattern.length && pattern[pi] === target[ti]) {
+      pi++;
+      ti++;
+    } else if (pi < pattern.length && pattern[pi] === '*') {
+      starAt = pi;
+      starTi = ti;
+      pi++;
+    } else if (starAt !== -1) {
+      // Backtrack: the `*` at `starAt` stretches one character further, provided that
+      // character is not one it is forbidden to cross.
+      if (STANDING_RULE_WILDCARD_FORBIDS.has(target[starTi]!)) return false;
+      starTi++;
+      pi = starAt + 1;
+      ti = starTi;
+    } else {
+      return false;
+    }
+  }
+  while (pi < pattern.length && pattern[pi] === '*') pi++;
+  return pi === pattern.length;
+}
+
+export function match(rule: StandingRuleExpression, request: PermissionRequest): boolean {
+  if (request.matchTarget === null) return false;
+  const colon = rule.indexOf(':');
+  const tool = rule.slice(0, colon);
+  const pattern = rule.slice(colon + 1);
+  if (tool !== request.tool) return false;
+  return matchesPattern(pattern, request.matchTarget);
 }
 
 interface SessionEntry {
@@ -85,6 +150,10 @@ interface SessionEntry {
   // walking `endedAt` forward and rewriting `meta.json` for a transition that already
   // happened.
   storageFailed: boolean;
+  // D110: in-memory, session-scoped, allow-only, and dies with the process — no field on
+  // `SessionRecord`, no line in any file, no entry in `meta.json`. A session rehydrated
+  // at boot holds none (I40).
+  readonly standingRules: StandingRuleExpression[];
   readonly subscribers: Set<SubscriberSink>;
   // I27: there is no lock in this server; `emit`'s synchronous prefix (seq assignment,
   // ring push, subscriber delivery) is the serialisation point. The durable spill write
@@ -483,6 +552,7 @@ export function createSessionManager(deps: {
           hasRunATurn: true,
           checkpointsAvailable: false,
           storageFailed: false,
+          standingRules: [],
           subscribers: new Set(),
           writeQueue: Promise.resolve(),
         };
@@ -556,6 +626,7 @@ export function createSessionManager(deps: {
         hasRunATurn: false,
         checkpointsAvailable: true,
         storageFailed: false,
+        standingRules: [],
         subscribers: new Set(),
         writeQueue: Promise.resolve(),
       };
@@ -667,19 +738,35 @@ export function createSessionManager(deps: {
       const entry = sessions.get(sessionId);
       if (!entry || entry.record.owner !== owner) return { ok: false, error: { code: 'no_such_session', sessionId } };
 
-      // S4.12: standing rules are S10's; until it ships a grammar, `scope: 'always'` and
-      // a supplied `rule` are both refused rather than silently downgraded to 'once'.
+      // I38: a standing rule is only ever created where `decision === 'allow'`, `rule`
+      // parses, and the named request's `matchTarget` is non-null — every other
+      // `scope: 'always'` is `bad_request`, never silently downgraded to `once`. These
+      // three checks need no `turn` or pending lookup; the fourth (`matchTarget`) does,
+      // and runs after it below, before anything is mutated.
+      let rule: StandingRuleExpression | null = null;
       if (answer.scope === 'always') {
-        return { ok: false, error: { code: 'bad_request', field: 'scope', detail: "scope 'always' is not available until S10 ships a grammar" } };
-      }
-      if (answer.rule !== null) {
-        return { ok: false, error: { code: 'bad_request', field: 'rule', detail: 'rule is not available until S10 ships a grammar' } };
+        if (answer.rule === null) {
+          return { ok: false, error: { code: 'bad_request', field: 'rule', detail: "scope 'always' requires a rule" } };
+        }
+        const parsed = parseStandingRule(answer.rule as unknown as string, config.caps);
+        if (parsed === null) {
+          return { ok: false, error: { code: 'bad_request', field: 'rule', detail: 'rule does not parse as a standing-rule expression' } };
+        }
+        if (answer.decision === 'deny') {
+          return { ok: false, error: { code: 'bad_request', field: 'decision', detail: "scope 'always' requires decision 'allow'" } };
+        }
+        rule = parsed;
       }
 
       const turn = entry.turn;
       if (!turn) return { ok: true, value: { accepted: false } };
       const pending = turn.pending.get(answer.requestId);
       if (!pending) return { ok: true, value: { accepted: false } }; // already resolved (D33)
+
+      if (rule !== null && pending.matchTarget === null) {
+        return { ok: false, error: { code: 'bad_request', field: 'scope', detail: 'no standing rule may be created against a request with no matchTarget' } };
+      }
+
       turn.pending.delete(answer.requestId); // synchronous with the lookup, before any await (D33)
 
       const record: AuditRecord = {
@@ -691,7 +778,7 @@ export function createSessionManager(deps: {
         tool: pending.tool,
         input: pending.input,
         decision: answer.decision,
-        scope: 'once',
+        scope: rule !== null ? 'always' : 'once',
         reason: answer.reason,
       };
 
@@ -700,7 +787,8 @@ export function createSessionManager(deps: {
       const appended = await store.appendAudit(record);
       if (!appended.ok) {
         // S4.7: an audit append failure denies, regardless of what the operator asked
-        // for — the turn continues and no tool runs.
+        // for — the turn continues and no tool runs. The rule is not held either: a
+        // grant that was never durably recorded must not start auto-approving.
         // A pending request exists only on a live turn, which only a live session (a
         // real adapter) can have — a rehydrated session's `turn` is always null.
         entry.adapter!.respond(answer.requestId, 'deny');
@@ -720,6 +808,11 @@ export function createSessionManager(deps: {
         return { ok: true, value: { accepted: true } };
       }
 
+      // Held only once its grant is durable — S10.3: never handed to the child (I42),
+      // never persisted (D110), and from this point matched against every later request
+      // on this session.
+      if (rule !== null) entry.standingRules.push(rule);
+
       // The audit record is already durable: the decision is final regardless of
       // whether `respond` can still reach the child (it may already be gone — the same
       // benign race the `exited` handler resolves for every other outstanding request).
@@ -730,7 +823,7 @@ export function createSessionManager(deps: {
         turnId: turn.turnId,
         requestId: answer.requestId,
         decision: answer.decision,
-        scope: 'once',
+        scope: rule !== null ? 'always' : 'once',
         operator: owner,
         reason: 'answered',
       });
@@ -1012,6 +1105,61 @@ export function createSessionManager(deps: {
     },
   };
 
+  // S10.4: the server's own decision for a request matched against a standing rule.
+  // Mirrors `answerPermission`'s happy/audit-failure paths, but the operator is `null`
+  // throughout and the grant behind it was already durable when the rule was created —
+  // there is nothing left to validate here, only to record and answer.
+  async function resolvePreapproved(entry: SessionEntry, turn: TurnState, request: PermissionRequest): Promise<void> {
+    if (!turn.pending.has(request.requestId)) return; // already resolved by a race
+    turn.pending.delete(request.requestId);
+
+    // 20-contract.md § Audit record: on `scope === 'standing'`, `reason` carries the
+    // matched `StandingRuleExpression` verbatim — the only place it holds anything but
+    // the operator's free-text reason.
+    const matched = entry.standingRules.find((r) => match(r, request)) ?? null;
+    const record: AuditRecord = {
+      ts: nowIso(),
+      operator: null,
+      sessionId: entry.record.id,
+      vendor: entry.record.vendor,
+      sandbox: entry.record.sandbox,
+      tool: request.tool,
+      input: request.input,
+      decision: 'allow',
+      scope: 'standing',
+      reason: matched,
+    };
+
+    const appended = await store.appendAudit(record);
+    if (!appended.ok) {
+      entry.adapter!.respond(request.requestId, 'deny');
+      await emit(entry, 'permission.resolved', {
+        turnId: turn.turnId,
+        requestId: request.requestId,
+        decision: 'deny',
+        scope: 'once',
+        operator: null,
+        reason: 'audit_unavailable',
+      });
+      await emit(entry, 'session.notice', {
+        level: 'error',
+        code: 'audit_unavailable',
+        text: 'The audit record could not be written; the tool call was denied.',
+      });
+      return;
+    }
+
+    entry.adapter!.respond(request.requestId, 'allow');
+    await emit(entry, 'permission.resolved', {
+      turnId: turn.turnId,
+      requestId: request.requestId,
+      decision: 'allow',
+      scope: 'standing',
+      operator: null,
+      reason: 'preapproved',
+    });
+  }
+
   function handleNotification(sessionId: SessionId, n: AdapterNotification): void {
     const entry = sessions.get(sessionId);
     if (!entry) return;
@@ -1111,9 +1259,31 @@ export function createSessionManager(deps: {
       case 'event': {
         const { kind, data, raw } = n.event as { kind: EventKind; data: Record<string, unknown>; raw?: unknown };
         const turn = entry.turn;
+        // S10.4: a request matching a standing rule this session already holds is
+        // auto-answered right after its own `permission.request` is emitted below — it
+        // still gets the full request/resolved pair and an audit record, just with no
+        // operator in the loop.
+        let autoApprove: PermissionRequest | null = null;
         if (kind === 'permission.request' && turn) {
-          const d = data as unknown as { requestId: RequestId; callId: CallId; tool: string; input: Readonly<Record<string, unknown>> };
-          turn.pending.set(d.requestId, { callId: d.callId, tool: d.tool, input: d.input });
+          const d = data as unknown as {
+            requestId: RequestId;
+            callId: CallId;
+            tool: string;
+            input: Readonly<Record<string, unknown>>;
+            matchTarget: string | null;
+            suggestions: readonly unknown[];
+          };
+          turn.pending.set(d.requestId, { callId: d.callId, tool: d.tool, input: d.input, matchTarget: d.matchTarget });
+          const request: PermissionRequest = {
+            turnId: turn.turnId,
+            requestId: d.requestId,
+            callId: d.callId,
+            tool: d.tool,
+            input: d.input,
+            matchTarget: d.matchTarget,
+            suggestions: d.suggestions ?? [],
+          };
+          if (entry.standingRules.some((rule) => match(rule, request))) autoApprove = request;
         }
         // S9.1: truncated before the envelope naming it is constructed (I3, D22). The
         // adapter always reports the pre-truncation `bytes` and `truncated: false` (S9
@@ -1152,6 +1322,7 @@ export function createSessionManager(deps: {
         // where that caller races the still-pending spill append (S5.1).
         if (kind === 'turn.ended') entry.turn = null;
         await emit(entry, kind, payload as never, raw);
+        if (autoApprove && turn) await resolvePreapproved(entry, turn, autoApprove);
         return;
       }
     }

@@ -267,14 +267,16 @@ export interface ToolResult {
   readonly bytes: number; // pre-truncation size
 }
 
-// Opaque pending open question 8; see `20-contract.md § Unresolved`. Equality and
-// storage only — no component may parse one until a grammar is decided.
+// `"<tool>:<pattern>"`. Constrained: /^[A-Za-z0-9_][A-Za-z0-9_.-]*:[^\r\n]+$/, and no
+// longer than `Caps.standingRuleBytes` as UTF-8. The half before the first colon is
+// compared for equality against `PermissionRequest.tool`; every later colon belongs to
+// the pattern. The pattern is matched against `PermissionRequest.matchTarget` in full,
+// anchored at both ends, byte for byte and case-sensitively, with no normalisation on
+// either side. `*` is the only metacharacter: it matches any run of characters,
+// including the empty run, except `;` `&` `|` `<` `>` `` ` `` `$` CR LF. There is no
+// escape, so no rule matches a literal `*`. Nothing else in the pattern is special.
+// Minted only by `parseStandingRule`.
 export type StandingRuleExpression = Brand<string, 'StandingRuleExpression'>;
-
-export interface PermissionSuggestion {
-  readonly label: string;
-  readonly rule: StandingRuleExpression;
-}
 
 export interface PermissionRequest {
   readonly turnId: TurnId;
@@ -282,7 +284,13 @@ export interface PermissionRequest {
   readonly callId: CallId;
   readonly tool: string;
   readonly input: Readonly<Record<string, unknown>>; // exactly what will run, never a summary
-  readonly suggestions: readonly PermissionSuggestion[];
+  // The one string a rule's pattern is matched against, projected from `input` by the
+  // adapter and emitted verbatim. `null` where the adapter defines no projection for
+  // this tool, and then no standing rule may be created against this request (I38).
+  readonly matchTarget: string | null;
+  // The vendor's `permission_suggestions`, forwarded exactly as it arrived (D104).
+  // Unverified on this transport; no module narrows, parses, or indexes it (I39).
+  readonly suggestions: readonly unknown[];
 }
 
 export type PermissionDecision = 'allow' | 'deny';
@@ -489,6 +497,7 @@ export interface Caps {
   readonly auditPageMax: number; // largest window `GET /api/audit` will serve
   readonly reviewBodyBytes: number; // (tier two) rejection threshold for Review.body
   readonly requisitionTextBytes: number; // (tier two) per field: title, justification
+  readonly standingRuleBytes: number; // rejection threshold for one StandingRuleExpression
 }
 
 export interface Config {

@@ -179,6 +179,10 @@ export function loadConfig(env: Readonly<Record<string, string | undefined>>): R
   if (!reviewBodyBytes.ok) return reviewBodyBytes;
   const requisitionTextBytes = parseIntEnv(env, 'CAPS_REQUISITION_TEXT_BYTES', 4 * 1024);
   if (!requisitionTextBytes.ok) return requisitionTextBytes;
+  // A standing rule is one line, `"<tool>:<pattern>"` — an order of magnitude below the
+  // other text caps is deliberately generous for the grammar it actually holds.
+  const standingRuleBytes = parseIntEnv(env, 'CAPS_STANDING_RULE_BYTES', 1024);
+  if (!standingRuleBytes.ok) return standingRuleBytes;
 
   const caps: Caps = {
     ringCapacity: ringCapacity.value,
@@ -188,6 +192,7 @@ export function loadConfig(env: Readonly<Record<string, string | undefined>>): R
     auditPageMax: auditPageMax.value,
     reviewBodyBytes: reviewBodyBytes.value,
     requisitionTextBytes: requisitionTextBytes.value,
+    standingRuleBytes: standingRuleBytes.value,
   };
 
   const includeRaw = env['INCLUDE_RAW'] === 'true';
