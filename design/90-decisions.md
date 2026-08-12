@@ -1943,6 +1943,116 @@ table and a probe. Dropping `app-server` later is not: the approval path, the de
 usage basis all rest on it, and D5 would have to be re-decided against a transport that cannot
 carry the prompt.
 
+### 2026-08-12 — D108 `StandingRuleExpression` is a local grammar, `"<tool>:<pattern>"`, and the vendor's field stays unread
+Context: open question 8 (#16) asked whether `permission_suggestions` is a sufficient grammar for
+"always allow". D35 made it blocking rather than nice-to-know, because the matching happens in
+this server. S10.1's finding (`design/findings/S10-standing-rule-grammar.md`) answers it, and the
+answer is narrower than "insufficient": the field is **unobservable**. A fresh probe against
+`claude 2.1.226` on 2026-08-12 reproduced D88 exactly — no `control_request` of any subtype, on
+any line, so a field that only ever appears inside one has never existed on any wire this project
+can inspect. `anthropics/claude-code#34046` is closed by a stale-bot auto-lock, not a fix, with no
+maintainer response anywhere in the thread. The vendor's documented `PermissionUpdate` shape
+describes the SDK's in-process `canUseTool` callback, not the `--permission-prompt-tool stdio`
+channel this project uses.
+Chosen: a local grammar, `"<tool>:<pattern>"` — the tool name compared for equality, the pattern
+matched in full against one projected string, anchored both ends, byte-exact and case-sensitive
+with no normalisation on either side. `*` is the only metacharacter and matches any run of
+characters **except** `;` `&` `|` `<` `>` `` ` `` `$` CR LF, so `Bash:git *` matches
+`git push --force` but not `git status && rm -rf /`. No escape, so no rule matches a literal `*`.
+Rules are operator-typed at answer time and never parsed from a vendor suggestion.
+`permission_suggestions` is retyped `readonly unknown[]` and forwarded verbatim, which reverses
+D104's rejection of exactly that retyping — D104 declined it while the grammar was undecided and
+the shape might still be adopted; now that the grammar is local and the channel is known dead,
+`{ label, rule }` asserts a two-field shape on data nobody has observed, and the branded `rule`
+would additionally claim the CLI emits our grammar.
+Rejected: **the vendor's `Tool(pattern)` syntax** — it is the CLI's own settings-file grammar,
+matched by the CLI before `can_use_tool` would fire, and reusing it implies this server
+understands `.claude/settings.json`, `Edit`'s anchor forms and `mcp__*` scoping. It does not; it
+matches one string against one glob. **A fuller glob (`**`, `?`, character classes)** — the
+separator-crossing distinction that gives `**` meaning is incoherent for a command line, so the
+dialect would have to vary per projection kind, which is machinery bought for nothing.
+**Plain `*` with no exclusions** — simpler and uniform, rejected because `Bash:git *` would then
+grant every command an operator can chain after `git`; the audit record would capture it, but the
+approval was not the one given. **Exact equality, no wildcard** — the most conservative option and
+still useful, rejected because `10-design.md` explicitly asks for coarse patterns so a standing
+approval is "a shape rather than a string". **Deleting `suggestions`** — it has never carried
+data and nothing may read it, but forwarding costs nothing and keeps the payload from being
+dropped silently if the channel ever starts firing.
+Reversibility: cheap in the widening direction — adding a metacharacter, or an exclusion-set
+member, is a parser change behind `parseStandingRule`. Expensive in the narrowing direction once
+operators have typed rules against the looser form.
+
+### 2026-08-12 — D109 The tool→string projection is the adapter's, carried as `PermissionRequest.matchTarget`
+Context: S10.1's proposed grammar needs `match` to project a request's `input` down to one string
+— `input.command` for `Bash`, `input.file_path` for `Read`/`Edit`/`Write`. D35 puts matching in
+`session-manager`. But that projection table is tool-shape knowledge, and `20-contract.md §
+Unresolved` 4 already records that moving tool-shape knowledge into the session manager "is
+exactly what the vendor boundary forbids". Worse, `Bash`/`Read`/`Edit`/`Write` are one vendor's
+tool names: a table there hard-codes Claude's vocabulary into vendor-neutral code and is wrong the
+moment another adapter ships standing rules. The two rulings could not both hold as drawn.
+Chosen: the adapter projects. `PermissionRequest` gains `matchTarget: string | null`, emitted
+verbatim, and `match(rule, request)` reads only `rule`, `request.tool` and `request.matchTarget` —
+never `input` (I46). `null` means the adapter defines no projection, and a `scope: 'always'`
+against such a request is `422 bad_request` on `scope` (I43) rather than a rule that matches
+everything or nothing by accident. The Claude table carries **four rows**, the four S10.1 names
+from observation; every other tool projects `null`, because guessing a field name is the thing
+this project stops for. Codex needs no table: it is `preauthorised` and constructs no
+`PermissionRequest` at all (I25).
+Rejected: **a projection table inside `session-manager`** — nothing new on the wire and one place
+to read the grammar, rejected as the boundary violation above. **A new `permissions` module** —
+keeps the table out of both, rejected because it still has to know tool shapes, so the boundary
+problem moves rather than resolves, and it buys a module boundary and an error type for two pure
+functions. **Falling back to a canonical JSON of `input` for unmapped tools** — rejected: it makes
+every rule match against a serialisation nobody typed against and whose key order is not
+contractual.
+Reversibility: cheap. Adding a row is an adapter change. Moving the projection back down into
+`session-manager` later would mean deleting a wire field consumers may already render.
+
+### 2026-08-12 — D110 A standing rule is in-memory, session-scoped, allow-only, and dies with the process
+Context: `20-contract.md § Unresolved` 2 recorded that the design describes standing approvals and
+gives the rule no home — no entity, no field, no file, no lifetime across session end or restart.
+S10.5 requires only that a *new* session on the same workspace asks again, which leaves the
+rehydration case open: `boot()` restores sessions from disk, so a persisted rule would survive a
+restart. Separately, `AnswerScope` and `PermissionDecision` are orthogonal in the type, so
+`always` + `deny` is expressible today and nothing ruled on it. Both would otherwise be decided by
+whatever the implementing slice happened to do.
+Chosen: in-memory session state only — no field on `SessionRecord`, no line in any file, no entry
+in `meta.json`. **There is therefore no persisted schema and no migration story, and that is the
+ruling rather than an omission.** A session rehydrated at boot holds no rules and the operator is
+asked again (I45). `scope: 'always'` additionally requires `decision: 'allow'`; `always` + `deny`
+is `422 bad_request` naming `decision`, so the store holds only allow-rules, `match` returns a
+boolean, and there is no precedence question to state or test. An auto-approval records the
+matched rule verbatim in the existing `AuditRecord.reason`, which lets the record explain itself
+without adding a persisted field — I11 already requires the record, and this makes it legible.
+Rejected: **persisting rules so a restart is invisible** — rejected because a new persisted shape
+needs a home under `meta.json`'s `schemaVersion` and a stated migration story, and more
+importantly because a grant surviving in a file outlives the process that could revoke it; ending
+the session is the only revocation this design offers, and it must actually revoke. **Supporting
+standing denials** — genuinely useful, and denial is the decision this design already treats as
+always-safe, but it makes precedence a permanent invariant and puts `scope: 'standing'` on
+denials, which S10.4's five-match criterion was not written for. Relaxing this later is additive.
+**A new `AuditRecord` field naming the matched rule** — cleaner typing, rejected as a persisted
+schema change needing a migration story for a string that `reason` already holds.
+Reversibility: cheap in every direction taken. Persisting later is additive; allowing standing
+denials later widens a refusal. Neither invalidates a record already written.
+
 ## Open
 
 Staging only. Once an item becomes an issue it leaves this list.
+
+- **`10-design.md` now contradicts the contract on where the standing-rule shape comes from.**
+  Two statements were falsified by the finding the design itself commissioned. `10-design.md`
+  *Control flow § 2* ends "`permission_suggestions` is where the shape comes from even though the
+  CLI no longer does the matching" — it is not, and cannot be (D108). *Open questions* 8 still
+  reads as open — it is answered. `10-design.md` *The hard problem* also still lists "Coarse
+  'always allow' patterns … we should not invent our own grammar before looking at what
+  `permission_suggestions` already offers on the wire"; the looking has been done and the answer
+  was to invent one. **The contract is right and the design is stale here**, which is the expected
+  direction — the design predicted, the probe measured. Correcting it is `/design`'s (`opus`,
+  `high`), not `/contract`'s, and it is deliberately not done in this pass.
+- **D105 declares `design/` frozen for the rest of tier one, but `design/FROZEN.md` has never
+  existed** — no commit in history adds it. The freeze mechanism was implemented (0659b65) and the
+  marker's existence is stated to be the whole mechanism, so the repository is *not* frozen and
+  the five gated commands do not refuse. Either the marker was never written or D105 is stale.
+  Worth resolving before the next authoring command runs, since this pass proceeded on the
+  marker's absence.

@@ -22,6 +22,7 @@ function baseConfig(storageRoot: string): Config {
       auditPageMax: 200,
       reviewBodyBytes: 1024,
       requisitionTextBytes: 1024,
+      standingRuleBytes: 1024,
     },
     includeRaw: false,
     sessionTokenBudget: null,

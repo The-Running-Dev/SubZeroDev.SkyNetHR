@@ -86,6 +86,7 @@ async function makeEdge(
       auditPageMax: 200,
       reviewBodyBytes: 1024,
       requisitionTextBytes: 1024,
+      standingRuleBytes: 1024,
     },
     includeRaw: false,
     sessionTokenBudget: null,
@@ -351,7 +352,7 @@ describe('S2.10 — SSE retry hint', () => {
     const h = await makeEdge(undefined, {
       caps: {
         ringCapacity: 500, toolResultBytes: 65536, subscriberQueueHighWater: 1000,
-        keepaliveMs: 15000, auditPageMax: 200, reviewBodyBytes: 1024, requisitionTextBytes: 1024,
+        keepaliveMs: 15000, auditPageMax: 200, reviewBodyBytes: 1024, requisitionTextBytes: 1024, standingRuleBytes: 1024,
       },
     });
     const id = await newSession(h, 'r1');
@@ -368,7 +369,7 @@ describe('S2.10 — SSE keepalive', () => {
     const h = await makeEdge(undefined, {
       caps: {
         ringCapacity: 500, toolResultBytes: 65536, subscriberQueueHighWater: 1000,
-        keepaliveMs: 60, auditPageMax: 200, reviewBodyBytes: 1024, requisitionTextBytes: 1024,
+        keepaliveMs: 60, auditPageMax: 200, reviewBodyBytes: 1024, requisitionTextBytes: 1024, standingRuleBytes: 1024,
       },
     });
     const id = await newSession(h, 'k1');
@@ -478,18 +479,20 @@ describe('S4 — POST /api/sessions/:id/permission', () => {
     assert.equal(((await res.json()) as { error: { code: string } }).error.code, 'no_such_session');
   });
 
-  it('refuses scope: always and a supplied rule with 422 bad_request naming the field (S4.12)', async () => {
+  it("scope: 'always' with no rule is refused 422 bad_request naming rule, and a well-formed 'always' answer now succeeds (S4.12's blanket refusal is removed by S10.6)", async () => {
     const h = await makeEdge();
     const id = await newSession(h, 'p4');
     const { requestId } = await firstPermissionRequestId(h, id);
 
-    const always = await post(h, `/api/sessions/${id}/permission`, { requestId, decision: 'allow', scope: 'always', rule: null, reason: null });
-    assert.equal(always.status, 422);
-    assert.equal(((await always.json()) as { error: { detail?: { field?: string } } }).error.detail?.field, 'scope');
+    const noRule = await post(h, `/api/sessions/${id}/permission`, { requestId, decision: 'allow', scope: 'always', rule: null, reason: null });
+    assert.equal(noRule.status, 422);
+    assert.equal(((await noRule.json()) as { error: { detail?: { field?: string } } }).error.detail?.field, 'rule');
 
-    const withRule = await post(h, `/api/sessions/${id}/permission`, { requestId, decision: 'allow', scope: 'once', rule: 'x', reason: null });
-    assert.equal(withRule.status, 422);
-    assert.equal(((await withRule.json()) as { error: { detail?: { field?: string } } }).error.detail?.field, 'rule');
+    const id2 = await newSession(h, 'p4b');
+    const { requestId: requestId2 } = await firstPermissionRequestId(h, id2);
+    const withRule = await post(h, `/api/sessions/${id2}/permission`, { requestId: requestId2, decision: 'allow', scope: 'always', rule: 'Bash:echo hi', reason: null });
+    assert.equal(withRule.status, 200);
+    assert.equal(((await withRule.json()) as { accepted: boolean }).accepted, true);
   });
 
   it('refuses a malformed body with 422 bad_request naming the field', async () => {
@@ -924,6 +927,7 @@ const S9_CAPS: Config['caps'] = {
   auditPageMax: 200,
   reviewBodyBytes: 1024,
   requisitionTextBytes: 1024,
+  standingRuleBytes: 1024,
 };
 
 describe('S9.2/S9.3/S9.5 — GET .../tool-output/:turnId/:callId', () => {

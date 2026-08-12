@@ -13,7 +13,7 @@ import type {
   TurnId,
 } from '../../contract/index.js';
 import { NdjsonSplitter } from '../ndjson.js';
-import { summariseToolCall } from './summarise.js';
+import { BASH_COMMAND_FIELD, summariseToolCall } from './summarise.js';
 
 const isWindows = platform === 'win32';
 
@@ -36,6 +36,20 @@ const IGNORED_SYSTEM_SUBTYPES = new Set([
   'thinking_tokens',
   'post_turn_summary',
 ]);
+
+// `PermissionRequest.matchTarget`'s projection table (D109) — the only place tool-shape
+// knowledge is permitted to live (I46). Four rows, because four are what
+// `design/findings/S1-claude-adapter.md` names; every other tool, including every
+// `mcp__*`, projects `null` rather than a guess. Emitted verbatim: no case folding, no
+// separator rewriting, no trimming, and a named field that is absent or not a string
+// projects `null` rather than a coerced string. `Bash`'s field name is shared with
+// `summariseToolCall` (`./summarise.js`) so the two can't silently disagree about it.
+function projectMatchTarget(tool: string, input: Readonly<Record<string, unknown>>): string | null {
+  const field = tool === 'Bash' ? BASH_COMMAND_FIELD : tool === 'Read' || tool === 'Edit' || tool === 'Write' ? 'file_path' : null;
+  if (field === null) return null;
+  const value = input[field];
+  return typeof value === 'string' ? value : null;
+}
 
 export function createClaudeAdapter(opts: AdapterOptions & { readonly executable?: string }): Adapter {
   // The env var is a test seam only: it lets a fixture CLI stand in for the real binary
@@ -165,14 +179,17 @@ export function createClaudeAdapter(opts: AdapterOptions & { readonly executable
         if (request?.['subtype'] !== 'can_use_tool') return;
         const requestId = rec['request_id'] as RequestId;
         const callId = request['tool_use_id'] as CallId;
+        const tool = request['tool_name'] as string;
+        const input = (request['input'] as Record<string, unknown> | undefined) ?? {};
         pendingByRequestId.set(requestId, { callId });
         emitEvent(
           'permission.request',
           {
             requestId,
             callId,
-            tool: request['tool_name'],
-            input: request['input'] ?? {},
+            tool,
+            input,
+            matchTarget: projectMatchTarget(tool, input),
             suggestions: request['permission_suggestions'] ?? [],
           },
           rec,

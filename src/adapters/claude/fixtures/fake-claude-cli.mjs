@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { readFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, readFileSync, writeFileSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 // A deterministic stand-in for the real `claude` binary, used because
 // `--permission-prompt-tool stdio` does not emit `control_request` on the real CLI
@@ -31,6 +31,8 @@ import { spawn } from 'node:child_process';
 //   big-tool-result — one tool call whose result is SKYNET_BIG_TOOL_RESULT_BYTES bytes
 //                   of untruncated 'x' repeated, for S9's truncation-before-envelope
 //                   assertions.
+//   mcp-permission — one control_request for an mcp__* tool, outside matchTarget's
+//                   projection table, so its matchTarget is always null (S10.6).
 
 const scenario = process.env.SKYNET_TEST_SCENARIO ?? 'full';
 const sessionId = 'fake-cli-session-' + Math.random().toString(36).slice(2);
@@ -75,6 +77,10 @@ process.stdin.on('data', (chunk) => {
     const raw = buffered.slice(0, nl);
     buffered = buffered.slice(nl + 1);
     if (raw.trim().length === 0) continue;
+    // S10.3: a test seam only, mirroring SKYNET_CLAUDE_EXECUTABLE — records every line
+    // this process's stdin receives so a test can assert on what the manager actually
+    // wrote, not just on what it claims to have written.
+    if (process.env.SKYNET_STDIN_LOG) appendFileSync(process.env.SKYNET_STDIN_LOG, raw + '\n');
     onLine(JSON.parse(raw));
   }
 });
@@ -192,6 +198,25 @@ function runScenario() {
     }
     case 'big-tool-result': {
       sendControlRequest('req-1', 'call-1');
+      return;
+    }
+    case 'mcp-permission': {
+      // A tool outside `matchTarget`'s four-row table (S10.6): every `mcp__*` tool
+      // projects `null`, so no standing rule may be created against this request.
+      line({
+        type: 'assistant',
+        message: {
+          id: 'msg-mcp-1',
+          content: [{ type: 'tool_use', id: 'call-1', name: 'mcp__example__fetch', input: { url: 'https://example.invalid' } }],
+          usage: { input_tokens: 1, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 },
+        },
+      });
+      line({
+        type: 'control_request',
+        request_id: 'req-1',
+        request: { subtype: 'can_use_tool', tool_use_id: 'call-1', tool_name: 'mcp__example__fetch', input: { url: 'https://example.invalid' }, permission_suggestions: [] },
+      });
+      awaitingControlResponse = true;
       return;
     }
     case 'die-with-pending': {
