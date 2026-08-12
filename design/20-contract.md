@@ -870,9 +870,10 @@ what was left behind; either coming back dirty is `CheckpointError.restore_incom
 partially-restored row in `10-design.md § Failure modes` is unchanged and is now *detected*
 rather than assumed absent.
 
-`10-design.md § Data model — Checkpoint` and D31 still name `checkout <sha> -- .`. **They are
-the stale side and this is the amendment, not a drift to be resolved downward** — carried
-here so the next `/reconcile` writes the design to match rather than the reverse.
+`10-design.md § Data model — Checkpoint` and D31 now carry this sequence too — the design
+absorbed it in D112 and D31 records that its mechanism is superseded. The note that stood here,
+telling a reader those two were still the stale side, was itself stale by four commits and is
+removed (D120).
 
 ### `adapters/*`
 
@@ -1206,7 +1207,7 @@ The `404` is `no_such_session` because `ApiErrorCode` carries no route-level not
 | `POST` | `/api/sessions/:id/permission` | `PermissionAnswer` | `200 { accepted: boolean }` | `403 bad_origin`, `404 no_such_session`, `422 bad_request` |
 | `POST` | `/api/sessions/:id/interrupt` | `{ turnId: TurnId }` | `200 { ok: true }` | `403 bad_origin`, `404 no_such_session`, `422 bad_request` |
 | `POST` | `/api/sessions/:id/end` | `{}` | `200 { ok: true }` | `403 bad_origin`, `404 no_such_session`, `409 turn_in_flight` |
-| `POST` | `/api/sessions/:id/checkpoint/restore` | `{ sha: GitSha }` | `200 { ok: true }` | `403 bad_origin`, `404 no_such_session`, `404 no_such_checkpoint`, `409 turn_in_flight`, `422 bad_request`, `500 checkpoint_failed` |
+| `POST` | `/api/sessions/:id/checkpoint/restore` | `{ sha: GitSha }` | `200 { ok: true }` | `403 bad_origin`, `404 no_such_session`, `404 no_such_checkpoint`, `409 session_ended`, `409 turn_in_flight`, `422 bad_request`, `500 checkpoint_failed` |
 | `DELETE` | `/api/sessions/:id` | — | `200 { ok: true }` | `403 bad_origin`, `404 no_such_session`, `409 turn_in_flight` |
 | `GET` | `/api/sessions` | — | `200 { sessions: SessionSummary[] }`, caller's own only | `401 unauthenticated` |
 | `GET` | `/api/sessions/:id` | — | `200 { session: SessionSummary }` | `401 unauthenticated`, `404 no_such_session` |
@@ -1219,6 +1220,14 @@ route returns, under the same ownership check, and it exists so that a client ho
 `sessionId` can re-read that session's authoritative `state` without fetching every session
 it owns. It answers `404 no_such_session` for a session that is not the caller's, exactly as
 every other route under `/api/sessions/:id` does.
+
+**Restore refuses an ended session, and that refusal is not merely symmetry with `/message`**
+(D120). A rehydrated session is `ended` (D20) but still holds its `cwd`, and the busy check
+frees a workspace the moment a session ends (D30) — so by the time an operator restores into an
+ended session, that directory may already be the live work-tree of somebody else's. Running the
+reset there would revert a second operator's work through a shadow repo they do not own, which
+is the exact hazard D19 exists to close, reached from the one direction the busy check does not
+cover. `409 session_ended`.
 
 The permission route resolves identity and the ownership check like every other session
 route; the operator it resolves is the one written to `AuditRecord.operator`.
@@ -1315,6 +1324,26 @@ sessions alike. Only where the spill cannot serve the range does the server send
 
 A comment line (`: keepalive`) every `Caps.keepaliveMs` keeps intermediaries from closing an
 idle stream, and is what lets a client tell a silent agent from a dead connection.
+
+**A `replay_gap` envelope is not a position in the stream, and its `seq` is a restatement
+rather than a new value** (D121). It consumes no `seq`, is never appended to the spill, never
+enters the ring, and goes to the one subscriber that could not be served — so its `seq` carries
+the point that subscriber is complete **through**, which may repeat a `seq` it already holds.
+That is deliberate and it is load-bearing: the edge writes `seq` as the SSE `id:`, so this value
+becomes the client's next `Last-Event-ID`. Stamping a fresh `seq` instead would tell the client
+it holds history it never received and make *that* the resume point, turning one reported gap
+into permanent silent loss.
+
+**A live-only envelope consumes a `seq` the spill never receives** (D121). When a spill write
+fails the session is ended (D41) and its closing envelopes — the `permission.resolved`
+cancellations, `turn.ended / storage_failure`, `session.ended`, `session.notice / error` — are
+delivered to attached subscribers and to no store, because the file that would hold them is the
+one that just failed. `SessionRecord.lastSeq` advances over them, so after a storage failure the
+in-memory watermark legitimately exceeds the spill's tail. Where the two disagree the spill is
+right, exactly as at boot. The consequence a client sees: an operator who watched the session
+end and then reconnects is **not** shown those envelopes again, and reads the session's state
+from `GET /api/sessions/:id` instead. `remove`'s `session_delete_incomplete` notice is the same
+shape for the same reason — by the time it fires there is no session left to replay it from.
 
 ## Error semantics
 
@@ -1500,7 +1529,7 @@ type SessionError =
 | `RecordsError.bad_request` | A text field over its cap, or a malformed field | No | `422 bad_request`, naming the field |
 | `RecordsError.storage` | The record-log append failed | Sometimes | `500 record_write_failed`. **The registry is not mutated**; the edit is still in the operator's form |
 | `SessionError.no_such_session` | Unknown id, or the caller is not the owner | No | `404 no_such_session` |
-| `SessionError.session_ended` | A message to a session in state `ended` | No | `409 session_ended` |
+| `SessionError.session_ended` | A message to a session in state `ended`, or a checkpoint restore into one — its `cwd` may already be held by a live session (D120) | No | `409 session_ended` |
 | `SessionError.turn_in_flight` | A second message, or a restore, end, or delete during a turn | Yes, once the turn ends | `409 turn_in_flight` |
 | `SessionError.workspace_busy` | The resolved path overlaps a live session's `cwd` | Yes, once that session ends | `409 workspace_busy`, naming the holding path and operator |
 | `SessionError.no_such_item` | A tick for an `itemId` absent from the configured template | No | `404 no_such_item` |
@@ -1531,8 +1560,8 @@ it; where two are named, the second is where a violation would first be observab
 
 | # | Invariant | Owner |
 |---|---|---|
-| I1 | `seq` is strictly increasing by exactly one, per session, from 1. A gap is a bug, never a dropped event | `session-manager` |
-| I2 | The ring buffer's contents are a strict suffix of the spill's, envelope for envelope, byte for byte | `store` |
+| I1 | `seq` is strictly increasing by exactly one, per session, from 1. A gap is a bug, never a dropped event. Two envelopes are outside this: an `error / replay_gap`, which restates a watermark and consumes no `seq`; and a live-only envelope after a storage failure, which consumes one the spill never receives — both in `§ Streaming` (D121) | `session-manager` |
+| I2 | The ring buffer's contents are a strict suffix of the spill's, envelope for envelope, byte for byte. A live-only envelope enters neither, so it cannot falsify this | `store` |
 | I3 | A `tool.result` is truncated before its envelope is constructed; the envelope in the ring and the line in the spill are identical | `session-manager` |
 | I4 | At most one `Turn` per session is non-null at any time | `session-manager` |
 | I5 | A guard is claimed in the same synchronous block that tests it: no `await` sits between a check and the mutation it protects. It governs four guards — the turn slot, the workspace claim, a requisition's decision, and a requisition's consumption | `session-manager`, `records` |
@@ -1541,7 +1570,7 @@ it; where two are named, the second is where a violation would first be observab
 | I8 | `state === 'ended'` implies `LiveSession.turn === null` and `endedAt !== null`; `state === 'live'` implies `endedAt === null` | `session-manager` |
 | I9 | Every `permission.request` is followed by exactly one `permission.resolved` with the same `requestId`, in the same session, before or at `turn.ended` | `session-manager` |
 | I10 | An `AuditRecord` is fsync'd before the corresponding `control_response` is written to the child's stdin | `session-manager`, `store` |
-| I11 | Every `permission.resolved` has exactly one `AuditRecord`, including auto-answers with `scope: 'standing'` | `session-manager` |
+| I11 | Every `permission.resolved` has exactly one `AuditRecord`, including auto-answers with `scope: 'standing'` — **except a resolution the append failure itself produced** (D122). A resolution carrying `reason: 'audit_unavailable'` exists *because* no record could be written, and a server-forced `cancelled_process_exit` resolution owes a best-effort append plus a `session.notice / audit_unavailable` when that append fails. Neither is a hole in the log where a tool ran: the first denies, and the second follows a child that is already gone | `session-manager` |
 | I12 | `AuditRecord.input` is never truncated, summarised, or derived; it is the bytes shown to the operator | `session-manager` |
 | I13 | `audit.ndjson` is never deleted, rewritten, or shortened, including when the session it names is deleted | `store` |
 | I14 | `turn.started` for a turn precedes every other event of that turn, and `turn.ended` follows all of them, including across a server restart | `session-manager` |
@@ -1708,8 +1737,8 @@ Newline-delimited JSON on stdout. **No deltas of any kind**: text arrives whole,
 | `turn.started` | *nothing* |
 | `item.completed`, `item.type == 'reasoning'` | `thinking` |
 | `item.completed`, `item.type == 'agent_message'` | `message`, role assistant |
-| `item.started`, `item.type == 'command_execution'` | `tool.call` — **but see *Item ids* below** |
-| `item.completed`, `item.type == 'command_execution'` | `tool.result`; `ok` from `exit_code == 0`, `output` from `aggregated_output` |
+| `item.started`, `item.type == 'command_execution'` | *nothing* — **unmapped on this transport**, see *Item ids* below |
+| `item.completed`, `item.type == 'command_execution'` | *nothing* — **unmapped on this transport**, see *Item ids* below |
 | `turn.completed` | `turn.ended`, `stopReason: 'completed'`. Its `usage` is **not** mapped — see *Usage* |
 | `close` with no `turn.completed` seen | `turn.ended`, `stopReason: 'process_exit'` |
 
@@ -1717,13 +1746,24 @@ Newline-delimited JSON on stdout. **No deltas of any kind**: text arrives whole,
 
 Both model a command execution as **one** item with two lifecycle states — `started` with null
 result fields, then `completed` on the same id carrying `aggregated_output`, `exit_code` and
-`status`. There is no discrete result record to normalise. The adapter therefore **synthesises**
-the contract's pair from one item's two states. This is what the falsified table's three
-`(unknown)` rows could not describe, and it is why filling them was a contract amendment rather
-than an adapter detail.
+`status`. There is no discrete result record to normalise. On `app-server` the adapter therefore
+**synthesises** the contract's pair from one item's two states. This is what the falsified
+table's three `(unknown)` rows could not describe, and it is why filling them was a contract
+amendment rather than an adapter detail.
 
 The ordering guarantee holds by construction: `completed` for an item cannot precede its
 `started`, so *"`tool.result` follows its `tool.call`"* is satisfied with no buffering.
+
+**On `exec --json` the synthesis is not performed and neither event is emitted at all** (D120).
+The table above said it was, which was never true of the shipped adapter: S8.7 stops before
+implementing correlation on the transport whose item ids collide, and the code returns silently
+for `command_execution` on both `item.started` and `item.completed`. The cost is larger than the
+word *correlation* suggests and is stated here rather than left to be discovered at a screen: a
+session on the fallback renders **no tool activity whatsoever** — not uncorrelated calls, none —
+so an operator watching one sees reasoning and messages while the commands that ran are absent
+from the transcript. That is a product consequence of `## Unresolved` 13, not a separate defect,
+and it is the strongest argument on record for resolving 13 before the fallback is offered to
+anyone.
 
 ### Policy, and the approval prompt now known to be reachable
 

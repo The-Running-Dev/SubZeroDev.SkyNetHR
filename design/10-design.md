@@ -311,15 +311,24 @@ conversation the operator believes is continuous, rendering as an unbroken trans
 
 ### Turn
 
-At most one live per session. **The turn owns the child process** — see *Concurrency*.
+At most one live per session. **The child process belongs to the turn's lifetime but not to
+this record** — see *Concurrency § Process lifetime* for the lifetime, and the row this table no
+longer has for why.
+
+**There is no `child` field, and removing it is a correction rather than a simplification**
+(D123). This table listed a process handle; the manager holds none. The child is spawned inside
+`Adapter.send` and terminated through `Adapter.kill`, so the adapter is its only declared owner —
+and a second reference here would hand `session-manager` a way to reach a process it is
+deliberately not the owner of, which is the leaf property *Module boundaries* exists to protect.
+`20-contract.md § Turn` has carried the divergence since the contract was derived and left the
+ruling to this pass.
 
 | Field | Type | Notes |
 |---|---|---|
 | `turnId` | `TurnId` (UUIDv4) | server-minted; carried on `turn.started`, and required on `POST /interrupt` |
 | `phase` | `'starting' \| 'running'` | `starting` from the moment the slot is claimed until the pre-turn checkpoint returns (D32) |
 | `startedAt` | ISO 8601 UTC | |
-| `child` | process handle | in-memory only; dies with the turn |
-| `pending` | `Map<RequestId, {callId}>` | in-memory only; outstanding permission requests |
+| `pending` | `Map<RequestId, PendingPermission>` | in-memory only; outstanding permission requests. Each carries `callId`, `tool`, `input` and the adapter's `matchTarget` — the last so that I43 is checked against the projection the request arrived with, rather than by re-reading `input` here, which would put tool-shape knowledge in this module (D114, I46) |
 
 **Turn is derived, not stored.** No `turns.json` exists. The turn history of a session is
 reconstructible from its event log by pairing `turn.started` with `turn.ended`, and that
@@ -861,10 +870,11 @@ the append-only-file property that makes it evidence — or stays out, leaving t
 
 ## Module boundaries
 
-Twelve modules — the two transport edges are two modules, not one with a slash in its name,
-which is the whole point of D10, and `records` is the twelfth, added by tier two (D77). The
-dependency graph is acyclic, and the edges most likely to be drawn backwards are called out
-below the diagram.
+Thirteen modules — the two transport edges are two modules, not one with a slash in its name,
+which is the whole point of D10; `records` is the twelfth, added by tier two (D77); and
+`edge/error-envelope` is the thirteenth, extracted so that two transports cannot answer one
+failure with two different statuses (D118, D123). The dependency graph is acyclic, and the edges
+most likely to be drawn backwards are called out below the diagram.
 
 ```mermaid
 flowchart TD
@@ -877,6 +887,7 @@ flowchart TD
     AD["adapters/*"]
     RC["records<br/>tier two"]
     SM["session-manager"]
+    EE["edge/error-envelope<br/>one status mapping"]
     EH["edge/sse"]
     EW["edge/ws"]
     CL["client"]
@@ -892,10 +903,13 @@ flowchart TD
     EH --> RC
     EH --> ID
     EH --> CF
+    EH --> EE
     EW --> SM
     EW --> RC
     EW --> ID
     EW --> CF
+    EW --> EE
+    EE --> CT
     ID --> CF
     CF --> JL
     CF --> CT
@@ -921,8 +935,9 @@ flowchart TD
 | `adapters/*` | **The only vendor knowledge** | `contract` | `send`, `respond`, `kill`, and one inbound `notify` (D46) |
 | `records` *(tier two)* | Review and requisition lifecycle, their registries, the incident read | `config`, `store`, `contract` | Raise / decide / claim, author / finalise, read |
 | `session-manager` | Ownership, turn state, `seq`, fan-out, reaping, the payroll fold | `config`, `jail`, `store`, `checkpoints`, `adapters`, `records`, `contract` | Session CRUD, subscribe |
-| `edge/sse` | SSE framing, `Last-Event-ID` reconnect, **origin check on mutating routes** | `config`, `session-manager`, `records`, `identity`, `contract` | HTTP routes |
-| `edge/ws` | WebSocket framing, first-message auth, **origin check at the handshake** | `config`, `session-manager`, `records`, `identity`, `contract` | HTTP routes |
+| `edge/error-envelope` | The one `ApiErrorCode` → HTTP status mapping, and the only way an edge writes a refusal | `contract` | `statusForCode`, `sendError`, `FALLBACK_STATUS` |
+| `edge/sse` | SSE framing, `Last-Event-ID` reconnect, **origin check on mutating routes**, the static client assets, and the `POST /api/login` exchange (D115) | `config`, `session-manager`, `records`, `identity`, `edge/error-envelope`, `contract` | HTTP routes |
+| `edge/ws` | WebSocket framing, first-message auth, **origin check at the handshake** | `config`, `session-manager`, `records`, `identity`, `edge/error-envelope`, `contract` | HTTP routes |
 | `client` | Rendering, **under the CSP and no-`innerHTML` rules** (D43, D74); the four themes (D58, D78) | `contract` | — |
 
 **Adapters are leaves.** They depend on `contract` and nothing else. They do not read
@@ -981,6 +996,14 @@ session registry exists. The direction that *is* drawn — `session-manager → 
 for exactly one call, the once-only requisition claim during session creation, and it is the
 right way round: consuming a requisition is part of creating a session, not the reverse.
 
+**`edge/error-envelope` is a module because two transports must not disagree about a status
+code** (D118, D123). It is small enough to read as an internal helper of `edge/sse`, and that
+reading is what would kill it: D10 makes the second transport a deployment property, so the
+moment `edge/ws` lands there are two callers, and the alternative to one shared mapping is two
+copies of it — which *Single ownership* forbids, with the divergence surfacing as one failure
+answered two ways depending on how the operator connected. It is a leaf on `contract`, exactly
+as `jail` is, and nothing outside `edge/*` may reach it.
+
 `checkpoints` depending only on `config` and `contract` — never on adapters — is what let
 D6 survive the move to two backends unchanged. Keep it that way.
 
@@ -1003,14 +1026,23 @@ POST /api/sessions {vendor, cwd, model?, sandbox?, requisitionId?}
                     not found          → 404 no_such_requisition
                     not approved       → 409 requisition_not_approved
                     already consumed   → 409 requisition_consumed
+  manager       → adapters[vendor].create({cwd: resolved, model, sandbox, notify})   (D46)
+                    unsupported vendor or sandbox → 422, with NO claim taken   (D123)
   manager       : claim the path in the registry            SYNCHRONOUS         (D32)
   ──────────────── every check above completes before the first await ─────────────
   manager       → store: mkdir, write meta.json, open spill
   manager       → checkpoints: init ckpt.git             → notice on failure, not fatal
-  manager       → adapters[vendor].create({cwd: resolved, model, sandbox, notify})   (D46)
   manager       → records: attach sessionId to the requisition   (tier two)
   manager       ← {sessionId}                            → on any failure, release BOTH claims
 ```
+
+**Creating the adapter sits above the claim, not below the storage writes, and the order is the
+one the code found rather than the one this diagram first drew** (D123). `createAdapter` is
+synchronous and it is where a vendor validates the requested sandbox, so it is the last check
+that can refuse — and a refusal that lands *before* the claim has nothing to release. Drawn the
+other way, an `unsupported_sandbox` on a Codex session with no `sandbox` set would take the
+workspace claim, take the requisition claim beside it, and then need both released on a path
+that never touched storage at all.
 
 Nothing is spawned. A session with no turn has no child process. The vendor's `policy` is
 determined here, from adapter capability, and is what the client renders as either "you
@@ -1625,12 +1657,21 @@ Genuinely simultaneous:
   construction; they share only the storage root and the four server-wide append files —
   `audit.ndjson`, `pids.ndjson`, and tier two's `reviews.ndjson` and `requisitions.ndjson`.
   **Those four files are the design's only shared mutable state on disk**, and the claim that
-  no lock is needed rests on something worth stating rather than assuming: each is opened
-  once, as a single append stream owned by `store`, and every writer goes through it. Ordered
-  appends through one stream in one single-threaded process cannot interleave a partial line.
-  Tier two added two files to this set and no new argument, which is the point of choosing
-  append-only files for it (D65). Two server processes over one storage root would break it
-  for all four, and nothing currently prevents that — see *Open questions*.
+  no lock is needed rests on something worth stating rather than assuming: every writer goes
+  through `store`, which appends each line to a handle opened `O_APPEND`, so the kernel places
+  the write at the file's current end rather than at an offset a caller remembered. Two writers
+  in one single-threaded process therefore cannot land at the same offset, and no writer has to
+  know another exists. Tier two added two files to this set and no new argument, which is the
+  point of choosing append-only files for it (D65). Two server processes over one storage root
+  would break it for all four, and nothing currently prevents that — see *Open questions*.
+
+  **The earlier wording said each file is opened once as a single long-lived stream, and that
+  is not what `store` does** (D124). A handle is opened and closed per append. The conclusion is
+  unchanged — `O_APPEND` is what the guarantee actually rests on, and it is the stronger of the
+  two, because it survives a second handle on the same file where a single-stream argument
+  assumes there is never one. What it does not carry is a line long enough to be split across
+  writes: `AuditRecord.input` is explicitly never truncated (*Data model § Audit record*), so
+  that file is the one with no bound on a line's length. Carried in `90-decisions.md § Open`.
 - **The two record registries** *(tier two)*, which are shared mutable state in *memory* and
   therefore governed by the same rule as the turn slot: every state test that decides
   something is claimed in the synchronous block that tests it. There are exactly two such
@@ -1740,7 +1781,8 @@ Concretely, there are four guards and they all follow it:
 
 | Guard | Tested and claimed before | Released on |
 |---|---|---|
-| The turn slot | `await checkpoints.commit` | Any failure in control flow 2 |
+| The turn slot, on `POST /message` | `await checkpoints.commit` | Any failure in control flow 2 |
+| The turn slot, on `POST /checkpoint/restore` | `await checkpoints.restore` | The restore returning, either way (D123) |
 | The workspace claim | `await store.mkdir` | Any failure in control flow 1 |
 | A requisition's decision *(tier two)* | `await store.appendRequisition` | Nothing — a decision is terminal |
 | A requisition's consumption *(tier two)* | `await store.mkdir`, with the workspace claim | Any failure in control flow 1, with the workspace claim |
@@ -1749,6 +1791,15 @@ The turn slot is occupied by a `Turn` in phase `starting` before the checkpoint 
 and the workspace claim is registered before storage is touched. Distinguish *the slot is
 claimed* from *`turn.started` is emitted*: the event still follows the checkpoint, so the
 ordering guarantee that a turn's checkpoint precedes its `turn.started` is untouched.
+
+**Restore is a second claimant of the turn slot, not merely a second reader of it** (D123).
+D17 put turn state in the manager so that restore could *ask* whether a turn is running; asking
+is not enough, because restore's own git sequence is exactly as unsafe to interleave with a
+concurrent one, or with a `POST /message`, as two turns are with each other. So it takes the
+slot under a server-minted `turnId` and releases it in a `finally`. That `turnId` reaches a
+client only in a `409 turn_in_flight` detail — it names no turn any `turn.started` announced,
+emits nothing, and spawns no child — which is stated because a client that assumed every
+`turnId` it sees came from an event would find one that did not.
 
 **Tier two adds two rows to this table and no new mechanism, and that is the test it had to
 pass.** Both new guards have the identical shape to the two that were already here — a state
@@ -2204,7 +2255,7 @@ be revoked; **D84**, the contract declares the tier-two text caps and the audit 
 no values; **D85**, the checklist fold is served by the server rather than assembled in the
 client.
 
-**From implementation, D87 to D116, and this section indexes them rather than restating
+**From implementation, D87 to D126, and this section indexes them rather than restating
 them.** They were taken while `design/` was frozen (D105), so each is a fact this document
 learned late rather than a choice it made: D88 and D96 on Claude's broken handshake, D89 to
 D95 and D97 to D104 on what S1 exposed about `emit`, argv, spawning and the vendor mapping,
@@ -2212,6 +2263,13 @@ D107 on Codex's two transports, D108 to D110 on the standing-rule grammar, D112 
 and D113 to D116 from the reconciliation that lifted the freeze. Where one of them and this
 document disagree, `90-decisions.md` wins and this document is the defect — which is what
 D113 was written to stop being true eleven times over.
+
+**D117 to D126 are the round after that**, and the direction reversed: D117 to D119 corrected
+the contract against the code, and D120 to D126 are this pass — D120 three more contract
+corrections (the Codex fallback's unmapped tool events, restore's `session_ended`, a stale
+staleness note), D121 the two `seq` exceptions, D122 I11's carve-out, D123 the five structural
+corrections *this* document just absorbed, D124 the no-lock argument moving to `O_APPEND`, and
+D125 to D126 two adapter decisions that had never been written down anywhere.
 
 Standing decisions this design rests on, all in `90-decisions.md`: D1/D10 transport,
 D2 sequencing, D3 delegated auth, D4 the jail, D5 the permission asymmetry, D6 shadow git,

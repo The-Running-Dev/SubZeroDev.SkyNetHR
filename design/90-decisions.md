@@ -2253,10 +2253,188 @@ it is not rediscovered.
 Reversibility: cheap as text. The behaviour it describes is not new and is unchanged by this
 entry.
 
+### 2026-08-12 — D120 `20-contract.md` absorbs three corrections this reconciliation found
+Context: reading the tree against the contract turned up three places where the contract, not the
+code, is the defect. **One**: the `codex exec --json` table maps `item.started` and
+`item.completed` on `command_execution` to `tool.call` and `tool.result`, and the adapter emits
+neither (`src/adapters/codex/index.ts:591,609`) — S8.7 stops before implementing correlation on
+the transport whose item ids collide. The contract already contradicted itself here, since
+`§ Item ids` four rows below says the fallback's correlation "is therefore **not specified
+here**". **Two**: `POST /api/sessions/:id/checkpoint/restore` answers `409 session_ended` for an
+ended session (`src/session-manager/index.ts:900`) and the route's refusal list does not carry
+it, nor does `SessionError.session_ended`'s row, which reads "a message to a session in state
+`ended`". **Three**: `§ checkpoints` still tells the reader that `10-design.md` and D31 name
+`checkout <sha> -- .` and that the next `/reconcile` should write the design to match — four
+commits after D112 did exactly that and appended the supersession to D31.
+Chosen: the contract moves in all three. The fallback's two rows become *unmapped*, with the
+product consequence stated where it can be checked — a session on that transport renders **no
+tool activity at all**, not merely uncorrelated calls, which is a larger claim than
+`## Unresolved` 13's wording carries and is the strongest argument on record for resolving 13
+before the fallback is offered. Restore's refusal is declared with its reason: a rehydrated
+session is `ended` but keeps its `cwd`, and the busy check frees a workspace the moment a session
+ends, so restoring into an ended session can revert a *second* operator's work through a shadow
+repo they do not own. The stale note is deleted.
+Rejected for the first: implementing the fallback's pair so the table becomes true. It decides
+`## Unresolved` 13 by writing code, which is the failure that item exists to prevent, and S8.7
+reserved the choice deliberately. Rejected for the second: removing the refusal from the code so
+the table becomes true — it reopens the hazard D19 closes, from the one direction the busy check
+does not cover. Rejected for the third: leaving the note, on the ground that it is harmless. A
+note asserting another document is wrong is believed and re-propagated; this one would have been
+carried into the next pass as a live finding.
+Reversibility: cheap. All three are text, and none changes behaviour.
+
+### 2026-08-12 — D121 The two envelopes that are exceptions to `seq` are declared
+Context: I1 says `seq` is strictly increasing by exactly one and that a gap is a bug. Two shipped
+paths are outside that and neither was written down. A `replay_gap` envelope
+(`src/session-manager/index.ts:964`) is stamped with the watermark its one subscriber is complete
+*through*, so it can repeat a `seq` already delivered; it consumes none and never reaches ring or
+spill. And after a spill-write failure the session's closing envelopes go out through
+`deliverDirect` (`:218`) to subscribers and to no store, while still advancing
+`SessionRecord.lastSeq` — so the in-memory watermark legitimately exceeds the spill's tail. Both
+matter to a client rather than being internal: the edge writes `seq` as the SSE `id:`, so either
+value can become the next `Last-Event-ID`.
+Chosen: declare both in `20-contract.md § Streaming` and qualify I1 and I2 to point at them. The
+gap envelope restates rather than advances, because stamping a fresh `seq` would tell the client
+it holds history it never received and make *that* the resume point — turning one reported gap
+into permanent silent loss. The live-only envelopes advance `lastSeq` and are not replayable; an
+operator who watched a session end and then reconnects reads its state from
+`GET /api/sessions/:id` instead. Where the watermark and the spill disagree the spill is right,
+as it already is at boot.
+Rejected: leaving both as code comments. They are the two places a client's resume point is
+decided, and a resume rule that lives only in the server's source is one no client author can
+check against. Rejected making `deliverDirect` not advance `lastSeq` so no watermark ever names
+an envelope no store holds: cheap, and it makes two live-delivery paths behave differently unless
+`remove`'s notice changes with it, for a case where the session is already ended.
+Reversibility: cheap as text; the second half would be a small code change if it is ever wanted.
+
+### 2026-08-12 — D122 I11 gains the carve-out its own failure path always required
+Context: I11 reads "Every `permission.resolved` has exactly one `AuditRecord`", unqualified. The
+design's `§ Control flow 2` and the contract's `§ Error semantics` both *require* emitting a
+`permission.resolved { reason: 'audit_unavailable' }` precisely when the append failed, and the
+code does (`src/session-manager/index.ts:1096`). A server-forced `cancelled_process_exit`
+resolution appends best-effort and emits a notice when that fails (`:1246`, `:304`). So the
+invariant was false by construction against behaviour two other sections mandate.
+Chosen: qualify I11 rather than change either. The exception is stated with the reason it is not
+a hole in the evidence: the first case *denies*, so nothing ran unaudited, and the second follows
+a child that is already gone. D33's "denial is the only decision safe to make without being able
+to record it" is what the carve-out is a restatement of.
+Rejected: splitting it into two invariants, one for operator-answered and standing resolutions
+and one for server-forced ones. More precise, and it separates D26's append-then-respond ordering
+from the forced path in a way both could be asserted against — worth revisiting if the tier-two
+slices find the single qualified form awkward. Rejected making I11 literally true by appending a
+record for the `audit_unavailable` resolution too: it needs a second durable store for the case
+the first one failed, which is the disk-full state itself, and D33 already weighed that.
+Reversibility: cheap.
+
+### 2026-08-12 — D123 `10-design.md` absorbs five structural corrections from the tree
+Context: five places where the design describes a structure the code does not have. The module
+table names twelve modules and `src/edge/error-envelope/` is a thirteenth, imported across a
+boundary today and declared in the contract by D118, which left the table to this pass.
+`§ Data model — Turn` lists a `child` process handle the manager has never held — D114 made it
+hold the contract's `Turn`, and the child lives in the adapter — and a
+`pending: Map<RequestId, {callId}>` narrower than the `PendingPermission` the code carries.
+Control flow 1 draws `adapters[vendor].create` after the storage writes; the code creates the
+adapter before the registry claim. The four-guard table lists the turn slot with one claimant and
+`restore` claims it too (`src/session-manager/index.ts:910`). And the `edge/sse` row names neither
+the static client assets nor the `POST /api/login` exchange, both of which D115 declared.
+Chosen: design ← code on all five, each with the reason the code's shape is the right one rather
+than merely the one that shipped. The error-envelope module earns its own paragraph, because it
+is small enough to read as an internal helper and that reading is what would kill it once
+`edge/ws` gives the mapping a second caller. `Turn` loses `child` because a second reference would
+hand `session-manager` a way to reach a process the adapter is the only declared owner of.
+`createAdapter` sits above the claim because it is the last check that can refuse, and a refusal
+above the claim has nothing to release. Restore is recorded as a claimant rather than a reader,
+with the note that its `turnId` reaches a client only in a `409 turn_in_flight` detail and names
+no turn any event announced.
+Rejected: code ← doc on the adapter ordering and the restore claim. Both would reintroduce a
+hazard to satisfy a diagram — an `unsupported_sandbox` holding two claims it never needed, and
+two git sequences free to interleave over one work-tree. Rejected reading `edge/error-envelope` as
+an internal helper the contract's preamble excludes: D118 weighed and rejected exactly that, and
+nothing found here is new evidence against it.
+Reversibility: cheap. Text describing behaviour that already ships.
+
+### 2026-08-12 — D124 The no-lock argument rests on `O_APPEND`, not on a single append stream
+Context: `§ Concurrency` says the four server-wide files are each "opened once, as a single append
+stream owned by `store`, and every writer goes through it", and rests the claim that no lock is
+needed on that. `store` opens and closes a handle per append (`src/store/index.ts:76`). The
+conclusion held; the stated mechanism did not exist.
+Chosen: restate the argument on what the code does. Every writer goes through `store`, which
+appends to a handle opened `O_APPEND`, so the kernel places each write at the file's current end
+rather than at a remembered offset — two writers in one single-threaded process cannot land at
+the same offset, and no writer has to know another exists. This is the stronger of the two
+arguments, because it survives a second handle on the same file where a single-stream argument
+assumes there is never one.
+What it does not carry, and the old wording obscured: a line long enough to be split across
+writes. `AuditRecord.input` is explicitly never truncated, so `audit.ndjson` is the one file with
+no bound on a line's length. Staged in `## Open` rather than decided, because the fix is a cap on
+a field the design deliberately refuses to cap and that is a trade-off, not a correction.
+Rejected: code ← doc, holding one long-lived handle per file as the design said. It keeps the
+stated mechanism at the cost of four descriptors for the process's life, a shutdown close path,
+and `appendAudit`'s fsync running against a shared handle — real work to make a weaker argument
+true. Rejected leaving the wording: it is the load-bearing sentence under "there is no mutex
+anywhere in this design", and a load-bearing sentence that describes no code is the worst kind.
+Reversibility: cheap.
+
+### 2026-08-12 — D125 The Claude adapter names the stop reason; D24's boundary is narrower than stated
+Context: `10-design.md § Interrupt` (D24) says the adapter exposes `kill` as mechanism and
+"everything about what it *means* — which events fire, what state is left, whether it counts as a
+failure — belongs to the manager". The Claude adapter keeps a `killRequested` flag
+(`src/adapters/claude/index.ts:68`) and its `close` handler emits `turn.ended` with
+`stopReason: 'interrupted'` or `'process_exit'` from it (`:340`). So one thing an interrupt
+*means* is decided below the boundary D24 draws.
+Chosen: record that the split is real and is correct, and leave D24's sentence unedited. Deciding
+*that* a turn ends is the manager's — it calls `kill`. Naming *what happened* has to be the close
+handler, because that is the only place that knows whether the process stopped on its own or was
+stopped, and the two produce the identical `close` event. The alternative is the manager
+inferring it from a flag it set moments earlier, which is the same knowledge in a place with less
+of it.
+Rejected: amending `§ Interrupt`'s sentence here. The correct wording is a judgement about what
+D24 was claiming — whether "what it means" was ever meant to include the stop-reason token — and
+that is `/design`'s, flagged here so it is not rediscovered. This is the same treatment D119 gave
+the threat-model row. Rejected moving the decision up into the manager: it would carry a
+`killRequested` of its own and read the adapter's exit code to tell the cases apart, which is
+strictly more coupling for the same answer.
+Reversibility: cheap; the flag is three lines either way.
+
+### 2026-08-12 — D126 The Codex adapter launches `app-server` with `approvalPolicy: 'never'`
+Context: `10-design.md § The hard problem` says every profile in `codex/PROFILES.md` carries
+`approval_policy = "on-request"`, and S8.1 established that under that policy `app-server` sends a
+real, answerable JSON-RPC approval request. The adapter passes `approvalPolicy: 'never'` on
+`thread/start` (`src/adapters/codex/index.ts:509`). Nothing recorded the override.
+Chosen: record it. It is the only value consistent with what is shipped — policy for every Codex
+session is `preauthorised`, and I25 requires a Codex session to emit **zero**
+`permission.request` events. Launching with `on-request` and then not answering the prompts would
+block the child on a channel nothing reads, which is the wedged turn D33 refuses to create.
+The profiles document describes what the CLI can be asked for, not what this server asks for, and
+the two are allowed to differ while D5 stands.
+Rejected: launching with `on-request` and mapping the row. That revises D5, which S8's *Out of
+scope* explicitly reserves for `/design` — the contract's row is marked *unreachable under the
+shipped policy* for exactly this reason. Rejected changing `codex/PROFILES.md` to match: it
+documents the CLI's own profiles, and rewriting it to describe this server's launch arguments
+makes it a second, wrong copy of the adapter.
+Reversibility: cheap as recorded; reversing the *behaviour* is D5's, and expensive.
+
 ## Open
 
 Staging only. Once an item becomes an issue it leaves this list.
 
+- **D102 was decided and never implemented, in either site it names.** `appendPid` still writes
+  `entry.turn?.turnId ?? randomUUID()` (`src/session-manager/index.ts:1190`) — the exact
+  expression D102 quotes and rejects — putting a fabricated `turnId` naming no turn into the file
+  boot reaps from. And a turn-scoped event arriving with no live turn is emitted *without*
+  `turnId` (`:1320`) rather than raising the `error` envelope D102 chose, which produces an
+  envelope violating its own declared payload type; for `permission.request` it is additionally
+  never entered in `pending` (`:1266`), so it can never be resolved and I9 fails silently. D102
+  was written in the S1 reconciliation `4e79b04`, *after* S1 landed in `38f607d`, and no slice
+  picked it up. D102 stands as written; the code moves, at `/fix`'s tier. **D102's premise needs
+  one correction on the way**: it calls the turnless-event state unreachable, and it is ordinary —
+  any record the child emits after `result`, the point at which the slot is freed, lands in it.
+- **No line-length bound exists on the four server-wide append files.** D124's `O_APPEND`
+  argument places every append at the file's end but does not make an arbitrarily long line one
+  write. `AuditRecord.input` is explicitly never truncated (*Data model § Audit record*), so
+  `audit.ndjson` is the file where this is reachable, and it is the file where a torn line costs
+  the most. Capping the field contradicts I12; the alternatives are a length-prefixed format or
+  accepting it with the reasoning written down.
 - **The `usage` silence on `codex exec --json` is unsurfaced, and the design now says it should
   not be.** A session on the fallback transport emits no `usage` events, so its payroll view
   reads a burn of zero indistinguishable from an idle session. Surfacing it needs a
