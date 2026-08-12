@@ -45,6 +45,7 @@ import type {
   StandingRuleExpression,
   StartupError,
   Store,
+  StoreError,
   Subscription,
   SubscriberSink,
   Turn,
@@ -208,6 +209,21 @@ export function createSessionManager(deps: {
       if (entry.record.state === 'live' && pathsOverlap(candidate, entry.record.cwd)) return entry;
     }
     return null;
+  }
+
+  // S6.10: `checkpoints.destroy` before `store.deleteSession`, not concurrently — `ckpt.git`
+  // sits inside the very directory `store.deleteSession` recursively removes, and two
+  // concurrent `fs.rm({recursive: true})` calls over overlapping trees can trip each other
+  // (an `ENOTEMPTY` mid-walk, on the loser). Shared by `remove()` and `create()`'s
+  // requisition-attach unwind — the only two places a session's storage is torn down —
+  // so this ordering lives in one place rather than two comments pointing at each other.
+  async function destroySessionStorage(sessionId: SessionId): Promise<{
+    readonly destroyed: Result<void, CheckpointError>;
+    readonly deleted: Result<void, StoreError>;
+  }> {
+    const destroyed = await checkpoints.destroy(sessionId);
+    const deleted = await store.deleteSession(sessionId);
+    return { destroyed, deleted };
   }
 
   // S9.8: delivers a completion envelope live-only, bypassing the ring and the spill —
@@ -672,8 +688,7 @@ export function createSessionManager(deps: {
           // both claims" extended to the one failure that can strike after them both).
           records.release(input.requisitionId);
           sessions.delete(sessionId);
-          await checkpoints.destroy(sessionId); // best-effort, like remove()'s
-          await store.deleteSession(sessionId); // best-effort, like remove()'s
+          await destroySessionStorage(sessionId); // best-effort, like remove()'s
           await entry.adapter!.kill();
           return { ok: false, error: { code: 'records', cause: attached.error } };
         }
@@ -875,13 +890,9 @@ export function createSessionManager(deps: {
       if (entry.turn) return { ok: false, error: { code: 'turn_in_flight', sessionId, turnId: entry.turn.turnId } };
 
       // S6.10: ckpt.git comes out alongside everything else `store.deleteSession`
-      // already owns removing. Sequential, not concurrent — `ckpt.git` sits inside the
-      // very directory `store.deleteSession` recursively removes, and two concurrent
-      // `fs.rm({recursive: true})` calls over overlapping trees can trip each other
-      // (an `ENOTEMPTY` mid-walk, on the loser). Any failure from either still folds
-      // into the same non-fatal notice below (S5.11).
-      const destroyed = await checkpoints.destroy(sessionId);
-      const deleted = await store.deleteSession(sessionId);
+      // already owns removing — see `destroySessionStorage`'s comment for the ordering.
+      // Any failure from either still folds into the same non-fatal notice below (S5.11).
+      const { destroyed, deleted } = await destroySessionStorage(sessionId);
       // S5.11: the registry entry comes out regardless of whether storage cleanup fully
       // succeeded — a partial failure must not leave a session an operator asked to
       // remove still listed.

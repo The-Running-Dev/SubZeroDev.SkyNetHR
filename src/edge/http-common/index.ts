@@ -19,6 +19,7 @@ import type {
   Vendor,
 } from '../../contract/index.js';
 import { sendError } from '../error-envelope/index.js';
+import { VENDORS } from '../../adapters/index.js';
 
 // D10 (`10-design.md § Module boundaries`) decided the two transport edges stay separate
 // modules and neither imports the other — it did not forbid a third module both compose
@@ -300,8 +301,9 @@ export function createHttpHandlers(deps: EdgeDeps) {
       return sendError(res, 'bad_request', 'sandbox must be a string or null', { field: 'sandbox' });
     }
     // S13.10: absent is the ordinary case and behaves exactly as it did before this field
-    // existed — a requisition is a second way in, never a gate (D68).
-    const requisitionId = body['requisitionId'] ?? null;
+    // existed — a requisition is a second way in, never a gate (D68). An empty string is
+    // absent too, not an id to look up.
+    const requisitionId = body['requisitionId'] === '' ? null : (body['requisitionId'] ?? null);
     if (requisitionId !== null && typeof requisitionId !== 'string') {
       return sendError(res, 'bad_request', 'requisitionId must be a string or null', { field: 'requisitionId' });
     }
@@ -492,8 +494,6 @@ export function createHttpHandlers(deps: EdgeDeps) {
     }
     sendJson(res, 200, result.value);
   }
-
-  const VENDORS: readonly Vendor[] = ['claude', 'codex'];
 
   // S13.2: `POST /api/requisitions` — `workspace` is stored as the caller's string with no
   // jail call and no refusal; caps and everything else are `records.raise`'s to enforce.
