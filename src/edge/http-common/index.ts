@@ -7,6 +7,7 @@ import type {
   AuditCursor,
   AuditQuery,
   CallId,
+  ChecklistItemId,
   EdgeDeps,
   IdentityResolver,
   IsoTimestamp,
@@ -589,6 +590,25 @@ export function createHttpHandlers(deps: EdgeDeps) {
     sendJson(res, 200, { ok: true });
   }
 
+  async function handleChecklist(req: IncomingMessage, res: ServerResponse, owner: OperatorId, sessionId: SessionId): Promise<void> {
+    const got = await manager.checklist(sessionId, owner);
+    if (!got.ok) return failWith(res, got.error);
+    sendJson(res, 200, { items: got.value });
+  }
+
+  async function handleTickChecklistItem(
+    req: IncomingMessage,
+    res: ServerResponse,
+    owner: OperatorId,
+    sessionId: SessionId,
+    itemId: ChecklistItemId,
+  ): Promise<void> {
+    await readBody(req); // drains the request; `{}` carries nothing to validate
+    const ticked = await manager.tickChecklistItem(sessionId, owner, itemId);
+    if (!ticked.ok) return failWith(res, ticked.error);
+    sendJson(res, 200, { ok: true });
+  }
+
   async function handleLogin(req: IncomingMessage, res: ServerResponse): Promise<void> {
     if (config.auth.mode !== 'shared-secret') {
       return sendError(res, 'no_such_session', 'no such route');
@@ -636,5 +656,7 @@ export function createHttpHandlers(deps: EdgeDeps) {
     handleRaiseRequisition,
     handleListRequisitions,
     handleDecideRequisition,
+    handleChecklist,
+    handleTickChecklistItem,
   };
 }

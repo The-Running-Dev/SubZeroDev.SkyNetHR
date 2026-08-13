@@ -153,6 +153,11 @@ interface SessionEntry extends LiveSession {
   // `SessionRecord`, no line in any file, no entry in `meta.json`. A session rehydrated
   // at boot holds none (I45).
   readonly standingRules: StandingRuleExpression[];
+  // D71: nothing about the checklist is persisted beyond the `checklist.item.completed`
+  // envelopes already in the session's own event log (`checklist` is the fold over them) —
+  // this is that fold, maintained incrementally by `emit` the same way `record.lastSeq` is,
+  // and rehydrated once at boot for a session loaded from disk, folded by `closeUnterminatedTurn`'s scan.
+  readonly completedChecklist: Map<ChecklistItemId, { readonly by: OperatorId; readonly completedAt: IsoTimestamp }>;
   readonly subscribers: Set<SubscriberSink>;
   // I27: there is no lock in this server; `emit`'s synchronous prefix (seq assignment,
   // ring push, subscriber delivery) is the serialisation point. The durable spill write
@@ -243,11 +248,14 @@ export function createSessionManager(deps: {
     for (const sub of entry.subscribers) sub.deliver(envelope);
   }
 
-  async function emit<K extends EventKind>(entry: SessionEntry, kind: K, data: EventPayloadMap[K], raw?: unknown): Promise<void> {
+  // Returns the envelope it built (so a caller like `tickChecklistItem` can read back the
+  // `ts` it was actually stamped with), or `null` when `storageFailed` made this a no-op —
+  // every other caller already ignores the return value, as it did before this returned one.
+  async function emit<K extends EventKind>(entry: SessionEntry, kind: K, data: EventPayloadMap[K], raw?: unknown): Promise<Envelope<K> | null> {
     // S9.8: once the spill has failed the session is already ended, and no further
     // envelope may reach the ring it can no longer back — the completion envelopes for
     // the failure itself go out through `deliverDirect` instead, not this path.
-    if (entry.storageFailed) return;
+    if (entry.storageFailed) return null;
     entry.seq += 1;
     const envelope = {
       seq: entry.seq as Seq,
@@ -354,6 +362,7 @@ export function createSessionManager(deps: {
       });
     });
     await entry.writeQueue;
+    return envelope;
   }
 
   // S7.10: proves the storage root is actually writable right now, not merely that it
@@ -454,6 +463,11 @@ export function createSessionManager(deps: {
     let openTurnId: TurnId | null = null;
     const pending = new Map<RequestId, { readonly tool: string; readonly input: Readonly<Record<string, unknown>> }>();
 
+    // S14.7: this is also where `entry.completedChecklist` is folded for a rehydrated
+    // entry — the only path that ever populates it for one (a rehydrated session is
+    // always `ended`, Step 2 above; a live session's map is kept current by `emit`
+    // instead). Sharing this scan, rather than a second pass over the same spill, is
+    // why the checklist case sits in this switch instead of its own function.
     for await (const result of store.readEventsAfter(entry.record.id, 0)) {
       if (!result.ok) break; // best-effort: an unreadable spill is reported elsewhere, not here
       const envelope = result.value;
@@ -474,6 +488,11 @@ export function createSessionManager(deps: {
         case 'permission.resolved': {
           const d = envelope.data as EventPayloadMap['permission.resolved'];
           pending.delete(d.requestId);
+          break;
+        }
+        case 'checklist.item.completed': {
+          const d = envelope.data as EventPayloadMap['checklist.item.completed'];
+          entry.completedChecklist.set(d.itemId, { by: d.by, completedAt: envelope.ts });
           break;
         }
         default:
@@ -567,6 +586,7 @@ export function createSessionManager(deps: {
           checkpointsAvailable: false,
           storageFailed: false,
           standingRules: [],
+          completedChecklist: new Map(),
           subscribers: new Set(),
           writeQueue: Promise.resolve(),
         };
@@ -580,6 +600,8 @@ export function createSessionManager(deps: {
       // `turn.ended { stopReason: 'server_restart' }` — before anything is served, so the
       // ordering guarantees in `20-contract.md § Rules the renderer may rely on` hold
       // unconditionally rather than acquiring a "the transcript might just stop" case.
+      // This is also where `entry.completedChecklist` gets folded for each rehydrated
+      // entry (S14.7) — the same scan, not a second one.
       for (const entry of sessions.values()) {
         await closeUnterminatedTurn(entry);
       }
@@ -655,6 +677,7 @@ export function createSessionManager(deps: {
         checkpointsAvailable: true,
         storageFailed: false,
         standingRules: [],
+        completedChecklist: new Map(),
         subscribers: new Set(),
         writeQueue: Promise.resolve(),
       };
@@ -1110,11 +1133,47 @@ export function createSessionManager(deps: {
     async payroll(): Promise<Result<PayrollView, SessionError>> {
       notImplemented('payroll');
     },
-    async checklist(): Promise<Result<readonly ChecklistItemState[], SessionError>> {
-      notImplemented('checklist');
+    async checklist(sessionId, owner): Promise<Result<readonly ChecklistItemState[], SessionError>> {
+      const entry = sessions.get(sessionId);
+      if (!entry || entry.record.owner !== owner) return { ok: false, error: { code: 'no_such_session', sessionId } };
+      return {
+        ok: true,
+        value: config.checklist.map((item) => {
+          const completed = entry.completedChecklist.get(item.id);
+          return {
+            id: item.id,
+            label: item.label,
+            completedBy: completed?.by ?? null,
+            completedAt: completed?.completedAt ?? null,
+          };
+        }),
+      };
     },
-    async tickChecklistItem() {
-      notImplemented('tickChecklistItem');
+    async tickChecklistItem(sessionId, owner, itemId): Promise<Result<void, SessionError>> {
+      const entry = sessions.get(sessionId);
+      if (!entry || entry.record.owner !== owner) return { ok: false, error: { code: 'no_such_session', sessionId } };
+      if (entry.record.state === 'ended') return { ok: false, error: { code: 'session_ended', sessionId } };
+      const template = config.checklist.find((item) => item.id === itemId);
+      if (!template) return { ok: false, error: { code: 'no_such_item', itemId } };
+      if (entry.completedChecklist.has(itemId)) return { ok: true, value: undefined }; // S14.4: idempotent
+
+      // Claimed synchronously, before `emit`'s first `await` (I5) — a second tick for the
+      // same item racing in before this one's envelope is durable must still see it as
+      // done, so at most one `checklist.item.completed` is ever emitted per item (I36).
+      // The placeholder `completedAt` is reconciled below to the envelope's real `ts` once
+      // `emit` returns it.
+      entry.completedChecklist.set(itemId, { by: owner, completedAt: nowIso() });
+      const envelope = await emit(entry, 'checklist.item.completed', { itemId, by: owner });
+      // `emit` still returns the envelope it built even when the append that was supposed
+      // to make it durable fails during this exact call — `entry.storageFailed` (set by
+      // that failure, S9.8) is what actually says whether it landed. Reporting success on
+      // a tick that never reached the spill would revert silently on the next rehydration.
+      if (envelope === null || entry.storageFailed) {
+        entry.completedChecklist.delete(itemId);
+        return { ok: false, error: { code: 'session_ended', sessionId } };
+      }
+      entry.completedChecklist.set(itemId, { by: owner, completedAt: envelope.ts });
+      return { ok: true, value: undefined };
     },
 
     async readAudit(query) {

@@ -367,6 +367,7 @@ async function runConsole(sessions: ReadonlyArray<Record<string, unknown>>) {
   for (const id of [
     'status', 'login', 'console', 'sessions', 'transcript', 'compose', 'new-session', 'login-form',
     'refresh', 'cwd', 'vendor', 'model', 'sandbox', 'requisition-id', 'text', 'secret', 'checkpoints', 'checkpoint-list',
+    'checklist', 'checklist-list',
     'policy-banner', 'audit', 'audit-open', 'audit-close', 'audit-filters', 'audit-filter-session',
     'audit-filter-operator', 'audit-filter-since', 'audit-filter-until', 'audit-rows', 'audit-empty',
     'audit-load-more', 'requisitions', 'requisitions-open', 'requisitions-close', 'raise-requisition',
@@ -410,11 +411,13 @@ async function runConsole(sessions: ReadonlyArray<Record<string, unknown>>) {
     json: async () =>
       String(input).endsWith('/checkpoints')
         ? { checkpoints: [] }
-        : String(input) === '/api/sessions'
-          ? { sessions }
-          : String(input) === '/api/requisitions'
-            ? { requisitions: [] }
-            : {},
+        : String(input).endsWith('/checklist')
+          ? { items: [] }
+          : String(input) === '/api/sessions'
+            ? { sessions }
+            : String(input) === '/api/requisitions'
+              ? { requisitions: [] }
+              : {},
   });
 
   // A distinct query per load: `app.js` runs its bootstrap on import, so a cached module

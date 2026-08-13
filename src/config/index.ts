@@ -123,6 +123,7 @@ function parseChecklist(env: Readonly<Record<string, string | undefined>>): Resu
       return invalid('CHECKLIST_JSON', 'each item needs a string id and a string label');
     }
     const e = entry as { id: string; label: string };
+    if (items.some((item) => item.id === e.id)) return invalid('CHECKLIST_JSON', `duplicate item id '${e.id}'`);
     items.push({ id: e.id as ChecklistItemId, label: e.label });
   }
   return { ok: true, value: items };

@@ -126,3 +126,22 @@ describe('config — which edge binds (S11.5, D117)', () => {
     assert.equal(r.ok && r.value.edge, 'sse');
   });
 });
+
+describe('config — the onboarding checklist (S14)', () => {
+  it('defaults to an empty checklist', () => {
+    const r = loadConfig(env());
+    assert.deepEqual(r.ok && r.value.checklist, []);
+  });
+
+  it('parses a valid CHECKLIST_JSON', () => {
+    const r = loadConfig(env({ CHECKLIST_JSON: '[{"id":"welcome","label":"Read the welcome guide"}]' }));
+    assert.deepEqual(r.ok && r.value.checklist, [{ id: 'welcome', label: 'Read the welcome guide' }]);
+  });
+
+  it('refuses two items sharing an id, naming the field', () => {
+    const r = loadConfig(
+      env({ CHECKLIST_JSON: '[{"id":"welcome","label":"A"},{"id":"welcome","label":"B"}]' }),
+    );
+    assert.equal(r.ok === false && r.error.code === 'invalid_field' && r.error.field, 'CHECKLIST_JSON');
+  });
+});

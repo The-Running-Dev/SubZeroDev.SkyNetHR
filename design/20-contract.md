@@ -1511,7 +1511,7 @@ it; where two are named, the second is where a violation would first be observab
 | I2 | The ring buffer's contents are a strict suffix of the spill's, envelope for envelope, byte for byte | `store` |
 | I3 | A `tool.result` is truncated before its envelope is constructed; the envelope in the ring and the line in the spill are identical | `session-manager` |
 | I4 | At most one `Turn` per session is non-null at any time | `session-manager` |
-| I5 | A guard is claimed in the same synchronous block that tests it: no `await` sits between a check and the mutation it protects. It governs four guards — the turn slot, the workspace claim, a requisition's decision, and a requisition's consumption | `session-manager`, `records` |
+| I5 | A guard is claimed in the same synchronous block that tests it: no `await` sits between a check and the mutation it protects. It governs five guards — the turn slot, the workspace claim, a requisition's decision, a requisition's consumption, and a checklist item's completion | `session-manager`, `records` |
 | I6 | No two `live` sessions have `cwd` values where one equals, contains, or is contained by the other | `session-manager` |
 | I7 | `cwd` is a `ResolvedPath` inside a configured root, resolved exactly once at session creation and never re-resolved | `jail`, `session-manager` |
 | I8 | `state === 'ended'` implies `LiveSession.turn === null` and `endedAt !== null`; `state === 'live'` implies `endedAt === null` | `session-manager` |

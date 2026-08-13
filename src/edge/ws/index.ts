@@ -1,7 +1,7 @@
 import type { IncomingMessage, RequestListener, ServerResponse } from 'node:http';
 import type { Socket } from 'node:net';
 import { createHash } from 'node:crypto';
-import type { CallId, Envelope, SessionId, Seq, Subscription, TurnId } from '../../contract/index.js';
+import type { CallId, ChecklistItemId, Envelope, SessionId, Seq, Subscription, TurnId } from '../../contract/index.js';
 import { sendError } from '../error-envelope/index.js';
 import {
   type EdgeDeps,
@@ -166,6 +166,8 @@ export function createWsEdge(deps: EdgeDeps): WsRequestListener {
     handleCheckpointRestore,
     handleAudit,
     handleLogin,
+    handleChecklist,
+    handleTickChecklistItem,
   } = createHttpHandlers(deps);
 
   // -------------------------------------------------------------------------
@@ -407,6 +409,17 @@ export function createWsEdge(deps: EdgeDeps): WsRequestListener {
             return sendError(res, 'bad_request', 'this edge serves events over a WebSocket upgrade, not a plain GET', { field: 'upgrade' });
           }
           if (method === 'GET' && rest === '/checkpoints') return handleListCheckpoints(req, res, owner, sessionId);
+          if (method === 'GET' && rest === '/checklist') return handleChecklist(req, res, owner, sessionId);
+          const checklistTickMatch = /^\/checklist\/([^/]+)$/.exec(rest);
+          if (method === 'POST' && checklistTickMatch !== null) {
+            let decodedItemId: string;
+            try {
+              decodedItemId = decodeURIComponent(checklistTickMatch[1]!);
+            } catch {
+              return sendError(res, 'bad_request', 'itemId is not a valid path segment', { field: 'itemId' });
+            }
+            return handleTickChecklistItem(req, res, owner, sessionId, decodedItemId as ChecklistItemId);
+          }
           const toolOutputMatch = /^\/tool-output\/([^/]+)\/([^/]+)$/.exec(rest);
           if (method === 'GET' && toolOutputMatch) {
             let decodedTurnId: string;

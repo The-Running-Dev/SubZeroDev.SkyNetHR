@@ -162,6 +162,23 @@ function selectSession(sessionId) {
   openStream(sessionId);
   void refreshSessions();
   void refreshCheckpoints();
+  void refreshChecklist();
+}
+
+// Fetches `/api/sessions/:id<suffix>` for the session selected when the call was made.
+// Returns `null` when the caller must do nothing further — unauthenticated, or a faster
+// session switch already landed after this request was sent, so rendering its payload
+// would overwrite the newly-selected session's own state with a stale one. Otherwise
+// returns `{ ok, payload }`, where `ok` is whether the fetch itself succeeded — some
+// callers need to react to a failure (e.g. hide a now-untrustworthy panel) rather than
+// just no-op the same as a `null`.
+async function fetchForCurrentSession(suffix) {
+  if (state.sessionId === null) return null;
+  const requestedSessionId = state.sessionId;
+  const result = await api('GET', `/api/sessions/${encodeURIComponent(requestedSessionId)}${suffix}`);
+  if (result.status === 401) return null;
+  if (state.sessionId !== requestedSessionId) return null;
+  return { ok: result.status === 200, payload: result.payload };
 }
 
 // ---------------------------------------------------------------------------
@@ -169,17 +186,12 @@ function selectSession(sessionId) {
 // ---------------------------------------------------------------------------
 
 async function refreshCheckpoints() {
-  if (state.sessionId === null) return;
-  const requestedSessionId = state.sessionId;
-  const result = await api('GET', `/api/sessions/${encodeURIComponent(requestedSessionId)}/checkpoints`);
-  if (result.status === 401 || result.status !== 200) return;
-  // A faster response for a session switched to *after* this request was sent must not
-  // overwrite that session's own list with a stale one.
-  if (state.sessionId !== requestedSessionId) return;
+  const fetched = await fetchForCurrentSession('/checkpoints');
+  if (!fetched || !fetched.ok) return;
 
   const list = $('checkpoint-list');
   clear(list);
-  for (const checkpoint of result.payload.checkpoints) {
+  for (const checkpoint of fetched.payload.checkpoints) {
     const item = document.createElement('li');
     item.className = 'checkpoint-item';
 
@@ -204,6 +216,53 @@ async function restoreCheckpoint(sha) {
   if (result.status !== 200) return status(describe(result), 'error');
   status('restored', 'ok');
   await refreshCheckpoints();
+}
+
+// ---------------------------------------------------------------------------
+// Onboarding checklist (S14) — S14.8: an empty `items` list (no `config.checklist`
+// configured for this deployment) hides the panel rather than showing an empty one.
+// ---------------------------------------------------------------------------
+
+async function refreshChecklist() {
+  const fetched = await fetchForCurrentSession('/checklist');
+  if (!fetched) return;
+  if (!fetched.ok) {
+    // A failed refetch must not leave the previous session's rows (and their Tick
+    // handlers, bound to that session's item ids) on screen under the session now
+    // selected — hide the stale panel rather than trust it.
+    $('checklist').hidden = true;
+    clear($('checklist-list'));
+    return;
+  }
+
+  const items = fetched.payload.items;
+  $('checklist').hidden = items.length === 0;
+  const list = $('checklist-list');
+  clear(list);
+  for (const item of items) {
+    const li = document.createElement('li');
+    li.className = item.completedBy ? 'checklist-item checklist-item--done' : 'checklist-item';
+    li.appendChild(text('span', 'checklist-item__label', item.label));
+    if (item.completedBy) {
+      li.appendChild(text('span', 'checklist-item__done', `done — ${item.completedBy}`));
+    } else {
+      const button = document.createElement('button');
+      button.className = 'button button--quiet';
+      button.type = 'button';
+      button.textContent = 'Tick';
+      button.addEventListener('click', () => void tickChecklistItem(item.id));
+      li.appendChild(button);
+    }
+    list.appendChild(li);
+  }
+}
+
+async function tickChecklistItem(itemId) {
+  if (state.sessionId === null) return;
+  const result = await api('POST', `/api/sessions/${encodeURIComponent(state.sessionId)}/checklist/${encodeURIComponent(itemId)}`, {});
+  if (result.status === 401) return;
+  if (result.status !== 200) return status(describe(result), 'error');
+  await refreshChecklist();
 }
 
 // A `replay_gap` says the server could not serve the history this connection asked for, so
@@ -258,6 +317,11 @@ function handleEnvelope(sessionId, envelope) {
     // came from this client's own turn or a restore issued elsewhere.
     void refreshCheckpoints();
   }
+  if (envelope.kind === 'checklist.item.completed' && envelope.sessionId === state.sessionId) {
+    // Shows up for anyone else watching the same session (S14, brief item 10) — not just
+    // the operator who ticked it.
+    void refreshChecklist();
+  }
   if (envelope.kind === 'permission.resolved') {
     const controls = state.pendingPermissions.get(envelope.data.requestId);
     if (controls) {
@@ -300,7 +364,7 @@ function openSseStream(sessionId) {
     'session.started', 'session.ended', 'session.notice',
     'turn.started', 'turn.ended',
     'message', 'thinking', 'tool.call', 'tool.result',
-    'permission.request', 'permission.resolved', 'checkpoint.created', 'error',
+    'permission.request', 'permission.resolved', 'checkpoint.created', 'checklist.item.completed', 'error',
   ]) {
     stream.addEventListener(kind, (event) => {
       let envelope;
