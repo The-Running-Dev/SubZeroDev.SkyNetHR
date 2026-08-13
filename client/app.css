@@ -2,27 +2,35 @@
  * S2.14 / D58 — the token layer.
  *
  * Every colour, spacing, radius and type value this console renders with is declared once,
- * here, as a custom property. No rule below the token block carries a literal. S18 adds
- * three more palettes and the switcher over the top of this; that is only cheap if nothing
- * downstream has to be found and rewritten first, which is why the layer ships now and the
- * palettes ship later.
+ * here, as a custom property. No rule below the token block carries a literal.
+ *
+ * S18 / D78 — four visual systems. Each is a full block of the same custom properties,
+ * selected by `data-theme` on the root element (set by `theme.js`, before first paint —
+ * S18.4). No block inherits from another and no block is partial: a theme that only
+ * overrode what differed from a "base" would make the base a fifth, undeclared theme.
+ * Layout tokens that are not part of any theme's visual identity — the spacing scale, type
+ * sizes, line-height, border width, sidebar width — are repeated identically across all
+ * four rather than factored out, for the same reason: one shared `:root` block would be a
+ * style rule outside every `data-theme` selector, which is exactly the drift this shape
+ * exists to make impossible to introduce by accident.
  */
 
-:root {
-  --ink: rgb(232 234 237);
-  --ink-dim: rgb(154 160 166);
-  --ink-faint: rgb(114 120 126);
-  --surface: rgb(20 22 25);
-  --surface-raised: rgb(28 31 35);
-  --surface-sunken: rgb(15 16 19);
-  --line: rgb(48 52 58);
-  --accent: rgb(122 162 247);
-  --accent-ink: rgb(16 18 22);
-  --ok: rgb(126 200 148);
-  --warn: rgb(224 184 112);
-  --danger: rgb(232 130 130);
-  --agent: rgb(158 206 255);
-  --thinking: rgb(150 140 200);
+/* A — Sterile enterprise HR */
+:root[data-theme="A"] {
+  --ink: #16181a;
+  --ink-dim: #6b6f73;
+  --ink-faint: #8a8e92;
+  --surface: #f2f0eb;
+  --surface-raised: #ffffff;
+  --surface-sunken: #faf9f6;
+  --line: #dcd8d0;
+  --accent: #1f4b47;
+  --accent-ink: #ffffff;
+  --ok: #2e7d4f;
+  --warn: #b67a16;
+  --danger: #b3271e;
+  --agent: #4f8f86;
+  --thinking: #8a7a9e;
 
   --space-0: 0;
   --space-1: 0.25rem;
@@ -32,8 +40,8 @@
   --space-5: 1.5rem;
   --space-6: 2rem;
 
-  --radius-1: 0.25rem;
-  --radius-2: 0.5rem;
+  --radius-1: 3px;
+  --radius-2: 4px;
 
   --text-xs: 0.75rem;
   --text-sm: 0.875rem;
@@ -43,7 +51,133 @@
   --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   --font-mono: ui-monospace, "Cascadia Code", "Source Code Pro", Menlo, monospace;
 
-  --shadow-1: 0 1px 2px rgb(0 0 0 / 0.4);
+  --shadow-1: none;
+  --border-width: 1px;
+  --sidebar-width: 20rem;
+  --line-height: 1.5;
+}
+
+/* B — Black-ops terminal */
+:root[data-theme="B"] {
+  --ink: #d9ffe4;
+  --ink-dim: #9ad0a6;
+  --ink-faint: #5f9c72;
+  --surface: #0b0e0c;
+  --surface-raised: #0f1412;
+  --surface-sunken: #070908;
+  --line: #1d2620;
+  --accent: #8fe3a8;
+  --accent-ink: #070908;
+  --ok: #6bd98f;
+  --warn: #e8b857;
+  --danger: #e8524a;
+  --agent: #7fd1e8;
+  --thinking: #b9a8e0;
+
+  --space-0: 0;
+  --space-1: 0.25rem;
+  --space-2: 0.5rem;
+  --space-3: 0.75rem;
+  --space-4: 1rem;
+  --space-5: 1.5rem;
+  --space-6: 2rem;
+
+  --radius-1: 2px;
+  --radius-2: 2px;
+
+  --text-xs: 0.75rem;
+  --text-sm: 0.875rem;
+  --text-md: 1rem;
+  --text-lg: 1.25rem;
+
+  --font-sans: ui-monospace, "Cascadia Code", "Source Code Pro", Menlo, monospace;
+  --font-mono: ui-monospace, "Cascadia Code", "Source Code Pro", Menlo, monospace;
+
+  --shadow-1: none;
+  --border-width: 1px;
+  --sidebar-width: 20rem;
+  --line-height: 1.5;
+}
+
+/* C — 1980s corporate memo */
+:root[data-theme="C"] {
+  --ink: #332c1c;
+  --ink-dim: #7a6d50;
+  --ink-faint: #8c7f60;
+  --surface: #f7f1df;
+  --surface-raised: #fffdf3;
+  --surface-sunken: #ede4c9;
+  --line: #d3c7a4;
+  --accent: #4a5d3a;
+  --accent-ink: #fffdf3;
+  --ok: #4a5d3a;
+  --warn: #8a6a18;
+  --danger: #a3251c;
+  --agent: #5b7a9a;
+  --thinking: #7a6152;
+
+  --space-0: 0;
+  --space-1: 0.25rem;
+  --space-2: 0.5rem;
+  --space-3: 0.75rem;
+  --space-4: 1rem;
+  --space-5: 1.5rem;
+  --space-6: 2rem;
+
+  --radius-1: 1px;
+  --radius-2: 2px;
+
+  --text-xs: 0.75rem;
+  --text-sm: 0.875rem;
+  --text-md: 1rem;
+  --text-lg: 1.25rem;
+
+  --font-sans: ui-serif, Georgia, "Times New Roman", serif;
+  --font-mono: ui-monospace, "Cascadia Code", "Source Code Pro", Menlo, monospace;
+
+  --shadow-1: 2px 3px 0 rgb(0 0 0 / 0.06);
+  --border-width: 1px;
+  --sidebar-width: 20rem;
+  --line-height: 1.5;
+}
+
+/* D — Modern SaaS, sinister copy */
+:root[data-theme="D"] {
+  --ink: #17172b;
+  --ink-dim: #7a7a8c;
+  --ink-faint: #9a9aac;
+  --surface: #fbfbfe;
+  --surface-raised: #ffffff;
+  --surface-sunken: #f3f3f8;
+  --line: #eaeaf2;
+  --accent: #6c5ce7;
+  --accent-ink: #ffffff;
+  --ok: #16a34a;
+  --warn: #c2860b;
+  --danger: #e5484d;
+  --agent: #5aa9e6;
+  --thinking: #8f7ee0;
+
+  --space-0: 0;
+  --space-1: 0.25rem;
+  --space-2: 0.5rem;
+  --space-3: 0.75rem;
+  --space-4: 1rem;
+  --space-5: 1.5rem;
+  --space-6: 2rem;
+
+  --radius-1: 10px;
+  --radius-2: 14px;
+
+  --text-xs: 0.75rem;
+  --text-sm: 0.875rem;
+  --text-md: 1rem;
+  --text-lg: 1.25rem;
+
+  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-mono: ui-monospace, "Cascadia Code", "Source Code Pro", Menlo, monospace;
+
+  --shadow-1: 0 3px 14px rgb(20 20 45 / 0.06);
   --border-width: 1px;
   --sidebar-width: 20rem;
   --line-height: 1.5;
@@ -93,6 +227,31 @@ body {
 .status__text--warn { color: var(--warn); }
 .status__text--error { color: var(--danger); }
 .status__text--info { color: var(--ink-dim); }
+
+/* S18.6/D79 — the status badge: a projection over `state`, the live turn and outstanding
+   permission requests, never a stored field. */
+.status-badge {
+  padding: var(--space-1) var(--space-2);
+  border-radius: var(--radius-1);
+  border: var(--border-width) solid var(--line);
+  font-size: var(--text-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+/* Colour comes from `.status__text--*` (above) wherever a tone already exists there — app.js
+   pairs `.status-badge--blocked`/`--on-shift` with `.status__text--error`/`--ok`, and IDLE
+   with `.status__text--info`, so only the border-colour and the one tone with no existing
+   match are declared here. */
+.status-badge--clocked-out { color: var(--ink-faint); }
+.status-badge--blocked { border-color: var(--danger); }
+.status-badge--on-shift { border-color: var(--ok); }
+
+.field--inline {
+  flex-direction: row;
+  align-items: center;
+  gap: var(--space-2);
+}
 
 /* ------------------------------------------------------------------ layout */
 
@@ -585,11 +744,20 @@ body {
   position: fixed;
   inset: 0;
   z-index: 10;
+  background: var(--surface);
+}
+
+/* An author-stylesheet `display` on the `[hidden]` element itself always beats the
+   browser's UA `[hidden] { display: none }` (same specificity, author origin wins) —
+   the same gotcha `.reviews:not([hidden])` above already guards against. Discovered here
+   by S18's screenshot pass: `#audit` and `#requisitions` shared this class and rendered
+   over the console on load despite `hidden`, before this slice's `#terminate` became a
+   third consumer and made it visible. */
+.panel--audit:not([hidden]) {
   display: flex;
   flex-direction: column;
   gap: var(--space-3);
   overflow-y: auto;
-  background: var(--surface);
 }
 
 .audit__header {

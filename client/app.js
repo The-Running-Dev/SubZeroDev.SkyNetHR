@@ -1,4 +1,4 @@
-import { createIncidentGroupsBuilder, renderAuditRow, renderEvent, renderPayrollSummary, renderRequisitionRow, renderReviewRow } from './render.js';
+import { createIncidentGroupsBuilder, renderAuditRow, renderEvent, renderPayrollSummary, renderRequisitionRow, renderReviewRow, renderSummaryRow } from './render.js';
 
 const $ = (id) => document.getElementById(id);
 
@@ -41,6 +41,11 @@ const state = {
   // there is no "list my drafts" route to recover it from, and none is needed — losing the
   // id after a reload just means starting a new draft.
   reviewDraftId: null,
+  // S18.6/D79: whether the selected session has a running turn right now. Not a server
+  // field — reconstructed from `turn.started`/`turn.ended` on this session's own stream,
+  // the only place this client can observe it. Reset on every `openStream` so a reconnect
+  // rebuilds it from the replay rather than carrying a stale guess forward.
+  turnLive: false,
 };
 
 function currentSession() {
@@ -82,6 +87,50 @@ function applyPolicyBanner(bannerOverride) {
   bar.hidden = false;
   clear(bar);
   bar.appendChild(text('span', 'policy-banner__text', banner));
+}
+
+// ---------------------------------------------------------------------------
+// S18.6/D79 — the status badge. A projection over `state`, the live turn (tracked from this
+// session's own stream, above) and outstanding permission requests (`state.pendingPermissions`,
+// S4/S9) — never a stored field, and never fetched. `ON PIP` (S18.7/D72) is a separate badge,
+// derived in `refreshReviews` from the review fold, and can appear alongside any of these four.
+// ---------------------------------------------------------------------------
+
+// One table from state to { label, class } rather than two functions that have to agree on
+// four magic strings by hand — a relabel here can't drift the class it renders with. The
+// class reuses `.status__text--*`'s tone colours (`ok`/`error`/`info`) rather than
+// redeclaring them; only the border-colour and the one tone with no existing match
+// (`--ink-faint`, CLOCKED OUT) are `.status-badge`'s own in app.css.
+const STATUS_BADGE_STATES = {
+  clockedOut: { label: 'CLOCKED OUT', cls: 'status-badge status-badge--clocked-out' },
+  blocked: { label: 'BLOCKED', cls: 'status-badge status-badge--blocked status__text--error' },
+  onShift: { label: 'ON SHIFT', cls: 'status-badge status-badge--on-shift status__text--ok' },
+  idle: { label: 'IDLE', cls: 'status-badge status__text--info' },
+};
+
+function statusBadgeState() {
+  const session = currentSession();
+  if (session === null) return null;
+  if (session.state === 'ended') return STATUS_BADGE_STATES.clockedOut;
+  if (state.pendingPermissions.size > 0) return STATUS_BADGE_STATES.blocked;
+  if (state.turnLive) return STATUS_BADGE_STATES.onShift;
+  return STATUS_BADGE_STATES.idle;
+}
+
+function applyStatusBadge() {
+  const badge = $('status-badge');
+  const next = statusBadgeState();
+  if (next === null) {
+    badge.hidden = true;
+    return;
+  }
+  // Selecting a session calls this both from `openStream` and from the `refreshSessions`
+  // that follows it, with nothing in between able to change the answer — skip the write
+  // when nothing actually changed rather than re-render the identical badge twice.
+  if (badge.hidden === false && badge.className === next.cls && badge.textContent === next.label) return;
+  badge.hidden = false;
+  badge.className = next.cls;
+  badge.textContent = next.label;
 }
 
 function text(tag, className, value) {
@@ -165,6 +214,8 @@ async function refreshSessions() {
   // withdraw the compose box.
   applySessionAvailability();
   applyPolicyBanner();
+  applyStatusBadge();
+  $('terminate-open').hidden = state.sessionId === null;
 }
 
 function selectSession(sessionId) {
@@ -174,6 +225,7 @@ function selectSession(sessionId) {
   applyPolicyBanner();
   $('checkpoints').hidden = false;
   $('reviews').hidden = false;
+  $('terminate-open').hidden = false;
   resetReviewForm();
   openStream(sessionId);
   void refreshSessions();
@@ -325,7 +377,14 @@ function handleReplayGap() {
 function handleEnvelope(sessionId, envelope) {
   const handlers = {
     onAnswerPermission: answerPermission,
-    onRequestRendered: (requestId, controls) => state.pendingPermissions.set(requestId, controls),
+    onRequestRendered: (requestId, controls) => {
+      // Guarded the same way `turn.started`/`turn.ended` below are: a stream torn down by
+      // `openStream` (a session switch) can still have an event in flight, and that event
+      // must not repopulate the fresh `pendingPermissions` map `openStream` just reset.
+      if (envelope.sessionId !== state.sessionId) return;
+      state.pendingPermissions.set(requestId, controls);
+      applyStatusBadge();
+    },
     // S9.2: the download link on a truncated `tool.result` — not part of the wire
     // vocabulary any event carries, so it comes from this stream's own session rather
     // than the envelope.
@@ -349,6 +408,15 @@ function handleEnvelope(sessionId, envelope) {
     const session = currentSession();
     if (session !== null) state.sessionsById.set(state.sessionId, { ...session, state: 'ended' });
     applySessionAvailability();
+    applyStatusBadge();
+  }
+  if (envelope.kind === 'turn.started' && envelope.sessionId === state.sessionId) {
+    state.turnLive = true;
+    applyStatusBadge();
+  }
+  if (envelope.kind === 'turn.ended' && envelope.sessionId === state.sessionId) {
+    state.turnLive = false;
+    applyStatusBadge();
   }
   if (envelope.kind === 'checkpoint.created') {
     // A new checkpoint invalidates the list this session already fetched, whether it
@@ -376,6 +444,7 @@ function handleEnvelope(sessionId, envelope) {
       const who = envelope.data.operator ? envelope.data.operator : `server (${envelope.data.reason})`;
       controls.setResolved(`${envelope.data.decision} — ${who}`);
       state.pendingPermissions.delete(envelope.data.requestId);
+      applyStatusBadge();
       state.lastSeq = envelope.seq;
       return;
     }
@@ -481,7 +550,9 @@ function openStream(sessionId) {
   if (state.stream) state.stream.close();
   state.lastSeq = 0;
   state.pendingPermissions = new Map();
+  state.turnLive = false;
   clear($('transcript'));
+  applyStatusBadge();
 
   if (activeEdge() === 'ws') openWsStream(sessionId);
   else openSseStream(sessionId);
@@ -816,6 +887,90 @@ function closeRequisitions() {
 }
 
 // ---------------------------------------------------------------------------
+// S18.1/D78 — the theme switcher. Sets the attribute `theme.js` already set before first
+// paint; writes the choice to the same browser-storage key so it survives a reload
+// (D60/S18.3 — this value never reaches the server, and switching issues no request and
+// changes no markup, S18.2). `theme.js` cannot share this constant: it must stay a classic
+// script and this file is a module, so the four-letter list is duplicated, not imported.
+// ---------------------------------------------------------------------------
+
+const THEME_STORAGE_KEY = 'skynet-hr-theme';
+const THEMES = ['A', 'B', 'C', 'D'];
+
+function applyTheme(themeId) {
+  document.documentElement.setAttribute('data-theme', themeId);
+  try {
+    localStorage.setItem(THEME_STORAGE_KEY, themeId);
+  } catch {
+    // A storage failure still lets the switch take effect for the rest of this load;
+    // it just will not survive a reload.
+  }
+}
+
+function initTheme() {
+  const select = $('theme-select');
+  const current = document.documentElement.getAttribute('data-theme');
+  select.value = THEMES.includes(current) ? current : 'B';
+  select.addEventListener('change', () => applyTheme(select.value));
+}
+
+// ---------------------------------------------------------------------------
+// S18.9/D56 — the termination screen: presentation over `DELETE /api/sessions/:id` and the
+// session state `GET /api/sessions` already returns. No field, route or stored value is
+// introduced. Severance, a context purge, session duplication and a transcript of the
+// departure conversation are all cut (D56/S18.10) — there is nothing here for any of them.
+// ---------------------------------------------------------------------------
+
+function openTerminate() {
+  const session = currentSession();
+  if (session === null) return;
+  const dl = $('terminate-summary');
+  clear(dl);
+  renderSummaryRow(document, dl, 'Session', session.id);
+  renderSummaryRow(document, dl, 'Owner', session.owner);
+  renderSummaryRow(document, dl, 'Agent', session.model ? `${session.vendor} · ${session.model}` : session.vendor);
+  renderSummaryRow(document, dl, 'Folder', session.cwd);
+  renderSummaryRow(document, dl, 'Status', session.state);
+  const ended = session.state === 'ended';
+  $('terminate-ended').hidden = !ended;
+  $('terminate-confirm').hidden = ended;
+  $('terminate').hidden = false;
+}
+
+function closeTerminate() {
+  $('terminate').hidden = true;
+}
+
+async function confirmTerminate() {
+  if (state.sessionId === null) return;
+  const result = await api('DELETE', `/api/sessions/${encodeURIComponent(state.sessionId)}`);
+  if (result.status === 401) return;
+  if (result.status !== 200) return status(describe(result), 'error');
+  status('employment terminated', 'ok');
+  closeTerminate();
+  // DELETE actually removes the session — a subsequent GET 404s — so `refreshSessions`
+  // below will no longer find it in `sessionsById`. Every piece of chrome that reads
+  // `currentSession()`/`state.sessionId` has to go back to the same "nothing selected"
+  // state a fresh page load starts in, not stay pointed at an id nothing on the server
+  // answers to any more (`applySessionAvailability`'s `ended` check is false for a session
+  // that no longer exists, not true, so left alone it would re-enable the compose box).
+  if (state.stream) state.stream.close();
+  state.stream = null;
+  state.sessionId = null;
+  state.lastSeq = 0;
+  state.pendingPermissions = new Map();
+  state.turnLive = false;
+  clear($('transcript'));
+  resetReviewForm();
+  $('compose').hidden = true;
+  $('checkpoints').hidden = true;
+  $('checklist').hidden = true;
+  $('payroll').hidden = true;
+  $('reviews').hidden = true;
+  await refreshSessions();
+}
+
+// ---------------------------------------------------------------------------
 // The shared-secret exchange. In the header-trust modes the proxy has already
 // authenticated the operator and this panel is never shown.
 // ---------------------------------------------------------------------------
@@ -826,6 +981,7 @@ function showLogin() {
   // The audit panel is a fixed full-viewport overlay independent of `#console` (S12.7) —
   // left open, it paints above `#login` and hides the very form this function exists to show.
   $('audit').hidden = true;
+  $('terminate').hidden = true;
 }
 
 async function submitLogin(event) {
@@ -852,6 +1008,10 @@ function start() {
   $('raise-requisition').addEventListener('submit', raiseRequisition);
   $('review-form').addEventListener('submit', saveReviewDraft);
   $('review-publish').addEventListener('click', () => void publishReview());
+  $('terminate-open').addEventListener('click', openTerminate);
+  $('terminate-close').addEventListener('click', closeTerminate);
+  $('terminate-confirm').addEventListener('click', () => void confirmTerminate());
+  initTheme();
   void refreshSessions();
   void refreshRequisitionOptions();
 }

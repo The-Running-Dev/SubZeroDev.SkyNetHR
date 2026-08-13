@@ -447,12 +447,17 @@ describe('S16 — the payroll panel renders burn, remaining budget, idle time, a
   });
 });
 
+// S18.1/D78: the token layer is four blocks, one per theme, each selected by
+// `:root[data-theme="X"]` rather than a bare `:root` — this regex is the one place both
+// S2.14 and S18's tests read the shape from, so it stays a single source between them.
+const ROOT_BLOCK = /:root(?:\[data-theme="[A-Z]"\])?\s*\{[\s\S]*?\}/g;
+
 describe('S2.14 — every rendered value is a CSS custom property', () => {
   it('declares its tokens in one stylesheet and uses literal colours nowhere else', async () => {
     const css = await readFile(path.join(CLIENT, 'app.css'), 'utf8');
 
     // The custom-property declarations are the one place a literal may appear.
-    const declarationBlocks = [...css.matchAll(/:root\s*\{[\s\S]*?\}/g)].map((m) => m[0]);
+    const declarationBlocks = [...css.matchAll(ROOT_BLOCK)].map((m) => m[0]);
     assert.ok(declarationBlocks.length >= 1, 'there is a :root token block');
     let rest = css;
     for (const block of declarationBlocks) rest = rest.replace(block, '');
@@ -473,7 +478,7 @@ describe('S2.14 — every rendered value is a CSS custom property', () => {
   it('sets every colour, spacing, radius and font-size declaration from a var()', async () => {
     const css = await readFile(path.join(CLIENT, 'app.css'), 'utf8');
     let rest = css;
-    for (const block of [...css.matchAll(/:root\s*\{[\s\S]*?\}/g)].map((m) => m[0])) rest = rest.replace(block, '');
+    for (const block of [...css.matchAll(ROOT_BLOCK)].map((m) => m[0])) rest = rest.replace(block, '');
 
     const properties = /(^|[;{]\s*)(color|background|background-color|border-color|border-radius|padding|margin|gap|font-size|font-family|box-shadow)\s*:\s*([^;}]+)/gi;
     let match: RegExpExecArray | null;
@@ -571,22 +576,48 @@ async function runConsole(sessions: ReadonlyArray<Record<string, unknown>>) {
     'requisition-rows', 'requisitions-empty',
     'reviews', 'review-rows', 'reviews-empty', 'pip-badge', 'review-form', 'review-rating',
     'review-pip', 'review-body', 'review-save', 'review-publish',
+    'status-badge', 'theme-select', 'terminate-open', 'terminate', 'terminate-close',
+    'terminate-summary', 'terminate-ended', 'terminate-confirm',
   ]) {
     byId.set(id, fakeEl('div'));
   }
+  // `theme-select` is read and written as a `<select>` (`.value`) by `app.js`'s theme
+  // switcher — `fakeEl` already carries a plain `value` field, so nothing more is needed.
   const streams: FakeStream[] = [];
   const fetchCalls: string[] = [];
+  const fetchMethods: string[] = [];
 
   const globals = globalThis as unknown as Record<string, unknown>;
-  const saved = { document: globals['document'], EventSource: globals['EventSource'], fetch: globals['fetch'] };
+  const saved = {
+    document: globals['document'],
+    EventSource: globals['EventSource'],
+    fetch: globals['fetch'],
+    localStorage: globals['localStorage'],
+  };
 
+  // S18.1/S18.4: `documentElement` is what `theme.js` (before this module even loads, in
+  // the real page) and `app.js`'s theme switcher both set `data-theme` on.
+  const rootAttrs = new Map<string, string>();
+  const documentElement = {
+    getAttribute: (k: string) => (rootAttrs.has(k) ? rootAttrs.get(k)! : null),
+    setAttribute: (k: string, v: string) => { rootAttrs.set(k, String(v)); },
+  };
   globals['document'] = {
+    documentElement,
     getElementById: (id: string) => byId.get(id) ?? null,
     createElement: (tag: string) => fakeEl(tag),
     // No `<meta name="skynet-edge">` in this fake document: `activeEdge()` reads that as
     // the SSE edge (S11.5's default), which is what every test here except S11's own
     // exercises.
     querySelector: () => null,
+  };
+  // S18.3: a plain in-memory stand-in for the browser storage the theme choice is read
+  // from and written to — never fetched, never posted.
+  const storageMap = new Map<string, string>();
+  globals['localStorage'] = {
+    getItem: (k: string) => (storageMap.has(k) ? storageMap.get(k)! : null),
+    setItem: (k: string, v: string) => { storageMap.set(k, String(v)); },
+    removeItem: (k: string) => { storageMap.delete(k); },
   };
   globals['EventSource'] = class {
     url: string;
@@ -605,8 +636,9 @@ async function runConsole(sessions: ReadonlyArray<Record<string, unknown>>) {
     }
     close(): void { this.closed = true; }
   };
-  globals['fetch'] = async (input: string) => {
+  globals['fetch'] = async (input: string, options?: { method?: string }) => {
     fetchCalls.push(String(input));
+    fetchMethods.push(options?.method ?? 'GET');
     return {
     status: 200,
     json: async () =>
@@ -639,8 +671,9 @@ async function runConsole(sessions: ReadonlyArray<Record<string, unknown>>) {
     globals['document'] = saved.document;
     globals['EventSource'] = saved.EventSource;
     globals['fetch'] = saved.fetch;
+    globals['localStorage'] = saved.localStorage;
   };
-  return { byId, streams, restore, fetchCalls };
+  return { byId, streams, restore, fetchCalls, fetchMethods, documentElement, storageMap };
 }
 
 function deliver(stream: FakeStream, envelope: Record<string, unknown>): void {
@@ -733,6 +766,335 @@ describe('S7.2 — an ended session offers no compose box', () => {
       assert.equal(byId.get('compose')!.hidden, true, 'the box goes at the event, not at the next refresh');
       // The event is still drawn: the status bar is transient, the transcript is the record.
       assert.equal(byId.get('transcript')!.children.length, 1);
+    } finally {
+      await restore();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// S18 — Four visual systems, and the badges over them.
+// ---------------------------------------------------------------------------
+
+function allFakeText(node: FakeEl): string[] {
+  const out: string[] = [];
+  if (node.textContent !== null) out.push(node.textContent);
+  for (const c of node.children) out.push(...allFakeText(c));
+  return out;
+}
+
+async function loadThemeBootstrap(storage: { getItem(key: string): string | null }) {
+  const rootAttrs = new Map<string, string>();
+  const globals = globalThis as unknown as Record<string, unknown>;
+  const saved = { document: globals['document'], localStorage: globals['localStorage'] };
+  globals['document'] = {
+    documentElement: {
+      setAttribute: (k: string, v: string) => rootAttrs.set(k, String(v)),
+      getAttribute: (k: string) => rootAttrs.get(k) ?? null,
+    },
+  };
+  globals['localStorage'] = storage;
+  try {
+    // A distinct query per load: the script runs its IIFE on import, so a cached module
+    // would set the attribute once and never again.
+    await import(`${pathToFileURL(path.join(CLIENT, 'theme.js')).href}?t=${Math.random()}`);
+  } finally {
+    globals['document'] = saved.document;
+    globals['localStorage'] = saved.localStorage;
+  }
+  return rootAttrs.get('data-theme') ?? null;
+}
+
+describe('S18.4 — theme.js sets data-theme before anything else runs', () => {
+  it('defaults to B when nothing is stored', async () => {
+    const attr = await loadThemeBootstrap({ getItem: () => null });
+    assert.equal(attr, 'B');
+  });
+
+  it('uses a validly stored theme', async () => {
+    const attr = await loadThemeBootstrap({ getItem: () => 'C' });
+    assert.equal(attr, 'C');
+  });
+
+  it('falls back to the default on an invalid stored value, rather than leaving the document unthemed', async () => {
+    const attr = await loadThemeBootstrap({ getItem: () => 'not-a-theme' });
+    assert.equal(attr, 'B');
+  });
+
+  it('falls back to the default when storage itself throws (private browsing, quota)', async () => {
+    const attr = await loadThemeBootstrap({
+      getItem: () => {
+        throw new Error('storage disabled');
+      },
+    });
+    assert.equal(attr, 'B');
+  });
+
+  it('is a classic external script, loaded ahead of the stylesheet, so it blocks parsing until it runs', async () => {
+    const html = await readFile(path.join(CLIENT, 'index.html'), 'utf8');
+    const themeScript = html.match(/<script[^>]*src="\/theme\.js"[^>]*>/);
+    assert.ok(themeScript, 'theme.js is loaded by a <script src="/theme.js"> tag');
+    assert.doesNotMatch(themeScript![0], /type="module"/, 'a module script defers to after parsing — too late to avoid a flash of the unthemed document');
+    assert.doesNotMatch(themeScript![0], /\b(defer|async)\b/, 'a deferred or async script is not guaranteed to run before first paint');
+    const stylesheetIndex = html.indexOf('<link rel="stylesheet"');
+    assert.ok(html.indexOf(themeScript![0]) < stylesheetIndex, 'theme.js is ordered ahead of the stylesheet link');
+  });
+
+  it('agrees with app.js on the storage key, the theme list and the default — the two copies this classic-script/module split forces', async () => {
+    // theme.js can't be `import`ed by app.js (classic script vs. module), so the storage
+    // key, theme list and default are hand-duplicated rather than shared — this is the
+    // regression test for that duplication staying in sync, since nothing else does.
+    const themeJs = await readFile(path.join(CLIENT, 'theme.js'), 'utf8');
+    const appJs = await readFile(path.join(CLIENT, 'app.js'), 'utf8');
+
+    const themeJsKey = themeJs.match(/var KEY = '([^']+)'/);
+    const appJsKey = appJs.match(/const THEME_STORAGE_KEY = '([^']+)'/);
+    assert.ok(themeJsKey && appJsKey, 'both files declare their storage key as expected');
+    assert.equal(appJsKey![1], themeJsKey![1], 'app.js and theme.js use the same storage key');
+
+    const themeJsList = themeJs.match(/var THEMES = (\[[^\]]+\])/);
+    const appJsList = appJs.match(/const THEMES = (\[[^\]]+\])/);
+    assert.ok(themeJsList && appJsList, 'both files declare a THEMES array as expected');
+    assert.equal(appJsList![1], themeJsList![1], 'app.js and theme.js list the same themes in the same order');
+
+    const themeJsDefault = themeJs.match(/var DEFAULT = '([^']+)'/);
+    const appJsDefault = appJs.match(/select\.value = THEMES\.includes\(current\) \? current : '([^']+)'/);
+    assert.ok(themeJsDefault && appJsDefault, 'both files fall back to a default theme as expected');
+    assert.equal(appJsDefault![1], themeJsDefault![1], 'app.js\'s theme-select fallback matches theme.js\'s pre-paint default');
+  });
+});
+
+describe('S18.1 — the four themes are one stylesheet, blocks selected by data-theme', () => {
+  it('declares exactly four :root[data-theme] blocks, for A, B, C and D, and no bare :root', async () => {
+    const css = await readFile(path.join(CLIENT, 'app.css'), 'utf8');
+    assert.doesNotMatch(css, /:root\s*\{/, 'a bare :root would apply outside every theme selector — the drift this shape exists to forbid');
+    for (const id of ['A', 'B', 'C', 'D']) {
+      assert.match(css, new RegExp(`:root\\[data-theme="${id}"\\]\\s*\\{`), `theme ${id} is declared`);
+    }
+    assert.equal([...css.matchAll(/:root\[data-theme="/g)].length, 4, 'exactly four theme blocks');
+  });
+
+  it('declares the same set of custom property names in every theme block, so no theme is missing a token another one has', async () => {
+    const css = await readFile(path.join(CLIENT, 'app.css'), 'utf8');
+    const blocks = [...css.matchAll(/:root\[data-theme="([A-Z])"\]\s*\{([\s\S]*?)\}/g)];
+    assert.equal(blocks.length, 4);
+    const namesByTheme = blocks.map((m) => [...m[2]!.matchAll(/(--[a-z0-9-]+)\s*:/g)].map((p) => p[1]!).sort());
+    for (let i = 1; i < namesByTheme.length; i++) {
+      assert.deepEqual(namesByTheme[i], namesByTheme[0], `theme ${blocks[i]![1]} declares the same tokens as theme ${blocks[0]![1]}`);
+    }
+    assert.ok(namesByTheme[0]!.length >= 10, 'the block actually declares a non-trivial number of tokens');
+  });
+
+  it('gives the shared layout tokens — spacing, type sizes, line-height, border width, sidebar width — the same value in every theme block, not just the same name', async () => {
+    // The previous test only compares property *names*; app.css's own comment claims the
+    // four-block shape makes drift on these specific tokens "impossible to introduce by
+    // accident" — that claim is only true if their values are actually checked, since they
+    // carry no part of any theme's visual identity and have no reason to differ.
+    const css = await readFile(path.join(CLIENT, 'app.css'), 'utf8');
+    const blocks = [...css.matchAll(/:root\[data-theme="([A-Z])"\]\s*\{([\s\S]*?)\}/g)];
+    assert.equal(blocks.length, 4);
+    const SHARED = [
+      '--space-0', '--space-1', '--space-2', '--space-3', '--space-4', '--space-5', '--space-6',
+      '--text-xs', '--text-sm', '--text-md', '--text-lg',
+      '--border-width', '--sidebar-width', '--line-height',
+    ];
+    function valueOf(block: string, name: string): string {
+      const match = block.match(new RegExp(`${name}\\s*:\\s*([^;]+);`));
+      assert.ok(match, `${name} is declared in the block`);
+      return match![1]!.trim();
+    }
+    const valuesByTheme = blocks.map((m) => Object.fromEntries(SHARED.map((name) => [name, valueOf(m[2]!, name)])));
+    for (let i = 1; i < valuesByTheme.length; i++) {
+      assert.deepEqual(valuesByTheme[i], valuesByTheme[0], `theme ${blocks[i]![1]} gives the shared layout tokens the same values as theme ${blocks[0]![1]}`);
+    }
+  });
+
+  it('carries no <style> and no inline style, and no CSS is generated in the client sources (already covered by S2.12, restated over the new files)', async () => {
+    for (const { name, text: src } of await clientSources()) {
+      if (!name.endsWith('.js')) continue;
+      assert.doesNotMatch(src, /\.style\s*=/, `${name} sets an inline style property, generating style text at runtime`);
+      assert.doesNotMatch(src, /<style/i, `${name} assembles a <style> block`);
+    }
+  });
+});
+
+describe('S18.2/S18.3 — switching issues no request, changes no markup, and never reaches the server', () => {
+  it('changing the select sets the attribute and storage with zero fetch calls, and the DOM is untouched', async () => {
+    const { byId, restore, fetchCalls, documentElement, storageMap } = await runConsole([]);
+    try {
+      const before = fetchCalls.length;
+      const domBefore = JSON.stringify(byId.get('console'));
+      const select = byId.get('theme-select')!;
+      select.value = 'D';
+      for (const fn of select.listeners.get('change') ?? []) fn({});
+
+      assert.equal(documentElement.getAttribute('data-theme'), 'D');
+      assert.equal(storageMap.get('skynet-hr-theme'), 'D');
+      assert.equal(fetchCalls.length, before, 'switching issued no request');
+      assert.equal(JSON.stringify(byId.get('console')), domBefore, 'switching changed no markup');
+    } finally {
+      await restore();
+    }
+  });
+
+  it('the storage key never appears anywhere in the server sources', async () => {
+    const roots = ['src', 'harness'];
+    let found: string | null = null;
+    for (const root of roots) {
+      const base = path.join(process.cwd(), root);
+      let entries: string[];
+      try {
+        entries = await readdir(base, { recursive: true });
+      } catch {
+        continue;
+      }
+      for (const rel of entries) {
+        if (rel.startsWith(`client${path.sep}`) || rel.includes(`${path.sep}client${path.sep}`)) continue;
+        const full = path.join(base, rel);
+        let content: string;
+        try {
+          content = await readFile(full, 'utf8');
+        } catch {
+          continue; // a directory, or unreadable
+        }
+        if (content.includes('skynet-hr-theme')) {
+          found = path.join(root, rel);
+          break;
+        }
+      }
+      if (found) break;
+    }
+    assert.equal(found, null, `the theme storage key must never reach the server, but was found in ${found}`);
+  });
+});
+
+describe('S18.6 — the status badge is a projection over state, the live turn and outstanding permissions', () => {
+  it('reads CLOCKED OUT for an ended session', async () => {
+    const { byId, restore } = await runConsole([{ id: 's1', cwd: '/w', vendor: 'claude', state: 'ended' }]);
+    try {
+      const button = byId.get('sessions')!.children[0]!.children[0]!;
+      for (const fn of button.listeners.get('click') ?? []) fn({});
+      const badge = byId.get('status-badge')!;
+      assert.equal(badge.hidden, false);
+      assert.equal(badge.textContent, 'CLOCKED OUT');
+    } finally {
+      await restore();
+    }
+  });
+
+  it('drives one live session through IDLE, ON SHIFT, BLOCKED and back, reading the badge at each point', async () => {
+    const { byId, streams, restore } = await runConsole([{ id: 's1', cwd: '/w', vendor: 'claude', state: 'live' }]);
+    try {
+      const button = byId.get('sessions')!.children[0]!.children[0]!;
+      for (const fn of button.listeners.get('click') ?? []) fn({});
+      const badge = byId.get('status-badge')!;
+      assert.equal(badge.textContent, 'IDLE', 'a live session with no turn and nothing outstanding is IDLE');
+
+      deliver(streams[0]!, { seq: 1, sessionId: 's1', ts: 'x', kind: 'turn.started', data: { turnId: 't1' } });
+      assert.equal(badge.textContent, 'ON SHIFT', 'a running turn is ON SHIFT');
+
+      deliver(streams[0]!, {
+        seq: 2, sessionId: 's1', ts: 'x', kind: 'permission.request',
+        data: { turnId: 't1', requestId: 'r1', callId: 'c1', tool: 'bash', input: {}, suggestions: [] },
+      });
+      assert.equal(badge.textContent, 'BLOCKED', 'an unresolved permission.request is BLOCKED, even mid-turn');
+
+      deliver(streams[0]!, {
+        seq: 3, sessionId: 's1', ts: 'x', kind: 'permission.resolved',
+        data: { requestId: 'r1', decision: 'allow', operator: 'ben', scope: 'once', reason: null },
+      });
+      assert.equal(badge.textContent, 'ON SHIFT', 'resolving the request returns to the turn already running');
+
+      deliver(streams[0]!, { seq: 4, sessionId: 's1', ts: 'x', kind: 'turn.ended', data: { turnId: 't1', stopReason: 'completed', usage: null } });
+      assert.equal(badge.textContent, 'IDLE', 'the turn ending with nothing outstanding returns to IDLE');
+
+      deliver(streams[0]!, { seq: 5, sessionId: 's1', ts: 'x', kind: 'session.ended', data: { reason: 'operator', endedAt: 'x' } });
+      assert.equal(badge.textContent, 'CLOCKED OUT', 'ending the session is CLOCKED OUT, from any prior state');
+    } finally {
+      await restore();
+    }
+  });
+
+  it('hides the badge when no session is selected', async () => {
+    const { byId, restore } = await runConsole([]);
+    try {
+      assert.equal(byId.get('status-badge')!.hidden, true);
+    } finally {
+      await restore();
+    }
+  });
+});
+
+describe('S18.8/S18.10 — PROBATION, Clone and the exit-interview transcript exist nowhere in the client', () => {
+  it('no client source names PROBATION, Clone, or an exit interview', async () => {
+    for (const { name, text: src } of await clientSources()) {
+      assert.doesNotMatch(src, /PROBATION/, `${name} names PROBATION`);
+      assert.doesNotMatch(src, /\bClone\b/, `${name} names a Clone action`);
+      assert.doesNotMatch(src, /exit.interview/i, `${name} names an exit interview`);
+    }
+  });
+});
+
+describe('S18.9 — the termination screen is presentation over DELETE /api/sessions/:id and real session state', () => {
+  it('renders the selected session\'s real id, owner, agent and folder as text, and offers Terminate', async () => {
+    const { byId, restore } = await runConsole([
+      { id: 's1', owner: 'ben', cwd: '/w/project', vendor: 'claude', model: 'sonnet', state: 'live' },
+    ]);
+    try {
+      const button = byId.get('sessions')!.children[0]!.children[0]!;
+      for (const fn of button.listeners.get('click') ?? []) fn({});
+      for (const fn of byId.get('terminate-open')!.listeners.get('click') ?? []) fn({});
+
+      assert.equal(byId.get('terminate')!.hidden, false);
+      const rendered = allFakeText(byId.get('terminate-summary')!).join(' ');
+      assert.ok(rendered.includes('s1'));
+      assert.ok(rendered.includes('ben'));
+      assert.ok(rendered.includes('/w/project'));
+      assert.ok(rendered.includes('claude'));
+      assert.equal(byId.get('terminate-confirm')!.hidden, false);
+      assert.equal(byId.get('terminate-ended')!.hidden, true);
+    } finally {
+      await restore();
+    }
+  });
+
+  it('confirming issues DELETE to the session\'s own route, then closes the panel and refreshes the list', async () => {
+    const { byId, restore, fetchCalls, fetchMethods } = await runConsole([
+      { id: 's1', owner: 'ben', cwd: '/w', vendor: 'claude', state: 'live' },
+    ]);
+    try {
+      const button = byId.get('sessions')!.children[0]!.children[0]!;
+      for (const fn of button.listeners.get('click') ?? []) fn({});
+      for (const fn of byId.get('terminate-open')!.listeners.get('click') ?? []) fn({});
+      const before = fetchCalls.filter((u) => u === '/api/sessions/s1').length;
+
+      // `terminate-confirm`'s handler is wired `() => void confirmTerminate()` (fire-and-forget,
+      // same as every other button in this client) — the listener itself returns nothing to
+      // await, so the two ticks below are what let the underlying fetch actually resolve.
+      for (const fn of byId.get('terminate-confirm')!.listeners.get('click') ?? []) fn({});
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      const calls = fetchCalls
+        .map((u, i) => ({ u, m: fetchMethods[i] }))
+        .filter((c) => c.u === '/api/sessions/s1' && c.m === 'DELETE');
+      assert.equal(calls.length, 1, 'exactly one DELETE to the session\'s own route');
+      assert.ok(fetchCalls.filter((u) => u === '/api/sessions/s1').length > before, 'no accidental extra call to the same route');
+      assert.equal(byId.get('terminate')!.hidden, true, 'the panel closes on success');
+    } finally {
+      await restore();
+    }
+  });
+
+  it('an already-ended session offers no Terminate control and says why', async () => {
+    const { byId, restore } = await runConsole([{ id: 's1', owner: 'ben', cwd: '/w', vendor: 'claude', state: 'ended' }]);
+    try {
+      const button = byId.get('sessions')!.children[0]!.children[0]!;
+      for (const fn of button.listeners.get('click') ?? []) fn({});
+      for (const fn of byId.get('terminate-open')!.listeners.get('click') ?? []) fn({});
+
+      assert.equal(byId.get('terminate-confirm')!.hidden, true);
+      assert.equal(byId.get('terminate-ended')!.hidden, false);
     } finally {
       await restore();
     }

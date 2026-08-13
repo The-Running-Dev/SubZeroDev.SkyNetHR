@@ -1,3 +1,4 @@
+<script src="/theme.js"></script>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>SkyNet HR</title>
@@ -6,8 +7,19 @@
 <header class="masthead">
   <h1 class="masthead__title">SkyNet HR</h1>
   <p id="status" class="masthead__status"></p>
+  <span id="status-badge" class="status-badge" hidden></span>
+  <label class="field field--inline">
+    <span class="field__label field__label--hidden">Visual system</span>
+    <select id="theme-select" class="field__input">
+      <option value="A">A — Enterprise</option>
+      <option value="B">B — Terminal</option>
+      <option value="C">C — Memo</option>
+      <option value="D">D — SaaS</option>
+    </select>
+  </label>
   <button id="requisitions-open" class="button button--quiet" type="button">Requisitions</button>
   <button id="audit-open" class="button button--quiet" type="button">Audit log</button>
+  <button id="terminate-open" class="button button--quiet" type="button" hidden>Terminate</button>
 </header>
 
 <section id="requisitions" class="panel panel--audit" hidden>
@@ -101,6 +113,16 @@
   <div id="audit-incident-groups" class="incident-groups" hidden></div>
   <p id="audit-empty" class="audit__empty" hidden>no audit records match this filter</p>
   <button id="audit-load-more" class="button button--quiet" type="button" hidden>Load older</button>
+</section>
+
+<section id="terminate" class="panel panel--audit" hidden>
+  <div class="audit__header">
+    <h2 class="panel__heading">Terminate employment</h2>
+    <button id="terminate-close" class="button button--quiet" type="button">Close</button>
+  </div>
+  <dl id="terminate-summary" class="payroll-summary"></dl>
+  <p id="terminate-ended" class="audit__empty" hidden>this session has already ended</p>
+  <button id="terminate-confirm" class="button button--deny" type="button">Terminate employment</button>
 </section>
 
 <section id="login" class="panel panel--login" hidden>

@@ -1170,7 +1170,7 @@ storage and never sent here (D60, D78).
 All request and response bodies are JSON unless stated. **Every route under `/api/` requires
 authentication, with exactly one exception — `POST /api/login`, which cannot, because it is
 what mints the credential.** The static client assets the same listener serves — `/`,
-`/app.js`, `/render.js`, `/app.css` — are outside `/api/` and outside this rule: they are the
+`/app.js`, `/render.js`, `/app.css`, `/theme.js` — are outside `/api/` and outside this rule: they are the
 console's own code, they carry no operator's data, and a page that refused to load before
 authentication would have nothing left to authenticate with.
 
@@ -1360,7 +1360,7 @@ type ApiErrorCode =
 **An unknown route has no code of its own, and the two substitutes it gets are split by
 prefix.** This union carries no route-level not-found, so:
 
-- A path **outside `/api/`** that is not one of the four static client assets answers
+- A path **outside `/api/`** that is not one of the five static client assets answers
   `404 no_such_session`. So does `POST /api/login` under a header auth mode, where the route
   genuinely does not exist for that deployment.
 - A path **under `/api/`** that this build does not serve — including an unrecognised
