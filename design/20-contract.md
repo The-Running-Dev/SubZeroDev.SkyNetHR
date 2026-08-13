@@ -174,20 +174,19 @@ interface PendingPermission {
 ```
 
 A live `Turn` hangs off `LiveSession.turn` and nowhere else. **It carries no child-process
-handle, and that is a divergence from `10-design.md § Data model — Turn`, which lists one**
-— stated rather than reconciled. The child is spawned inside `Adapter.send` and terminated
-through `Adapter.kill`, so the handle never crosses into `session-manager`, and declaring a
-second reference to it here would give the manager a way to reach a process the adapter is
-the only declared owner of. Which document is wrong is `/reconcile`'s to decide.
+handle.** The child is spawned inside `Adapter.send` and terminated through `Adapter.kill`, so
+the handle never crosses into `session-manager`, and declaring a second reference to it here
+would give the manager a way to reach a process the adapter is the only declared owner of.
 
-**`pending`'s value type is a second divergence in the same table, and it is stated here for
-the same reason.** The design types it `Map<RequestId, {callId}>`; this contract needs all four
-fields of `PendingPermission`, because `answerPermission` must enforce I43 — `scope: 'always'`
-against a request whose `matchTarget` is `null` is `bad_request` — and append I11's audit
-record carrying `tool` and `input`, without re-reading the originating request. Re-reading it
-is what would put tool-shape knowledge in `session-manager` and break I46 (D109). Unlike the
-child handle above, this one has a settled direction: the contract is the amendment and the
-design is the stale side.
+`pending`'s value type is all four fields of `PendingPermission`, because `answerPermission`
+must enforce I43 — `scope: 'always'` against a request whose `matchTarget` is `null` is
+`bad_request` — and append I11's audit record carrying `tool` and `input`, without re-reading
+the originating request. Re-reading it is what would put tool-shape knowledge in
+`session-manager` and break I46 (D109).
+
+Both of these stood here as declared divergences from `10-design.md § Data model — Turn`,
+which listed a `child` row and typed `pending` as `{callId}`. That section now states neither;
+the divergences are closed.
 
 ### Process record
 
@@ -864,9 +863,9 @@ what was left behind; either coming back dirty is `CheckpointError.restore_incom
 partially-restored row in `10-design.md § Failure modes` is unchanged and is now *detected*
 rather than assumed absent.
 
-`10-design.md § Data model — Checkpoint` and D31 still name `checkout <sha> -- .`. **They are
-the stale side and this is the amendment, not a drift to be resolved downward** — carried
-here so the next `/reconcile` writes the design to match rather than the reverse.
+**This amendment is discharged.** `10-design.md § Data model — Checkpoint` describes the
+`read-tree` sequence and why D31's own `add -A` defeats `checkout`, and D31 carries a
+supersession banner naming D112. Nothing is queued here for a later pass.
 
 ### `adapters/*`
 
@@ -1351,13 +1350,22 @@ type ApiErrorCode =
 | 500 | `record_write_failed` *(tier two)* | The record-log append failed; nothing changed anywhere |
 | 500 | `payroll_unavailable` *(tier two)* | The fold could not read the spill; the session itself is unaffected |
 
-**`no_such_session` is also the answer to an unknown route, and that is a forced overload
-rather than a chosen one.** This union carries no route-level not-found, so a request to a
-path this build does not serve — and a `POST /api/login` under a header auth mode — answers
-`404 no_such_session`. The consequence is stated so a client does not read more into it than
-it holds: a `404 no_such_session` distinguishes "no such session", "not your session" and "no
-such route" from each other in none of the three cases. Adding a code to separate the third
-is additive and is not done here.
+**An unknown route has no code of its own, and the two substitutes it gets are split by
+prefix.** This union carries no route-level not-found, so:
+
+- A path **outside `/api/`** that is not one of the four static client assets answers
+  `404 no_such_session`. So does `POST /api/login` under a header auth mode, where the route
+  genuinely does not exist for that deployment.
+- A path **under `/api/`** that this build does not serve — including an unrecognised
+  sub-route under an existing session id — answers `422 bad_request`, naming the offending
+  path or sub-route in `detail.field`.
+
+The consequence of the first is stated so a client does not read more into it than it holds: a
+`404 no_such_session` distinguishes "no such session", "not your session" and "no such route"
+from each other in none of the three cases. The consequence of the second is that a `422` from
+a session sub-route means *this build serves no such route*, and is deliberately not a `404`
+against the session — a client must not read it as "this session does not exist". Adding a code
+to separate route-level not-found from both is additive and is not done here (D116).
 
 **`SessionError.storage` reaching an edge is reported as `503 agent_unavailable`.** Every
 storage failure the error table below routes by call site — a spill append ends the session,
@@ -1511,7 +1519,7 @@ it; where two are named, the second is where a violation would first be observab
 | I2 | The ring buffer's contents are a strict suffix of the spill's, envelope for envelope, byte for byte | `store` |
 | I3 | A `tool.result` is truncated before its envelope is constructed; the envelope in the ring and the line in the spill are identical | `session-manager` |
 | I4 | At most one `Turn` per session is non-null at any time | `session-manager` |
-| I5 | A guard is claimed in the same synchronous block that tests it: no `await` sits between a check and the mutation it protects. It governs five guards — the turn slot, the workspace claim, a requisition's decision, a requisition's consumption, and a checklist item's completion | `session-manager`, `records` |
+| I5 | A guard is claimed in the same synchronous block that tests it: no `await` sits between a check and the mutation it protects. It governs six guards — the turn slot, the workspace claim, a requisition's decision, a requisition's consumption, a review's mutation, and a checklist item's completion | `session-manager`, `records` |
 | I6 | No two `live` sessions have `cwd` values where one equals, contains, or is contained by the other | `session-manager` |
 | I7 | `cwd` is a `ResolvedPath` inside a configured root, resolved exactly once at session creation and never re-resolved | `jail`, `session-manager` |
 | I8 | `state === 'ended'` implies `LiveSession.turn === null` and `endedAt !== null`; `state === 'live'` implies `endedAt === null` | `session-manager` |

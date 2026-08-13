@@ -311,15 +311,18 @@ conversation the operator believes is continuous, rendering as an unbroken trans
 
 ### Turn
 
-At most one live per session. **The turn owns the child process** — see *Concurrency*.
+At most one live per session. **The child process is turn-scoped and adapter-owned** — one
+child per turn (D16), spawned inside `Adapter.send` and terminated through `Adapter.kill`, and
+the manager never holds a handle on it. Shape is owned by `20-contract.md § Turn`; it is not
+restated here.
 
-| Field | Type | Notes |
-|---|---|---|
-| `turnId` | `TurnId` (UUIDv4) | server-minted; carried on `turn.started`, and required on `POST /interrupt` |
-| `phase` | `'starting' \| 'running'` | `starting` from the moment the slot is claimed until the pre-turn checkpoint returns (D32) |
-| `startedAt` | ISO 8601 UTC | |
-| `child` | process handle | in-memory only; dies with the turn |
-| `pending` | `Map<RequestId, {callId}>` | in-memory only; outstanding permission requests |
+**This section listed a `child` handle on `Turn` and it never had one.** The adapter is the
+only declared owner of the process (`20-contract.md § adapters/*`), so a second reference here
+would give the manager a way to reach something it is not the owner of — which is the whole of
+why interrupt goes through `kill` rather than through a stored handle. `pending`'s value type
+was likewise given as `{callId}` and is four fields, because `answerPermission` must enforce
+I43 and append I11's audit record without re-reading the originating request, which would put
+tool-shape knowledge in `session-manager` and break I46 (D109).
 
 **Turn is derived, not stored.** No `turns.json` exists. The turn history of a session is
 reconstructible from its event log by pairing `turn.started` with `turn.ended`, and that
@@ -433,8 +436,7 @@ is O(file) per replay request, and the first cut accepts it: a session in the ex
 — tens of thousands of envelopes — is a single sequential read of a few megabytes. It does
 not stay true for a session two orders of magnitude larger, where opening it becomes a
 multi-second scan that grows with its own history. An offset index is the fix and it is not
-designed here; it is in `90-decisions.md § Open` so it becomes an issue rather than a
-surprise.
+designed here; it is tracked as issue #19 rather than left as a surprise.
 
 ### Identity spaces
 
@@ -861,10 +863,20 @@ the append-only-file property that makes it evidence — or stays out, leaving t
 
 ## Module boundaries
 
-Twelve modules — the two transport edges are two modules, not one with a slash in its name,
-which is the whole point of D10, and `records` is the twelfth, added by tier two (D77). The
-dependency graph is acyclic, and the edges most likely to be drawn backwards are called out
-below the diagram.
+Fourteen modules — the two transport edges are two modules, not one with a slash in its name,
+which is the whole point of D10; `records` is the twelfth, added by tier two (D77); and
+`edge/http-common` and `edge/error-envelope` are the thirteenth and fourteenth, which the two
+edges compose through. The dependency graph is acyclic, and the edges most likely to be drawn
+backwards are called out below the diagram.
+
+**D10 forbids the two edges importing each other; it does not forbid a third module both
+compose through**, and the distinction is what keeps two transports answering one request
+identically instead of by parallel maintenance. `error-envelope` holds the single
+`ApiErrorCode → HTTP status` mapping; `http-common` holds everything about a request that is
+not framing — the origin check, identity resolution, `POST /api/login`, body reading, the
+`AuditQuery` parse, and the requisition and checklist handlers. What is left in `edge/sse` and
+`edge/ws` is exactly their own transport: SSE framing and `Last-Event-ID`, WebSocket framing
+and first-message auth, and each one's routing table.
 
 ```mermaid
 flowchart TD
@@ -877,6 +889,8 @@ flowchart TD
     AD["adapters/*"]
     RC["records<br/>tier two"]
     SM["session-manager"]
+    HC["edge/http-common"]
+    EE["edge/error-envelope"]
     EH["edge/sse"]
     EW["edge/ws"]
     CL["client"]
@@ -888,14 +902,23 @@ flowchart TD
     SM --> RC
     SM --> CT
     SM --> CF
+    EH --> HC
+    EH --> EE
     EH --> SM
     EH --> RC
-    EH --> ID
     EH --> CF
+    EW --> HC
+    EW --> EE
     EW --> SM
     EW --> RC
-    EW --> ID
     EW --> CF
+    HC --> EE
+    HC --> SM
+    HC --> RC
+    HC --> ID
+    HC --> CF
+    HC --> AD
+    EE --> CT
     ID --> CF
     CF --> JL
     CF --> CT
@@ -921,8 +944,10 @@ flowchart TD
 | `adapters/*` | **The only vendor knowledge** | `contract` | `send`, `respond`, `kill`, and one inbound `notify` (D46) |
 | `records` *(tier two)* | Review and requisition lifecycle, their registries, the incident read | `config`, `store`, `contract` | Raise / decide / claim, author / finalise, read |
 | `session-manager` | Ownership, turn state, `seq`, fan-out, reaping, the payroll fold | `config`, `jail`, `store`, `checkpoints`, `adapters`, `records`, `contract` | Session CRUD, subscribe |
-| `edge/sse` | SSE framing, `Last-Event-ID` reconnect, **origin check on mutating routes** | `config`, `session-manager`, `records`, `identity`, `contract` | HTTP routes |
-| `edge/ws` | WebSocket framing, first-message auth, **origin check at the handshake** | `config`, `session-manager`, `records`, `identity`, `contract` | HTTP routes |
+| `edge/error-envelope` | The one `ApiErrorCode` → HTTP status mapping | `contract` | `statusForCode`, `sendError` |
+| `edge/http-common` | Everything about a request that is not framing: **the origin check**, identity resolution, login, body reading, the `AuditQuery` parse, and the handlers both edges share | `config`, `session-manager`, `records`, `identity`, `adapters`, `contract`, `edge/error-envelope` | Handlers and helpers, to the two edges only |
+| `edge/sse` | SSE framing and `Last-Event-ID` reconnect; its own routing table | `config`, `session-manager`, `records`, `contract`, `edge/http-common`, `edge/error-envelope` | HTTP routes |
+| `edge/ws` | WebSocket framing and first-message auth; its own routing table | `config`, `session-manager`, `records`, `contract`, `edge/http-common`, `edge/error-envelope` | HTTP routes, plus `.handleUpgrade` (D117) |
 | `client` | Rendering, **under the CSP and no-`innerHTML` rules** (D43, D74); the four themes (D58, D78) | `contract` | — |
 
 **Adapters are leaves.** They depend on `contract` and nothing else. They do not read
@@ -958,6 +983,14 @@ manager, and buried constants are how a cap becomes unconfigurable without a rel
 edges → config**, for the origin allow-list (D29), which each edge applies before it resolves
 identity — it is a property of the request rather than of the operator, so it does not belong
 behind `identity`.
+
+**`edge/http-common → adapters` is drawn, and it is not an I20 violation.** The edge validates
+the `vendor` field on `POST /api/sessions` and `POST /api/requisitions` against `VENDORS`, the
+single enumeration of that union's members, which lives beside the `createAdapter` switch that
+makes each member runnable so a second independently-typed copy cannot drift. Testing
+membership is not branching on a vendor: no code above `adapters/*` asks *which* vendor this
+is, and I20 remains what it says. The alternative — a second enumeration in `contract` or at
+the edge — buys the missing arrow at the cost of the drift `VENDORS` exists to prevent.
 
 **One edge was drawn backwards, and S1 found it: `config` depends on `jail`, not the reverse**
 (D94). `jail` was given a `config` dependency here for the workspace roots, and it does not
@@ -1586,7 +1619,7 @@ compiles into two behaviours:
 **Nothing on this list is verified on both platforms today.** The pair is a requirement of the
 brief and the design carries code paths for both, which is exactly the state D64 objects to:
 a two-platform claim gated by nothing. Building the gate is tier-one work and no slice covers
-it — carried in `90-decisions.md § Open`.
+it — tracked as issue #28.
 
 ### Server lifecycle
 
@@ -1745,7 +1778,7 @@ So the rule, and it is the only concurrency rule in this design beyond `emit`:
 > **A guard is claimed in the same synchronous block that tests it. No `await` may sit
 > between a check and the mutation that check protects.**
 
-Concretely, there are five guards and they all follow it:
+Concretely, there are six guards and they all follow it:
 
 | Guard | Tested and claimed before | Released on |
 |---|---|---|
@@ -1754,16 +1787,20 @@ Concretely, there are five guards and they all follow it:
 | A requisition's decision *(tier two)* | `await store.appendRequisition` | The append settling, success or failure |
 | A requisition's consumption *(tier two)* | `await store.mkdir`, with the workspace claim | Any failure in control flow 1, with the workspace claim |
 | A review's mutation *(tier two)* | `await store.appendReview` | The append settling, success or failure |
+| A checklist item's completion *(tier two)* | `await` on the completing `emit` | The append failing — the item reverts to incomplete |
 
 The turn slot is occupied by a `Turn` in phase `starting` before the checkpoint is awaited,
 and the workspace claim is registered before storage is touched. Distinguish *the slot is
 claimed* from *`turn.started` is emitted*: the event still follows the checkpoint, so the
 ordering guarantee that a turn's checkpoint precedes its `turn.started` is untouched.
 
-**Tier two adds three guards to this table, and one of them is not the same shape as the two
+**Tier two adds four guards to this table, and two of them are not the same shape as the two
 that were already here** (D120). The turn slot and the workspace claim set their guard to the
 value that *is* the record's own visible state — `turn` assigned, the path occupied — and
-revert that same value on failure. A requisition's decision and a review's mutation cannot work
+revert that same value on failure, and a checklist item's completion is the same shape again:
+the fold is marked done before the envelope is awaited and unmarked if the append does not
+land, which is what makes a second tick in the same tick a no-op rather than a second envelope
+(I36). A requisition's decision and a review's mutation cannot work
 that way: *Records boundary*, below, requires a failed append to leave the registry
 unmutated — the reverse of the audit path's ordering (D26), because neither write is
 irreversible and losing a retypable edit is a smaller failure than the registry claiming a
@@ -1780,7 +1817,7 @@ This is why the races table below can name "manager turn state" as an enforcer a
 telling the truth. Without the rule, that column describes an intention.
 
 A mutex would also solve it, and is rejected for the reason the section opens with: an async
-lock is a scheduler, it has to be acquired correctly in five places instead of one, and
+lock is a scheduler, it has to be acquired correctly in six places instead of one, and
 "there is no mutex anywhere in this design" is a claim worth being able to keep making.
 
 ### Ordering guarantees the renderer may rely on
@@ -2354,8 +2391,8 @@ these are cited by number elsewhere in this document and in the slices.
    round is not drift but undetermined input, and it is carried where it can be checked:
    `20-contract.md § Unresolved` 5 to 11, each naming its issue, and the seven slices that
    open with a stop rather than with code.
-10. `Start-AgentSession.ps1` (D14) is unreconciled against this architecture. Carried in
-    `90-decisions.md § Open`; not restated here.
+10. `Start-AgentSession.ps1` (D14) is unreconciled against this architecture. Tracked as issue
+    #17; not restated here.
 11. **No append-only file here has an index, and every read scans.** For the spill this is
     acceptable at the expected volume and not at 100× it, where opening an old session becomes
     a multi-second scan that grows with the session's own history. **`audit.ndjson` is the
@@ -2365,7 +2402,7 @@ these are cited by number elsewhere in this document and in the slices.
     is what makes the audit read tolerable without an index, not a substitute for one. The two
     record logs are not a concern — human-paced, kilobytes. An offset sidecar is the fix for
     both files that need it; it is listed rather than designed because the bound has not been
-    hit and the file format is what it would constrain. Carried in `90-decisions.md § Open`.
+    hit and the file format is what it would constrain. Tracked as issue #19.
 
 **Needing a decision from the owner (tier two):**
 
@@ -2382,8 +2419,8 @@ these are cited by number elsewhere in this document and in the slices.
     tier two is items 8 to 12, none of which is a backlog. Either it is permitted but not
     required, which is this design's working read and why nothing above provides for it, or the
     definition of done is one item short. It cannot be designed either way while that is
-    unsettled: `90-decisions.md § Open` separately records that a dragged ticket has no defined
-    effect and no home in storage, and those are the same question asked from the other end.
+    unsettled: issue #26 separately records that a dragged ticket has no defined effect and no
+    home in storage, and those are the same question asked from the other end.
 
 **Needing an experiment (tier two):**
 
