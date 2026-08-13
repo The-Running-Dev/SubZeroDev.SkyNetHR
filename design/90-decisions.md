@@ -2319,10 +2319,6 @@ been taken and not the first.
 Reversibility: cheap. Wording only; no behavioural change to code, and a later install can
 re-merge or re-word freely.
 
-## Open
-
-Staging only. Once an item becomes an issue it leaves this list.
-
 ### 2026-08-13 — D122 The checklist applies to every session, and ticking is refused once the session has ended
 Context: issue #41 (S14.1's stop condition) found the checklist-tick route, as drawn, checks only
 ownership and the template — no session-state refusal, unlike every other route that writes to a
@@ -2342,3 +2338,79 @@ every other write to a session already refuses post-end; an unexplained exceptio
 omission, not a design choice with a reason behind it.
 Reversibility: cheap. A later eligibility field could still narrow this without changing the
 route's shape.
+
+### 2026-08-13 — D123 The child handle leaves `Turn`; the adapter is its only owner
+Context: `10-design.md § Data model — Turn` listed a `child | process handle` row and typed
+`pending` as `Map<RequestId, {callId}>`. `20-contract.md § Turn` declared neither, stated both
+as divergences, and deferred the child one to `/reconcile` by name. The tree agrees with the
+contract: `Turn` is `{turnId, phase, startedAt, pending}`, the child is spawned inside
+`Adapter.send`, and the manager reaches it only through `adapter.kill()`.
+Chosen: the design changes. The `child` row is removed and the section states that the child is
+turn-scoped (D16) and adapter-owned, and that shape is `20-contract.md`'s. `pending` is four
+fields, which the contract had already ruled settled — `answerPermission` needs `tool`, `input`
+and `matchTarget` to enforce I43 and append I11's record without re-reading the request, which
+would put tool-shape knowledge in `session-manager` and break I46 (D109).
+Rejected: putting a handle on the live `Turn` to match the design. It gives `session-manager` a
+second reference to a process `20-contract.md § adapters/*` names the adapter the sole owner
+of, and it reopens the leaf-adapter argument *Module boundaries* rests on. Rejected leaving the
+divergence stated — it is what made this finding reappear on every pass, which is the cost the
+lesson below names.
+Reversibility: cheap in the document; expensive in code once anything reads such a handle,
+which is the argument for closing it in the direction the tree already runs.
+
+### 2026-08-13 — D124 I5 governs six guards, and both documents say six
+Context: `20-contract.md` I5 enumerated five — turn slot, workspace claim, requisition decision,
+requisition consumption, checklist completion. `10-design.md § The single-writer invariant`
+enumerated a different five, with a review's mutation in place of the checklist. Both guards are
+real: the checklist claim is taken synchronously before `emit`'s first `await` and is what makes
+I36 hold, and the review lock is D120's. Each document had silently dropped the other's.
+Chosen: six, enumerated identically in both. The guard table gains a checklist row and says how
+that guard is shaped — state-marked-then-reverted, like the turn slot, not lock-shaped like the
+decision and the review append. D120's paragraph is corrected from "adds three guards, one of
+them" to "adds four, two of them", which is what it already described.
+Rejected: dropping the review lock from I5 — S15 would then implement a guard no invariant
+asserts, and D120's own argument that it is the same rule as the turn slot stops being
+expressible. Rejected dropping the checklist — the synchronous claim is exactly D32's shape and
+removing it from I5 hides why it must not move after the `await`.
+Reversibility: cheap. Text in two places, no code change; the guards themselves already exist.
+
+### 2026-08-13 — D125 An unknown route's answer is split by prefix, and the contract says which
+Context: `20-contract.md § Error semantics` and D116 both state that a path this build does not
+serve answers `404 no_such_session`. Only paths outside `/api/` do. Every unrecognised path
+under `/api/`, and every unrecognised sub-route under an existing session id, answers
+`422 bad_request` naming the path — behaviour that landed in S2a–S2d and therefore predates
+D116, whose context sentence was already false when it was written.
+Chosen: the contract changes to describe the split, and states the consequence of each half —
+the `404`'s three-way ambiguity, and that a `422` from a session sub-route means "no such route
+in this build" and must not be read as "no such session".
+Rejected: making the code answer `404` everywhere. It deletes the one signal distinguishing a
+missing route from a session that is not yours, and rewrites passing tests to lose information.
+Rejected adding `no_such_route` to `ApiErrorCode` — D116 weighed and rejected exactly that, and
+nothing since has changed the balance; overturning it needs a reason this pass does not have.
+Reversibility: cheap. Text today, a variant tomorrow, as D116 already says.
+
+### 2026-08-13 — D126 Fourteen modules: the two edges compose through a shared third
+Context: `src/edge/http-common` and `src/edge/error-envelope` are shipped modules appearing in
+neither the module table nor the dependency graph, which still said twelve. `http-common` is not
+a helper — it owns the origin check (I24), identity resolution, `POST /api/login`, body reading,
+the `AuditQuery` parse, and the requisition and checklist handlers, all of which the table
+attributed to `edge/sse` and `edge/ws` themselves. It also imports `VENDORS` from `adapters`, an
+arrow the graph did not draw.
+Chosen: the design changes. Both modules join the graph and the table; the ownership column
+moves what they own off the two edges, leaving each edge exactly its own transport and routing
+table; and the `http-common → adapters` arrow is drawn with a paragraph saying why it is not an
+I20 violation — validating membership of `Vendor` is not asking which vendor this is. The
+reading D10 permits is stated rather than left implicit: it forbids the two edges importing each
+other, not a third module both compose through.
+Rejected: removing the `VENDORS` import and enumerating `Vendor`'s members a second time at the
+edge or in `contract`. It buys a tidier graph at the cost of the drift that enumeration exists
+to prevent — the list lives beside the `createAdapter` switch that makes each member runnable.
+Rejected calling both modules private helpers and leaving the table at twelve: the origin check
+is an invariant with a named owner, and the table would keep naming the wrong one.
+Reversibility: cheap. Documentation of structure that already exists.
+
+## Open
+
+Staging only. Once an item becomes an issue it leaves this list.
+
+*(empty)*
