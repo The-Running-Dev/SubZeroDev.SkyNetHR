@@ -109,6 +109,12 @@ function checkpointCreatedNode(doc, data) {
   return row(doc, 'checkpoint', 'checkpoint', el(doc, 'div', 'checkpoint__text', data.turnId === null ? `safety checkpoint — ${data.label}` : data.label));
 }
 
+// S14.3: this envelope carries no `turnId` and may land mid-turn — rendered attributed to
+// the operator who ticked it (`data.by`), never to the agent.
+function checklistItemCompletedNode(doc, data) {
+  return row(doc, 'checklist', 'checklist', el(doc, 'div', 'checklist__text', `checklist item checked off — ${data.by}`));
+}
+
 // `handlers.onAnswerPermission(requestId, decision)` posts the answer and resolves to
 // whether the server accepted it; `handlers.onRequestRendered(requestId, controls)`
 // hands the caller a `setResolved(text)` closure so a later `permission.resolved` —
@@ -179,6 +185,7 @@ const RENDERERS = {
   'permission.request': permissionRequestNode,
   'permission.resolved': permissionResolvedNode,
   'checkpoint.created': checkpointCreatedNode,
+  'checklist.item.completed': checklistItemCompletedNode,
   error: errorNode,
 };
 

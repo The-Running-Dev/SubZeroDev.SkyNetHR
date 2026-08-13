@@ -10,7 +10,7 @@ import { createSessionManager, match, parseStandingRule } from './index.js';
 import { createStore } from '../store/index.js';
 import { createCheckpoints } from '../checkpoints/index.js';
 import { createRecords } from '../records/index.js';
-import type { AuditRecord, Caps, Checkpoints, Config, Envelope, IsoTimestamp, OperatorId, PermissionRequest, ProcessRecord, Records, SessionId, Store, TurnId } from '../contract/index.js';
+import type { AuditRecord, Caps, ChecklistItemId, Checkpoints, Config, Envelope, IsoTimestamp, OperatorId, PermissionRequest, ProcessRecord, Records, SessionId, Store, TurnId } from '../contract/index.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -71,6 +71,7 @@ async function makeManager(
   wrapStore: (store: Store) => Store = (s) => s,
   checkpointsOverride: ((config: Config) => Checkpoints) | null = null,
   recordsOverride: ((config: Config, store: Store) => Records) | null = null,
+  checklistOverride: Config['checklist'] = [],
 ) {
   process.env['SKYNET_TEST_SCENARIO'] = scenario;
   process.env['SKYNET_CLAUDE_EXECUTABLE'] = FIXTURE;
@@ -98,7 +99,7 @@ async function makeManager(
     sessionCookieMaxAgeSeconds: 2592000,
     includeRaw: false,
     sessionTokenBudget: null,
-    checklist: [],
+    checklist: checklistOverride,
     edge: 'sse',
   };
   const storeResult = await createStore(config);
@@ -2353,4 +2354,249 @@ test('S13.10 — POST /api/sessions with no requisitionId behaves exactly as bef
   await mkdir(projectDir);
   const created = await manager.create(owner, { vendor: 'claude', cwd: projectDir, model: null, sandbox: null, requisitionId: null });
   assert.equal(created.ok, true);
+});
+
+// ---------------------------------------------------------------------------
+// S14 — Onboarding: work the first-run checklist
+// ---------------------------------------------------------------------------
+
+const CHECKLIST_TEMPLATE = [
+  { id: 'welcome' as ChecklistItemId, label: 'Read the welcome guide' },
+  { id: 'workspace' as ChecklistItemId, label: 'Confirm your workspace' },
+];
+
+test('S14.1/D122 — ticking an ended session is refused 409 session_ended; the read stays available', async () => {
+  const { manager, workspaceRoot } = await makeManager('full', {}, undefined, undefined, undefined, CHECKLIST_TEMPLATE);
+  const owner = 'operator-1' as OperatorId;
+  const projectDir = path.join(workspaceRoot, 'proj-s141');
+  await mkdir(projectDir);
+  const created = await manager.create(owner, { vendor: 'claude', cwd: projectDir, model: null, sandbox: null, requisitionId: null });
+  assert.equal(created.ok, true);
+  if (!created.ok) return;
+  const { sessionId } = created.value;
+
+  assert.equal((await manager.end(sessionId, owner)).ok, true);
+
+  const ticked = await manager.tickChecklistItem(sessionId, owner, 'welcome' as ChecklistItemId);
+  assert.equal(ticked.ok, false);
+  if (!ticked.ok) assert.equal(ticked.error.code, 'session_ended');
+
+  const got = await manager.checklist(sessionId, owner);
+  assert.equal(got.ok, true);
+});
+
+test('S14.2/S14.9 — a tick emits one checklist.item.completed { itemId, by } at a seq contiguous with the stream; another operator gets no_such_session on either route', async () => {
+  const { manager, workspaceRoot } = await makeManager('full', {}, undefined, undefined, undefined, CHECKLIST_TEMPLATE);
+  const owner = 'operator-1' as OperatorId;
+  const projectDir = path.join(workspaceRoot, 'proj-s142');
+  await mkdir(projectDir);
+  const created = await manager.create(owner, { vendor: 'claude', cwd: projectDir, model: null, sandbox: null, requisitionId: null });
+  assert.equal(created.ok, true);
+  if (!created.ok) return;
+  const { sessionId } = created.value;
+
+  const received: Envelope[] = [];
+  await manager.subscribe(sessionId, owner, 0, { deliver: (e) => received.push(e), close: () => {} });
+  const seqBefore = received.reduce((max, e) => Math.max(max, e.seq as unknown as number), 0);
+
+  const ticked = await manager.tickChecklistItem(sessionId, owner, 'welcome' as ChecklistItemId);
+  assert.equal(ticked.ok, true);
+
+  const completed = received.filter((e) => e.kind === 'checklist.item.completed');
+  assert.equal(completed.length, 1);
+  assert.deepEqual(completed[0]!.data, { itemId: 'welcome', by: owner });
+  assert.equal(completed[0]!.seq as unknown as number, seqBefore + 1);
+
+  const other = 'operator-2' as OperatorId;
+  const otherRead = await manager.checklist(sessionId, other);
+  assert.equal(otherRead.ok, false);
+  if (!otherRead.ok) assert.equal(otherRead.error.code, 'no_such_session');
+  const otherTick = await manager.tickChecklistItem(sessionId, other, 'workspace' as ChecklistItemId);
+  assert.equal(otherTick.ok, false);
+  if (!otherTick.ok) assert.equal(otherTick.error.code, 'no_such_session');
+});
+
+test('S14.3 — a tick carries no turnId and lands between turn.started and turn.ended when the turn is live', async () => {
+  const { manager, workspaceRoot } = await makeManager('full', {}, undefined, undefined, undefined, CHECKLIST_TEMPLATE);
+  const owner = 'operator-1' as OperatorId;
+  const projectDir = path.join(workspaceRoot, 'proj-s143');
+  await mkdir(projectDir);
+  const created = await manager.create(owner, { vendor: 'claude', cwd: projectDir, model: null, sandbox: null, requisitionId: null });
+  assert.equal(created.ok, true);
+  if (!created.ok) return;
+  const { sessionId } = created.value;
+
+  const received: Envelope[] = [];
+  await manager.subscribe(sessionId, owner, 0, { deliver: (e) => received.push(e), close: () => {} });
+
+  const messaged = await manager.message(sessionId, owner, 'do the thing');
+  assert.equal(messaged.ok, true);
+  await waitUntil(() => received.some((e) => e.kind === 'permission.request'));
+
+  const ticked = await manager.tickChecklistItem(sessionId, owner, 'welcome' as ChecklistItemId);
+  assert.equal(ticked.ok, true);
+
+  const requestEnvelope = received.find((e) => e.kind === 'permission.request')!;
+  const requestId = (requestEnvelope.data as { requestId: string }).requestId;
+  const answered = await manager.answerPermission(sessionId, owner, {
+    requestId: requestId as never,
+    decision: 'deny',
+    scope: 'once',
+    rule: null,
+    reason: null,
+  });
+  assert.equal(answered.ok, true);
+  await waitUntil(() => received.some((e) => e.kind === 'turn.ended'));
+
+  const kinds = received.map((e) => e.kind);
+  const turnStartedIdx = kinds.indexOf('turn.started');
+  const checklistIdx = kinds.indexOf('checklist.item.completed');
+  const turnEndedIdx = kinds.indexOf('turn.ended');
+  assert.ok(turnStartedIdx !== -1 && checklistIdx !== -1 && turnEndedIdx !== -1);
+  assert.ok(turnStartedIdx < checklistIdx && checklistIdx < turnEndedIdx, 'the tick lands between turn.started and turn.ended');
+
+  const checklistEnvelope = received.find((e) => e.kind === 'checklist.item.completed')!;
+  assert.equal('turnId' in (checklistEnvelope.data as object), false, 'the envelope carries no turnId');
+});
+
+test('S14.4 — a second tick for an already-complete item is idempotent: 200, no second envelope, the same completedBy/completedAt', async () => {
+  const { manager, workspaceRoot } = await makeManager('full', {}, undefined, undefined, undefined, CHECKLIST_TEMPLATE);
+  const owner = 'operator-1' as OperatorId;
+  const projectDir = path.join(workspaceRoot, 'proj-s144');
+  await mkdir(projectDir);
+  const created = await manager.create(owner, { vendor: 'claude', cwd: projectDir, model: null, sandbox: null, requisitionId: null });
+  assert.equal(created.ok, true);
+  if (!created.ok) return;
+  const { sessionId } = created.value;
+
+  const received: Envelope[] = [];
+  await manager.subscribe(sessionId, owner, 0, { deliver: (e) => received.push(e), close: () => {} });
+
+  assert.equal((await manager.tickChecklistItem(sessionId, owner, 'welcome' as ChecklistItemId)).ok, true);
+  const afterFirst = await manager.checklist(sessionId, owner);
+  assert.equal(afterFirst.ok, true);
+  const stateAfterFirst = afterFirst.ok ? afterFirst.value.find((i) => i.id === 'welcome') : undefined;
+
+  const second = await manager.tickChecklistItem(sessionId, owner, 'welcome' as ChecklistItemId);
+  assert.equal(second.ok, true);
+
+  assert.equal(received.filter((e) => e.kind === 'checklist.item.completed').length, 1, 'a second tick emits no second envelope');
+
+  const afterSecond = await manager.checklist(sessionId, owner);
+  assert.equal(afterSecond.ok, true);
+  const stateAfterSecond = afterSecond.ok ? afterSecond.value.find((i) => i.id === 'welcome') : undefined;
+  assert.deepEqual(stateAfterSecond, stateAfterFirst, 'at most one exists per (sessionId, itemId) — I36');
+});
+
+test('S14.5 — an itemId absent from the configured template is 404 no_such_item', async () => {
+  const { manager, workspaceRoot } = await makeManager('full', {}, undefined, undefined, undefined, CHECKLIST_TEMPLATE);
+  const owner = 'operator-1' as OperatorId;
+  const projectDir = path.join(workspaceRoot, 'proj-s145');
+  await mkdir(projectDir);
+  const created = await manager.create(owner, { vendor: 'claude', cwd: projectDir, model: null, sandbox: null, requisitionId: null });
+  assert.equal(created.ok, true);
+  if (!created.ok) return;
+
+  const ticked = await manager.tickChecklistItem(created.value.sessionId, owner, 'nonesuch' as ChecklistItemId);
+  assert.equal(ticked.ok, false);
+  if (!ticked.ok) assert.equal(ticked.error.code, 'no_such_item');
+});
+
+test('S14.6/S14.8 — checklist() folds every configured item, complete or not, and an empty template reads back empty', async () => {
+  const { manager, workspaceRoot } = await makeManager('full', {}, undefined, undefined, undefined, CHECKLIST_TEMPLATE);
+  const owner = 'operator-1' as OperatorId;
+  const projectDir = path.join(workspaceRoot, 'proj-s146');
+  await mkdir(projectDir);
+  const created = await manager.create(owner, { vendor: 'claude', cwd: projectDir, model: null, sandbox: null, requisitionId: null });
+  assert.equal(created.ok, true);
+  if (!created.ok) return;
+  const { sessionId } = created.value;
+
+  assert.equal((await manager.tickChecklistItem(sessionId, owner, 'welcome' as ChecklistItemId)).ok, true);
+
+  const got = await manager.checklist(sessionId, owner);
+  assert.equal(got.ok, true);
+  if (!got.ok) return;
+  assert.equal(got.value.length, 2);
+  const welcome = got.value.find((i) => i.id === 'welcome')!;
+  assert.equal(welcome.label, 'Read the welcome guide');
+  assert.equal(welcome.completedBy, owner);
+  assert.notEqual(welcome.completedAt, null);
+  const workspaceItem = got.value.find((i) => i.id === 'workspace')!;
+  assert.equal(workspaceItem.completedBy, null);
+  assert.equal(workspaceItem.completedAt, null);
+
+  const { manager: emptyManager, workspaceRoot: emptyWorkspaceRoot } = await makeManager('full');
+  const emptyDir = path.join(emptyWorkspaceRoot, 'proj-s148');
+  await mkdir(emptyDir);
+  const emptyCreated = await emptyManager.create(owner, { vendor: 'claude', cwd: emptyDir, model: null, sandbox: null, requisitionId: null });
+  assert.equal(emptyCreated.ok, true);
+  if (!emptyCreated.ok) return;
+  const emptyGot = await emptyManager.checklist(emptyCreated.value.sessionId, owner);
+  assert.equal(emptyGot.ok, true);
+  if (emptyGot.ok) assert.deepEqual(emptyGot.value, []);
+});
+
+test('S14.7 — the fold survives a reload: a rehydrated session reports the same ticked set boot rebuilt from the spill', async () => {
+  const { config, store, checkpoints } = await makeManager('full', {}, undefined, undefined, undefined, CHECKLIST_TEMPLATE);
+  const sessionId = 'sess-checklist-reload';
+  const record = bootSessionRecord(sessionId);
+  assert.equal((await store.createSession(record)).ok, true);
+  assert.equal(
+    (await store.appendEvent(record.id, bootEnvelope(sessionId, 1, 'checklist.item.completed', { itemId: 'welcome', by: record.owner }))).ok,
+    true,
+  );
+  await store.writeMeta({ ...record, lastSeq: 1 as never });
+
+  const manager2 = createSessionManager({ config, store, checkpoints, records: notImplementedProxy<Records>('records') });
+  assert.equal((await manager2.boot()).ok, true);
+
+  const got = await manager2.checklist(sessionId as never, record.owner);
+  assert.equal(got.ok, true);
+  if (!got.ok) return;
+  const welcome = got.value.find((i) => i.id === 'welcome')!;
+  assert.equal(welcome.completedBy, record.owner);
+  assert.notEqual(welcome.completedAt, null);
+  const workspaceItem = got.value.find((i) => i.id === 'workspace')!;
+  assert.equal(workspaceItem.completedBy, null);
+
+  // A rehydrated session is always `ended` — the write half of D122's rule applies to it too.
+  const ticked = await manager2.tickChecklistItem(sessionId as never, record.owner, 'workspace' as ChecklistItemId);
+  assert.equal(ticked.ok, false);
+  if (!ticked.ok) assert.equal(ticked.error.code, 'session_ended');
+});
+
+test('S14.10 — a tick appends nothing to audit.ndjson: byte-identical across five ticks', async () => {
+  const template = [
+    { id: 'a' as ChecklistItemId, label: 'A' },
+    { id: 'b' as ChecklistItemId, label: 'B' },
+    { id: 'c' as ChecklistItemId, label: 'C' },
+    { id: 'd' as ChecklistItemId, label: 'D' },
+    { id: 'e' as ChecklistItemId, label: 'E' },
+  ];
+  const { manager, workspaceRoot, storageRoot } = await makeManager('full', {}, undefined, undefined, undefined, template);
+  const owner = 'operator-1' as OperatorId;
+  const projectDir = path.join(workspaceRoot, 'proj-s1410');
+  await mkdir(projectDir);
+  const created = await manager.create(owner, { vendor: 'claude', cwd: projectDir, model: null, sandbox: null, requisitionId: null });
+  assert.equal(created.ok, true);
+  if (!created.ok) return;
+  const { sessionId } = created.value;
+
+  const auditPath = path.join(storageRoot, 'audit.ndjson');
+  const readRaw = async () => {
+    try {
+      return await readFile(auditPath, 'utf8');
+    } catch {
+      return '';
+    }
+  };
+  const before = await readRaw();
+
+  for (const item of template) {
+    assert.equal((await manager.tickChecklistItem(sessionId, owner, item.id)).ok, true);
+  }
+
+  const after = await readRaw();
+  assert.equal(after, before, 'audit.ndjson is byte-identical across five checklist ticks');
 });

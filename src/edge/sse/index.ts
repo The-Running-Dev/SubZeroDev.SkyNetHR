@@ -1,5 +1,5 @@
 import type { IncomingMessage, RequestListener, ServerResponse } from 'node:http';
-import type { CallId, Envelope, OperatorId, RequisitionId, Seq, SessionId, Subscription, TurnId } from '../../contract/index.js';
+import type { CallId, ChecklistItemId, Envelope, OperatorId, RequisitionId, Seq, SessionId, Subscription, TurnId } from '../../contract/index.js';
 import { sendError } from '../error-envelope/index.js';
 import {
   type EdgeDeps,
@@ -45,6 +45,8 @@ export function createSseEdge(deps: EdgeDeps): RequestListener {
     handleRaiseRequisition,
     handleListRequisitions,
     handleDecideRequisition,
+    handleChecklist,
+    handleTickChecklistItem,
   } = createHttpHandlers(deps);
 
   async function handleEvents(req: IncomingMessage, res: ServerResponse, owner: OperatorId, sessionId: SessionId): Promise<void> {
@@ -217,6 +219,17 @@ export function createSseEdge(deps: EdgeDeps): RequestListener {
           if (method === 'DELETE' && rest === '') return handleDelete(req, res, owner, sessionId);
           if (method === 'GET' && rest === '/events') return handleEvents(req, res, owner, sessionId);
           if (method === 'GET' && rest === '/checkpoints') return handleListCheckpoints(req, res, owner, sessionId);
+          if (method === 'GET' && rest === '/checklist') return handleChecklist(req, res, owner, sessionId);
+          const checklistTickMatch = /^\/checklist\/([^/]+)$/.exec(rest);
+          if (method === 'POST' && checklistTickMatch !== null) {
+            let decodedItemId: string;
+            try {
+              decodedItemId = decodeURIComponent(checklistTickMatch[1]!);
+            } catch {
+              return sendError(res, 'bad_request', 'itemId is not a valid path segment', { field: 'itemId' });
+            }
+            return handleTickChecklistItem(req, res, owner, sessionId, decodedItemId as ChecklistItemId);
+          }
           const toolOutputMatch = /^\/tool-output\/([^/]+)\/([^/]+)$/.exec(rest);
           if (method === 'GET' && toolOutputMatch) {
             let decodedTurnId: string;
