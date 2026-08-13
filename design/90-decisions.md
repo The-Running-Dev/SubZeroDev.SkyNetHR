@@ -2514,6 +2514,128 @@ exact problem.
 Reversibility: cheap. One enum value, one boot emission scoped to live-at-shutdown sessions, and a
 fold rule; nothing persisted changes shape.
 
+### 2026-08-14 — D131 `Caps.auditPageMax` bounds records examined, not only records returned
+Context: `20-contract.md § store` promises `readAuditPage` is "bounded; never a whole-file scan"
+and I39 says "Nothing scans the whole file", but `readAuditPageImpl` stopped only on
+`records.length >= limit`. A query with a filter — `incidentsOnly`, a `sessionId`, a `since` —
+that matched fewer than `limit` records therefore walked backward to byte 0. The incident view of
+brief item 11 is precisely that query, and `audit.ndjson` is precisely the file D73 bounded the
+read of because it grows for the deployment's lifetime and is never truncated. The S12.9
+performance test asserted the bound only for an unfiltered query, where every record matches and
+the two bounds coincide, so nothing caught it.
+Chosen: a read stops at whichever comes first — `limit` matches, or `Caps.auditPageMax` records
+*inspected* — and mints a `nextCursor` at the same kind of line boundary either way. The cap is
+reused rather than a second one added, because I39 already names it as the bound on the read. The
+visible consequence is that a page may be short, or empty, with a cursor still to follow, so
+`nextCursor === null` becomes the only end-of-log signal; `20-contract.md § Audit` states that and
+the client's "no records" message now waits for it.
+Rejected: a separate byte or line budget in `Caps`. A second knob for one call site, and I39
+already binds this read to `auditPageMax` by name.
+Rejected: narrowing I39 to a bound on the result rather than the read. That concedes exactly the
+permanently-degrading screen D73 exists to prevent, on the one file that never stops growing.
+Rejected: an offset index now. Issue #19 carries it, it constrains the file format, and the bound
+is what D73 says makes it not yet necessary.
+Reversibility: cheap. One stop condition in `store`; no persisted shape changes and `AuditCursor`
+stays opaque.
+
+### 2026-08-14 — D132 Both jail failures answer `409 outside_workspace_root`
+Context: the contract's error table routes `JailError.unresolvable` to `409
+outside_workspace_root` — "The jail admits only paths *proven* inside a root" — and
+`edge/http-common`'s `apiErrorFor` answered `422 bad_request` naming `cwd`, with a comment
+arguing that a path which was never resolved was not rejected by the jail. Nothing recorded the
+divergence.
+Chosen: the contract's mapping. Both failures answer `409 outside_workspace_root`; only the
+`outside_workspace_root` branch carries `detail.roots`, because `unresolvable` has none to carry.
+The property this protects is that `POST /api/sessions` cannot be used to tell "no such
+directory" from "outside every root" — without it, any authenticated operator has a filesystem
+existence probe over the whole host, which is the concealment D50 and the jail's own wording
+assume. D68's requisition story depends on the same code being the answer at spend time.
+Rejected: keeping `422 bad_request`. More accurate to the operator who typed a path wrong, and it
+publishes the existence of every path outside the roots to every operator; the threat model does
+not list that as accepted.
+Rejected: a third code distinguishing the two. It publishes the same bit with extra ceremony.
+Reversibility: cheap in code, awkward in the log — a client written against the looser refusal
+would have to be revisited.
+
+### 2026-08-14 — D133 D102 lands, and reuses `adapter_unknown_record` rather than widening `ErrorEventKind`
+Context: D102 (2026-08-09) chose to treat a turn-scoped fact arriving with no live turn as an
+error rather than an invented value, naming two exact lines. Neither changed. `appendPid` still
+wrote `entry.turn?.turnId ?? randomUUID()`, putting an id naming no turn into `pids.ndjson` where
+the boot reaper reads it as fact; and a turn-scoped payload arriving after the slot was freed
+still went out with no `turnId`, which the contract declares non-optional on every one of them
+and which, for `permission.request`, also means the request never enters `pending` and is never
+resolved (I9).
+Chosen: implement D102 as written. Both sites emit a non-fatal `error` envelope naming the
+condition; the pid record is refused rather than written with a minted id, and the malformed
+event is dropped with the original preserved in `raw`. The envelope's `kind` is
+`adapter_unknown_record`, which is an overload — the condition is the manager's, not an
+adapter's — taken because `ErrorEventKind` is a closed vocabulary (D44) and widening it is
+`/contract`'s, not a reconciliation's.
+Rejected: a new `ErrorEventKind` for it. More honest on the wire and the right eventual shape;
+it is a contract amendment to a closed union and does not belong in this pass. Recorded here so
+the overload is deliberate rather than discovered.
+Rejected: writing the pid record with a placeholder id so boot can still reap the child. It is
+the fabricated value D102 refuses, and the only reachable path to it — a spill failure clearing
+the slot mid-turn — already kills the child on its own.
+Reversibility: cheap.
+
+### 2026-08-14 — D134 The ring is dropped whenever the spill can no longer back it
+Context: I2 says the ring buffer's contents are a strict suffix of the spill's, and two paths
+broke it. `emit` pushes to the ring synchronously and appends asynchronously, so a failed append
+(D41) left in the ring the one envelope the spill would never hold, servable to any later
+reconnect. And `remove()` deleted the storage and the registry entry but never the ring, so a
+deleted session's envelopes stayed in memory for the life of the process — with `Store.dropRing`
+declared in the contract and called from nowhere.
+Chosen: call `dropRing` in both places — the whole ring, not the offending envelope. A ring that
+has been dropped makes `readRingAfter` answer `null`, which sends every replay to the spill, and
+the spill is the authority wherever the two disagree (D37's rule, D40's read path). Keeping a
+truncated ring would leave a structure whose suffix property holds only by argument rather than
+by construction.
+Rejected: popping just the failed envelope. Restores I2 literally and leaves the ring live on a
+session that is ending, so the next reconnect is served from memory rather than from the
+transcript that is now shorter than it — the divergence, moved.
+Rejected: weakening I2 and deleting `dropRing`. It gives up the property D40 spends to make ring
+and spill interchangeable for reads, which is the whole argument that replay is truthful.
+Reversibility: cheap.
+
+### 2026-08-14 — D135 Restore is refused on an ended session, and the contract declares it
+Context: `session-manager.restore` refuses `409 session_ended`, a refusal the route's table did
+not list and which `SessionError.session_ended`'s row described only as "a message to a session
+in state `ended`". `30-slices.md § S6` compounds it, putting "restoring a workspace held by
+another session" out of scope on the grounds that S5.7 makes it impossible — which is true for
+live sessions and false for ended ones, since an ended session keeps its `cwd` and the busy check
+excludes only `state === 'live'` (D30).
+Chosen: the code is right and the contract is the stale side. `POST
+/api/sessions/:id/checkpoint/restore` declares `409 session_ended`, and the error table's row
+names all three writes it now covers, with the reason. Dropping the guard instead would let a
+rehydrated session run `read-tree --reset -u` against a work-tree a *different* live session now
+owns, which is the silent cross-session revert D19 and D30 exist to close.
+Rejected: dropping the guard to match the table as written. Restores parity between browsable
+and restorable for rehydrated sessions, at the cost of the one hazard the workspace rule is for.
+Rejected: routing the added refusal to `/contract` as an amendment pass. The refusal already
+ships; leaving it undeclared for a pass is the state a client can actually trip over.
+Reversibility: expensive-ish — this is a declared refusal on a public route, so removing it later
+is a compatibility question rather than an edit.
+
+### 2026-08-14 — D136 A review's in-flight append answers `review_final`
+Context: D120 gave a requisition's decision and a review's mutation an exclusivity lock claimed
+synchronously before the append, and named what a *requisition* collision answers —
+`already_decided`, "reporting the outcome the in-flight decision is about to produce", which that
+code's declared meaning genuinely covers. It said nothing about reviews, and `records` answers a
+review lock collision with `review_final`, whose declared meaning — "a final review accepts no
+further append" — is false in that case: the review is a draft, and the caller may retry and
+succeed.
+Chosen: widen `review_final`'s declared meaning to cover both, matching the shape D120 already
+blessed for requisitions. The two record-log locks then answer symmetrically, and the contract
+says plainly that the code is terminal in one case and retryable in the other.
+Rejected: a distinct `ApiErrorCode` for a record-log write already in flight. The honest answer,
+since a retry is meaningful in one case and not the other; it adds to a union the contract keeps
+deliberately small, against D116's precedent of recording an overload rather than multiplying
+codes, and adding it is `/contract`'s.
+Rejected: answering `RecordsError.storage` or `bad_request` instead. Both are equally wrong about
+what happened, and `storage` would report a failed write where none was attempted.
+Reversibility: cheap; nothing persisted and no signature changes.
+
 ## Open
 
 Staging only. Once an item becomes an issue it leaves this list.

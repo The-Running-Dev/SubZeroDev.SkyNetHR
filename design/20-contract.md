@@ -523,7 +523,7 @@ interface AuditQuery {
 
 interface AuditPage {
   readonly records: readonly AuditRecord[];   // newest first
-  readonly nextCursor: AuditCursor | null;    // null when the window reached the oldest record
+  readonly nextCursor: AuditCursor | null;    // null when the read reached the oldest record
 }
 ```
 
@@ -1202,7 +1202,7 @@ The `404` is `no_such_session` because `ApiErrorCode` carries no route-level not
 | `POST` | `/api/sessions/:id/permission` | `PermissionAnswer` | `200 { accepted: boolean }` | `403 bad_origin`, `404 no_such_session`, `422 bad_request` |
 | `POST` | `/api/sessions/:id/interrupt` | `{ turnId: TurnId }` | `200 { ok: true }` | `403 bad_origin`, `404 no_such_session`, `422 bad_request` |
 | `POST` | `/api/sessions/:id/end` | `{}` | `200 { ok: true }` | `403 bad_origin`, `404 no_such_session`, `409 turn_in_flight` |
-| `POST` | `/api/sessions/:id/checkpoint/restore` | `{ sha: GitSha }` | `200 { ok: true }` | `403 bad_origin`, `404 no_such_session`, `404 no_such_checkpoint`, `409 turn_in_flight`, `422 bad_request`, `500 checkpoint_failed` |
+| `POST` | `/api/sessions/:id/checkpoint/restore` | `{ sha: GitSha }` | `200 { ok: true }` | `403 bad_origin`, `404 no_such_session`, `404 no_such_checkpoint`, `409 session_ended`, `409 turn_in_flight`, `422 bad_request`, `500 checkpoint_failed` |
 | `DELETE` | `/api/sessions/:id` | — | `200 { ok: true }` | `403 bad_origin`, `404 no_such_session`, `409 turn_in_flight` |
 | `GET` | `/api/sessions` | — | `200 { sessions: SessionSummary[] }`, caller's own only | `401 unauthenticated` |
 | `GET` | `/api/sessions/:id` | — | `200 { session: SessionSummary }` | `401 unauthenticated`, `404 no_such_session` |
@@ -1244,6 +1244,15 @@ question this log answers crosses sessions, and scoped to one operator it answer
 did I approve". The window is bounded by `Caps.auditPageMax` and resumed by `nextCursor`;
 there is no unbounded read, because this is the one file that grows for the deployment's
 lifetime. The incident view of brief item 11 is this route with `incidentsOnly: true`.
+
+**`Caps.auditPageMax` bounds records *examined*, not only records returned, and the
+consequence is that a page may be short — or empty — with a cursor still to follow.** A
+filter bounded only by its result count is not bounded at all: a query matching nothing walks
+to the start of the file, which is exactly the scan D73 refuses and the one that grows with
+the deployment rather than with the answer. So a read stops at whichever comes first, `limit`
+matches or `Caps.auditPageMax` records inspected, and reports where to resume either way. **A
+short page is therefore not the end of the log and a caller must not read it as one**; only
+`nextCursor === null` is.
 
 ### Requisitions — tier two
 
@@ -1341,7 +1350,7 @@ type ApiErrorCode =
 | 404 | `no_such_output` | The tool-output blob is missing or unreadable |
 | 404 | `no_such_checkpoint` | No such `sha` in this session's shadow git |
 | 409 | `turn_in_flight` | A turn is running |
-| 409 | `session_ended` | The session is ended and accepts no new turn |
+| 409 | `session_ended` | The session is ended: it accepts no new turn, no checklist tick, and no restore |
 | 409 | `workspace_busy` | The resolved path equals, contains, or is contained by a live session's `cwd` |
 | 409 | `outside_workspace_root` | `cwd` failed the jail check |
 | 422 | `bad_request` | Malformed body, or a text field over its cap |
@@ -1352,7 +1361,7 @@ type ApiErrorCode =
 | 409 | `requisition_consumed` *(tier two)* | Already spent on a session |
 | 409 | `already_decided` *(tier two)* | A decision is terminal; the refusal names who made it and what it was |
 | 404 | `no_such_review` *(tier two)* | Unknown, or a draft that is not the caller's |
-| 409 | `review_final` *(tier two)* | A final review accepts no further append |
+| 409 | `review_final` *(tier two)* | A final review accepts no further append — and neither does one whose own append is still in flight (D120) |
 | 404 | `no_such_item` *(tier two)* | No such `itemId` in the configured checklist template |
 | 500 | `record_write_failed` *(tier two)* | The record-log append failed; nothing changed anywhere |
 | 500 | `payroll_unavailable` *(tier two)* | The fold could not read the spill; the session itself is unaffected |
@@ -1488,11 +1497,11 @@ type SessionError =
 | `RecordsError.requisition_not_approved` | A claim against `open` or `rejected` | Yes, once approved | `409 requisition_not_approved`; nothing is claimed |
 | `RecordsError.requisition_consumed` | A claim against one already spent | No | `409 requisition_consumed`; raise another (D80, D81) |
 | `RecordsError.no_such_review` | Unknown id, or a draft that is not the caller's | No | `404 no_such_review`. Never distinguishes the two |
-| `RecordsError.review_final` | An append or a second finalise on a final review | No | `409 review_final` |
+| `RecordsError.review_final` | An append or a second finalise on a final review, **or on one whose own append is still in flight** — D120's exclusivity lock, refusing the second writer before either write lands, exactly as `already_decided` does for a requisition | No | `409 review_final`. Terminal in the first case and retryable in the second; a caller that cannot tell them apart retries and either succeeds or is refused again |
 | `RecordsError.bad_request` | A text field over its cap, or a malformed field | No | `422 bad_request`, naming the field |
 | `RecordsError.storage` | The record-log append failed | Sometimes | `500 record_write_failed`. **The registry is not mutated**; the edit is still in the operator's form |
 | `SessionError.no_such_session` | Unknown id, or the caller is not the owner | No | `404 no_such_session` |
-| `SessionError.session_ended` | A message to a session in state `ended` | No | `409 session_ended` |
+| `SessionError.session_ended` | A message, a checklist tick, or a **restore** against a session in state `ended`. Restore is refused because an ended session keeps its `cwd` while the busy check excludes only *live* sessions (D30), so a new session may already hold that workspace — restoring through the ended one would run git against a work-tree it no longer owns. `POST /:id/end` is the exception and is deliberately inert on a repeat call | No | `409 session_ended` |
 | `SessionError.turn_in_flight` | A second message, or a restore, end, or delete during a turn | Yes, once the turn ends | `409 turn_in_flight` |
 | `SessionError.workspace_busy` | The resolved path overlaps a live session's `cwd` | Yes, once that session ends | `409 workspace_busy`, naming the holding path and operator |
 | `SessionError.no_such_item` | A tick for an `itemId` absent from the configured template | No | `404 no_such_item` |

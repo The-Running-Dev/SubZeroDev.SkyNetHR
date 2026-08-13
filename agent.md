@@ -47,7 +47,14 @@ and preferences belong in `AGENTS.md`.
   worth of authoring ran under a regime nobody had established, and the gap had to be
   adjudicated as a record correction (D111) rather than caught at the moment of the freeze.**
   Where a decision's mechanism is a file, the file lands in the same commit as the entry, or
-  the decision has not been made.
+  the decision has not been made. **The same failure with code as the mechanism is quieter and
+  lasts longer**: D102 named two exact lines as defects and chose the fix, and neither line
+  changed — it belonged to no slice and had no issue, so a `/code-review` and a `/reconcile`
+  both passed over it reading the tree as correct. **Cost: four days and fifteen commits in
+  which the decision log described a tree that did not exist, and a later reconciliation spent
+  rediscovering a decision already made.** A decision taken outside a slice names the slice or
+  the issue that will carry it, in the entry itself — a decision with no landing point does not
+  land.
 
 ## Sequences and arguments
 

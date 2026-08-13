@@ -79,17 +79,20 @@ export function apiErrorFor(error: SessionError): { code: ApiErrorCode; message:
     case 'bad_request':
       return { code: 'bad_request', message: error.detail, detail: { field: error.field } };
     case 'jail':
+      // Both jail failures answer `409 outside_workspace_root`, per `20-contract.md`'s
+      // error table: "The jail admits only paths *proven* inside a root." An
+      // `unresolvable` path is one the jail could not prove anything about, and giving it
+      // a code of its own would let any authenticated operator tell "no such directory"
+      // from "outside every root" — turning `POST /api/sessions` into a filesystem
+      // existence probe. The roots are named either way; only the resolved candidate is
+      // withheld.
       return error.cause.code === 'outside_workspace_root'
         ? {
             code: 'outside_workspace_root',
             message: 'cwd is outside every configured workspace root',
             detail: { roots: error.cause.roots },
           }
-        // `unresolvable` is a path that does not exist or cannot be canonicalised. That is
-        // a malformed request rather than a containment failure, and saying
-        // `outside_workspace_root` would tell the caller their path was rejected by the
-        // jail when it was never resolved at all.
-        : { code: 'bad_request', message: error.cause.detail, detail: { field: 'cwd' } };
+        : { code: 'outside_workspace_root', message: 'cwd is outside every configured workspace root' };
     case 'adapter':
       switch (error.cause.code) {
         case 'unsupported_vendor':
@@ -299,8 +302,14 @@ export function createHttpHandlers(deps: EdgeDeps) {
     if (typeof body['cwd'] !== 'string' || body['cwd'].trim() === '') {
       return sendError(res, 'bad_request', 'cwd is required', { field: 'cwd' });
     }
-    if (typeof body['vendor'] !== 'string') {
-      return sendError(res, 'bad_request', 'vendor is required', { field: 'vendor' });
+    // `10-design.md § Module boundaries`: the edge tests `vendor` against `VENDORS` on this
+    // route and on `POST /api/requisitions`, which is what the `edge/http-common → adapters`
+    // arrow is for. Testing membership is not branching on a vendor (I20). Refusing here
+    // rather than letting `createAdapter`'s `unsupported_vendor` do it puts the refusal
+    // ahead of the jail, the workspace claim and the requisition claim instead of behind
+    // all three.
+    if (typeof body['vendor'] !== 'string' || !VENDORS.includes(body['vendor'] as Vendor)) {
+      return sendError(res, 'bad_request', 'vendor must be one of claude, codex', { field: 'vendor' });
     }
     const model = body['model'] ?? null;
     if (model !== null && typeof model !== 'string') {

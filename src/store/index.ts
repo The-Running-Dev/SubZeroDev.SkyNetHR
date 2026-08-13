@@ -207,6 +207,15 @@ async function readAuditPageImpl(
 ): Promise<Result<AuditPage, StoreError>> {
   const requested = Number.isFinite(query.limit) && query.limit > 0 ? Math.floor(query.limit) : auditPageMax;
   const limit = Math.min(requested, auditPageMax);
+  // I39 bounds the *read*, not merely the result: `Caps.auditPageMax` caps how many
+  // records one call may examine, exactly as it caps how many it may return. Without this
+  // a filtered query — `incidentsOnly`, a `sessionId`, a `since` — that matches fewer than
+  // `limit` records walks back to byte 0, which is the whole-file scan D73 exists to
+  // prevent and which grows with the deployment's lifetime rather than with the answer.
+  // Hitting the budget is not the end of the log: the page comes back short with a
+  // non-null `nextCursor`, and the caller pages on until that cursor is null.
+  const scanBudget = auditPageMax;
+  let examined = 0;
 
   // A missing file is an empty file for cursor-validation purposes — an altered cursor
   // must be refused the same way regardless of whether `audit.ndjson` happens to exist
@@ -290,6 +299,7 @@ async function readAuditPageImpl(
         } catch {
           record = null; // a torn or corrupt line, dropped rather than surfaced as fatal
         }
+        examined += 1;
         if (record !== null && auditRecordMatches(record, query)) {
           records.push(record);
           if (records.length >= limit) {
@@ -297,6 +307,14 @@ async function readAuditPageImpl(
             stopped = true;
             break;
           }
+        }
+        // The scan budget stops the read at the same kind of boundary a full page does:
+        // `absoluteStart` is where the next page resumes, and the line it names has already
+        // been examined and rejected, so excluding it loses nothing.
+        if (examined >= scanBudget) {
+          nextCursor = absoluteStart === 0 ? null : encodeAuditCursor(absoluteStart, cursorSecret);
+          stopped = true;
+          break;
         }
       }
 

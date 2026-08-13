@@ -702,7 +702,11 @@ async function loadAuditPage(reset) {
   // D86/S12.5: round-tripped exactly as received — nothing here parses or constructs it.
   state.auditCursor = result.payload.nextCursor;
   $('audit-load-more').hidden = state.auditCursor === null;
-  if (state.auditRecordCount === 0) $('audit-empty').hidden = false;
+  // A page can come back short — even empty — with a cursor still to follow: the server
+  // bounds how many records one read may *examine*, not only how many it returns
+  // (I39), so a filter that matches nothing in the first window is not an empty log.
+  // "No records" is only true once the paging has actually reached the oldest record.
+  if (state.auditRecordCount === 0 && state.auditCursor === null) $('audit-empty').hidden = false;
 }
 
 function openAudit() {
