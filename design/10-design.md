@@ -1212,6 +1212,7 @@ POST /api/sessions {..., requisitionId}                       → control flow 1
 
 POST /api/sessions/:id/checklist/:itemId
   edge     → origin check, identity, ownership check (session route)
+  manager  : session ended?                            else → 409 session_ended  (D122)
   manager  : itemId in the config template?           else → 404 no_such_item
   manager  → emit checklist.item.completed {itemId, by}                       (D71)
              already complete → no second envelope, 200; ticking is idempotent
@@ -1235,6 +1236,11 @@ and the workspace claim and it is stated once in *Concurrency*.
 will both tick; the second produces no envelope. And it is not an audit record: brief item 7
 promises a record of every *tool approval*, and diluting that log with provisioning clicks
 makes the artifact the threat model leans on harder to read for no gain.
+
+**Every session has a checklist, and ticking refuses once the session has ended** (D122).
+The checklist's template is global configuration (D71), not tied to a requisition, so gating
+it to sessions opened through one would condition tier one's own onboarding surface on a
+tier-two feature. The session-state check matches every other route that writes to a session.
 
 ## Threat model
 

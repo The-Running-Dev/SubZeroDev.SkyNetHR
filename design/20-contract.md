@@ -1277,11 +1277,11 @@ matching D50.
 |---|---|---|---|---|
 | `GET` | `/api/sessions/:id/payroll` | — | `200 PayrollView` | `404 no_such_session`, `500 payroll_unavailable` |
 | `GET` | `/api/sessions/:id/checklist` | — | `200 { items: ChecklistItemState[] }` | `404 no_such_session` |
-| `POST` | `/api/sessions/:id/checklist/:itemId` | `{}` | `200 { ok: true }` | `403 bad_origin`, `404 no_such_session`, `404 no_such_item` |
+| `POST` | `/api/sessions/:id/checklist/:itemId` | `{}` | `200 { ok: true }` | `403 bad_origin`, `404 no_such_session`, `409 session_ended`, `404 no_such_item` |
 
 Both checklist routes are under `/api/sessions/:id` and carry the ownership check: only the
-session's owner may read or tick its checklist. Whether a tick is refused on an ended session,
-and which sessions have a checklist at all, are undecided — see `## Unresolved` 9.
+session's owner may read or tick its checklist. Every session has a checklist, and a tick on
+an ended session is `409 session_ended` (D122).
 
 A tick is idempotent and is **not** audited: `audit.ndjson` records tool approvals, and
 diluting it with provisioning clicks makes the artifact the threat model leans on harder to
@@ -1850,12 +1850,9 @@ are new in this pass and each names the issue that carries it.
    scalar, and nothing says whether cache reads and cache creation count against a budget
    alongside input and output tokens. The budget's *scope* is a separate open owner decision
    which this contract follows the design in taking as per session. (#29, #30)
-9. **The checklist tick's session-state refusal and eligibility rule.** Every other route that
-   writes to a session refuses once it has ended; this one, as drawn, checks only ownership and
-   the template. Whether a tick on an ended session is refused, and whether every session has a
-   checklist or only one opened through a requisition, are both unstated. The route above
-   therefore lists no `409 session_ended`, and that omission is the open question, not a
-   ruling. (#41)
+9. **Resolved by D122.** Every session has a checklist — the template is global configuration
+   (D71) and not tied to a requisition — and ticking is refused on an ended session,
+   `409 session_ended`, matching every other session-write route. (#41)
 10. **Review finalisation's concurrency guard, and a torn tail that un-finalises.** `updatedAt`
     now gives the PIP fold an ordering key, which was one half of this. The other half is
     mechanism: nothing states that finalisation is claimed under I5, and the accepted

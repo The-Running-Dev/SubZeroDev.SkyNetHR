@@ -2323,9 +2323,30 @@ re-merge or re-word freely.
 
 Staging only. Once an item becomes an issue it leaves this list.
 
-- **#31 and #35 were closed citing decisions that do not exist.** Both closing comments quote
-  resolution text attributed to `D83` and `D87` respectively; neither decision's actual content
-  (`design/90-decisions.md`) matches. D120 above supplies the resolution both issues claimed to
-  already have. Worth `/track` opening a bug: whatever closed these issues wrote a plausible
-  resolution comment without writing the decision it cites, and that pattern may not be confined
-  to these two.
+- **#31, #35, and now #41 were closed citing decisions that do not exist.** All three closing
+  comments quote resolution text attributed to `D83`, `D87`, and `D93` respectively; none of those
+  decisions' actual content (`design/90-decisions.md`) matches the claim. D120 above supplies the
+  resolution #31 and #35 claimed to already have; D122 below does the same for #41. Worth
+  `/track` opening a bug: whatever closed these issues wrote a plausible resolution comment
+  without writing the decision it cites, and the pattern is now confirmed across three issues, not
+  two — it should be treated as systemic rather than incidental.
+
+### 2026-08-13 — D122 The checklist applies to every session, and ticking is refused once the session has ended
+Context: issue #41 (S14.1's stop condition) found the checklist-tick route, as drawn, checks only
+ownership and the template — no session-state refusal, unlike every other route that writes to a
+session, and no eligibility rule for which sessions get a checklist at all. #41 was closed citing
+`D93` as the resolution; `D93` is "An auth mode is required in every configuration," unrelated,
+and no other decision in this log states either rule. The question #41 was meant to settle was
+never actually decided.
+Chosen: the checklist applies to every session, not only ones opened through a requisition — the
+template is global configuration (D71), tier one has no requisitions at all, and brief item 10's
+first-run checklist is not a tier-two feature. Ticking is refused on an ended session,
+`409 session_ended`, matching the refusal every other session-write route already gives (D36's
+pattern).
+Rejected: gating the checklist to requisition-opened sessions — would make a tier-one session's
+onboarding conditional on a tier-two feature that may not even be enabled, and nothing in the data
+model currently carries a field to gate on. Leaving ticking permitted after the session ends —
+every other write to a session already refuses post-end; an unexplained exception here is an
+omission, not a design choice with a reason behind it.
+Reversibility: cheap. A later eligibility field could still narrow this without changing the
+route's shape.
