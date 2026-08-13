@@ -815,11 +815,15 @@ recoverable by re-doing the edit.
 
 **"Durable" means fsync, and it is defined once here because D26 rests on it.** An append
 that has reached the OS survives a process crash; it does not survive a host crash. Where
-this design says *durable* — the audit record before a permission response reaches the child
-— it means the data is fsync'd, and for a rename, the containing directory too. Ordinary
-spill appends are **not** fsync'd per line; the cost is unjustifiable at event rates and the
-loss window is bounded by the OS writeback interval. That difference is deliberate and is
-stated so that nobody later reads one guarantee as the other.
+this design says *durable* — the audit record before a permission response reaches the child,
+and every review line before a review route's response reaches the caller (D128) — it means
+the data is fsync'd, and for a rename, the containing directory too. Ordinary spill appends
+are **not** fsync'd per line; the cost is unjustifiable at event rates and the loss window is
+bounded by the OS writeback interval. `requisitions.ndjson` is not durable per line either, and
+that is why its consumption line can revert under D68's written exception — reviews get the
+stronger guarantee `pids.ndjson` and requisitions do not because I29 is the one record-log
+invariant with no crash carve-out. That difference is deliberate and is stated so that nobody
+later reads one guarantee as the other.
 
 A corrupt `meta.json` still costs the session — boot skips it (*Failure modes*), and the
 transcript, checkpoints and blobs beside it become unreachable through the console. The

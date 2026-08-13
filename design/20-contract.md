@@ -814,7 +814,7 @@ interface Store {
   readOpenPids(): Promise<readonly ProcessRecord[]>;
 
   // Record logs (tier two). A read failure yields an empty list and never aborts boot.
-  appendReview(record: Review): Promise<Result<void, StoreError>>;
+  appendReview(record: Review): Promise<Result<void, StoreError>>;   // durable: fsync before it returns (D128)
   readAllReviews(): Promise<readonly Review[]>;              // latest line per reviewId
   appendRequisition(record: Requisition): Promise<Result<void, StoreError>>;
   readAllRequisitions(): Promise<readonly Requisition[]>;    // latest line per requisitionId
@@ -1070,6 +1070,11 @@ interface SessionManager {
   // authenticated operator. A pure delegation to `Store.readAuditPage` — it exists here,
   // not on `records`, because `records` is tier two and this route is tier one (`## Unresolved` 5).
   readAudit(query: AuditQuery): Promise<Result<AuditPage, StoreError>>;
+
+  // Tier two. No owner, shaped like `readAudit` for the same reason: D70 opens a review about
+  // any session to every operator, not only the session's own owner. `null` for a session that
+  // does not exist; `POST /api/reviews` turns that into `404 no_such_session` (D127).
+  getSnapshotForReview(sessionId: SessionId): SessionSnapshot | null;
 }
 
 declare function createSessionManager(deps: {
@@ -1840,12 +1845,9 @@ are new in this pass and each names the issue that carries it.
    ownership — it sits on `session-manager` only because that module already bridges edges to
    `store`, not because the read is about sessions. S17 (tier two) reuses the same method with
    `incidentsOnly: true` rather than duplicating it on `records`. (#34)
-6. **How the edge obtains a `SessionSnapshot` for a review about a session the author does
-   not own.** `records.createReview` takes the snapshot as a parameter (D77) and that part is
-   settled. What is not: the threat model says writing a review about another operator's
-   session is deliberately open, while the only route to a session is the ownership check that
-   answers `404` to a non-owner. The two cannot both be true, and the resolution decides
-   whether `POST /api/reviews` needs a manager method that does not apply that check. (#32)
+6. **Resolved by D127.** `SessionManager.getSnapshotForReview` reads a session's snapshot with
+   no owner parameter and no ownership check, shaped like `readAudit` above. `POST /api/reviews`
+   calls it directly rather than the ownership-checked `get`. (#32)
 7. **Resolved by D120.** The two orders were each partly right: a requisition's decision and a
    review's mutation claim an exclusivity lock synchronously, before the append — which is what
    D32's guard rule requires — but that lock is distinct from `state`, and `state` itself
@@ -1861,12 +1863,12 @@ are new in this pass and each names the issue that carries it.
 9. **Resolved by D122.** Every session has a checklist — the template is global configuration
    (D71) and not tied to a requisition — and ticking is refused on an ended session,
    `409 session_ended`, matching every other session-write route. (#41)
-10. **Review finalisation's concurrency guard, and a torn tail that un-finalises.** `updatedAt`
-    now gives the PIP fold an ordering key, which was one half of this. The other half is
-    mechanism: nothing states that finalisation is claimed under I5, and the accepted
-    latest-line-wins reversion applied to `reviews.ndjson` can retract a final review that
-    other operators have already seen and that may have raised a PIP badge. I29 states the
-    invariant; what enforces it across a crash is undetermined. (#35, #36)
+10. **Resolved by D120, D124 and D128.** `finaliseReview` claims the same synchronous I5 lock
+    as `appendReview` (D120, and named among I5's six guards by D124). The crash half is closed
+    by D128: `Store.appendReview` is durable — fsync'd before it returns — so a line the caller
+    was actually told succeeded cannot be un-written by a later host crash. The accepted
+    latest-line-wins reversion (D65) still applies to a write the caller was never acknowledged
+    for, which is the same durable-before-ack shape I10 already gives `AuditRecord`. (#35, #36)
 11. **How a removed or retyped field in `reviews.ndjson` or `requisitions.ndjson` is
     migrated.** Every other persisted shape gates on `meta.json`'s `schemaVersion`, and these
     two files are not under it. Adding fields is safe today; removing or retyping one has no

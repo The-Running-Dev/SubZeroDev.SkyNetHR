@@ -2409,6 +2409,60 @@ Rejected calling both modules private helpers and leaving the table at twelve: t
 is an invariant with a named owner, and the table would keep naming the wrong one.
 Reversibility: cheap. Documentation of structure that already exists.
 
+### 2026-08-13 — D127 `session-manager.getSnapshotForReview` reads a session with no ownership check
+Context: `## Unresolved` 6 (#32) named a real contradiction: the threat model says writing a
+review about another operator's session is deliberately open, while the only existing route to
+a session applies the ownership check and answers `404` to a non-owner. `records.createReview`
+already takes the snapshot as a parameter (D77); nothing supplied one for a session the caller
+does not own.
+Chosen: `SessionManager` gains `getSnapshotForReview(sessionId): SessionSnapshot | null`,
+shaped exactly like `readAudit` (`## Unresolved` 5, #34, resolved by S12) — no owner parameter,
+no ownership check, `null` for a session that does not exist, which `POST /api/reviews` turns
+into `404 no_such_session`. The precedent is direct: D70 already opens both audit reads and
+review reads/writes to every operator regardless of session ownership, and `readAudit` is the
+existing answer to "how does a tier-one-owned method serve a tier-two route without applying
+the per-session ownership check."
+Rejected: a variant of `get`/`message` that takes an `ignoreOwnership` flag — it puts a footgun
+on the one method everything else legitimately calls with ownership enforced, for the sake of
+avoiding one new method name.
+Rejected: resolving the session inside `records` itself — `records.createReview`'s own comment
+already states "`records` never resolves a session," and giving it a `store`/session dependency
+to do so would cross the boundary `## Unresolved` 5 drew for the opposite direction.
+Reversibility: cheap. One new method, no change to an existing signature.
+
+### 2026-08-13 — D128 A review's finalising line is fsync'd before the response, closing the retraction gap I29 leaves open
+Context: `## Unresolved` 10 (#35, #36) named two halves. The first — whether finalisation
+claims a guard at all — was already closed by D120 and D124: `finaliseReview` claims the same
+synchronous lock as `appendReview`, named among I5's six guards. What remained is mechanism:
+`10-design.md § Persistence summary` (D65) accepts, for both record logs generally, that a
+torn trailing line reverts the previous line to authoritative — a requisition's consumption can
+un-happen and D68's own text says so in writing. I29 carries no matching exception: it states,
+unqualified, that a review's `state` moves `draft → final` and never back. A torn tail
+reverting an acknowledged `final` review to `draft` would silently break a stated invariant,
+not merely repeat an accepted, written-down cost the way the requisition case does — and unlike
+a requisition's bookkeeping lie, a retracted review may already have been read by other
+operators and may already have raised a PIP badge they saw.
+Chosen: `Store.appendReview` is durable — fsync'd before it returns — for every line, matching
+`appendAudit`'s existing shape and D26's "durable before the response reaches the caller"
+argument, extended here to `finaliseReview`'s response rather than a permission decision.
+Because `finaliseReview` and `appendReview` (the draft-edit path) share the one store method,
+every review line is fsync'd, not only the finalising one; the cost argument that exempts
+ordinary spill events (`10-design.md` line ~820, "unjustifiable at event rates") does not apply
+here; reviews are human-paced and kilobytes, the same basis already used to reject an offset
+index for the record logs. Consequence: once a caller has received a `200`/`201` for any review
+route, that line survives a subsequent host crash, so the reversion `## Unresolved` 10 worried
+about can only ever hit a write the caller was never told succeeded — which is the same
+durable-before-ack shape I10 already establishes for `AuditRecord`, applied to the one record
+log carrying an invariant strict enough to need it.
+Rejected: leaving `appendReview` un-fsync'd and adding a separate, fsync'd path only
+`finaliseReview` calls — two store methods writing the same file for one difference in
+durability is the extra surface D65's own reasoning (avoid a second write protocol, a second
+torn-write story) argues against, for a cost this file's size does not justify avoiding.
+Rejected: applying the same fix to `appendRequisition` — no invariant on a requisition is
+written as absolutely as I29, D68 already accepts and documents the loss, and widening the fix
+unasked is exactly the kind of scope this session was told to leave alone.
+Reversibility: cheap. One store method's durability changes; no signature changes shape.
+
 ## Open
 
 Staging only. Once an item becomes an issue it leaves this list.
