@@ -55,6 +55,7 @@ import type {
 } from '../contract/index.js';
 
 const isWindows = platform === 'win32';
+const isDarwin = platform === 'darwin';
 const execFileAsync = promisify(execFile);
 import type { Checkpoints } from '../contract/index.js';
 import type { Records } from '../contract/index.js';
@@ -382,7 +383,8 @@ export function createSessionManager(deps: {
   }
 
   // The OS-reported image name for a live pid, or `null` when nothing is running there
-  // (already exited, or never existed). Windows has no `/proc`; Linux does.
+  // (already exited, or never existed). Windows has no `/proc`; neither does macOS —
+  // both read the live process table instead, each with the tool the platform gives.
   async function getProcessImage(pid: number): Promise<string | null> {
     if (isWindows) {
       try {
@@ -391,6 +393,17 @@ export function createSessionManager(deps: {
         if (!firstLine) return null;
         const match = /^"([^"]*)"/.exec(firstLine);
         return match ? match[1]! : null;
+      } catch {
+        return null;
+      }
+    }
+    if (isDarwin) {
+      try {
+        // `comm=` reports the full invoked path on macOS (unlike Linux's `/proc/pid/comm`,
+        // which is always the bare name); `ucomm=` is the field that stays a bare name here.
+        const { stdout } = await execFileAsync('ps', ['-p', String(pid), '-o', 'ucomm=']);
+        const line = stdout.trim();
+        return line.length > 0 ? line : null;
       } catch {
         return null;
       }
