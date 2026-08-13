@@ -24,10 +24,6 @@ function nowIso(): IsoTimestamp {
   return new Date().toISOString() as IsoTimestamp;
 }
 
-function notImplemented(method: string): never {
-  throw new Error(`records.${method} is not implemented before S15`);
-}
-
 function err<T>(error: RecordsError): Result<T, RecordsError> {
   return { ok: false, error };
 }
@@ -40,6 +36,17 @@ export function createRecords(deps: { readonly config: Config; readonly store: S
   const { config, store } = deps;
 
   const requisitions = new Map<RequisitionId, Requisition>();
+
+  // Reviews, in write-recency order (oldest write first): an update deletes then re-sets
+  // its key, moving it to the end of Map iteration order. `isUnderPip` reads that order
+  // directly for D83's "ties broken by the later line" — the same technique
+  // `store.foldLatestById` uses to give `readAllReviews` the matching order at boot.
+  const reviews = new Map<ReviewId, Review>();
+
+  // D120/I5: a review's mutation — `appendReview` (a draft edit) and `finaliseReview`
+  // share one guard, claimed synchronously before the `await` on their append. `state`
+  // itself changes only once that append durably succeeds (Records boundary).
+  const reviewMutating = new Set<ReviewId>();
 
   // S13.6/I33/I5: a claim taken but not yet durable as `consumed` — checked by `claim`
   // alongside `state`, per D120's exclusivity-lock shape, so a second `POST /api/sessions`
@@ -60,6 +67,12 @@ export function createRecords(deps: { readonly config: Config; readonly store: S
       // the latest line per id and drops a torn trailing line (S13.14).
       const loaded = await store.readAllRequisitions();
       for (const record of loaded) requisitions.set(record.requisitionId, record);
+
+      // I38: same guarantee as requisitions above — an unreadable `reviews.ndjson` yields
+      // an empty registry rather than aborting boot. `store.readAllReviews` already folds
+      // to the latest line per id, in write order (S15.12).
+      const loadedReviews = await store.readAllReviews();
+      for (const record of loadedReviews) reviews.set(record.reviewId, record);
     },
 
     async raise(raisedBy, input: RaiseRequisitionInput) {
@@ -168,23 +181,130 @@ export function createRecords(deps: { readonly config: Config; readonly store: S
       reservedForConsumption.delete(requisitionId);
     },
 
-    async createReview(_author: OperatorId, _snapshot: SessionSnapshot, _input: CreateReviewInput) {
-      notImplemented('createReview');
+    async createReview(author, snapshot: SessionSnapshot, input: CreateReviewInput) {
+      // D127/S15.2: `subject` (the wire shape) and `snapshot.sessionId` (what the edge
+      // resolved) must name the same session — the one consistency check `records` can
+      // make without resolving a session itself.
+      if (input.subject !== snapshot.sessionId) {
+        return err({ code: 'bad_request', field: 'subject', detail: 'subject does not match the resolved session' });
+      }
+      const bodyBytes = Buffer.byteLength(input.body, 'utf8');
+      if (bodyBytes > config.caps.reviewBodyBytes) {
+        return err({ code: 'bad_request', field: 'body', detail: `body exceeds ${config.caps.reviewBodyBytes} bytes` });
+      }
+
+      const now = nowIso();
+      const record: Review = {
+        reviewId: randomUUID() as ReviewId,
+        subject: input.subject,
+        snapshot,
+        author,
+        state: 'draft',
+        rating: input.rating,
+        pip: input.pip,
+        body: input.body,
+        createdAt: now,
+        updatedAt: now,
+      };
+
+      const appended = await store.appendReview(record);
+      if (!appended.ok) return err({ code: 'storage', cause: appended.error });
+      reviews.set(record.reviewId, record);
+      return ok(record);
     },
-    async appendReview(_reviewId: ReviewId, _author: OperatorId, _patch: ReviewPatch) {
-      notImplemented('appendReview');
+
+    async appendReview(reviewId, author, patch: ReviewPatch) {
+      const current = reviews.get(reviewId);
+      if (!current) return err({ code: 'no_such_review', reviewId });
+      // I29: a `final` review is terminal, for every caller, before the author check —
+      // it has already been read by others and its badge may already be raised.
+      if (current.state === 'final') return err({ code: 'review_final', reviewId });
+      // I31/D50: a draft not owned by `author` reads as not found, never a distinct
+      // forbidden.
+      if (current.author !== author) return err({ code: 'no_such_review', reviewId });
+
+      if (patch.body !== undefined) {
+        const bodyBytes = Buffer.byteLength(patch.body, 'utf8');
+        if (bodyBytes > config.caps.reviewBodyBytes) {
+          return err({ code: 'bad_request', field: 'body', detail: `body exceeds ${config.caps.reviewBodyBytes} bytes` });
+        }
+      }
+
+      // I5/D120: claimed synchronously, before the `await` below — no other synchronous
+      // step separates this from the reads above. A second mutation racing this one in
+      // the same tick sees the review still at its prior `state`/`author`, which the
+      // checks above already covered; the lock's job is only to stop two appends for the
+      // same review both winning past this point before either's write lands.
+      if (reviewMutating.has(reviewId)) return err({ code: 'review_final', reviewId });
+      reviewMutating.add(reviewId);
+
+      const updated: Review = {
+        ...current,
+        rating: patch.rating !== undefined ? patch.rating : current.rating,
+        pip: patch.pip !== undefined ? patch.pip : current.pip,
+        body: patch.body !== undefined ? patch.body : current.body,
+        updatedAt: nowIso(),
+      };
+
+      const appended = await store.appendReview(updated);
+      reviewMutating.delete(reviewId);
+      if (!appended.ok) {
+        // Records boundary: a failed append must not mutate the registry — `current`
+        // still stands and the operator's edit is still in their form.
+        return err({ code: 'storage', cause: appended.error });
+      }
+      reviews.delete(reviewId);
+      reviews.set(reviewId, updated);
+      return ok(updated);
     },
-    async finaliseReview(_reviewId: ReviewId, _author: OperatorId) {
-      notImplemented('finaliseReview');
+
+    async finaliseReview(reviewId, author) {
+      const current = reviews.get(reviewId);
+      if (!current) return err({ code: 'no_such_review', reviewId });
+      if (current.state === 'final') return err({ code: 'review_final', reviewId });
+      if (current.author !== author) return err({ code: 'no_such_review', reviewId });
+
+      // I5/D120/D124: the same synchronous lock `appendReview` claims — finalisation is
+      // a review mutation too.
+      if (reviewMutating.has(reviewId)) return err({ code: 'review_final', reviewId });
+      reviewMutating.add(reviewId);
+
+      const finalised: Review = { ...current, state: 'final', updatedAt: nowIso() };
+
+      // D128: durable — fsync'd before this resolves, so a caller that has received the
+      // `200` knows this line survives a subsequent crash (I29).
+      const appended = await store.appendReview(finalised);
+      reviewMutating.delete(reviewId);
+      if (!appended.ok) return err({ code: 'storage', cause: appended.error });
+      reviews.delete(reviewId);
+      reviews.set(reviewId, finalised);
+      return ok(finalised);
     },
-    getReview(_reviewId: ReviewId, _reader: OperatorId) {
-      notImplemented('getReview');
+
+    getReview(reviewId, reader) {
+      const found = reviews.get(reviewId);
+      if (!found) return err({ code: 'no_such_review', reviewId });
+      if (found.state === 'draft' && found.author !== reader) return err({ code: 'no_such_review', reviewId });
+      return ok(found);
     },
-    listReviews(_subject: SessionId) {
-      notImplemented('listReviews');
+
+    listReviews(subject) {
+      // D70/I31: finals only, for every operator including the drafts' own authors —
+      // an author reaches their own draft through `getReview` instead.
+      return Array.from(reviews.values()).filter((r) => r.state === 'final' && r.subject === subject);
     },
-    isUnderPip(_subject: SessionId) {
-      notImplemented('isUnderPip');
+
+    isUnderPip(subject) {
+      // I35/D72/D83: the `pip` of the final review for `subject` with the greatest
+      // `updatedAt`, ties broken by the later line. `reviews` iterates oldest write
+      // first, so scanning forward and taking `>=` lets the later-written entry win a
+      // tie without a second field.
+      let best: Review | null = null;
+      for (const r of reviews.values()) {
+        if (r.state !== 'final' || r.subject !== subject) continue;
+        if (best === null || r.updatedAt >= best.updatedAt) best = r;
+      }
+      return best !== null && best.pip;
     },
   };
 

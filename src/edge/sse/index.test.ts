@@ -293,6 +293,129 @@ describe('S13 — POST/GET /api/requisitions, POST /api/requisitions/:id/decisio
   });
 });
 
+describe('S15 — POST/GET /api/reviews, POST /api/reviews/:id, POST /api/reviews/:id/finalise', () => {
+  it('S15.2 — creates a draft for a session the caller does not own, with the snapshot copied at authorship', async () => {
+    const h = await makeEdge(undefined, undefined, undefined, (c, s) => createRecords({ config: c, store: s }));
+    const id = await newSession(h, 'r1', 'alice');
+
+    const created = await post(h, '/api/reviews', { subject: id, rating: 'meets', pip: false, body: 'solid work' }, 'bob');
+    assert.equal(created.status, 201, `create failed: ${await created.clone().text()}`);
+    const body = (await created.json()) as { review: { reviewId: string; state: string; author: string; snapshot: { sessionId: string; owner: string } } };
+    assert.equal(body.review.state, 'draft');
+    assert.equal(body.review.author, 'bob');
+    assert.equal(body.review.snapshot.sessionId, id);
+    assert.equal(body.review.snapshot.owner, 'alice');
+  });
+
+  it('an unknown subject is refused 404 no_such_session', async () => {
+    const h = await makeEdge(undefined, undefined, undefined, (c, s) => createRecords({ config: c, store: s }));
+    const res = await post(h, '/api/reviews', { subject: 'no-such-session', rating: null, pip: false, body: 'x' });
+    assert.equal(res.status, 404);
+    assert.equal(((await res.json()) as { error: { code: string } }).error.code, 'no_such_session');
+  });
+
+  it('S15.7 — an unrecognised rating token is refused 422 bad_request naming the field', async () => {
+    const h = await makeEdge(undefined, undefined, undefined, (c, s) => createRecords({ config: c, store: s }));
+    const id = await newSession(h, 'r2');
+    const res = await post(h, '/api/reviews', { subject: id, rating: 'amazing', pip: false, body: 'x' });
+    assert.equal(res.status, 422);
+    const err = ((await res.json()) as { error: { code: string; detail?: { field?: string } } }).error;
+    assert.equal(err.code, 'bad_request');
+    assert.equal(err.detail?.field, 'rating');
+  });
+
+  it('S15.3/S15.4/S15.6 — a draft is invisible to another operator, and finalising makes it readable and listed', async () => {
+    const h = await makeEdge(undefined, undefined, undefined, (c, s) => createRecords({ config: c, store: s }));
+    const id = await newSession(h, 'r3');
+    const created = await post(h, '/api/reviews', { subject: id, rating: null, pip: true, body: 'draft body' }, 'alice');
+    const { review } = (await created.json()) as { review: { reviewId: string } };
+
+    const listedWhileDraft = await get(h, `/api/reviews?subject=${id}`, 'carol');
+    assert.equal(((await listedWhileDraft.json()) as { reviews: unknown[] }).reviews.length, 0);
+
+    const readByOther = await get(h, `/api/reviews/${review.reviewId}`, 'carol');
+    assert.equal(readByOther.status, 404);
+    assert.equal(((await readByOther.json()) as { error: { code: string } }).error.code, 'no_such_review');
+
+    const finalised = await post(h, `/api/reviews/${review.reviewId}/finalise`, {}, 'alice');
+    assert.equal(finalised.status, 200, `finalise failed: ${await finalised.clone().text()}`);
+    assert.equal(((await finalised.json()) as { review: { state: string } }).review.state, 'final');
+
+    const readAfter = await get(h, `/api/reviews/${review.reviewId}`, 'carol');
+    assert.equal(readAfter.status, 200);
+
+    const listedAfter = await get(h, `/api/reviews?subject=${id}`, 'carol');
+    const listedBody = (await listedAfter.json()) as { reviews: Array<{ reviewId: string }> };
+    assert.equal(listedBody.reviews.length, 1);
+    assert.equal(listedBody.reviews[0]!.reviewId, review.reviewId);
+
+    const secondFinalise = await post(h, `/api/reviews/${review.reviewId}/finalise`, {}, 'alice');
+    assert.equal(secondFinalise.status, 409);
+    assert.equal(((await secondFinalise.json()) as { error: { code: string } }).error.code, 'review_final');
+  });
+
+  it('S15.5 — POST /api/reviews/:id edits a draft in place from the caller\'s point of view', async () => {
+    const h = await makeEdge(undefined, undefined, undefined, (c, s) => createRecords({ config: c, store: s }));
+    const id = await newSession(h, 'r4');
+    const created = await post(h, '/api/reviews', { subject: id, rating: null, pip: false, body: 'v1' }, 'alice');
+    const { review } = (await created.json()) as { review: { reviewId: string } };
+
+    const edited = await post(h, `/api/reviews/${review.reviewId}`, { body: 'v2' }, 'alice');
+    assert.equal(edited.status, 200, `edit failed: ${await edited.clone().text()}`);
+    assert.equal(((await edited.json()) as { review: { body: string } }).review.body, 'v2');
+
+    const editByOther = await post(h, `/api/reviews/${review.reviewId}`, { body: 'hijacked' }, 'carol');
+    assert.equal(editByOther.status, 404);
+  });
+
+  it('S15.8 — an oversized body is refused 422 bad_request naming the field', async () => {
+    const h = await makeEdge(
+      { mode: 'proxy-header', userHeader: 'x-forwarded-user' },
+      {
+        caps: {
+          ringCapacity: 500,
+          toolResultBytes: 65536,
+          subscriberQueueHighWater: 1000,
+          keepaliveMs: 15000,
+          auditPageMax: 200,
+          reviewBodyBytes: 8,
+          requisitionTextBytes: 1024,
+          standingRuleBytes: 1024,
+        },
+      },
+      undefined,
+      (c, s) => createRecords({ config: c, store: s }),
+    );
+    const id = await newSession(h, 'r5');
+    const res = await post(h, '/api/reviews', { subject: id, rating: null, pip: false, body: 'way too long for eight bytes' });
+    assert.equal(res.status, 422);
+    const err = ((await res.json()) as { error: { code: string; detail?: { field?: string } } }).error;
+    assert.equal(err.code, 'bad_request');
+    assert.equal(err.detail?.field, 'body');
+  });
+
+  it('S15.10 — a review survives DELETE /api/sessions/:id and renders from its snapshot', async () => {
+    const h = await makeEdge(undefined, undefined, undefined, (c, s) => createRecords({ config: c, store: s }));
+    const id = await newSession(h, 'r6');
+    const created = await post(h, '/api/reviews', { subject: id, rating: null, pip: false, body: 'x' }, 'alice');
+    const { review } = (await created.json()) as { review: { reviewId: string } };
+    await post(h, `/api/reviews/${review.reviewId}/finalise`, {}, 'alice');
+
+    const ended = await post(h, `/api/sessions/${id}/end`, {});
+    assert.equal(ended.status, 200);
+    const deleted = await fetch(`${h.base}/api/sessions/${id}`, {
+      method: 'DELETE',
+      headers: { 'sec-fetch-site': 'same-origin', 'x-forwarded-user': 'ben' },
+    });
+    assert.equal(deleted.status, 200, `delete failed: ${await deleted.clone().text()}`);
+
+    const read = await get(h, `/api/reviews/${review.reviewId}`, 'carol');
+    assert.equal(read.status, 200);
+    const body = (await read.json()) as { review: { snapshot: { sessionId: string } } };
+    assert.equal(body.review.snapshot.sessionId, id);
+  });
+});
+
 describe('S2.2 — POST /api/sessions/:id/message', () => {
   it('returns 202 { turnId }', async () => {
     const h = await makeEdge();

@@ -1,4 +1,4 @@
-import { renderAuditRow, renderEvent, renderRequisitionRow } from './render.js';
+import { renderAuditRow, renderEvent, renderRequisitionRow, renderReviewRow } from './render.js';
 
 const $ = (id) => document.getElementById(id);
 
@@ -27,6 +27,12 @@ const state = {
   // reset that outruns an in-flight "Load older") can never overwrite state a newer call
   // already reset — mirrors `refreshCheckpoints`'s `requestedSessionId` guard.
   auditRequestToken: 0,
+  // S15: the reviewId of the draft this operator is currently editing for the selected
+  // session, if any. Ephemeral — a reload loses it, same as every other piece of UI state
+  // this client keeps nowhere durable (D67/D70 keep no per-operator record server-side);
+  // there is no "list my drafts" route to recover it from, and none is needed — losing the
+  // id after a reload just means starting a new draft.
+  reviewDraftId: null,
 };
 
 function currentSession() {
@@ -159,10 +165,13 @@ function selectSession(sessionId) {
   applySessionAvailability();
   applyPolicyBanner();
   $('checkpoints').hidden = false;
+  $('reviews').hidden = false;
+  resetReviewForm();
   openStream(sessionId);
   void refreshSessions();
   void refreshCheckpoints();
   void refreshChecklist();
+  void refreshReviews();
 }
 
 // Fetches `/api/sessions/:id<suffix>` for the session selected when the call was made.
@@ -583,6 +592,70 @@ async function filterAudit(event) {
 }
 
 // ---------------------------------------------------------------------------
+// Reviews (S15) — PIP status is derived client-side from the finals `GET /api/reviews`
+// already returns, never served as a session field (D72/D79): the latest final by
+// `updatedAt`, ties broken by the later entry in the array — the server's own write order
+// (S15.9/D83), the same tie-break `records.isUnderPip` applies. A draft is its author's
+// alone (S15.3); `state.reviewDraftId` is this client's only record of which one it is
+// currently editing.
+// ---------------------------------------------------------------------------
+
+function resetReviewForm() {
+  $('review-form').reset();
+  $('review-publish').disabled = true;
+  state.reviewDraftId = null;
+}
+
+async function refreshReviews() {
+  if (state.sessionId === null) return;
+  const requestedSessionId = state.sessionId;
+  const result = await api('GET', `/api/reviews?subject=${encodeURIComponent(requestedSessionId)}`);
+  if (result.status === 401) return;
+  if (state.sessionId !== requestedSessionId) return; // superseded by a faster session switch
+  if (result.status !== 200) return status(describe(result), 'error');
+
+  const reviews = result.payload.reviews;
+  const tbody = $('review-rows');
+  clear(tbody);
+  for (const review of reviews) tbody.appendChild(renderReviewRow(document, review));
+  $('reviews-empty').hidden = reviews.length > 0;
+
+  let latest = null;
+  for (const review of reviews) {
+    if (latest === null || review.updatedAt >= latest.updatedAt) latest = review;
+  }
+  $('pip-badge').hidden = !(latest && latest.pip);
+}
+
+async function saveReviewDraft(event) {
+  event.preventDefault();
+  if (state.sessionId === null) return;
+  const rating = $('review-rating').value.trim();
+  const pip = $('review-pip').checked;
+  const body = $('review-body').value;
+
+  const result =
+    state.reviewDraftId === null
+      ? await api('POST', '/api/reviews', { subject: state.sessionId, rating: rating === '' ? null : rating, pip, body })
+      : await api('POST', `/api/reviews/${encodeURIComponent(state.reviewDraftId)}`, { rating: rating === '' ? null : rating, pip, body });
+  if (result.status === 401) return;
+  if (result.status !== 201 && result.status !== 200) return status(describe(result), 'error');
+  state.reviewDraftId = result.payload.review.reviewId;
+  $('review-publish').disabled = false;
+  status('draft saved', 'ok');
+}
+
+async function publishReview() {
+  if (state.reviewDraftId === null) return;
+  const result = await api('POST', `/api/reviews/${encodeURIComponent(state.reviewDraftId)}/finalise`, {});
+  if (result.status === 401) return;
+  if (result.status !== 200) return status(describe(result), 'error');
+  status('review published', 'ok');
+  resetReviewForm();
+  await refreshReviews();
+}
+
+// ---------------------------------------------------------------------------
 // Requisitions (S13) — open to every authenticated operator (D70): a requisition cannot
 // be approved by someone who cannot see it. `workspace` is rendered as text only, exactly
 // like every other operator-authored string this client shows (S13.15, I26).
@@ -720,6 +793,8 @@ function start() {
   $('requisitions-open').addEventListener('click', openRequisitions);
   $('requisitions-close').addEventListener('click', closeRequisitions);
   $('raise-requisition').addEventListener('submit', raiseRequisition);
+  $('review-form').addEventListener('submit', saveReviewDraft);
+  $('review-publish').addEventListener('click', () => void publishReview());
   void refreshSessions();
   void refreshRequisitionOptions();
 }

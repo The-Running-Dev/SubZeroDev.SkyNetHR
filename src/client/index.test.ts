@@ -85,6 +85,13 @@ async function loadRequisitionRowRenderer() {
   return mod.renderRequisitionRow;
 }
 
+async function loadReviewRowRenderer() {
+  const mod = (await import(pathToFileURL(path.join(CLIENT, 'render.js')).href)) as {
+    renderReviewRow: (doc: unknown, review: unknown) => StubNode;
+  };
+  return mod.renderReviewRow;
+}
+
 const XSS = '<img src=x onerror=alert(1)>';
 
 describe('S2.11 — the client renders normalised events only', () => {
@@ -260,6 +267,32 @@ describe('S13.15 — a requisition\'s title, justification and workspace render 
   });
 });
 
+describe("S15.13 — a review's body renders as literal characters, in a different operator's browser", () => {
+  it('renders an XSS payload in body as literal characters, never as markup', async () => {
+    const renderReviewRow = await loadReviewRowRenderer();
+    const { doc, created } = makeDoc();
+    const review = {
+      reviewId: 'rev-1',
+      subject: 'sess-1',
+      snapshot: { sessionId: 'sess-1', owner: 'alice', vendor: 'claude', cwd: '/w', createdAt: 'x' },
+      author: 'alice',
+      state: 'final',
+      rating: 'meets',
+      pip: false,
+      body: XSS,
+      createdAt: 'x',
+      updatedAt: 'x',
+    };
+    // `bob` reads a review `alice` authored — the review is final, so D70's open read
+    // applies, exercised here as the "different operator's browser" the criterion names.
+    const row = renderReviewRow(doc, review);
+    const rendered = allText(row).join(' ');
+    assert.ok(rendered.includes(XSS), 'the exact XSS characters survive as a text node');
+    assert.ok(rendered.includes('alice'));
+    assert.ok(!created.some((n) => n.tag.toLowerCase() === 'img'), 'no img element was ever created');
+  });
+});
+
 describe('S2.14 — every rendered value is a CSS custom property', () => {
   it('declares its tokens in one stylesheet and uses literal colours nowhere else', async () => {
     const css = await readFile(path.join(CLIENT, 'app.css'), 'utf8');
@@ -319,6 +352,8 @@ interface FakeEl {
   hidden: boolean;
   type: string;
   value: string;
+  checked: boolean;
+  disabled: boolean;
   scrollTop: number;
   scrollHeight: number;
   textContent: string | null;
@@ -329,6 +364,7 @@ interface FakeEl {
   firstChild: FakeEl | null;
   addEventListener(kind: string, fn: (event: unknown) => void): void;
   querySelector(): null;
+  reset(): void;
 }
 
 function fakeEl(tag: string): FakeEl {
@@ -338,6 +374,8 @@ function fakeEl(tag: string): FakeEl {
     hidden: false,
     type: '',
     value: '',
+    checked: false,
+    disabled: false,
     scrollTop: 0,
     scrollHeight: 0,
     textContent: null,
@@ -352,6 +390,9 @@ function fakeEl(tag: string): FakeEl {
       node.listeners.set(kind, existing);
     },
     querySelector: () => null,
+    // A `<form>`'s real `reset()` restores every field to its initial value — the stub
+    // only needs the two fields `resetReviewForm` (client/app.js) actually reads back.
+    reset() { node.value = ''; node.checked = false; },
   };
   return node;
 }
@@ -373,6 +414,8 @@ async function runConsole(sessions: ReadonlyArray<Record<string, unknown>>) {
     'audit-load-more', 'requisitions', 'requisitions-open', 'requisitions-close', 'raise-requisition',
     'requisition-title', 'requisition-justification', 'requisition-workspace', 'requisition-vendor',
     'requisition-rows', 'requisitions-empty',
+    'reviews', 'review-rows', 'reviews-empty', 'pip-badge', 'review-form', 'review-rating',
+    'review-pip', 'review-body', 'review-save', 'review-publish',
   ]) {
     byId.set(id, fakeEl('div'));
   }
@@ -417,7 +460,9 @@ async function runConsole(sessions: ReadonlyArray<Record<string, unknown>>) {
             ? { sessions }
             : String(input) === '/api/requisitions'
               ? { requisitions: [] }
-              : {},
+              : String(input).startsWith('/api/reviews')
+                ? { reviews: [] }
+                : {},
   });
 
   // A distinct query per load: `app.js` runs its bootstrap on import, so a cached module

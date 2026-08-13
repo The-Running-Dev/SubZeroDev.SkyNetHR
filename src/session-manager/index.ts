@@ -41,6 +41,7 @@ import type {
   SessionId,
   SessionManager,
   SessionRecord,
+  SessionSnapshot,
   SessionSummary,
   StandingRuleExpression,
   StartupError,
@@ -1178,6 +1179,21 @@ export function createSessionManager(deps: {
 
     async readAudit(query) {
       return store.readAuditPage(query);
+    },
+
+    getSnapshotForReview(sessionId): SessionSnapshot | null {
+      // D127: no owner parameter, no ownership check — shaped like `readAudit` above.
+      // `null` for a session that does not exist; `POST /api/reviews` turns that into
+      // `404 no_such_session`.
+      const entry = sessions.get(sessionId);
+      if (!entry) return null;
+      return {
+        sessionId: entry.record.id,
+        owner: entry.record.owner,
+        vendor: entry.record.vendor,
+        cwd: entry.record.cwd,
+        createdAt: entry.record.createdAt,
+      };
     },
   };
 

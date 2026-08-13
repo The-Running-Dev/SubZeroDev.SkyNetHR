@@ -419,6 +419,11 @@ export interface AuditPage {
 
 export type Rating = 'does_not_meet' | 'meets_some' | 'meets' | 'exceeds' | 'exceptional';
 
+// The one runtime enumeration of `Rating`'s members, `adapters`' `VENDORS` shape (D126):
+// a second hand-copy elsewhere is the drift that having one canonical list exists to
+// prevent, so `parseRating` at the edge imports this rather than re-enumerating it.
+export const RATINGS: readonly Rating[] = ['does_not_meet', 'meets_some', 'meets', 'exceeds', 'exceptional'];
+
 export type ReviewState = 'draft' | 'final';
 
 export interface Review {
@@ -721,6 +726,12 @@ export interface SessionManager {
   // Not session-scoped and takes no owner, like `boot`: D70 opens this read to every
   // authenticated operator. A pure delegation to `Store.readAuditPage` (D119).
   readAudit(query: AuditQuery): Promise<Result<AuditPage, StoreError>>;
+
+  // Tier two. No owner, shaped like `readAudit` for the same reason: D70 opens a review
+  // about any session to every operator, not only the session's own owner. `null` for a
+  // session that does not exist; `POST /api/reviews` turns that into `404 no_such_session`
+  // (D127).
+  getSnapshotForReview(sessionId: SessionId): SessionSnapshot | null;
 }
 
 // ---------------------------------------------------------------------------

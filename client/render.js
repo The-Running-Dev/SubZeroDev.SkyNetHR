@@ -268,3 +268,20 @@ export function renderRequisitionRow(doc, requisition, onDecide) {
   tr.appendChild(actions);
   return tr;
 }
+
+// S15.13: `body` is one operator's free text read by every authenticated operator once
+// the review is final (D74's carve-out, widened past agent-derived content) — the same
+// `textContent`-only discipline as `renderRequisitionRow`'s, never assembled markup.
+export function renderReviewRow(doc, review) {
+  const tr = doc.createElement('tr');
+  tr.className = 'review-row';
+  tr.appendChild(el(doc, 'td', 'review-row__author', review.author));
+  tr.appendChild(el(doc, 'td', 'review-row__rating', review.rating));
+  tr.appendChild(el(doc, 'td', 'review-row__pip', review.pip ? 'ON PIP' : ''));
+  tr.appendChild(el(doc, 'td', 'review-row__state', review.state));
+  const bodyCell = doc.createElement('td');
+  bodyCell.className = 'review-row__body';
+  bodyCell.appendChild(el(doc, 'pre', 'review-row__body-pre', review.body));
+  tr.appendChild(bodyCell);
+  return tr;
+}

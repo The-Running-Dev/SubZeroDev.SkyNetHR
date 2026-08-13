@@ -106,16 +106,31 @@ async function readAllLines(filePath: string): Promise<Result<readonly string[],
 // Reads a `{id-field}`-keyed append-only log where the latest line for an id wins,
 // dropping an unparseable trailing line (a torn write) and any line missing the id
 // field, as `20-contract.md § Persisted schemas` requires for `reviews.ndjson` and
-// `requisitions.ndjson`.
-async function foldLatestById<T>(filePath: string, idField: keyof T): Promise<readonly T[]> {
+// `requisitions.ndjson`. `reorderByLatestWrite` (only reviews needs it) returns the array
+// ordered by each id's *winning* line rather than its first appearance: an id already seen
+// is deleted before being re-set, which moves it to the end of Map iteration order — what
+// D83 calls "the later line" for `records`' review-ordering tie-break (I35) to read off
+// directly, with no second field or a second pass over the file. Requisitions and pids have
+// no such reader and stay in first-appearance order, unaffected by this flag.
+async function foldLatestById<T>(filePath: string, idField: keyof T, reorderByLatestWrite: boolean): Promise<readonly T[]> {
   const linesResult = await readAllLines(filePath);
-  if (!linesResult.ok) return [];
+  if (!linesResult.ok) {
+    // I38/S15.12: an unreadable file (not merely absent — `readAllLines` already turns
+    // ENOENT into an empty read) yields an empty registry, but never silently: the operator
+    // needs a way to discover the whole log went missing.
+    const detail = 'detail' in linesResult.error ? linesResult.error.detail : linesResult.error.code;
+    console.warn(`[store] dropped ${filePath}: ${detail}`);
+    return [];
+  }
   const byId = new Map<string, T>();
   for (const line of linesResult.value) {
     try {
       const parsed = JSON.parse(line) as T;
-      const id = String(parsed[idField]);
-      byId.set(id, parsed);
+      const id = parsed[idField];
+      if (id === undefined || id === null) continue; // missing id field: cannot trust this line
+      const key = String(id);
+      if (reorderByLatestWrite) byId.delete(key);
+      byId.set(key, parsed);
     } catch {
       // Dropped: either a torn trailing line, or (mid-file) corrupt input we cannot trust.
     }
@@ -529,16 +544,20 @@ export async function createStore(config: Config): Promise<Result<Store, StoreEr
     },
 
     async readOpenPids(): Promise<readonly ProcessRecord[]> {
-      const all = await foldLatestById<ProcessRecord>(path.join(storageRoot, 'pids.ndjson'), 'pid');
+      const all = await foldLatestById<ProcessRecord>(path.join(storageRoot, 'pids.ndjson'), 'pid', false);
       return all.filter((r) => r.exitedAt === null);
     },
 
     async appendReview(record: Review) {
-      return appendLine(path.join(storageRoot, 'reviews.ndjson'), JSON.stringify(record), false);
+      // D128: durable — fsync'd before it returns, for every line, not only the
+      // finalising one. Reviews are human-paced and kilobytes, so the cost that exempts
+      // ordinary spill events does not apply here, and a torn tail must never revert an
+      // acknowledged `final` review back to `draft` (I29).
+      return appendLine(path.join(storageRoot, 'reviews.ndjson'), JSON.stringify(record), true);
     },
 
     async readAllReviews(): Promise<readonly Review[]> {
-      return foldLatestById<Review>(path.join(storageRoot, 'reviews.ndjson'), 'reviewId');
+      return foldLatestById<Review>(path.join(storageRoot, 'reviews.ndjson'), 'reviewId', true);
     },
 
     async appendRequisition(record: Requisition) {
@@ -546,7 +565,7 @@ export async function createStore(config: Config): Promise<Result<Store, StoreEr
     },
 
     async readAllRequisitions(): Promise<readonly Requisition[]> {
-      return foldLatestById<Requisition>(path.join(storageRoot, 'requisitions.ndjson'), 'requisitionId');
+      return foldLatestById<Requisition>(path.join(storageRoot, 'requisitions.ndjson'), 'requisitionId', false);
     },
   };
 
