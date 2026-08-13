@@ -344,6 +344,41 @@ describe('S16 — the payroll panel renders burn, remaining budget, idle time, a
     assert.equal(formatDuration(60_000), '1m');
     assert.equal(formatDuration(3_600_000 + 5 * 60_000), '1h 05m');
   });
+
+  it('refetches the panel on usage, turn.ended and session.ended, not just at session selection', async () => {
+    const { byId, streams, restore, fetchCalls } = await runConsole([{ id: 's1', cwd: '/w/p', vendor: 'claude', state: 'live' }]);
+    try {
+      const button = byId.get('sessions')!.children[0]!.children[0]!;
+      for (const fn of button.listeners.get('click') ?? []) fn({});
+      const countAfterSelect = fetchCalls.filter((u) => u.endsWith('/payroll')).length;
+      assert.equal(countAfterSelect, 1, 'selecting a session fetches the panel once');
+
+      deliver(streams[0]!, { seq: 1, sessionId: 's1', ts: '2026-08-09T00:00:00.000Z', kind: 'usage', data: { turnId: 't1', usage: { inputTokens: 1, outputTokens: 1, cacheRead: 0, cacheCreate: 0 } } });
+      assert.equal(fetchCalls.filter((u) => u.endsWith('/payroll')).length, countAfterSelect + 1, 'a usage event refetches burn — a live session must not show a stale count');
+
+      deliver(streams[0]!, { seq: 2, sessionId: 's1', ts: '2026-08-09T00:00:00.000Z', kind: 'turn.ended', data: { turnId: 't1', stopReason: 'completed', usage: null } });
+      assert.equal(fetchCalls.filter((u) => u.endsWith('/payroll')).length, countAfterSelect + 2, 'turn.ended closes an idle boundary and refetches too');
+
+      deliver(streams[0]!, { seq: 3, sessionId: 's1', ts: '2026-08-09T00:00:00.000Z', kind: 'session.ended', data: { reason: 'operator', endedAt: '2026-08-09T00:00:00.000Z' } });
+      assert.equal(fetchCalls.filter((u) => u.endsWith('/payroll')).length, countAfterSelect + 3, 'session.ended finalises the trailing idle gap and refetches once more');
+    } finally {
+      await restore();
+    }
+  });
+
+  it('does not refetch for another session\'s usage event', async () => {
+    const { byId, streams, restore, fetchCalls } = await runConsole([{ id: 's1', cwd: '/w/p', vendor: 'claude', state: 'live' }]);
+    try {
+      const button = byId.get('sessions')!.children[0]!.children[0]!;
+      for (const fn of button.listeners.get('click') ?? []) fn({});
+      const before = fetchCalls.filter((u) => u.endsWith('/payroll')).length;
+
+      deliver(streams[0]!, { seq: 1, sessionId: 'some-other-session', ts: '2026-08-09T00:00:00.000Z', kind: 'usage', data: { turnId: 't1', usage: { inputTokens: 1, outputTokens: 1, cacheRead: 0, cacheCreate: 0 } } });
+      assert.equal(fetchCalls.filter((u) => u.endsWith('/payroll')).length, before, 'a usage event for a session that is not selected must not refetch this one');
+    } finally {
+      await restore();
+    }
+  });
 });
 
 describe('S2.14 — every rendered value is a CSS custom property', () => {
@@ -474,6 +509,7 @@ async function runConsole(sessions: ReadonlyArray<Record<string, unknown>>) {
     byId.set(id, fakeEl('div'));
   }
   const streams: FakeStream[] = [];
+  const fetchCalls: string[] = [];
 
   const globals = globalThis as unknown as Record<string, unknown>;
   const saved = { document: globals['document'], EventSource: globals['EventSource'], fetch: globals['fetch'] };
@@ -503,7 +539,9 @@ async function runConsole(sessions: ReadonlyArray<Record<string, unknown>>) {
     }
     close(): void { this.closed = true; }
   };
-  globals['fetch'] = async (input: string) => ({
+  globals['fetch'] = async (input: string) => {
+    fetchCalls.push(String(input));
+    return {
     status: 200,
     json: async () =>
       String(input).endsWith('/checkpoints')
@@ -519,7 +557,8 @@ async function runConsole(sessions: ReadonlyArray<Record<string, unknown>>) {
               : String(input).startsWith('/api/reviews')
                 ? { reviews: [] }
                 : {},
-  });
+    };
+  };
 
   // A distinct query per load: `app.js` runs its bootstrap on import, so a cached module
   // would replay nothing.
@@ -535,7 +574,7 @@ async function runConsole(sessions: ReadonlyArray<Record<string, unknown>>) {
     globals['EventSource'] = saved.EventSource;
     globals['fetch'] = saved.fetch;
   };
-  return { byId, streams, restore };
+  return { byId, streams, restore, fetchCalls };
 }
 
 function deliver(stream: FakeStream, envelope: Record<string, unknown>): void {

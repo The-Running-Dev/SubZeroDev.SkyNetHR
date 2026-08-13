@@ -352,6 +352,14 @@ function handleEnvelope(sessionId, envelope) {
     // the operator who ticked it.
     void refreshChecklist();
   }
+  if ((envelope.kind === 'usage' || envelope.kind === 'turn.ended' || envelope.kind === 'session.ended') && envelope.sessionId === state.sessionId) {
+    // `usage` moves burn; `turn.ended` closes an idle boundary and, on a restart-closed
+    // turn, a dropped interval; `session.ended` finalises the trailing idle gap. Selecting
+    // a session only fetches a snapshot (S16) — without this the panel would freeze at
+    // whatever it read then, and a transient `payroll_unavailable` would never get a
+    // second try.
+    void refreshPayroll();
+  }
   if (envelope.kind === 'permission.resolved') {
     const controls = state.pendingPermissions.get(envelope.data.requestId);
     if (controls) {
@@ -392,7 +400,7 @@ function openSseStream(sessionId) {
 
   for (const kind of [
     'session.started', 'session.ended', 'session.notice',
-    'turn.started', 'turn.ended',
+    'turn.started', 'turn.ended', 'usage',
     'message', 'thinking', 'tool.call', 'tool.result',
     'permission.request', 'permission.resolved', 'checkpoint.created', 'checklist.item.completed', 'error',
   ]) {
