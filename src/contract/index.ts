@@ -721,6 +721,12 @@ export interface SessionManager {
   // Not session-scoped and takes no owner, like `boot`: D70 opens this read to every
   // authenticated operator. A pure delegation to `Store.readAuditPage` (D119).
   readAudit(query: AuditQuery): Promise<Result<AuditPage, StoreError>>;
+
+  // Tier two. No owner, shaped like `readAudit` for the same reason: D70 opens a review
+  // about any session to every operator, not only the session's own owner. `null` for a
+  // session that does not exist; `POST /api/reviews` turns that into `404 no_such_session`
+  // (D127).
+  getSnapshotForReview(sessionId: SessionId): SessionSnapshot | null;
 }
 
 // ---------------------------------------------------------------------------

@@ -12,8 +12,10 @@ import type {
   IdentityResolver,
   IsoTimestamp,
   OperatorId,
+  Rating,
   RecordsError,
   RequisitionId,
+  ReviewId,
   SessionError,
   SessionId,
   TurnId,
@@ -566,6 +568,127 @@ export function createHttpHandlers(deps: EdgeDeps) {
     sendJson(res, 200, { requisition: decided.value });
   }
 
+  const RATINGS: readonly Rating[] = ['does_not_meet', 'meets_some', 'meets', 'exceeds', 'exceptional'];
+
+  function parseRating(value: unknown): { ok: true; value: Rating | null } | { ok: false } {
+    if (value === null || value === undefined) return { ok: true, value: null };
+    if (typeof value === 'string' && RATINGS.includes(value as Rating)) return { ok: true, value: value as Rating };
+    return { ok: false };
+  }
+
+  // S15.2/D127: `POST /api/reviews` — the edge resolves the `SessionSnapshot` through
+  // `manager.getSnapshotForReview` (no ownership check, D70) and hands it to `records`,
+  // which never resolves a session itself (`## Unresolved` 5's boundary).
+  async function handleCreateReview(req: IncomingMessage, res: ServerResponse, owner: OperatorId): Promise<void> {
+    const raw = await readBody(req);
+    if (raw === null) return sendError(res, 'bad_request', 'request body too large', { field: 'body' });
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      return sendError(res, 'bad_request', 'body is not valid JSON', { field: 'body' });
+    }
+    if (typeof parsed !== 'object' || parsed === null) {
+      return sendError(res, 'bad_request', 'body must be an object', { field: 'body' });
+    }
+    const body = parsed as Record<string, unknown>;
+
+    if (typeof body['subject'] !== 'string' || body['subject'] === '') {
+      return sendError(res, 'bad_request', 'subject is required', { field: 'subject' });
+    }
+    const rating = parseRating(body['rating']);
+    if (!rating.ok) return sendError(res, 'bad_request', 'rating is not a recognised token', { field: 'rating' });
+    if (typeof body['pip'] !== 'boolean') {
+      return sendError(res, 'bad_request', 'pip must be a boolean', { field: 'pip' });
+    }
+    if (typeof body['body'] !== 'string') {
+      return sendError(res, 'bad_request', 'body is required', { field: 'body' });
+    }
+
+    const subject = body['subject'] as SessionId;
+    const snapshot = deps.manager.getSnapshotForReview(subject);
+    if (snapshot === null) return sendError(res, 'no_such_session', 'no such session');
+
+    const created = await deps.records.createReview(owner, snapshot, {
+      subject,
+      rating: rating.value,
+      pip: body['pip'],
+      body: body['body'],
+    });
+    if (!created.ok) {
+      const api = recordsApiError(created.error);
+      return sendError(res, api.code, api.message, api.detail);
+    }
+    sendJson(res, 201, { review: created.value });
+  }
+
+  async function handleAppendReview(req: IncomingMessage, res: ServerResponse, owner: OperatorId, reviewId: ReviewId): Promise<void> {
+    const raw = await readBody(req);
+    if (raw === null) return sendError(res, 'bad_request', 'request body too large', { field: 'body' });
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      return sendError(res, 'bad_request', 'body is not valid JSON', { field: 'body' });
+    }
+    if (typeof parsed !== 'object' || parsed === null) {
+      return sendError(res, 'bad_request', 'body must be an object', { field: 'body' });
+    }
+    const body = parsed as Record<string, unknown>;
+
+    const patch: { rating?: Rating | null; pip?: boolean; body?: string } = {};
+    if ('rating' in body) {
+      const rating = parseRating(body['rating']);
+      if (!rating.ok) return sendError(res, 'bad_request', 'rating is not a recognised token', { field: 'rating' });
+      patch.rating = rating.value;
+    }
+    if ('pip' in body) {
+      if (typeof body['pip'] !== 'boolean') return sendError(res, 'bad_request', 'pip must be a boolean', { field: 'pip' });
+      patch.pip = body['pip'];
+    }
+    if ('body' in body) {
+      if (typeof body['body'] !== 'string') return sendError(res, 'bad_request', 'body must be a string', { field: 'body' });
+      patch.body = body['body'];
+    }
+
+    const appended = await deps.records.appendReview(reviewId, owner, patch);
+    if (!appended.ok) {
+      const api = recordsApiError(appended.error);
+      return sendError(res, api.code, api.message, api.detail);
+    }
+    sendJson(res, 200, { review: appended.value });
+  }
+
+  async function handleFinaliseReview(req: IncomingMessage, res: ServerResponse, owner: OperatorId, reviewId: ReviewId): Promise<void> {
+    await readBody(req); // drains the request; `{}` carries nothing to validate
+    const finalised = await deps.records.finaliseReview(reviewId, owner);
+    if (!finalised.ok) {
+      const api = recordsApiError(finalised.error);
+      return sendError(res, api.code, api.message, api.detail);
+    }
+    sendJson(res, 200, { review: finalised.value });
+  }
+
+  // S15.4/D70: finals only, for every caller including a draft's own author — an author
+  // reaches their draft through `GET /api/reviews/:id` instead.
+  function handleListReviews(req: IncomingMessage, res: ServerResponse): void {
+    const url = new URL(req.url ?? '/', 'http://placeholder');
+    const subject = url.searchParams.get('subject');
+    if (subject === null || subject === '') {
+      return sendError(res, 'bad_request', 'subject is required', { field: 'subject' });
+    }
+    sendJson(res, 200, { reviews: deps.records.listReviews(subject as SessionId) });
+  }
+
+  function handleGetReview(_req: IncomingMessage, res: ServerResponse, owner: OperatorId, reviewId: ReviewId): void {
+    const got = deps.records.getReview(reviewId, owner);
+    if (!got.ok) {
+      const api = recordsApiError(got.error);
+      return sendError(res, api.code, api.message, api.detail);
+    }
+    sendJson(res, 200, { review: got.value });
+  }
+
   async function handleListCheckpoints(_req: IncomingMessage, res: ServerResponse, owner: OperatorId, sessionId: SessionId): Promise<void> {
     const listed = await manager.listCheckpoints(sessionId, owner);
     if (!listed.ok) return failWith(res, listed.error);
@@ -656,6 +779,11 @@ export function createHttpHandlers(deps: EdgeDeps) {
     handleRaiseRequisition,
     handleListRequisitions,
     handleDecideRequisition,
+    handleCreateReview,
+    handleAppendReview,
+    handleFinaliseReview,
+    handleListReviews,
+    handleGetReview,
     handleChecklist,
     handleTickChecklistItem,
   };

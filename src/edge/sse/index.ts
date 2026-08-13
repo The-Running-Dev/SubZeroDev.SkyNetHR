@@ -1,5 +1,5 @@
 import type { IncomingMessage, RequestListener, ServerResponse } from 'node:http';
-import type { CallId, ChecklistItemId, Envelope, OperatorId, RequisitionId, Seq, SessionId, Subscription, TurnId } from '../../contract/index.js';
+import type { CallId, ChecklistItemId, Envelope, OperatorId, RequisitionId, ReviewId, Seq, SessionId, Subscription, TurnId } from '../../contract/index.js';
 import { sendError } from '../error-envelope/index.js';
 import {
   type EdgeDeps,
@@ -45,6 +45,11 @@ export function createSseEdge(deps: EdgeDeps): RequestListener {
     handleRaiseRequisition,
     handleListRequisitions,
     handleDecideRequisition,
+    handleCreateReview,
+    handleAppendReview,
+    handleFinaliseReview,
+    handleListReviews,
+    handleGetReview,
     handleChecklist,
     handleTickChecklistItem,
   } = createHttpHandlers(deps);
@@ -199,6 +204,36 @@ export function createSseEdge(deps: EdgeDeps): RequestListener {
             return sendError(res, 'bad_request', 'requisition id is not a valid path segment', { field: 'requisitionId' });
           }
           return handleDecideRequisition(req, res, owner, decoded as RequisitionId);
+        }
+
+        if (method === 'GET' && pathname === '/api/reviews') {
+          return handleListReviews(req, res);
+        }
+        if (method === 'POST' && pathname === '/api/reviews') {
+          return handleCreateReview(req, res, owner);
+        }
+
+        const reviewFinaliseRoute = /^\/api\/reviews\/([^/]+)\/finalise$/.exec(pathname);
+        if (method === 'POST' && reviewFinaliseRoute !== null) {
+          let decoded: string;
+          try {
+            decoded = decodeURIComponent(reviewFinaliseRoute[1]!);
+          } catch {
+            return sendError(res, 'bad_request', 'review id is not a valid path segment', { field: 'reviewId' });
+          }
+          return handleFinaliseReview(req, res, owner, decoded as ReviewId);
+        }
+
+        const reviewRoute = /^\/api\/reviews\/([^/]+)$/.exec(pathname);
+        if (reviewRoute !== null) {
+          let decoded: string;
+          try {
+            decoded = decodeURIComponent(reviewRoute[1]!);
+          } catch {
+            return sendError(res, 'bad_request', 'review id is not a valid path segment', { field: 'reviewId' });
+          }
+          if (method === 'POST') return handleAppendReview(req, res, owner, decoded as ReviewId);
+          if (method === 'GET') return handleGetReview(req, res, owner, decoded as ReviewId);
         }
 
         const sessionRoute = /^\/api\/sessions\/([^/]+)(\/[^?]*)?$/.exec(pathname);

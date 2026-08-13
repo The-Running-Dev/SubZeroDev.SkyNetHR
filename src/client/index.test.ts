@@ -85,6 +85,13 @@ async function loadRequisitionRowRenderer() {
   return mod.renderRequisitionRow;
 }
 
+async function loadReviewRowRenderer() {
+  const mod = (await import(pathToFileURL(path.join(CLIENT, 'render.js')).href)) as {
+    renderReviewRow: (doc: unknown, review: unknown) => StubNode;
+  };
+  return mod.renderReviewRow;
+}
+
 const XSS = '<img src=x onerror=alert(1)>';
 
 describe('S2.11 — the client renders normalised events only', () => {
@@ -257,6 +264,32 @@ describe('S13.15 — a requisition\'s title, justification and workspace render 
     const { doc: doc2 } = makeDoc();
     const approved = renderRequisitionRow(doc2, { ...base, state: 'approved', decidedBy: 'bob' }, () => {});
     assert.equal(findAll(approved, 'button').length, 0);
+  });
+});
+
+describe("S15.13 — a review's body renders as literal characters, in a different operator's browser", () => {
+  it('renders an XSS payload in body as literal characters, never as markup', async () => {
+    const renderReviewRow = await loadReviewRowRenderer();
+    const { doc, created } = makeDoc();
+    const review = {
+      reviewId: 'rev-1',
+      subject: 'sess-1',
+      snapshot: { sessionId: 'sess-1', owner: 'alice', vendor: 'claude', cwd: '/w', createdAt: 'x' },
+      author: 'alice',
+      state: 'final',
+      rating: 'meets',
+      pip: false,
+      body: XSS,
+      createdAt: 'x',
+      updatedAt: 'x',
+    };
+    // `bob` reads a review `alice` authored — the review is final, so D70's open read
+    // applies, exercised here as the "different operator's browser" the criterion names.
+    const row = renderReviewRow(doc, review);
+    const rendered = allText(row).join(' ');
+    assert.ok(rendered.includes(XSS), 'the exact XSS characters survive as a text node');
+    assert.ok(rendered.includes('alice'));
+    assert.ok(!created.some((n) => n.tag.toLowerCase() === 'img'), 'no img element was ever created');
   });
 });
 

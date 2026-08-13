@@ -106,7 +106,11 @@ async function readAllLines(filePath: string): Promise<Result<readonly string[],
 // Reads a `{id-field}`-keyed append-only log where the latest line for an id wins,
 // dropping an unparseable trailing line (a torn write) and any line missing the id
 // field, as `20-contract.md § Persisted schemas` requires for `reviews.ndjson` and
-// `requisitions.ndjson`.
+// `requisitions.ndjson`. The returned array is ordered by each id's *winning* line, not
+// its first appearance: an id already seen is deleted before being re-set, which moves it
+// to the end of Map iteration order — what D83 calls "the later line" for `records`'
+// review-ordering tie-break (I35) to read off directly, with no second field or a second
+// pass over the file.
 async function foldLatestById<T>(filePath: string, idField: keyof T): Promise<readonly T[]> {
   const linesResult = await readAllLines(filePath);
   if (!linesResult.ok) return [];
@@ -115,6 +119,7 @@ async function foldLatestById<T>(filePath: string, idField: keyof T): Promise<re
     try {
       const parsed = JSON.parse(line) as T;
       const id = String(parsed[idField]);
+      if (byId.has(id)) byId.delete(id);
       byId.set(id, parsed);
     } catch {
       // Dropped: either a torn trailing line, or (mid-file) corrupt input we cannot trust.
@@ -534,7 +539,11 @@ export async function createStore(config: Config): Promise<Result<Store, StoreEr
     },
 
     async appendReview(record: Review) {
-      return appendLine(path.join(storageRoot, 'reviews.ndjson'), JSON.stringify(record), false);
+      // D128: durable — fsync'd before it returns, for every line, not only the
+      // finalising one. Reviews are human-paced and kilobytes, so the cost that exempts
+      // ordinary spill events does not apply here, and a torn tail must never revert an
+      // acknowledged `final` review back to `draft` (I29).
+      return appendLine(path.join(storageRoot, 'reviews.ndjson'), JSON.stringify(record), true);
     },
 
     async readAllReviews(): Promise<readonly Review[]> {
