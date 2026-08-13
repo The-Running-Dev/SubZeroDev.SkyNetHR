@@ -173,6 +173,17 @@ describe('S2.1 — POST /api/sessions', () => {
     assert.equal(((await res.json()) as { error: { code: string } }).error.code, 'outside_workspace_root');
   });
 
+  it('D132 — refuses a cwd that cannot be resolved with the same 409 outside_workspace_root, not a distinguishable code', async () => {
+    const h = await makeEdge();
+    // Inside a configured root and simply not there. Answering this differently from the
+    // case above would make the route a filesystem existence probe for any authenticated
+    // operator; the contract's error table routes both jail failures to one code.
+    const missing = path.join(h.workspaceRoot, 'no-such-directory');
+    const res = await post(h, '/api/sessions', { vendor: 'claude', cwd: missing, model: null, sandbox: null, requisitionId: null });
+    assert.equal(res.status, 409);
+    assert.equal(((await res.json()) as { error: { code: string } }).error.code, 'outside_workspace_root');
+  });
+
   it('refuses a malformed body with 422 bad_request naming the field', async () => {
     const h = await makeEdge();
     const cwd = path.join(h.workspaceRoot, 'b');

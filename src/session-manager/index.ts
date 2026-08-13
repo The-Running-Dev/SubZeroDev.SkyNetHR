@@ -297,6 +297,12 @@ export function createSessionManager(deps: {
       const appended = await store.appendEvent(entry.record.id, envelope as Envelope);
       if (appended.ok || entry.storageFailed) return;
       entry.storageFailed = true;
+      // I2: the ring is a strict suffix of the spill, and this envelope is the one the
+      // spill will never hold — it was pushed synchronously, before this append was even
+      // issued. Dropping the ring is what keeps a later reconnect from being served an
+      // envelope no read of the durable transcript can reproduce; `readRingAfter` then
+      // answers `null` and every replay goes to the spill, which is the authority (D40).
+      store.dropRing(entry.record.id);
       const turn = entry.turn;
       entry.turn = null;
       entry.record.state = 'ended';
@@ -1011,6 +1017,10 @@ export function createSessionManager(deps: {
       // succeeded — a partial failure must not leave a session an operator asked to
       // remove still listed.
       sessions.delete(sessionId);
+      // I2: the spill this ring is supposed to be a suffix of is gone, so the ring must go
+      // with it — otherwise a deleted session's envelopes stay in memory for the life of
+      // the process, and `dropRing` is a `Store` primitive nothing ever calls.
+      store.dropRing(sessionId);
 
       const failures: string[] = [];
       if (!deleted.ok) {
@@ -1394,11 +1404,26 @@ export function createSessionManager(deps: {
         return;
       }
       case 'spawned': {
+        // D102: a turn-scoped fact arriving with no live turn is an error, never an
+        // invented value. A child is only ever spawned from inside `message()`, which
+        // holds the slot across `adapter.send` — so a `spawned` with no turn is a state
+        // this design says cannot occur, and minting a `TurnId` for it would put an id
+        // naming no turn into `pids.ndjson`, where the reaper reads it as fact.
+        // `ProcessRecord.turnId` stays non-null; the record is refused instead.
+        const turn = entry.turn;
+        if (!turn) {
+          await emit(entry, 'error', {
+            kind: 'adapter_unknown_record',
+            message: `a child (pid ${n.pid}, ${n.image}) was reported spawned with no live turn; it is not recorded in pids.ndjson and boot will not reap it`,
+            fatal: false,
+          });
+          return;
+        }
         await store.appendPid({
           pid: n.pid,
           pgid: n.pgid,
           sessionId: entry.record.id,
-          turnId: entry.turn?.turnId ?? (randomUUID() as TurnId),
+          turnId: turn.turnId,
           startedAt: nowIso(),
           image: n.image,
           exitedAt: null,
@@ -1528,6 +1553,26 @@ export function createSessionManager(deps: {
         }
         // The adapter omits `turnId` from every payload that carries one (contract
         // `AdapterEvent`); the manager, which owns `Turn`, is what stamps it back on.
+        //
+        // D102: with no live turn there is nothing to stamp, and neither of the two ways
+        // out is acceptable — emitting the payload anyway ships an envelope missing a
+        // field the contract declares non-optional (and, for `permission.request`, one
+        // that never enters `pending` and so is never resolved, against I9), while
+        // stamping a remembered id attributes the event to a turn it does not belong to.
+        // So the state is reported rather than papered over, with the original in `raw`.
+        if (!turn && KINDS_CARRYING_TURN_ID.has(kind)) {
+          await emit(
+            entry,
+            'error',
+            {
+              kind: 'adapter_unknown_record',
+              message: `a ${kind} arrived with no live turn and was dropped; it carries no turnId to attribute it by`,
+              fatal: false,
+            },
+            raw ?? eventData,
+          );
+          return;
+        }
         const payload = turn && KINDS_CARRYING_TURN_ID.has(kind) ? { ...eventData, turnId: turn.turnId } : eventData;
         // Cleared before the event is emitted, not after: `emit` delivers to
         // subscribers synchronously but then awaits the spill write, so a caller

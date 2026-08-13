@@ -1456,6 +1456,28 @@ test('S5.9 — delete removes meta.json, events.ndjson, tool-output/ and the reg
   assert.equal(auditAfter, auditBefore);
 });
 
+test('D134 — delete drops the ring too: the spill it was a suffix of is gone (I2)', async () => {
+  const { manager, workspaceRoot, store } = await makeManager('full');
+  const owner = 'operator-1' as OperatorId;
+  const { sessionId, received, requestEnvelope } = await runOneRequest('full', workspaceRoot, manager, owner, 'proj-d134');
+  const requestId = (requestEnvelope.data as { requestId: string }).requestId;
+  await manager.answerPermission(sessionId, owner, { requestId: requestId as never, decision: 'allow', scope: 'once', rule: null, reason: null });
+  await waitUntil(() => received.some((e) => e.kind === 'turn.ended'));
+
+  assert.notEqual(store.readRingAfter(sessionId, 0), null, 'the ring holds this session before the delete');
+
+  for (;;) {
+    const removed = await manager.remove(sessionId, owner);
+    if (removed.ok) break;
+    assert.equal(removed.error.code, 'turn_in_flight', `delete refused: ${removed.error.code}`);
+    await new Promise((r) => setTimeout(r, 10));
+  }
+
+  // `null` is "cannot serve", which is what an absent ring answers — the envelopes are
+  // not merely unreachable through the manager, they are no longer held.
+  assert.equal(store.readRingAfter(sessionId, 0), null, 'the ring is dropped with the storage it mirrored');
+});
+
 test('S5.10 — end and delete are both refused turn_in_flight during a turn', async () => {
   const { manager, workspaceRoot } = await makeManager('full');
   const owner = 'operator-1' as OperatorId;

@@ -477,6 +477,46 @@ test('S12.6 — sessionId, operator, since and until each narrow the window, and
   if (combined.ok) assert.deepEqual(combined.value.records.map((r) => r.input.seq), [2]);
 });
 
+test('D131 — a filtered read is bounded by caps.auditPageMax records examined, not only records returned', async () => {
+  const storageRoot = await mkdtemp(path.join(tmpdir(), 'skynet-store-'));
+  const config = baseConfig(storageRoot);
+  const capped: Config = { ...config, caps: { ...config.caps, auditPageMax: 40 } };
+  const storeResult = await createStore(capped);
+  if (!storeResult.ok) return;
+  const store = storeResult.value;
+
+  // 400 records, of which exactly two — the two oldest — match the filter. Reading by
+  // result count alone would answer this in one call by walking to byte 0; reading by
+  // records examined must take at least ceil(400 / 40) = 10 pages to reach them.
+  const N = 400;
+  const records = Array.from({ length: N }, (_, i) =>
+    auditRecord(i + 1, { sessionId: (i < 2 ? 's-wanted' : 's-other') as never }),
+  );
+  await writeAuditFixture(storageRoot, records);
+
+  const first = await store.readAuditPage(emptyAuditQuery({ sessionId: 's-wanted' as never, limit: 40 }));
+  assert.equal(first.ok, true);
+  if (!first.ok) return;
+  assert.deepEqual(first.value.records, [], 'the newest 40 records hold no match');
+  assert.notEqual(first.value.nextCursor, null, 'a short page is not the end of the log — the cursor says where to resume');
+
+  let before = first.value.nextCursor;
+  let pages = 1;
+  const seen: number[] = [];
+  while (before !== null) {
+    const page = await store.readAuditPage(emptyAuditQuery({ before, sessionId: 's-wanted' as never, limit: 40 }));
+    assert.equal(page.ok, true);
+    if (!page.ok) return;
+    pages += 1;
+    for (const r of page.value.records) seen.push(r.input.seq as number);
+    before = page.value.nextCursor;
+    assert.ok(pages <= N, 'paging must terminate');
+  }
+
+  assert.deepEqual(seen, [2, 1], 'every match is visited exactly once, newest first, across the paging');
+  assert.ok(pages >= N / capped.caps.auditPageMax, `a bounded read needs at least ${N / capped.caps.auditPageMax} pages, took ${pages}`);
+});
+
 test('S12.8 — a record for a session removed by deleteSession is still readable, with vendor and sandbox intact', async () => {
   const storageRoot = await mkdtemp(path.join(tmpdir(), 'skynet-store-'));
   const storeResult = await createStore(baseConfig(storageRoot));
