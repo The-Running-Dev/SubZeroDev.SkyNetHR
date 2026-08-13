@@ -241,7 +241,11 @@ function Invoke-DriftCheck {
 
     foreach ($number in ($doc.Slices.Keys | Sort-Object)) {
         $docIds = @($doc.Slices[$number] | Sort-Object -Unique)
-        $issue  = $tracker.Issues | Where-Object { $_.title -match "^S$number\b" } | Select-Object -First 1
+        # `\b` alone matches between a digit and a following period, so "^S5\b" also matches
+        # "S5.1's interrupt test is flaky..." - a bug issue naming a criterion, not the slice's
+        # own tracking issue. The `(?!\.)` excludes that case while still matching "S5 - ..."
+        # and a bare "S5".
+        $issue  = $tracker.Issues | Where-Object { $_.title -match "^S$number\b(?!\.)" } | Select-Object -First 1
 
         if (-not $issue) {
             $findings.Add((New-Finding -Kind 'NoIssue' -Slice "S$number" -Detail 'slice has no issue; /track opens one' -Issue 0))

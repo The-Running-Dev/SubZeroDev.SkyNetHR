@@ -162,6 +162,23 @@ None.
             $r.SlicesCompared | Should -Be 0
         }
 
+        It 'a bug issue titled with a criterion id is not mistaken for the slice issue' {
+            # "\b" alone matches between a digit and a following period, so "^S1\b" also
+            # matches "S1.1's test is flaky ...". That bug issue must lose to the real slice
+            # issue regardless of tracker order - reproduces the false InDocNotIssue findings
+            # Test-DesignDrift.ps1 reported against #110 and #101 for S5 and S11.
+            $path = New-SlicesDoc -Content $script:TwoCriterionDoc
+            Mock Get-TrackerIssue { New-Tracker -Issues @(
+                New-Issue -Number 110 -Title "S1.1's fixture test is flaky under full-suite load" -Body '- [ ] **S1.1** unrelated flake tracking'
+                New-Issue -Number 9 -Title 'S1 — A slice' -Body "- [x] **S1.1** first`n- [x] **S1.2** second"
+            ) }
+
+            $r = Invoke-DriftCheck -SlicesPath $path
+
+            $r.State | Should -Be 'Clean'
+            $r.Findings.Count | Should -Be 0
+        }
+
         It 'a slice with no issue at all is reported rather than skipped' {
             $path = New-SlicesDoc -Content $script:TwoCriterionDoc
             Mock Get-TrackerIssue { New-Tracker }
