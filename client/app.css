@@ -434,6 +434,54 @@ body {
   font-size: var(--text-sm);
 }
 
+/* -------------------------------------------------------------- reviews (S15) */
+
+.reviews {
+  padding: var(--space-3) var(--space-5);
+  border-top: var(--border-width) solid var(--line);
+  background: var(--surface-raised);
+  gap: var(--space-3);
+}
+
+/* An author-stylesheet `display` on the `[hidden]` element itself always beats the
+ * browser's UA `[hidden] { display: none }`, regardless of selector order — so the flex
+ * layout is qualified on `:not([hidden])` rather than applied unconditionally, the one
+ * place in this rule that toggling `.hidden` in `app.js` must actually hide the panel. */
+.reviews:not([hidden]) {
+  display: flex;
+  flex-direction: column;
+}
+
+.reviews__header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.reviews__actions {
+  display: flex;
+  gap: var(--space-2);
+}
+
+.pip-badge {
+  padding: var(--space-1) var(--space-2);
+  border-radius: var(--radius-1);
+  background: var(--danger);
+  color: var(--accent-ink);
+  font-size: var(--text-xs);
+}
+
+.review-row__body-pre {
+  margin: var(--space-0);
+  max-width: 24rem;
+  max-height: 8rem;
+  overflow: auto;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 /* ----------------------------------------------------------------- compose */
 
 .compose {

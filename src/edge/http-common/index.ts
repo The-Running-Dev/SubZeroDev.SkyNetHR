@@ -15,12 +15,14 @@ import type {
   Rating,
   RecordsError,
   RequisitionId,
+  Result,
   ReviewId,
   SessionError,
   SessionId,
   TurnId,
   Vendor,
 } from '../../contract/index.js';
+import { RATINGS } from '../../contract/index.js';
 import { sendError } from '../error-envelope/index.js';
 import { VENDORS } from '../../adapters/index.js';
 
@@ -568,12 +570,10 @@ export function createHttpHandlers(deps: EdgeDeps) {
     sendJson(res, 200, { requisition: decided.value });
   }
 
-  const RATINGS: readonly Rating[] = ['does_not_meet', 'meets_some', 'meets', 'exceeds', 'exceptional'];
-
-  function parseRating(value: unknown): { ok: true; value: Rating | null } | { ok: false } {
+  function parseRating(value: unknown): Result<Rating | null, void> {
     if (value === null || value === undefined) return { ok: true, value: null };
     if (typeof value === 'string' && RATINGS.includes(value as Rating)) return { ok: true, value: value as Rating };
-    return { ok: false };
+    return { ok: false, error: undefined };
   }
 
   // S15.2/D127: `POST /api/reviews` — the edge resolves the `SessionSnapshot` through

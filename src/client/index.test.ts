@@ -352,6 +352,8 @@ interface FakeEl {
   hidden: boolean;
   type: string;
   value: string;
+  checked: boolean;
+  disabled: boolean;
   scrollTop: number;
   scrollHeight: number;
   textContent: string | null;
@@ -362,6 +364,7 @@ interface FakeEl {
   firstChild: FakeEl | null;
   addEventListener(kind: string, fn: (event: unknown) => void): void;
   querySelector(): null;
+  reset(): void;
 }
 
 function fakeEl(tag: string): FakeEl {
@@ -371,6 +374,8 @@ function fakeEl(tag: string): FakeEl {
     hidden: false,
     type: '',
     value: '',
+    checked: false,
+    disabled: false,
     scrollTop: 0,
     scrollHeight: 0,
     textContent: null,
@@ -385,6 +390,9 @@ function fakeEl(tag: string): FakeEl {
       node.listeners.set(kind, existing);
     },
     querySelector: () => null,
+    // A `<form>`'s real `reset()` restores every field to its initial value — the stub
+    // only needs the two fields `resetReviewForm` (client/app.js) actually reads back.
+    reset() { node.value = ''; node.checked = false; },
   };
   return node;
 }
@@ -406,6 +414,8 @@ async function runConsole(sessions: ReadonlyArray<Record<string, unknown>>) {
     'audit-load-more', 'requisitions', 'requisitions-open', 'requisitions-close', 'raise-requisition',
     'requisition-title', 'requisition-justification', 'requisition-workspace', 'requisition-vendor',
     'requisition-rows', 'requisitions-empty',
+    'reviews', 'review-rows', 'reviews-empty', 'pip-badge', 'review-form', 'review-rating',
+    'review-pip', 'review-body', 'review-save', 'review-publish',
   ]) {
     byId.set(id, fakeEl('div'));
   }
@@ -450,7 +460,9 @@ async function runConsole(sessions: ReadonlyArray<Record<string, unknown>>) {
             ? { sessions }
             : String(input) === '/api/requisitions'
               ? { requisitions: [] }
-              : {},
+              : String(input).startsWith('/api/reviews')
+                ? { reviews: [] }
+                : {},
   });
 
   // A distinct query per load: `app.js` runs its bootstrap on import, so a cached module

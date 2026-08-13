@@ -275,16 +275,10 @@ export function renderRequisitionRow(doc, requisition, onDecide) {
 export function renderReviewRow(doc, review) {
   const tr = doc.createElement('tr');
   tr.className = 'review-row';
-  const cell = (className, text) => {
-    const td = doc.createElement('td');
-    td.className = className;
-    td.textContent = text === null || text === undefined ? '' : String(text);
-    return td;
-  };
-  tr.appendChild(cell('review-row__author', review.author));
-  tr.appendChild(cell('review-row__rating', review.rating));
-  tr.appendChild(cell('review-row__pip', review.pip ? 'ON PIP' : ''));
-  tr.appendChild(cell('review-row__state', review.state));
+  tr.appendChild(el(doc, 'td', 'review-row__author', review.author));
+  tr.appendChild(el(doc, 'td', 'review-row__rating', review.rating));
+  tr.appendChild(el(doc, 'td', 'review-row__pip', review.pip ? 'ON PIP' : ''));
+  tr.appendChild(el(doc, 'td', 'review-row__state', review.state));
   const bodyCell = doc.createElement('td');
   bodyCell.className = 'review-row__body';
   bodyCell.appendChild(el(doc, 'pre', 'review-row__body-pre', review.body));

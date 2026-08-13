@@ -161,6 +161,52 @@
       <h2 class="panel__heading">First-run checklist</h2>
       <ul id="checklist-list" class="checklist-list"></ul>
     </section>
+    <section id="reviews" class="reviews" hidden>
+      <div class="reviews__header">
+        <h2 class="panel__heading">Reviews</h2>
+        <span id="pip-badge" class="pip-badge" hidden>ON PIP</span>
+      </div>
+      <div class="audit__table-wrap">
+        <table class="audit-table">
+          <thead>
+            <tr>
+              <th>Author</th>
+              <th>Rating</th>
+              <th>PIP</th>
+              <th>State</th>
+              <th>Body</th>
+            </tr>
+          </thead>
+          <tbody id="review-rows"></tbody>
+        </table>
+      </div>
+      <p id="reviews-empty" class="audit__empty" hidden>no published reviews yet</p>
+      <form id="review-form" class="form">
+        <label class="field">
+          <span class="field__label">Rating <span class="field__hint">optional</span></span>
+          <select id="review-rating" class="field__input">
+            <option value="">none</option>
+            <option value="does_not_meet">does not meet</option>
+            <option value="meets_some">meets some</option>
+            <option value="meets">meets</option>
+            <option value="exceeds">exceeds</option>
+            <option value="exceptional">exceptional</option>
+          </select>
+        </label>
+        <label class="field">
+          <span class="field__label">Puts this session on a plan</span>
+          <input id="review-pip" type="checkbox">
+        </label>
+        <label class="field">
+          <span class="field__label">Body</span>
+          <textarea id="review-body" class="field__input" rows="4"></textarea>
+        </label>
+        <div class="reviews__actions">
+          <button id="review-save" class="button button--quiet" type="submit">Save draft</button>
+          <button id="review-publish" class="button" type="button" disabled>Publish</button>
+        </div>
+      </form>
+    </section>
     <form id="compose" class="compose" hidden>
       <label class="field field--grow">
         <span class="field__label field__label--hidden">Message</span>

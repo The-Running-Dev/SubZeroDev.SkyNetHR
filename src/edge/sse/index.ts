@@ -27,6 +27,18 @@ function stampEdgeTag(html: string): string {
   return html.replace('<meta charset="utf-8">', '<meta charset="utf-8">\n<meta name="skynet-edge" content="sse">');
 }
 
+// Decodes one `%`-escaped path segment; a malformed encoding sends the standard `400
+// bad_request` naming `field` and returns `null` for the caller to bail out on — the one
+// shape every route match below shares instead of each repeating its own try/catch.
+function decodeSegment(res: ServerResponse, raw: string, label: string, field: string): string | null {
+  try {
+    return decodeURIComponent(raw);
+  } catch {
+    sendError(res, 'bad_request', `${label} is not a valid path segment`, { field });
+    return null;
+  }
+}
+
 export function createSseEdge(deps: EdgeDeps): RequestListener {
   const { config, identity, manager } = deps;
 
@@ -197,12 +209,8 @@ export function createSseEdge(deps: EdgeDeps): RequestListener {
 
         const requisitionRoute = /^\/api\/requisitions\/([^/]+)\/decision$/.exec(pathname);
         if (method === 'POST' && requisitionRoute !== null) {
-          let decoded: string;
-          try {
-            decoded = decodeURIComponent(requisitionRoute[1]!);
-          } catch {
-            return sendError(res, 'bad_request', 'requisition id is not a valid path segment', { field: 'requisitionId' });
-          }
+          const decoded = decodeSegment(res, requisitionRoute[1]!, 'requisition id', 'requisitionId');
+          if (decoded === null) return;
           return handleDecideRequisition(req, res, owner, decoded as RequisitionId);
         }
 
@@ -215,35 +223,23 @@ export function createSseEdge(deps: EdgeDeps): RequestListener {
 
         const reviewFinaliseRoute = /^\/api\/reviews\/([^/]+)\/finalise$/.exec(pathname);
         if (method === 'POST' && reviewFinaliseRoute !== null) {
-          let decoded: string;
-          try {
-            decoded = decodeURIComponent(reviewFinaliseRoute[1]!);
-          } catch {
-            return sendError(res, 'bad_request', 'review id is not a valid path segment', { field: 'reviewId' });
-          }
+          const decoded = decodeSegment(res, reviewFinaliseRoute[1]!, 'review id', 'reviewId');
+          if (decoded === null) return;
           return handleFinaliseReview(req, res, owner, decoded as ReviewId);
         }
 
         const reviewRoute = /^\/api\/reviews\/([^/]+)$/.exec(pathname);
         if (reviewRoute !== null) {
-          let decoded: string;
-          try {
-            decoded = decodeURIComponent(reviewRoute[1]!);
-          } catch {
-            return sendError(res, 'bad_request', 'review id is not a valid path segment', { field: 'reviewId' });
-          }
+          const decoded = decodeSegment(res, reviewRoute[1]!, 'review id', 'reviewId');
+          if (decoded === null) return;
           if (method === 'POST') return handleAppendReview(req, res, owner, decoded as ReviewId);
           if (method === 'GET') return handleGetReview(req, res, owner, decoded as ReviewId);
         }
 
         const sessionRoute = /^\/api\/sessions\/([^/]+)(\/[^?]*)?$/.exec(pathname);
         if (sessionRoute !== null) {
-          let decoded: string;
-          try {
-            decoded = decodeURIComponent(sessionRoute[1]!);
-          } catch {
-            return sendError(res, 'bad_request', 'session id is not a valid path segment', { field: 'sessionId' });
-          }
+          const decoded = decodeSegment(res, sessionRoute[1]!, 'session id', 'sessionId');
+          if (decoded === null) return;
           const sessionId = decoded as SessionId;
           const rest = sessionRoute[2] ?? '';
           if (method === 'POST' && rest === '/message') return handleMessage(req, res, owner, sessionId);
@@ -257,28 +253,16 @@ export function createSseEdge(deps: EdgeDeps): RequestListener {
           if (method === 'GET' && rest === '/checklist') return handleChecklist(req, res, owner, sessionId);
           const checklistTickMatch = /^\/checklist\/([^/]+)$/.exec(rest);
           if (method === 'POST' && checklistTickMatch !== null) {
-            let decodedItemId: string;
-            try {
-              decodedItemId = decodeURIComponent(checklistTickMatch[1]!);
-            } catch {
-              return sendError(res, 'bad_request', 'itemId is not a valid path segment', { field: 'itemId' });
-            }
+            const decodedItemId = decodeSegment(res, checklistTickMatch[1]!, 'itemId', 'itemId');
+            if (decodedItemId === null) return;
             return handleTickChecklistItem(req, res, owner, sessionId, decodedItemId as ChecklistItemId);
           }
           const toolOutputMatch = /^\/tool-output\/([^/]+)\/([^/]+)$/.exec(rest);
           if (method === 'GET' && toolOutputMatch) {
-            let decodedTurnId: string;
-            try {
-              decodedTurnId = decodeURIComponent(toolOutputMatch[1]!);
-            } catch {
-              return sendError(res, 'bad_request', 'turnId is not a valid path segment', { field: 'turnId' });
-            }
-            let decodedCallId: string;
-            try {
-              decodedCallId = decodeURIComponent(toolOutputMatch[2]!);
-            } catch {
-              return sendError(res, 'bad_request', 'callId is not a valid path segment', { field: 'callId' });
-            }
+            const decodedTurnId = decodeSegment(res, toolOutputMatch[1]!, 'turnId', 'turnId');
+            if (decodedTurnId === null) return;
+            const decodedCallId = decodeSegment(res, toolOutputMatch[2]!, 'callId', 'callId');
+            if (decodedCallId === null) return;
             return handleToolOutput(req, res, owner, sessionId, decodedTurnId as TurnId, decodedCallId as CallId);
           }
           if (method === 'GET' && rest === '') {

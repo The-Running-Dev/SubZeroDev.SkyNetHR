@@ -419,6 +419,11 @@ export interface AuditPage {
 
 export type Rating = 'does_not_meet' | 'meets_some' | 'meets' | 'exceeds' | 'exceptional';
 
+// The one runtime enumeration of `Rating`'s members, `adapters`' `VENDORS` shape (D126):
+// a second hand-copy elsewhere is the drift that having one canonical list exists to
+// prevent, so `parseRating` at the edge imports this rather than re-enumerating it.
+export const RATINGS: readonly Rating[] = ['does_not_meet', 'meets_some', 'meets', 'exceeds', 'exceptional'];
+
 export type ReviewState = 'draft' | 'final';
 
 export interface Review {
