@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { existsSync } from 'node:fs';
+import { existsSync, realpathSync } from 'node:fs';
 import { mkdtemp, mkdir, chmod, readFile, rm, writeFile } from 'node:fs/promises';
 import { execFile, spawn } from 'node:child_process';
 import { tmpdir } from 'node:os';
@@ -7,6 +7,7 @@ import path from 'node:path';
 import { after, test } from 'node:test';
 import { promisify } from 'node:util';
 import { createSessionManager, match, parseStandingRule } from './index.js';
+import { stripExtendedPrefix } from '../jail/index.js';
 import { createStore } from '../store/index.js';
 import { createCheckpoints } from '../checkpoints/index.js';
 import { createRecords } from '../records/index.js';
@@ -78,7 +79,11 @@ async function makeManager(
   process.env['SKYNET_CLAUDE_EXECUTABLE'] = FIXTURE;
   const storageRoot = await mkdtemp(path.join(tmpdir(), 'skynet-sm-'));
   storageRoots.push(storageRoot);
-  const workspaceRoot = await mkdtemp(path.join(tmpdir(), 'skynet-ws-'));
+  const workspaceRootRaw = await mkdtemp(path.join(tmpdir(), 'skynet-ws-'));
+  // `stripExtendedPrefix(realpathSync.native(...))` is what `config/index.ts` actually does
+  // for `WORKSPACE_ROOTS` — the jail resolves a candidate `cwd` the same way, and on macOS
+  // `/var/folders/...` and its realpath `/private/var/folders/...` are different strings.
+  const workspaceRoot = stripExtendedPrefix(realpathSync.native(workspaceRootRaw));
   const config: Config = {
     bind: { host: '127.0.0.1', port: 3000 },
     auth: { mode: 'shared-secret', cookieName: 'skynet', secret: 'x' },
