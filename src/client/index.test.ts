@@ -78,6 +78,14 @@ async function loadAuditRowRenderer() {
   return mod.renderAuditRow;
 }
 
+async function loadIncidentGroupRenderer() {
+  const mod = (await import(pathToFileURL(path.join(CLIENT, 'render.js')).href)) as {
+    renderIncidentGroups: (doc: unknown, records: unknown[]) => StubNode;
+    groupAuditRecords: (records: unknown[]) => Array<{ sessionId: string; operators: Array<{ operator: string | null; records: unknown[] }> }>;
+  };
+  return mod;
+}
+
 async function loadRequisitionRowRenderer() {
   const mod = (await import(pathToFileURL(path.join(CLIENT, 'render.js')).href)) as {
     renderRequisitionRow: (doc: unknown, requisition: unknown, onDecide?: unknown) => StubNode;
@@ -230,6 +238,64 @@ describe('S12.10 — the audit screen renders every field as a text node', () =>
     };
     const row = renderAuditRow(doc, record);
     assert.ok(allText(row).includes('server'));
+  });
+});
+
+describe('S17.5 — the incident view groups the server\'s flat page by session and by operator, client-side', () => {
+  it('groups records first by sessionId, then by operator within a session, preserving arrival order', async () => {
+    const { groupAuditRecords } = await loadIncidentGroupRenderer();
+    const records = [
+      { sessionId: 's-1', operator: 'alice', ts: '1' },
+      { sessionId: 's-1', operator: null, ts: '2' },
+      { sessionId: 's-2', operator: 'alice', ts: '3' },
+      { sessionId: 's-1', operator: 'alice', ts: '4' },
+    ];
+    const groups = groupAuditRecords(records);
+    assert.equal(groups.length, 2, 'two sessions');
+    assert.equal(groups[0]!.sessionId, 's-1');
+    assert.equal(groups[0]!.operators.length, 2, 'alice and server, within s-1');
+    assert.equal(groups[0]!.operators[0]!.operator, 'alice');
+    assert.equal(groups[0]!.operators[0]!.records.length, 2, 'both s-1/alice records, including the later one');
+    assert.equal(groups[0]!.operators[1]!.operator, null);
+    assert.equal(groups[1]!.sessionId, 's-2');
+  });
+
+  it('renders every record from the flat page as a text node under its group, no grouped shape assumed beyond arrangement', async () => {
+    const { renderIncidentGroups } = await loadIncidentGroupRenderer();
+    const { doc, created } = makeDoc();
+    const records = [
+      {
+        ts: 'x', operator: null, sessionId: 'sess-owned-by-nobody', vendor: 'x', sandbox: null,
+        tool: XSS, input: { a: XSS }, decision: 'deny', scope: 'once', reason: 'cancelled_process_exit',
+      },
+      {
+        ts: 'y', operator: 'alice', sessionId: 'sess-owned-by-alice', vendor: 'x', sandbox: null,
+        tool: 'bash', input: {}, decision: 'allow', scope: 'standing', reason: 'rule',
+      },
+    ];
+    const tree = renderIncidentGroups(doc, records);
+    const rendered = allText(tree).join(' ');
+    assert.ok(rendered.includes('sess-owned-by-nobody'));
+    assert.ok(rendered.includes('sess-owned-by-alice'));
+    assert.ok(rendered.includes('server'), 'operator: null renders as "server", same as the flat view');
+    assert.ok(rendered.includes('alice'));
+    assert.ok(rendered.includes(XSS), 'the exact XSS characters survive as text — never assembled markup');
+    assert.ok(!created.some((n) => n.tag.toLowerCase() === 'img'), 'no img element was ever created');
+  });
+});
+
+describe('S17.6 — the incident view reads records across owners and across deleted sessions, same as S12', () => {
+  it('renders a record for a session the viewer does not own, and one for a session that no longer exists', async () => {
+    const { renderIncidentGroups } = await loadIncidentGroupRenderer();
+    const { doc } = makeDoc();
+    const records = [
+      { ts: 'x', operator: null, sessionId: 'sess-not-owned', vendor: 'x', sandbox: null, tool: 'bash', input: {}, decision: 'deny', scope: 'once', reason: 'cancelled_process_exit' },
+      { ts: 'y', operator: null, sessionId: 'sess-deleted', vendor: 'x', sandbox: null, tool: 'bash', input: {}, decision: 'deny', scope: 'once', reason: 'cancelled_process_exit' },
+    ];
+    const tree = renderIncidentGroups(doc, records);
+    const rendered = allText(tree).join(' ');
+    assert.ok(rendered.includes('sess-not-owned'));
+    assert.ok(rendered.includes('sess-deleted'));
   });
 });
 

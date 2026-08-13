@@ -267,6 +267,98 @@ export function renderAuditRow(doc, record) {
   return tr;
 }
 
+// S17.5: the server returns records; grouping by session and by operator is the reader's
+// (D73) — no grouped shape exists in the contract. Nested session-then-operator, in the
+// order groups are first encountered in `records` (already newest-first from the server).
+export function groupAuditRecords(records) {
+  const bySession = [];
+  const sessionIndex = new Map();
+  for (const record of records) {
+    let session = sessionIndex.get(record.sessionId);
+    if (session === undefined) {
+      session = { sessionId: record.sessionId, operators: [], operatorIndex: new Map() };
+      sessionIndex.set(record.sessionId, session);
+      bySession.push(session);
+    }
+    const operatorKey = record.operator;
+    let group = session.operatorIndex.get(operatorKey);
+    if (group === undefined) {
+      group = { operator: operatorKey, records: [] };
+      session.operatorIndex.set(operatorKey, group);
+      session.operators.push(group);
+    }
+    group.records.push(record);
+  }
+  return bySession.map(({ sessionId, operators }) => ({ sessionId, operators }));
+}
+
+// Same seven columns and labels as the flat table's static `<thead>` in `index.html` — kept
+// in sync by hand since a per-operator table here has nowhere else to draw one from.
+function incidentTableHead(doc) {
+  const thead = doc.createElement('thead');
+  const tr = doc.createElement('tr');
+  for (const label of ['When', 'Operator', 'Session', 'Tool', 'Input', 'Decision', 'Scope']) {
+    tr.appendChild(el(doc, 'th', undefined, label));
+  }
+  thead.appendChild(tr);
+  return thead;
+}
+
+// The incident view (S17): the same rows `renderAuditRow` produces, under headings that
+// group them by session and then by operator — never a new shape, just a different
+// arrangement of the flat page the server already returned.
+//
+// S17.7: builds incrementally — `addRecords` slots each new page's records into the
+// session/operator groups already on the page rather than regrouping and redrawing
+// everything loaded so far, so "Load older" stays linear in total records loaded instead of
+// quadratic.
+export function createIncidentGroupsBuilder(doc, container) {
+  const sessionIndex = new Map();
+
+  function sessionGroupFor(sessionId) {
+    let session = sessionIndex.get(sessionId);
+    if (session === undefined) {
+      const sessionEl = el(doc, 'section', 'incident-group incident-group--session');
+      sessionEl.appendChild(el(doc, 'h3', 'incident-group__heading', `Session ${sessionId}`));
+      container.appendChild(sessionEl);
+      session = { sessionEl, operatorIndex: new Map() };
+      sessionIndex.set(sessionId, session);
+    }
+    return session;
+  }
+
+  function operatorTbodyFor(session, operatorKey) {
+    let tbody = session.operatorIndex.get(operatorKey);
+    if (tbody === undefined) {
+      const opGroup = el(doc, 'div', 'incident-group incident-group--operator');
+      opGroup.appendChild(el(doc, 'h4', 'incident-group__subheading', operatorKey === null ? 'server' : operatorKey));
+      const table = el(doc, 'table', 'audit-table');
+      table.appendChild(incidentTableHead(doc));
+      tbody = el(doc, 'tbody');
+      table.appendChild(tbody);
+      opGroup.appendChild(table);
+      session.sessionEl.appendChild(opGroup);
+      session.operatorIndex.set(operatorKey, tbody);
+    }
+    return tbody;
+  }
+
+  return {
+    addRecords(records) {
+      for (const record of records) {
+        const tbody = operatorTbodyFor(sessionGroupFor(record.sessionId), record.operator);
+        tbody.appendChild(renderAuditRow(doc, record));
+      }
+    },
+  };
+}
+
+export function renderIncidentGroups(doc, records) {
+  const container = el(doc, 'div', 'incident-groups');
+  createIncidentGroupsBuilder(doc, container).addRecords(records);
+  return container;
+}
+
 // S13.15: `title`, `justification` and `workspace` are one operator's free text read by
 // another (D74) — the same `textContent`-only discipline as `renderAuditRow`'s `input`,
 // never assembled markup. `onDecide`, when given, receives `(requisitionId, decision)` and
