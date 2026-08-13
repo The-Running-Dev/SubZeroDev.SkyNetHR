@@ -2410,14 +2410,11 @@ these are cited by number elsewhere in this document and in the slices.
 
 **Needing a decision from the owner (tier two):**
 
-12. **Is the token budget per session, per deployment, or per workspace?** D53 says a budget
-    is "a value the operator sets in configuration" and stops there, and the three readings
-    give brief item 8's "budget remaining" three different meanings. This design takes it as
-    per session, because that is the only one needing no new persisted entity and the only one
-    where the number on a session's screen is about that session — but a per-deployment budget
-    is what an owner watching total spend would actually want, and per-workspace is defensible
-    for a shared monorepo. The choice is cheap now and awkward once a screen has shipped
-    against one reading.
+12. **Resolved (#29): the token budget is per session.** D53 says a budget is "a value the
+    operator sets in configuration" and stopped there, leaving brief item 8's "budget remaining"
+    with three possible readings. Settled as per session — the only one needing no new
+    persisted entity and the only one where the number on a session's screen is about that
+    session.
 13. **Operator-driven assignment is in scope and has no definition-of-done item.** D52 keeps
     it — "an operator dragging work onto a session is an operator action and stays" — and D59's
     tier two is items 8 to 12, none of which is a backlog. Either it is permitted but not

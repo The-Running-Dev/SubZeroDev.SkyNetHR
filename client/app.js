@@ -1,4 +1,4 @@
-import { renderAuditRow, renderEvent, renderRequisitionRow, renderReviewRow } from './render.js';
+import { renderAuditRow, renderEvent, renderPayrollSummary, renderRequisitionRow, renderReviewRow } from './render.js';
 
 const $ = (id) => document.getElementById(id);
 
@@ -172,6 +172,7 @@ function selectSession(sessionId) {
   void refreshCheckpoints();
   void refreshChecklist();
   void refreshReviews();
+  void refreshPayroll();
 }
 
 // Fetches `/api/sessions/:id<suffix>` for the session selected when the call was made.
@@ -272,6 +273,26 @@ async function tickChecklistItem(itemId) {
   if (result.status === 401) return;
   if (result.status !== 200) return status(describe(result), 'error');
   await refreshChecklist();
+}
+
+// ---------------------------------------------------------------------------
+// Payroll (S16) — a pure read, no form. `500 payroll_unavailable` (S16.8) hides the
+// panel rather than showing a stale or zeroed one; the session itself is unaffected.
+// ---------------------------------------------------------------------------
+
+async function refreshPayroll() {
+  const fetched = await fetchForCurrentSession('/payroll');
+  if (!fetched) return;
+  const panel = $('payroll');
+  const container = $('payroll-summary');
+  if (!fetched.ok) {
+    panel.hidden = true;
+    clear(container);
+    return;
+  }
+  panel.hidden = false;
+  clear(container);
+  container.appendChild(renderPayrollSummary(document, fetched.payload));
 }
 
 // A `replay_gap` says the server could not serve the history this connection asked for, so

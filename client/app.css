@@ -434,6 +434,38 @@ body {
   font-size: var(--text-sm);
 }
 
+/* -------------------------------------------------------------------- payroll (S16) */
+
+.payroll {
+  padding: var(--space-3) var(--space-5);
+  border-top: var(--border-width) solid var(--line);
+  background: var(--surface-raised);
+}
+
+.payroll-summary {
+  margin: var(--space-0);
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-4);
+}
+
+.payroll-summary__row {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.payroll-summary__label {
+  margin: var(--space-0);
+  font-size: var(--text-xs);
+  color: var(--ink-dim);
+}
+
+.payroll-summary__value {
+  margin: var(--space-0);
+  font-size: var(--text-sm);
+}
+
 /* -------------------------------------------------------------- reviews (S15) */
 
 .reviews {

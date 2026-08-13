@@ -2463,6 +2463,25 @@ written as absolutely as I29, D68 already accepts and documents the loss, and wi
 unasked is exactly the kind of scope this session was told to leave alone.
 Reversibility: cheap. One store method's durability changes; no signature changes shape.
 
+### 2026-08-13 — D129 `remainingTokens` subtracts `burn`'s full component-wise sum, cache included
+Context: `## Unresolved` 8 (#29, #30) left `PayrollView.remainingTokens` with `burn` determined
+(a component-wise sum) but the subtraction itself open: nothing said whether cache reads and
+cache creation count against the budget alongside input and output tokens. S16.2 stops the
+slice until both this and the budget's scope have landed; the scope half was already resolved
+by #29 (per session). Raised during `/slice S16`, decided by the owner in-session rather than
+guessed.
+Chosen: `remainingTokens = budgetTokens - total(burn)`, where `total` sums every `Usage` field —
+input, output, cache reads, cache creation. Consistent with `burn` already being the complete
+component-wise sum; a budget that ignored cache tokens would understate real spend, since cache
+reads and creation are billed by every vendor observed so far.
+Rejected: subtracting only input and output, treating cache tokens as budget-neutral. Would need
+a second scalar alongside `burn` with no name anywhere in the contract, and there is no stated
+reason to treat cache tokens as free — they cost the deployment even when they discount the
+vendor's own bill.
+Reversibility: cheap. A read-time computation over an existing, already-durable fold; no
+persisted schema or signature changes shape, so a later change of basis only changes what one
+route returns.
+
 ## Open
 
 Staging only. Once an item becomes an issue it leaves this list.

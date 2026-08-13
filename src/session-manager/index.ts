@@ -51,6 +51,7 @@ import type {
   SubscriberSink,
   Turn,
   TurnId,
+  Usage,
 } from '../contract/index.js';
 
 const isWindows = platform === 'win32';
@@ -453,6 +454,82 @@ export function createSessionManager(deps: {
       );
     }
     await store.tombstonePid(record.pid, nowIso());
+  }
+
+  // S16: burn, idle time and the budget subtraction are folds over the session's own
+  // spill — never a running counter — so a live read and a post-restart read walk the
+  // identical path and cannot disagree (S16.5). `usage` events are the only source of
+  // `burn`: `turn.ended.usage` is always emitted `null` by every adapter (D75 puts the
+  // vendor-normalised, summable figure on the dedicated `usage` envelope instead), so
+  // summing it here would double-count nothing but is also never a source to skip.
+  async function foldPayroll(sessionId: SessionId, record: SessionRecord): Promise<Result<PayrollView, SessionError>> {
+    const burn: { -readonly [K in keyof Usage]: Usage[K] } = { inputTokens: 0, outputTokens: 0, cacheRead: 0, cacheCreate: 0 };
+    let idleMs = 0;
+    let droppedIntervals = 0;
+    // The wall-clock boundary the *next* idle interval starts from: `null` while a turn
+    // is open (busy, not idle), the last `turn.ended`'s own `ts` otherwise. Idle time is
+    // billed session-creation-to-first-turn (D76/`10-design.md § Derived views`), so it
+    // starts at `record.createdAt` rather than at the first envelope read.
+    let cursor: IsoTimestamp | null = record.createdAt;
+    // Whether the interval starting at `cursor` sits behind a `server_restart` close and
+    // must be dropped rather than billed (S16.7, D76).
+    let cursorDropped = false;
+
+    for await (const result of store.readEventsAfter(sessionId, 0)) {
+      if (!result.ok) return { ok: false, error: { code: 'payroll_unavailable', cause: result.error } };
+      const envelope = result.value;
+      switch (envelope.kind) {
+        case 'turn.started': {
+          if (cursor !== null) {
+            const gapMs = new Date(envelope.ts).getTime() - new Date(cursor).getTime();
+            if (cursorDropped) droppedIntervals += 1;
+            else idleMs += gapMs;
+          }
+          cursor = null;
+          cursorDropped = false;
+          break;
+        }
+        case 'turn.ended': {
+          const data = envelope.data as EventPayloadMap['turn.ended'];
+          cursor = envelope.ts;
+          cursorDropped = data.stopReason === 'server_restart';
+          break;
+        }
+        case 'usage': {
+          const data = envelope.data as EventPayloadMap['usage'];
+          burn.inputTokens += data.usage.inputTokens;
+          burn.outputTokens += data.usage.outputTokens;
+          burn.cacheRead += data.usage.cacheRead;
+          burn.cacheCreate += data.usage.cacheCreate;
+          break;
+        }
+        default:
+          break;
+      }
+    }
+
+    // Last-turn-to-`endedAt` (S16.6). A live session mid-turn has `cursor === null` (no
+    // trailing idle to bill yet); a live session between turns has no `endedAt` yet
+    // either, so nothing is added until the session actually ends.
+    if (cursor !== null && record.endedAt !== null) {
+      const gapMs = new Date(record.endedAt).getTime() - new Date(cursor).getTime();
+      if (cursorDropped) droppedIntervals += 1;
+      else idleMs += gapMs;
+    }
+
+    const budgetTokens = config.sessionTokenBudget;
+    const totalBurn = burn.inputTokens + burn.outputTokens + burn.cacheRead + burn.cacheCreate;
+    return {
+      ok: true,
+      value: {
+        sessionId,
+        burn,
+        budgetTokens,
+        remainingTokens: budgetTokens === null ? null : budgetTokens - totalBurn, // D129
+        idleMs,
+        droppedIntervals,
+      },
+    };
   }
 
   // S7.4/S7.9 (D39): a spill ending on an unpaired `turn.started` is closed on disk —
@@ -1131,8 +1208,10 @@ export function createSessionManager(deps: {
       return { ok: true, value: { close: () => entry.subscribers.delete(proxy) } };
     },
 
-    async payroll(): Promise<Result<PayrollView, SessionError>> {
-      notImplemented('payroll');
+    async payroll(sessionId, owner): Promise<Result<PayrollView, SessionError>> {
+      const entry = sessions.get(sessionId);
+      if (!entry || entry.record.owner !== owner) return { ok: false, error: { code: 'no_such_session', sessionId } }; // S16.9
+      return foldPayroll(sessionId, entry.record);
     },
     async checklist(sessionId, owner): Promise<Result<readonly ChecklistItemState[], SessionError>> {
       const entry = sessions.get(sessionId);

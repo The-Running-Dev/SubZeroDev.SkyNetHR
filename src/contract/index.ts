@@ -920,4 +920,5 @@ export type SessionError =
   | { readonly code: 'adapter'; readonly cause: AdapterError }
   | { readonly code: 'checkpoint'; readonly cause: CheckpointError }
   | { readonly code: 'storage'; readonly cause: StoreError }
-  | { readonly code: 'records'; readonly cause: RecordsError };
+  | { readonly code: 'records'; readonly cause: RecordsError }
+  | { readonly code: 'payroll_unavailable'; readonly cause: StoreError };

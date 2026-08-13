@@ -64,6 +64,7 @@ export function createSseEdge(deps: EdgeDeps): RequestListener {
     handleGetReview,
     handleChecklist,
     handleTickChecklistItem,
+    handlePayroll,
   } = createHttpHandlers(deps);
 
   async function handleEvents(req: IncomingMessage, res: ServerResponse, owner: OperatorId, sessionId: SessionId): Promise<void> {
@@ -257,6 +258,7 @@ export function createSseEdge(deps: EdgeDeps): RequestListener {
             if (decodedItemId === null) return;
             return handleTickChecklistItem(req, res, owner, sessionId, decodedItemId as ChecklistItemId);
           }
+          if (method === 'GET' && rest === '/payroll') return handlePayroll(req, res, owner, sessionId);
           const toolOutputMatch = /^\/tool-output\/([^/]+)\/([^/]+)$/.exec(rest);
           if (method === 'GET' && toolOutputMatch) {
             const decodedTurnId = decodeSegment(res, toolOutputMatch[1]!, 'turnId', 'turnId');

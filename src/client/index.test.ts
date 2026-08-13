@@ -92,6 +92,14 @@ async function loadReviewRowRenderer() {
   return mod.renderReviewRow;
 }
 
+async function loadPayrollSummaryRenderer() {
+  const mod = (await import(pathToFileURL(path.join(CLIENT, 'render.js')).href)) as {
+    renderPayrollSummary: (doc: unknown, view: unknown) => StubNode;
+    formatDuration: (ms: number) => string;
+  };
+  return mod;
+}
+
 const XSS = '<img src=x onerror=alert(1)>';
 
 describe('S2.11 — the client renders normalised events only', () => {
@@ -293,6 +301,51 @@ describe("S15.13 — a review's body renders as literal characters, in a differe
   });
 });
 
+describe('S16 — the payroll panel renders burn, remaining budget, idle time, and dropped intervals', () => {
+  it('shows "no budget set" when remainingTokens is null and omits the dropped-interval row when there are none', async () => {
+    const { renderPayrollSummary } = await loadPayrollSummaryRenderer();
+    const { doc } = makeDoc();
+    const view = {
+      sessionId: 'sess-1',
+      burn: { inputTokens: 100, outputTokens: 50, cacheRead: 10, cacheCreate: 5 },
+      budgetTokens: null,
+      remainingTokens: null,
+      idleMs: 65000,
+      droppedIntervals: 0,
+    };
+    const dl = renderPayrollSummary(doc, view);
+    const rendered = allText(dl).join(' ');
+    assert.ok(rendered.includes('165'), 'burn is the component-wise sum of the four fields (100+50+10+5)');
+    assert.ok(rendered.includes('no budget set'));
+    assert.ok(!rendered.includes('dropped'), 'no dropped-interval row when droppedIntervals is 0');
+  });
+
+  it('shows the dropped-interval count when there is one, and a numeric remaining budget when there is a budget', async () => {
+    const { renderPayrollSummary } = await loadPayrollSummaryRenderer();
+    const { doc } = makeDoc();
+    const view = {
+      sessionId: 'sess-1',
+      burn: { inputTokens: 100, outputTokens: 50, cacheRead: 0, cacheCreate: 0 },
+      budgetTokens: 1000,
+      remainingTokens: 850,
+      idleMs: 0,
+      droppedIntervals: 2,
+    };
+    const dl = renderPayrollSummary(doc, view);
+    const rendered = allText(dl).join(' ');
+    assert.ok(rendered.includes('850'));
+    assert.ok(rendered.includes('2 intervals dropped'));
+  });
+
+  it('formatDuration reads hours and minutes, and floors under a minute to "<1m"', async () => {
+    const { formatDuration } = await loadPayrollSummaryRenderer();
+    assert.equal(formatDuration(0), '<1m');
+    assert.equal(formatDuration(59_000), '<1m');
+    assert.equal(formatDuration(60_000), '1m');
+    assert.equal(formatDuration(3_600_000 + 5 * 60_000), '1h 05m');
+  });
+});
+
 describe('S2.14 — every rendered value is a CSS custom property', () => {
   it('declares its tokens in one stylesheet and uses literal colours nowhere else', async () => {
     const css = await readFile(path.join(CLIENT, 'app.css'), 'utf8');
@@ -409,6 +462,7 @@ async function runConsole(sessions: ReadonlyArray<Record<string, unknown>>) {
     'status', 'login', 'console', 'sessions', 'transcript', 'compose', 'new-session', 'login-form',
     'refresh', 'cwd', 'vendor', 'model', 'sandbox', 'requisition-id', 'text', 'secret', 'checkpoints', 'checkpoint-list',
     'checklist', 'checklist-list',
+    'payroll', 'payroll-summary',
     'policy-banner', 'audit', 'audit-open', 'audit-close', 'audit-filters', 'audit-filter-session',
     'audit-filter-operator', 'audit-filter-since', 'audit-filter-until', 'audit-rows', 'audit-empty',
     'audit-load-more', 'requisitions', 'requisitions-open', 'requisitions-close', 'raise-requisition',
@@ -456,7 +510,9 @@ async function runConsole(sessions: ReadonlyArray<Record<string, unknown>>) {
         ? { checkpoints: [] }
         : String(input).endsWith('/checklist')
           ? { items: [] }
-          : String(input) === '/api/sessions'
+          : String(input).endsWith('/payroll')
+            ? { sessionId: 's1', burn: { inputTokens: 0, outputTokens: 0, cacheRead: 0, cacheCreate: 0 }, budgetTokens: null, remainingTokens: null, idleMs: 0, droppedIntervals: 0 }
+            : String(input) === '/api/sessions'
             ? { sessions }
             : String(input) === '/api/requisitions'
               ? { requisitions: [] }
