@@ -2486,4 +2486,24 @@ route returns.
 
 Staging only. Once an item becomes an issue it leaves this list.
 
-*(empty)*
+- **A restart that lands while a session is idle between turns is billed as idle time, not
+  dropped — contradicting D76's own stated goal.** Found during `/code-review` on S16.
+  `foldPayroll`'s trailing-interval branch (`src/session-manager/index.ts`, the fold's final
+  `if (cursor !== null && record.endedAt !== null)`) bills `record.endedAt` minus the last
+  `turn.ended`/creation timestamp as idle, treating it as dropped only when `cursorDropped` was
+  set by a `turn.ended { stopReason: 'server_restart' }` earlier in the same fold. That marker
+  only exists when boot found an *open* turn to close (`closeUnterminatedTurn`, D39) — a crash
+  while no turn is open leaves no marker at all, and boot still synthesises `endedAt` as the
+  boot timestamp (`record.endedAt ?? nowIso()`). The result: the whole outage is billed as an
+  operator's idle time, the exact wrong number D76 says this fold exists to prevent — D76's own
+  text only ever discusses the mid-turn case, and never says what should happen to an idle-time
+  restart.
+  Three ways to close it were considered and none fits within what's already decided: emitting
+  a marker envelope for this case is what `20-contract.md`'s note under `SessionEndReason`
+  explicitly forbids ("No envelope carries `server_restart`... an implementer must not close the
+  apparent gap by emitting one at boot" — D45's rejected alternative); an in-memory-only flag
+  doesn't survive a second restart before the payroll view is next read, breaking S16.5's
+  invariant that the fold is derivable purely from the durable spill; and inferring it from host
+  uptime is D76's own named rejected alternative for this exact problem. Needs an owner decision
+  — relax D45 with a narrowly-scoped marker, or accept the residual case as a documented S16
+  limitation — before it can be closed as a decision or filed as a bug.
