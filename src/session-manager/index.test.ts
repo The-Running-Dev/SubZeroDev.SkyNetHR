@@ -2600,3 +2600,33 @@ test('S14.10 — a tick appends nothing to audit.ndjson: byte-identical across f
   const after = await readRaw();
   assert.equal(after, before, 'audit.ndjson is byte-identical across five checklist ticks');
 });
+
+test('S14.11 — a spill failure on the checklist.item.completed append is reported, not swallowed: the tick fails, the item stays incomplete, and the session ends', async () => {
+  let failNextChecklistTick = false;
+  const { manager, workspaceRoot } = await makeManager('full', {}, (store) => ({
+    ...store,
+    async appendEvent(sessionId, envelope) {
+      if (failNextChecklistTick && envelope.kind === 'checklist.item.completed') {
+        failNextChecklistTick = false;
+        return { ok: false, error: { code: 'io', path: 'events.ndjson', detail: 'disk full' } };
+      }
+      return store.appendEvent(sessionId, envelope);
+    },
+  }), undefined, undefined, CHECKLIST_TEMPLATE);
+  const owner = 'operator-1' as OperatorId;
+  const projectDir = path.join(workspaceRoot, 'proj-s1411');
+  await mkdir(projectDir);
+  const created = await manager.create(owner, { vendor: 'claude', cwd: projectDir, model: null, sandbox: null, requisitionId: null });
+  assert.equal(created.ok, true);
+  if (!created.ok) return;
+  const { sessionId } = created.value;
+
+  failNextChecklistTick = true;
+  const ticked = await manager.tickChecklistItem(sessionId, owner, 'welcome' as ChecklistItemId);
+  assert.equal(ticked.ok, false, 'a tick whose envelope never reaches the spill is not reported as a success');
+  if (!ticked.ok) assert.equal(ticked.error.code, 'session_ended');
+
+  const summary = manager.get(sessionId, owner);
+  assert.equal(summary.ok, true);
+  if (summary.ok) assert.equal(summary.value.state, 'ended', 'the storage failure ends the session, same as S9.8');
+});

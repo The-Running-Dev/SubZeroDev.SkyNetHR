@@ -156,7 +156,7 @@ interface SessionEntry extends LiveSession {
   // D71: nothing about the checklist is persisted beyond the `checklist.item.completed`
   // envelopes already in the session's own event log (`checklist` is the fold over them) —
   // this is that fold, maintained incrementally by `emit` the same way `record.lastSeq` is,
-  // and rehydrated once at boot for a session loaded from disk (`rehydrateChecklist`).
+  // and rehydrated once at boot for a session loaded from disk, folded by `closeUnterminatedTurn`'s scan.
   readonly completedChecklist: Map<ChecklistItemId, { readonly by: OperatorId; readonly completedAt: IsoTimestamp }>;
   readonly subscribers: Set<SubscriberSink>;
   // I27: there is no lock in this server; `emit`'s synchronous prefix (seq assignment,
@@ -236,20 +236,6 @@ export function createSessionManager(deps: {
   // to hold the envelope that triggered the failure. Pushing these to the ring anyway
   // would put something in it the spill does not hold (D41); the same reasoning as
   // `remove()`'s post-registry notice, which has nothing left to replay it from either.
-  // S14.7: a session rehydrated at boot starts with an empty `completedChecklist` — folded
-  // once here from the durable spill, the only source of truth a rehydrated entry has left.
-  // A rehydrated session is always `ended` (Step 2, above), so this is the only path that
-  // ever populates the map for one; a live session's map is kept current by `emit` instead.
-  async function rehydrateChecklist(entry: SessionEntry): Promise<void> {
-    for await (const result of store.readEventsAfter(entry.record.id, 0)) {
-      if (!result.ok) break; // best-effort, matching closeUnterminatedTurn's own scan
-      const envelope = result.value;
-      if (envelope.kind !== 'checklist.item.completed') continue;
-      const d = envelope.data as EventPayloadMap['checklist.item.completed'];
-      entry.completedChecklist.set(d.itemId, { by: d.by, completedAt: envelope.ts });
-    }
-  }
-
   function deliverDirect<K extends EventKind>(entry: SessionEntry, kind: K, data: EventPayloadMap[K]): void {
     entry.seq += 1;
     const envelope = { seq: entry.seq as Seq, sessionId: entry.record.id, ts: nowIso(), kind, data } as Envelope;
@@ -477,6 +463,11 @@ export function createSessionManager(deps: {
     let openTurnId: TurnId | null = null;
     const pending = new Map<RequestId, { readonly tool: string; readonly input: Readonly<Record<string, unknown>> }>();
 
+    // S14.7: this is also where `entry.completedChecklist` is folded for a rehydrated
+    // entry — the only path that ever populates it for one (a rehydrated session is
+    // always `ended`, Step 2 above; a live session's map is kept current by `emit`
+    // instead). Sharing this scan, rather than a second pass over the same spill, is
+    // why the checklist case sits in this switch instead of its own function.
     for await (const result of store.readEventsAfter(entry.record.id, 0)) {
       if (!result.ok) break; // best-effort: an unreadable spill is reported elsewhere, not here
       const envelope = result.value;
@@ -497,6 +488,11 @@ export function createSessionManager(deps: {
         case 'permission.resolved': {
           const d = envelope.data as EventPayloadMap['permission.resolved'];
           pending.delete(d.requestId);
+          break;
+        }
+        case 'checklist.item.completed': {
+          const d = envelope.data as EventPayloadMap['checklist.item.completed'];
+          entry.completedChecklist.set(d.itemId, { by: d.by, completedAt: envelope.ts });
           break;
         }
         default:
@@ -597,7 +593,6 @@ export function createSessionManager(deps: {
         sessions.set(sessionId, entry);
         // One of the three occasions `store`'s table names: a `state` transition.
         await store.writeMeta(rehydrated);
-        await rehydrateChecklist(entry);
       }
 
       // Step 3 (D39): a spill left on an unpaired `turn.started` is closed on disk —
@@ -605,6 +600,8 @@ export function createSessionManager(deps: {
       // `turn.ended { stopReason: 'server_restart' }` — before anything is served, so the
       // ordering guarantees in `20-contract.md § Rules the renderer may rely on` hold
       // unconditionally rather than acquiring a "the transcript might just stop" case.
+      // This is also where `entry.completedChecklist` gets folded for each rehydrated
+      // entry (S14.7) — the same scan, not a second one.
       for (const entry of sessions.values()) {
         await closeUnterminatedTurn(entry);
       }
@@ -1167,7 +1164,15 @@ export function createSessionManager(deps: {
       // `emit` returns it.
       entry.completedChecklist.set(itemId, { by: owner, completedAt: nowIso() });
       const envelope = await emit(entry, 'checklist.item.completed', { itemId, by: owner });
-      if (envelope) entry.completedChecklist.set(itemId, { by: owner, completedAt: envelope.ts });
+      // `emit` still returns the envelope it built even when the append that was supposed
+      // to make it durable fails during this exact call — `entry.storageFailed` (set by
+      // that failure, S9.8) is what actually says whether it landed. Reporting success on
+      // a tick that never reached the spill would revert silently on the next rehydration.
+      if (envelope === null || entry.storageFailed) {
+        entry.completedChecklist.delete(itemId);
+        return { ok: false, error: { code: 'session_ended', sessionId } };
+      }
+      entry.completedChecklist.set(itemId, { by: owner, completedAt: envelope.ts });
       return { ok: true, value: undefined };
     },
 
