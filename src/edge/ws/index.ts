@@ -168,6 +168,7 @@ export function createWsEdge(deps: EdgeDeps): WsRequestListener {
     handleLogin,
     handleChecklist,
     handleTickChecklistItem,
+    handlePayroll,
   } = createHttpHandlers(deps);
 
   // -------------------------------------------------------------------------
@@ -420,6 +421,7 @@ export function createWsEdge(deps: EdgeDeps): WsRequestListener {
             }
             return handleTickChecklistItem(req, res, owner, sessionId, decodedItemId as ChecklistItemId);
           }
+          if (method === 'GET' && rest === '/payroll') return handlePayroll(req, res, owner, sessionId);
           const toolOutputMatch = /^\/tool-output\/([^/]+)\/([^/]+)$/.exec(rest);
           if (method === 'GET' && toolOutputMatch) {
             let decodedTurnId: string;

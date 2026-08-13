@@ -1,4 +1,4 @@
-import { renderAuditRow, renderEvent, renderRequisitionRow, renderReviewRow } from './render.js';
+import { renderAuditRow, renderEvent, renderPayrollSummary, renderRequisitionRow, renderReviewRow } from './render.js';
 
 const $ = (id) => document.getElementById(id);
 
@@ -172,6 +172,7 @@ function selectSession(sessionId) {
   void refreshCheckpoints();
   void refreshChecklist();
   void refreshReviews();
+  void refreshPayroll();
 }
 
 // Fetches `/api/sessions/:id<suffix>` for the session selected when the call was made.
@@ -274,6 +275,26 @@ async function tickChecklistItem(itemId) {
   await refreshChecklist();
 }
 
+// ---------------------------------------------------------------------------
+// Payroll (S16) — a pure read, no form. `500 payroll_unavailable` (S16.8) hides the
+// panel rather than showing a stale or zeroed one; the session itself is unaffected.
+// ---------------------------------------------------------------------------
+
+async function refreshPayroll() {
+  const fetched = await fetchForCurrentSession('/payroll');
+  if (!fetched) return;
+  const panel = $('payroll');
+  const container = $('payroll-summary');
+  if (!fetched.ok) {
+    panel.hidden = true;
+    clear(container);
+    return;
+  }
+  panel.hidden = false;
+  clear(container);
+  container.appendChild(renderPayrollSummary(document, fetched.payload));
+}
+
 // A `replay_gap` says the server could not serve the history this connection asked for, so
 // what is on screen is not the run (S3.3). A fresh `EventSource` carries no `Last-Event-ID`
 // and therefore asks for the transcript from seq 1 — which is the refetch. Once only: a
@@ -331,6 +352,14 @@ function handleEnvelope(sessionId, envelope) {
     // the operator who ticked it.
     void refreshChecklist();
   }
+  if ((envelope.kind === 'usage' || envelope.kind === 'turn.ended' || envelope.kind === 'session.ended') && envelope.sessionId === state.sessionId) {
+    // `usage` moves burn; `turn.ended` closes an idle boundary and, on a restart-closed
+    // turn, a dropped interval; `session.ended` finalises the trailing idle gap. Selecting
+    // a session only fetches a snapshot (S16) — without this the panel would freeze at
+    // whatever it read then, and a transient `payroll_unavailable` would never get a
+    // second try.
+    void refreshPayroll();
+  }
   if (envelope.kind === 'permission.resolved') {
     const controls = state.pendingPermissions.get(envelope.data.requestId);
     if (controls) {
@@ -371,7 +400,7 @@ function openSseStream(sessionId) {
 
   for (const kind of [
     'session.started', 'session.ended', 'session.notice',
-    'turn.started', 'turn.ended',
+    'turn.started', 'turn.ended', 'usage',
     'message', 'thinking', 'tool.call', 'tool.result',
     'permission.request', 'permission.resolved', 'checkpoint.created', 'checklist.item.completed', 'error',
   ]) {

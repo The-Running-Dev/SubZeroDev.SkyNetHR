@@ -72,6 +72,7 @@ async function makeManager(
   checkpointsOverride: ((config: Config) => Checkpoints) | null = null,
   recordsOverride: ((config: Config, store: Store) => Records) | null = null,
   checklistOverride: Config['checklist'] = [],
+  configOverride: Partial<Config> = {},
 ) {
   process.env['SKYNET_TEST_SCENARIO'] = scenario;
   process.env['SKYNET_CLAUDE_EXECUTABLE'] = FIXTURE;
@@ -101,6 +102,7 @@ async function makeManager(
     sessionTokenBudget: null,
     checklist: checklistOverride,
     edge: 'sse',
+    ...configOverride,
   };
   const storeResult = await createStore(config);
   if (!storeResult.ok) throw new Error('store failed to init');
@@ -2629,4 +2631,180 @@ test('S14.11 — a spill failure on the checklist.item.completed append is repor
   const summary = manager.get(sessionId, owner);
   assert.equal(summary.ok, true);
   if (summary.ok) assert.equal(summary.value.state, 'ended', 'the storage failure ends the session, same as S9.8');
+});
+
+// ---------------------------------------------------------------------------
+// S16 — Payroll: what a session has cost
+// ---------------------------------------------------------------------------
+
+// A rehydrated fixture with known, millisecond-exact gaps (S16.6) and one restart-closed
+// turn (S16.7, D76): creation -> t1.started is 1000ms idle; t1 carries three `usage`
+// events either side of a compaction notice, summed for S16.3/S16.4; t1.ended -> t2.started
+// is 3000ms idle; t2 is closed by a `server_restart`, so t2.ended -> t3.started (3900ms) is
+// dropped rather than billed; t3.ended -> endedAt is 2500ms idle. Total idleMs = 1000 +
+// 3000 + 2500 = 6500; droppedIntervals = 1.
+const T0 = Date.parse('2026-01-01T00:00:00.000Z');
+function isoAt(offsetMs: number): IsoTimestamp {
+  return new Date(T0 + offsetMs).toISOString() as IsoTimestamp;
+}
+function payrollFixtureEnvelope(sessionId: string, seq: number, offsetMs: number, kind: string, data: unknown): Envelope {
+  return { seq: seq as never, sessionId: sessionId as never, ts: isoAt(offsetMs), kind: kind as never, data: data as never } as Envelope;
+}
+
+async function bootPayrollFixture(
+  configOverride: Partial<Config> = {},
+): Promise<{ manager: ReturnType<typeof createSessionManager>; sessionId: SessionId; owner: OperatorId }> {
+  const { config, store, checkpoints } = await makeManager('full', {}, undefined, undefined, undefined, undefined, configOverride);
+  const sessionId = 'sess-payroll';
+  const owner = 'operator-1' as OperatorId;
+  const record = bootSessionRecord(sessionId, { owner, createdAt: isoAt(0), state: 'ended', endedAt: isoAt(12000) });
+  assert.equal((await store.createSession(record)).ok, true);
+
+  const events: Array<[number, string, unknown]> = [
+    [1000, 'turn.started', { turnId: 't1' }],
+    [1500, 'usage', { turnId: 't1', usage: { inputTokens: 100, outputTokens: 50, cacheRead: 10, cacheCreate: 5 } }],
+    [1600, 'session.notice', { level: 'info', code: 'compaction', text: 'Compacting context' }],
+    [1800, 'usage', { turnId: 't1', usage: { inputTokens: 80, outputTokens: 40, cacheRead: 0, cacheCreate: 20 } }],
+    [1900, 'usage', { turnId: 't1', usage: { inputTokens: 60, outputTokens: 30, cacheRead: 5, cacheCreate: 0 } }],
+    [2000, 'turn.ended', { turnId: 't1', stopReason: 'completed', usage: null }],
+    [5000, 'turn.started', { turnId: 't2' }],
+    [5100, 'turn.ended', { turnId: 't2', stopReason: 'server_restart', usage: null }],
+    [9000, 'turn.started', { turnId: 't3' }],
+    [9500, 'turn.ended', { turnId: 't3', stopReason: 'completed', usage: null }],
+  ];
+  let seq = 1;
+  for (const [offsetMs, kind, data] of events) {
+    assert.equal((await store.appendEvent(record.id, payrollFixtureEnvelope(sessionId, seq, offsetMs, kind, data))).ok, true);
+    seq += 1;
+  }
+  await store.writeMeta({ ...record, lastSeq: (seq - 1) as never });
+
+  const manager = createSessionManager({ config, store, checkpoints, records: notImplementedProxy<Records>('records') });
+  assert.equal((await manager.boot()).ok, true);
+  return { manager, sessionId: sessionId as SessionId, owner };
+}
+
+test('S16.3/S16.4 — burn is the component-wise sum of every usage event, unaffected by a compaction between them; budgetTokens comes from config and remainingTokens is null exactly when it is', async () => {
+  const { manager, sessionId, owner } = await bootPayrollFixture({ sessionTokenBudget: null });
+  const got = await manager.payroll(sessionId, owner);
+  assert.equal(got.ok, true);
+  if (!got.ok) return;
+  assert.deepEqual(got.value.burn, { inputTokens: 240, outputTokens: 120, cacheRead: 15, cacheCreate: 25 });
+  assert.equal(got.value.budgetTokens, null);
+  assert.equal(got.value.remainingTokens, null);
+
+  const budgeted = await bootPayrollFixture({ sessionTokenBudget: 1000 });
+  const gotBudgeted = await budgeted.manager.payroll(budgeted.sessionId, budgeted.owner);
+  assert.equal(gotBudgeted.ok, true);
+  if (!gotBudgeted.ok) return;
+  assert.equal(gotBudgeted.value.budgetTokens, 1000);
+  // D129: remainingTokens subtracts burn's full component-wise sum, cache included —
+  // 240 + 120 + 15 + 25 = 400.
+  assert.equal(gotBudgeted.value.remainingTokens, 600);
+});
+
+test('S16.3 — no module above adapters/* reads Envelope.raw to do its own token arithmetic', async () => {
+  const sessionManagerSrc = await readFile(path.join(process.cwd(), 'src', 'session-manager', 'index.ts'), 'utf8');
+  assert.equal(sessionManagerSrc.includes('.raw'), false, 'session-manager never reads the raw vendor record');
+  const clientDir = path.join(process.cwd(), 'client');
+  const clientFiles = ['app.js', 'render.js'];
+  for (const file of clientFiles) {
+    let src: string;
+    try {
+      src = await readFile(path.join(clientDir, file), 'utf8');
+    } catch {
+      continue; // not every client file need exist by this point in the pipeline
+    }
+    assert.equal(src.includes('.raw'), false, `client/${file} never reads the raw vendor record`);
+  }
+});
+
+test('S16.6/S16.7 — idleMs is the wall clock live with no turn, to the millisecond; an interval containing a server_restart is dropped and counted instead', async () => {
+  const { manager, sessionId, owner } = await bootPayrollFixture();
+  const got = await manager.payroll(sessionId, owner);
+  assert.equal(got.ok, true);
+  if (!got.ok) return;
+  assert.equal(got.value.idleMs, 6500);
+  assert.equal(got.value.droppedIntervals, 1);
+});
+
+test('S16.5 — the payroll read for a live session equals the same read after a restart has rehydrated it, the spill being the only source either way', async () => {
+  const { manager, workspaceRoot, config, store, checkpoints } = await makeManager('full');
+  const owner = 'operator-1' as OperatorId;
+  const projectDir = path.join(workspaceRoot, 'proj-s165');
+  await mkdir(projectDir);
+  const created = await manager.create(owner, { vendor: 'claude', cwd: projectDir, model: null, sandbox: null, requisitionId: null });
+  assert.equal(created.ok, true);
+  if (!created.ok) return;
+  const { sessionId } = created.value;
+
+  const received: Envelope[] = [];
+  await manager.subscribe(sessionId, owner, 0, { deliver: (e) => received.push(e), close: () => {} });
+  const messaged = await manager.message(sessionId, owner, 'do the thing');
+  assert.equal(messaged.ok, true);
+  await waitUntil(() => received.some((e) => e.kind === 'permission.request'));
+  const requestEnvelope = received.find((e) => e.kind === 'permission.request')!;
+  const requestId = (requestEnvelope.data as { requestId: string }).requestId;
+  await manager.answerPermission(sessionId, owner, { requestId: requestId as never, decision: 'deny', scope: 'once', rule: null, reason: null });
+  await waitUntil(() => received.some((e) => e.kind === 'turn.ended'));
+
+  // Read after `end` rather than before: a live, not-yet-ended session has no `endedAt`
+  // to close the trailing idle interval against (S16.6), so comparing a mid-session read
+  // to a post-restart one would differ by scope, not by mechanism. Ending first makes the
+  // two reads answer the identical question — same durable spill, same session.
+  await manager.end(sessionId, owner);
+  const live = await manager.payroll(sessionId, owner);
+  assert.equal(live.ok, true);
+
+  const manager2 = createSessionManager({ config, store, checkpoints, records: notImplementedProxy<Records>('records') });
+  assert.equal((await manager2.boot()).ok, true);
+  const rehydrated = await manager2.payroll(sessionId, owner);
+  assert.equal(rehydrated.ok, true);
+  if (!live.ok || !rehydrated.ok) return;
+  assert.deepEqual(rehydrated.value.burn, live.value.burn);
+  assert.equal(rehydrated.value.idleMs, live.value.idleMs);
+  assert.equal(rehydrated.value.droppedIntervals, live.value.droppedIntervals);
+});
+
+test('S16.8 — a payroll read whose spill cannot be read is 500 payroll_unavailable, and the session is unaffected: the next message still starts a turn', async () => {
+  const { manager, workspaceRoot } = await makeManager('full', {}, (store) => ({
+    ...store,
+    readEventsAfter(sessionId, after) {
+      return (async function* () {
+        yield { ok: false, error: { code: 'io', path: 'events.ndjson', detail: 'disk full' } } as const;
+      })();
+    },
+  }));
+  const owner = 'operator-1' as OperatorId;
+  const projectDir = path.join(workspaceRoot, 'proj-s168');
+  await mkdir(projectDir);
+  const created = await manager.create(owner, { vendor: 'claude', cwd: projectDir, model: null, sandbox: null, requisitionId: null });
+  assert.equal(created.ok, true);
+  if (!created.ok) return;
+  const { sessionId } = created.value;
+
+  const got = await manager.payroll(sessionId, owner);
+  assert.equal(got.ok, false);
+  if (!got.ok) assert.equal(got.error.code, 'payroll_unavailable');
+
+  const received: Envelope[] = [];
+  await manager.subscribe(sessionId, owner, 0, { deliver: (e) => received.push(e), close: () => {} });
+  const messaged = await manager.message(sessionId, owner, 'still works');
+  assert.equal(messaged.ok, true, 'the session is unaffected by the failed payroll read');
+  await waitUntil(() => received.some((e) => e.kind === 'turn.started'));
+});
+
+test('S16.9 — the route carries the ownership check: another operator gets no_such_session', async () => {
+  const { manager, workspaceRoot } = await makeManager('full');
+  const owner = 'operator-1' as OperatorId;
+  const projectDir = path.join(workspaceRoot, 'proj-s169');
+  await mkdir(projectDir);
+  const created = await manager.create(owner, { vendor: 'claude', cwd: projectDir, model: null, sandbox: null, requisitionId: null });
+  assert.equal(created.ok, true);
+  if (!created.ok) return;
+
+  const other = 'operator-2' as OperatorId;
+  const got = await manager.payroll(created.value.sessionId, other);
+  assert.equal(got.ok, false);
+  if (!got.ok) assert.equal(got.error.code, 'no_such_session');
 });

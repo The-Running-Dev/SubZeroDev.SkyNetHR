@@ -172,6 +172,45 @@ function permissionResolvedNode(doc, data) {
   return row(doc, 'permission-resolved', 'permission', body);
 }
 
+// S16: no formatter for a duration or a token count existed anywhere in this client before
+// this panel — both are written here, next to `pretty`, rather than inline in `app.js`,
+// matching this file's existing convention that value-to-text conversion lives here.
+export function formatDuration(ms) {
+  const clamped = Math.max(0, ms);
+  const totalMinutes = Math.floor(clamped / 60000);
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+  if (hours === 0 && minutes === 0) return '<1m';
+  if (hours === 0) return `${minutes}m`;
+  return `${hours}h ${String(minutes).padStart(2, '0')}m`;
+}
+
+export function formatTokenCount(n) {
+  return n.toLocaleString('en-US');
+}
+
+// S16.4/S16.7: a pure read — `burn`'s four fields are summed here for display only, never
+// re-derived or second-guessed (the server's sum is authoritative, I28) — and the dropped-
+// interval notice (D76) is shown only when there is one to report.
+export function renderPayrollSummary(doc, view) {
+  const totalBurn = view.burn.inputTokens + view.burn.outputTokens + view.burn.cacheRead + view.burn.cacheCreate;
+  const dl = el(doc, 'dl', 'payroll-summary');
+  function summaryRow(label, value) {
+    const wrapper = el(doc, 'div', 'payroll-summary__row');
+    wrapper.appendChild(el(doc, 'dt', 'payroll-summary__label', label));
+    wrapper.appendChild(el(doc, 'dd', 'payroll-summary__value', value));
+    dl.appendChild(wrapper);
+  }
+  summaryRow('Burn', `${formatTokenCount(totalBurn)} tokens`);
+  summaryRow('Budget remaining', view.remainingTokens === null ? 'no budget set' : `${formatTokenCount(view.remainingTokens)} tokens`);
+  summaryRow('Idle time', formatDuration(view.idleMs));
+  if (view.droppedIntervals > 0) {
+    const plural = view.droppedIntervals === 1 ? 'interval' : 'intervals';
+    summaryRow('Unaccounted idle', `${view.droppedIntervals} ${plural} dropped — the server was down for part of it`);
+  }
+  return dl;
+}
+
 const RENDERERS = {
   'session.started': sessionStartedNode,
   'session.ended': sessionEndedNode,

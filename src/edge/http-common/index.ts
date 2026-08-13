@@ -112,6 +112,10 @@ export function apiErrorFor(error: SessionError): { code: ApiErrorCode; message:
       return { code: 'agent_unavailable', message: 'session storage is unavailable' };
     case 'records':
       return recordsApiError(error.cause);
+    case 'payroll_unavailable':
+      // S16.8: distinct from the generic `storage` arm above — the session itself is
+      // unaffected, unlike `agent_unavailable`, which clears a live turn.
+      return { code: 'payroll_unavailable', message: 'the payroll fold could not read the session spill' };
   }
 }
 
@@ -732,6 +736,12 @@ export function createHttpHandlers(deps: EdgeDeps) {
     sendJson(res, 200, { ok: true });
   }
 
+  async function handlePayroll(_req: IncomingMessage, res: ServerResponse, owner: OperatorId, sessionId: SessionId): Promise<void> {
+    const got = await manager.payroll(sessionId, owner);
+    if (!got.ok) return failWith(res, got.error);
+    sendJson(res, 200, got.value);
+  }
+
   async function handleLogin(req: IncomingMessage, res: ServerResponse): Promise<void> {
     if (config.auth.mode !== 'shared-secret') {
       return sendError(res, 'no_such_session', 'no such route');
@@ -786,5 +796,6 @@ export function createHttpHandlers(deps: EdgeDeps) {
     handleGetReview,
     handleChecklist,
     handleTickChecklistItem,
+    handlePayroll,
   };
 }

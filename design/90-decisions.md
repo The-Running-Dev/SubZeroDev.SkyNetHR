@@ -2463,8 +2463,72 @@ written as absolutely as I29, D68 already accepts and documents the loss, and wi
 unasked is exactly the kind of scope this session was told to leave alone.
 Reversibility: cheap. One store method's durability changes; no signature changes shape.
 
+### 2026-08-13 — D129 `remainingTokens` subtracts `burn`'s full component-wise sum, cache included
+Context: `## Unresolved` 8 (#29, #30) left `PayrollView.remainingTokens` with `burn` determined
+(a component-wise sum) but the subtraction itself open: nothing said whether cache reads and
+cache creation count against the budget alongside input and output tokens. S16.2 stops the
+slice until both this and the budget's scope have landed; the scope half was already resolved
+by #29 (per session). Raised during `/slice S16`, decided by the owner in-session rather than
+guessed.
+Chosen: `remainingTokens = budgetTokens - total(burn)`, where `total` sums every `Usage` field —
+input, output, cache reads, cache creation. Consistent with `burn` already being the complete
+component-wise sum; a budget that ignored cache tokens would understate real spend, since cache
+reads and creation are billed by every vendor observed so far.
+Rejected: subtracting only input and output, treating cache tokens as budget-neutral. Would need
+a second scalar alongside `burn` with no name anywhere in the contract, and there is no stated
+reason to treat cache tokens as free — they cost the deployment even when they discount the
+vendor's own bill.
+Reversibility: cheap. A read-time computation over an existing, already-durable fold; no
+persisted schema or signature changes shape, so a later change of basis only changes what one
+route returns.
+
+### 2026-08-13 — D130 Boot marks a restart with a `session.notice`, and that notice is the payroll fold's only drop marker
+Context: D76 drops any idle interval containing a restart, and its only signal is `turn.ended
+{ stopReason: 'server_restart' }`, which D39's boot appends *only* where the spill ends on an
+unpaired `turn.started`. A server that goes down while a session is idle between turns leaves no
+marker at all, and boot still synthesises `endedAt` as the boot timestamp — so `foldPayroll` bills
+the whole outage as that operator's idle time and reports `droppedIntervals: 0`. That is the number
+*Derived views* says must not be silently wrong, and D76's own text never considers the case. Found
+by `/code-review` on S16; S16.7's criterion as written is met, so this is a gap in the criterion
+rather than a defect in the slice.
+Chosen: a new `SessionNoticeCode` for the restart, emitted by boot as one `session.notice` per
+session that was **live** at shutdown — not for sessions already ended, which would append to every
+dead session's spill on every restart. The payroll fold's rule becomes *drop the interval ending at
+a restart notice*, and `turn.ended { server_restart }` stops carrying fold meaning: one marker, one
+rule, both cases. The mid-turn case consequently reports `droppedIntervals: 0`, because an outage
+inside an open turn was never billed as idle — that is D76's "either the turn or the idle gap after
+it, depending on where you cut" finally cut, in favour of the turn.
+Rejected: a durable `endReason` on `meta.json` stamped `server_restart` at boot. It is the better
+*root* fix — `endedAt` is fabricated at boot and every future consumer inherits that, not only
+payroll — but it is invisible to the operator, and a transcript showing nothing where an outage was
+is the quiet degradation this design refuses. It composes with this decision rather than competing,
+and is worth its own item.
+Rejected: accepting the gap and amending D76 and S16.7 to say only mid-turn restarts are
+detectable. `10-design.md § Derived views` has already ruled against it twice.
+Rejected: `session.ended { reason: 'server_restart' }`. Forbidden by `20-contract.md`'s note under
+`SessionEndReason` — D45's rejected alternative, retained knowingly. This decision leaves that
+undisturbed: a notice is not an end reason, and boot still ends a rehydrated session without saying
+why on the wire.
+Rejected: inferring the outage from host uptime. D76's own named rejected alternative for this
+exact problem.
+Reversibility: cheap. One enum value, one boot emission scoped to live-at-shutdown sessions, and a
+fold rule; nothing persisted changes shape.
+
 ## Open
 
 Staging only. Once an item becomes an issue it leaves this list.
 
-*(empty)*
+- **Implement D130: boot marks a restart with a notice, and the payroll fold reads that instead of
+  the turn close.** `20-contract.md` needs the new `SessionNoticeCode` value first — a contract
+  amendment, so `/contract` — after which boot emits one `session.notice` per session that was live
+  at shutdown, and `foldPayroll` drops the interval ending at that notice rather than keying off
+  `turn.ended { stopReason: 'server_restart' }`. D76 and S16.7 both need their wording brought in
+  line: under the unified rule the mid-turn case reports `droppedIntervals: 0`, which S16.7's
+  current fixture asserts as `1`. Until this lands, a restart while a session sits idle between
+  turns is billed as that operator's idle time with `droppedIntervals: 0`.
+- **Make `endedAt` honest about a synthesised end (D130's rejected-but-composing alternative).**
+  Boot writes `record.endedAt ?? nowIso()`, so every ended-by-restart session carries an `endedAt`
+  it invented. D130 fixes the payroll consequence only; any other consumer of `endedAt` — session
+  duration, "how long was this open" — still inherits the fabrication. A durable `endReason` on
+  `meta.json` would fix it at the root and is additive (optional field, absent on existing
+  sessions, no `schemaVersion` bump under D49).

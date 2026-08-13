@@ -616,7 +616,9 @@ interface PayrollView {
   readonly sessionId: SessionId;
   readonly burn: Usage;                     // component-wise sum of every `usage` event
   readonly budgetTokens: number | null;     // Config.sessionTokenBudget; null when unset
-  readonly remainingTokens: number | null;  // null when budgetTokens is null; see Unresolved 8
+  readonly remainingTokens: number | null;  // budgetTokens minus burn's full component-wise sum
+                                             // (input, output, cache reads, cache creation);
+                                             // null when budgetTokens is null (D129)
   readonly idleMs: number;                  // live-with-no-turn wall clock
   readonly droppedIntervals: number;        // idle intervals discarded for spanning a restart
 }
@@ -1452,7 +1454,8 @@ type SessionError =
   | { readonly code: 'adapter'; readonly cause: AdapterError }
   | { readonly code: 'checkpoint'; readonly cause: CheckpointError }
   | { readonly code: 'storage'; readonly cause: StoreError }
-  | { readonly code: 'records'; readonly cause: RecordsError };
+  | { readonly code: 'records'; readonly cause: RecordsError }
+  | { readonly code: 'payroll_unavailable'; readonly cause: StoreError };
 ```
 
 | Variant | Raised when | Retryable | Caller does |
@@ -1855,11 +1858,10 @@ are new in this pass and each names the issue that carries it.
    change; `decide`, `appendReview` and `finaliseReview` already return only once the store call
    settles, and `RecordsError.storage`'s "the registry is not mutated" already said the right
    thing. (#31, and #35 for the review half)
-8. **What "burn" is measured in for `remainingTokens`.** `PayrollView.burn` is a component-wise
-   sum and is determined. The subtraction is not: brief item 8's "budget remaining" needs one
-   scalar, and nothing says whether cache reads and cache creation count against a budget
-   alongside input and output tokens. The budget's *scope* is a separate open owner decision
-   which this contract follows the design in taking as per session. (#29, #30)
+8. **Resolved by D129.** `remainingTokens` subtracts `burn`'s full component-wise sum — input,
+   output, cache reads, and cache creation all count against the budget — from `budgetTokens`.
+   The budget's *scope* is resolved separately: per session (#29), which this contract already
+   followed the design in taking.
 9. **Resolved by D122.** Every session has a checklist — the template is global configuration
    (D71) and not tied to a requisition — and ticking is refused on an ended session,
    `409 session_ended`, matching every other session-write route. (#41)
