@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { createServer, type Server } from 'node:http';
+import { realpathSync } from 'node:fs';
 import { mkdtemp, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -10,6 +11,7 @@ import { createSessionManager } from '../../session-manager/index.js';
 import { createStore } from '../../store/index.js';
 import { createCheckpoints } from '../../checkpoints/index.js';
 import { createRecords } from '../../records/index.js';
+import { stripExtendedPrefix } from '../../jail/index.js';
 import type { AuthConfig, Config, Records, Store } from '../../contract/index.js';
 
 const FIXTURE = path.join(process.cwd(), 'src', 'adapters', 'claude', 'fixtures', 'fake-claude-cli.mjs');
@@ -74,7 +76,11 @@ async function makeEdge(
   process.env['SKYNET_CLAUDE_EXECUTABLE'] = FIXTURE;
   const storageRoot = await mkdtemp(path.join(tmpdir(), 'skynet-edge-store-'));
   storageRoots.push(storageRoot);
-  const workspaceRoot = await mkdtemp(path.join(tmpdir(), 'skynet-edge-ws-'));
+  const workspaceRootRaw = await mkdtemp(path.join(tmpdir(), 'skynet-edge-ws-'));
+  // `stripExtendedPrefix(realpathSync.native(...))` is what `config/index.ts` actually does
+  // for `WORKSPACE_ROOTS` — the jail resolves a candidate `cwd` the same way, and on macOS
+  // `/var/folders/...` and its realpath `/private/var/folders/...` are different strings.
+  const workspaceRoot = stripExtendedPrefix(realpathSync.native(workspaceRootRaw));
   const config: Config = {
     bind: { host: '127.0.0.1', port: 0 },
     auth,
