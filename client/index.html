@@ -76,9 +76,13 @@
       <span class="field__label">Until</span>
       <input id="audit-filter-until" class="field__input" type="datetime-local">
     </label>
+    <label class="field field--checkbox">
+      <input id="audit-filter-incidents" class="field__input" type="checkbox">
+      <span class="field__label">Incidents only</span>
+    </label>
     <button class="button" type="submit">Filter</button>
   </form>
-  <div class="audit__table-wrap">
+  <div id="audit-table-wrap" class="audit__table-wrap">
     <table class="audit-table">
       <thead>
         <tr>
@@ -94,6 +98,7 @@
       <tbody id="audit-rows"></tbody>
     </table>
   </div>
+  <div id="audit-incident-groups" class="incident-groups" hidden></div>
   <p id="audit-empty" class="audit__empty" hidden>no audit records match this filter</p>
   <button id="audit-load-more" class="button button--quiet" type="button" hidden>Load older</button>
 </section>

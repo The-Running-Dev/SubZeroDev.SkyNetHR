@@ -500,6 +500,114 @@ test('S12.8 — a record for a session removed by deleteSession is still readabl
   assert.equal(page.value.records[0]!.sandbox, 'workspace-write');
 });
 
+// ---------------------------------------------------------------------------
+// S17 — incidentsOnly
+// ---------------------------------------------------------------------------
+
+test('S17.1 — incidentsOnly returns exactly the union of decision===deny, operator===null and scope===standing, and nothing else', async () => {
+  const storageRoot = await mkdtemp(path.join(tmpdir(), 'skynet-store-'));
+  const storeResult = await createStore(baseConfig(storageRoot));
+  if (!storeResult.ok) return;
+  const store = storeResult.value;
+
+  // Every dimension isolated, plus two records that straddle two sets at once, so the
+  // union is exercised rather than three independently-correct single-dimension checks.
+  const ordinary = [
+    auditRecord(1, { operator: 'op-1' as never, decision: 'allow', scope: 'once' }),
+    auditRecord(2, { operator: 'op-2' as never, decision: 'allow', scope: 'once' }),
+  ];
+  const denyOnly = [
+    auditRecord(3, { operator: 'op-1' as never, decision: 'deny', scope: 'once' }),
+    auditRecord(4, { operator: 'op-2' as never, decision: 'deny', scope: 'once' }),
+  ];
+  const operatorNullOnly = [
+    auditRecord(5, { operator: null, decision: 'allow', scope: 'once' }),
+    auditRecord(6, { operator: null, decision: 'allow', scope: 'once' }),
+  ];
+  const standingOnly = [
+    auditRecord(7, { operator: 'op-3' as never, decision: 'allow', scope: 'standing' as never }),
+    auditRecord(8, { operator: 'op-4' as never, decision: 'allow', scope: 'standing' as never }),
+  ];
+  const denyAndOperatorNull = [auditRecord(9, { operator: null, decision: 'deny', scope: 'once' })];
+  const operatorNullAndStanding = [auditRecord(10, { operator: null, decision: 'allow', scope: 'standing' as never })];
+
+  const records = [...ordinary, ...denyOnly, ...operatorNullOnly, ...standingOnly, ...denyAndOperatorNull, ...operatorNullAndStanding];
+  await writeAuditFixture(storageRoot, records);
+
+  const denyCount = records.filter((r) => r.decision === 'deny').length;
+  const operatorNullCount = records.filter((r) => r.operator === null).length;
+  const standingCount = records.filter((r) => r.scope === 'standing').length;
+  assert.equal(denyCount, 3, 'deny set: 3, 4, 9');
+  assert.equal(operatorNullCount, 4, 'operator===null set: 5, 6, 9, 10');
+  assert.equal(standingCount, 3, 'standing set: 7, 8, 10');
+
+  const page = await store.readAuditPage(emptyAuditQuery({ incidentsOnly: true, limit: 200 }));
+  assert.equal(page.ok, true);
+  if (!page.ok) return;
+  const gotSeqs = new Set(page.value.records.map((r) => r.input.seq as number));
+  assert.equal(gotSeqs.size, 8, 'the union is 8 records — 10 minus the 2 ordinary ones');
+  assert.deepEqual(gotSeqs, new Set([3, 4, 5, 6, 7, 8, 9, 10]), 'exactly the union and nothing else');
+  assert.ok(!gotSeqs.has(1) && !gotSeqs.has(2), 'ordinary allows are excluded');
+});
+
+test('S17.2 — paging by nextCursor with incidentsOnly:true visits every incident exactly once, no duplicate, no omission, over 500+ records', async () => {
+  const storageRoot = await mkdtemp(path.join(tmpdir(), 'skynet-store-'));
+  const config = baseConfig(storageRoot);
+  const capped: Config = { ...config, caps: { ...config.caps, auditPageMax: 37 } }; // deliberately not a divisor of N
+  const storeResult = await createStore(capped);
+  if (!storeResult.ok) return;
+  const store = storeResult.value;
+
+  const N = 517;
+  // Every third record is a forced (operator: null) incident; the rest are ordinary.
+  const records = Array.from({ length: N }, (_, i) =>
+    auditRecord(i + 1, (i + 1) % 3 === 0 ? { operator: null } : {}),
+  );
+  await writeAuditFixture(storageRoot, records);
+
+  const visited: number[] = [];
+  let before: AuditCursor | null = null;
+  let pages = 0;
+  for (;;) {
+    const page = await store.readAuditPage(emptyAuditQuery({ before, limit: 37, incidentsOnly: true }));
+    assert.equal(page.ok, true);
+    if (!page.ok) return;
+    pages += 1;
+    assert.ok(pages < 100, 'paging did not converge — likely an infinite loop');
+    for (const r of page.value.records) visited.push(r.input.seq as number);
+    if (page.value.nextCursor === null) break;
+    before = page.value.nextCursor;
+  }
+
+  const expected = records
+    .filter((r) => r.operator === null)
+    .map((r) => r.input.seq as number)
+    .reverse(); // newest first
+  assert.ok(expected.length > 100, 'the fixture has enough incidents to span several pages');
+  assert.deepEqual(visited, expected, 'no duplicate, no omission, across every page — same clamping, cursor and paging as S12.4');
+});
+
+test('S17.6 — incidentsOnly reads records for a session removed by deleteSession, alongside a live one owned by a different operator', async () => {
+  const storageRoot = await mkdtemp(path.join(tmpdir(), 'skynet-store-'));
+  const storeResult = await createStore(baseConfig(storageRoot));
+  if (!storeResult.ok) return;
+  const store = storeResult.value;
+
+  const removed = sessionRecord('sess-removed');
+  await store.createSession(removed);
+  const notOwned = auditRecord(1, { sessionId: 'sess-not-owned' as never, operator: null, decision: 'deny' });
+  const forRemoved = auditRecord(2, { sessionId: 'sess-removed' as never, operator: null, decision: 'deny' });
+  await writeAuditFixture(storageRoot, [notOwned, forRemoved]);
+
+  const deleted = await store.deleteSession(removed.id);
+  assert.equal(deleted.ok, true);
+
+  const page = await store.readAuditPage(emptyAuditQuery({ incidentsOnly: true, limit: 10 }));
+  assert.equal(page.ok, true);
+  if (!page.ok) return;
+  assert.equal(page.value.records.length, 2, 'both the deleted session\'s record and the not-owned one are read (D70, D25)');
+});
+
 test('S12.9 — no read scans the whole file: first-page elapsed time at 100,000 records is not far off first-page time at 10,000', async () => {
   const storageRoot10k = await mkdtemp(path.join(tmpdir(), 'skynet-store-'));
   const storeResult10k = await createStore(baseConfig(storageRoot10k));

@@ -1,4 +1,4 @@
-import { renderAuditRow, renderEvent, renderPayrollSummary, renderRequisitionRow, renderReviewRow } from './render.js';
+import { renderAuditRow, renderEvent, renderIncidentGroups, renderPayrollSummary, renderRequisitionRow, renderReviewRow } from './render.js';
 
 const $ = (id) => document.getElementById(id);
 
@@ -27,6 +27,11 @@ const state = {
   // reset that outruns an in-flight "Load older") can never overwrite state a newer call
   // already reset — mirrors `refreshCheckpoints`'s `requestedSessionId` guard.
   auditRequestToken: 0,
+  // S17.5: every record loaded under the current `incidentsOnly` filter, so the grouped
+  // incident view can be rebuilt whole on each page rather than only ever growing a flat
+  // append — grouping by session and by operator has to see the accumulated set, not just
+  // the newest page.
+  auditRecords: [],
   // S15: the reviewId of the draft this operator is currently editing for the selected
   // session, if any. Ephemeral — a reload loses it, same as every other piece of UI state
   // this client keeps nowhere durable (D67/D70 keep no per-operator record server-side);
@@ -565,6 +570,7 @@ function readAuditFilters() {
     operator: $('audit-filter-operator').value.trim(),
     since: isoFromLocalInput($('audit-filter-since').value),
     until: isoFromLocalInput($('audit-filter-until').value),
+    incidentsOnly: $('audit-filter-incidents').checked,
   };
 }
 
@@ -576,6 +582,7 @@ function auditQueryParams(filters, before) {
   if (filters.operator !== '') params.set('operator', filters.operator);
   if (filters.since !== null) params.set('since', filters.since);
   if (filters.until !== null) params.set('until', filters.until);
+  if (filters.incidentsOnly) params.set('incidentsOnly', 'true');
   return params;
 }
 
@@ -583,7 +590,9 @@ async function loadAuditPage(reset) {
   if (reset) {
     state.auditCursor = null;
     state.auditFilters = readAuditFilters();
+    state.auditRecords = [];
     clear($('audit-rows'));
+    clear($('audit-incident-groups'));
     $('audit-empty').hidden = true;
   }
   // Pinned at the last reset — "Load older" resumes the same query its cursor was minted
@@ -596,14 +605,27 @@ async function loadAuditPage(reset) {
   if (result.status === 401) return;
   if (result.status !== 200) return status(describe(result), 'error');
 
-  const tbody = $('audit-rows');
-  for (const record of result.payload.records) {
-    tbody.appendChild(renderAuditRow(document, record));
+  state.auditRecords.push(...result.payload.records);
+
+  // S17.5: the incident view groups by session and by operator; the ordinary view stays
+  // the flat table S12 shipped. Both read the same page — grouping is arrangement only.
+  $('audit-table-wrap').hidden = filters.incidentsOnly;
+  $('audit-incident-groups').hidden = !filters.incidentsOnly;
+  if (filters.incidentsOnly) {
+    const groups = $('audit-incident-groups');
+    clear(groups);
+    groups.appendChild(renderIncidentGroups(document, state.auditRecords));
+  } else {
+    const tbody = $('audit-rows');
+    for (const record of result.payload.records) {
+      tbody.appendChild(renderAuditRow(document, record));
+    }
   }
+
   // D86/S12.5: round-tripped exactly as received — nothing here parses or constructs it.
   state.auditCursor = result.payload.nextCursor;
   $('audit-load-more').hidden = state.auditCursor === null;
-  if (tbody.children.length === 0) $('audit-empty').hidden = false;
+  if (state.auditRecords.length === 0) $('audit-empty').hidden = false;
 }
 
 function openAudit() {

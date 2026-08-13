@@ -1036,6 +1036,25 @@ test("S10.4 — a later request matching a held rule is auto-answered every time
     assert.equal(a.decision, 'allow');
     assert.equal(a.reason, 'Bash:echo hi');
   }
+
+  // S17.4: the same standing auto-allow reaches the incident view — readAuditPage with
+  // incidentsOnly:true, exercised against S10's own auto-answer path rather than a
+  // synthetic fixture.
+  const page = await manager.readAudit({
+    before: null,
+    limit: 200,
+    sessionId: null,
+    operator: null,
+    since: null,
+    until: null,
+    incidentsOnly: true,
+  });
+  assert.equal(page.ok, true);
+  if (page.ok) {
+    const standingIncidents = page.value.records.filter((r) => r.scope === 'standing');
+    assert.equal(standingIncidents.length, 4, 'every auto-approved match reaches the incident view');
+    for (const r of standingIncidents) assert.equal(r.operator, null);
+  }
 });
 
 test('S10.5 — a standing rule does not outlive its session: a new session on the same workspace, by a different operator, is asked again', async () => {
@@ -2100,6 +2119,65 @@ test('S9.8 — a spill failure mid-turn kills the child, resolves the outstandin
   const summary = manager.get(sessionId, owner);
   assert.equal(summary.ok, true);
   if (summary.ok) assert.equal(summary.value.state, 'ended');
+
+  // S17.3: this storage-failure-forced cancellation reaches the incident view via
+  // incidentsOnly:true, attributed to nobody (`operator: null`) with the cause in
+  // `reason`. A true "denied because the audit append failed" record cannot exist to be
+  // read back here — `finalizeResolution`'s `audit_unavailable` path (S4.7) denies and
+  // notifies without ever writing an `AuditRecord`, since the append that would carry it
+  // is the very one that failed — so this and S4.9's live-child-death cancellation are
+  // the two real, persisted `operator: null` incidents S17.3 exercises.
+  const incidentPage = await manager.readAudit({
+    before: null,
+    limit: 200,
+    sessionId: null,
+    operator: null,
+    since: null,
+    until: null,
+    incidentsOnly: true,
+  });
+  assert.equal(incidentPage.ok, true);
+  if (incidentPage.ok) {
+    const forced = incidentPage.value.records.find((r) => r.sessionId === sessionId && r.reason === 'cancelled_process_exit');
+    assert.ok(forced, 'the storage-failure cancellation appears in the incident view');
+    assert.equal(forced!.operator, null);
+    assert.equal(forced!.decision, 'deny');
+  }
+});
+
+test('S17.3 — a live child dying with requests outstanding also reaches the incident view, attributed to nobody with the cause in reason', async () => {
+  const { manager, workspaceRoot } = await makeManager('die-with-pending');
+  const owner = 'operator-1' as OperatorId;
+  const projectDir = path.join(workspaceRoot, 'proj-s173');
+  await mkdir(projectDir);
+  const created = await manager.create(owner, { vendor: 'claude', cwd: projectDir, model: null, sandbox: null, requisitionId: null });
+  assert.equal(created.ok, true);
+  if (!created.ok) return;
+  const { sessionId } = created.value;
+
+  const received: Envelope[] = [];
+  await manager.subscribe(sessionId, owner, 0, { deliver: (e) => received.push(e), close: () => {} });
+  await manager.message(sessionId, owner, 'go');
+  await waitUntil(() => received.some((e) => e.kind === 'turn.ended'));
+
+  const page = await manager.readAudit({
+    before: null,
+    limit: 200,
+    sessionId: null,
+    operator: null,
+    since: null,
+    until: null,
+    incidentsOnly: true,
+  });
+  assert.equal(page.ok, true);
+  if (page.ok) {
+    const forced = page.value.records.filter((r) => r.sessionId === sessionId && r.reason === 'cancelled_process_exit');
+    assert.equal(forced.length, 2, 'both outstanding requests, cancelled by the child dying, appear as incidents');
+    for (const r of forced) {
+      assert.equal(r.operator, null);
+      assert.equal(r.decision, 'deny');
+    }
+  }
 });
 
 test('S9.1/S9.2/S9.4 — a tool.result over the byte cap is truncated before its envelope is built, the full bytes are fetchable, and two turns sharing a callId keep separate blobs', async () => {

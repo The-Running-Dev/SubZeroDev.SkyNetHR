@@ -1328,4 +1328,24 @@ describe('S12 — GET /api/audit', () => {
     assert.equal(untilBody.error.code, 'bad_request');
     assert.equal(untilBody.error.detail.field, 'until');
   });
+
+  it('S17.1/S17.6 — incidentsOnly=true serves only the union of deny/operator-null/standing, readable by every operator across owners and deleted sessions (D70, D25)', async () => {
+    const h = await makeEdge();
+    await writeFile(
+      path.join(h.storageRoot, 'audit.ndjson'),
+      [
+        auditLine({ operator: 'alice', sessionId: 's-a', decision: 'allow', scope: 'once' }), // ordinary — excluded
+        auditLine({ operator: null, sessionId: 's-not-owned', decision: 'deny', scope: 'once', reason: 'cancelled_process_exit' }),
+        auditLine({ operator: 'bob', sessionId: 's-deleted', decision: 'allow', scope: 'standing', reason: 'Bash:*' }),
+      ].join('\n') + '\n',
+      'utf8',
+    );
+
+    const asCarol = await get(h, '/api/audit?incidentsOnly=true', 'carol');
+    assert.equal(asCarol.status, 200);
+    const body = (await asCarol.json()) as { records: Array<{ sessionId: string; operator: string | null; scope: string }> };
+    assert.equal(body.records.length, 2, 'the ordinary allow is excluded; the forced deny and the standing allow are not');
+    const sessionIds = body.records.map((r) => r.sessionId).sort();
+    assert.deepEqual(sessionIds, ['s-deleted', 's-not-owned'], 'neither record belongs to carol, and one names a session that never existed for her');
+  });
 });

@@ -267,6 +267,56 @@ export function renderAuditRow(doc, record) {
   return tr;
 }
 
+// S17.5: the server returns records; grouping by session and by operator is the reader's
+// (D73) — no grouped shape exists in the contract. Nested session-then-operator, in the
+// order groups are first encountered in `records` (already newest-first from the server).
+export function groupAuditRecords(records) {
+  const bySession = [];
+  const sessionIndex = new Map();
+  for (const record of records) {
+    let session = sessionIndex.get(record.sessionId);
+    if (session === undefined) {
+      session = { sessionId: record.sessionId, operators: [], operatorIndex: new Map() };
+      sessionIndex.set(record.sessionId, session);
+      bySession.push(session);
+    }
+    const operatorKey = record.operator === null ? null : record.operator;
+    let group = session.operatorIndex.get(operatorKey);
+    if (group === undefined) {
+      group = { operator: operatorKey, records: [] };
+      session.operatorIndex.set(operatorKey, group);
+      session.operators.push(group);
+    }
+    group.records.push(record);
+  }
+  return bySession.map(({ sessionId, operators }) => ({ sessionId, operators }));
+}
+
+// The incident view (S17): the same rows `renderAuditRow` produces, under headings that
+// group them by session and then by operator — never a new shape, just a different
+// arrangement of the flat page the server already returned.
+export function renderIncidentGroups(doc, records) {
+  const container = el(doc, 'div', 'incident-groups');
+  for (const session of groupAuditRecords(records)) {
+    const sessionGroup = el(doc, 'section', 'incident-group incident-group--session');
+    sessionGroup.appendChild(el(doc, 'h3', 'incident-group__heading', `Session ${session.sessionId}`));
+    for (const operatorGroup of session.operators) {
+      const opGroup = el(doc, 'div', 'incident-group incident-group--operator');
+      opGroup.appendChild(
+        el(doc, 'h4', 'incident-group__subheading', operatorGroup.operator === null ? 'server' : operatorGroup.operator),
+      );
+      const table = el(doc, 'table', 'audit-table');
+      const tbody = el(doc, 'tbody');
+      for (const record of operatorGroup.records) tbody.appendChild(renderAuditRow(doc, record));
+      table.appendChild(tbody);
+      opGroup.appendChild(table);
+      sessionGroup.appendChild(opGroup);
+    }
+    container.appendChild(sessionGroup);
+  }
+  return container;
+}
+
 // S13.15: `title`, `justification` and `workspace` are one operator's free text read by
 // another (D74) — the same `textContent`-only discipline as `renderAuditRow`'s `input`,
 // never assembled markup. `onDecide`, when given, receives `(requisitionId, decision)` and
