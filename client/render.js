@@ -280,7 +280,7 @@ export function groupAuditRecords(records) {
       sessionIndex.set(record.sessionId, session);
       bySession.push(session);
     }
-    const operatorKey = record.operator === null ? null : record.operator;
+    const operatorKey = record.operator;
     let group = session.operatorIndex.get(operatorKey);
     if (group === undefined) {
       group = { operator: operatorKey, records: [] };
@@ -292,28 +292,70 @@ export function groupAuditRecords(records) {
   return bySession.map(({ sessionId, operators }) => ({ sessionId, operators }));
 }
 
+// Same seven columns and labels as the flat table's static `<thead>` in `index.html` — kept
+// in sync by hand since a per-operator table here has nowhere else to draw one from.
+function incidentTableHead(doc) {
+  const thead = doc.createElement('thead');
+  const tr = doc.createElement('tr');
+  for (const label of ['When', 'Operator', 'Session', 'Tool', 'Input', 'Decision', 'Scope']) {
+    tr.appendChild(el(doc, 'th', undefined, label));
+  }
+  thead.appendChild(tr);
+  return thead;
+}
+
 // The incident view (S17): the same rows `renderAuditRow` produces, under headings that
 // group them by session and then by operator — never a new shape, just a different
 // arrangement of the flat page the server already returned.
-export function renderIncidentGroups(doc, records) {
-  const container = el(doc, 'div', 'incident-groups');
-  for (const session of groupAuditRecords(records)) {
-    const sessionGroup = el(doc, 'section', 'incident-group incident-group--session');
-    sessionGroup.appendChild(el(doc, 'h3', 'incident-group__heading', `Session ${session.sessionId}`));
-    for (const operatorGroup of session.operators) {
+//
+// S17.7: builds incrementally — `addRecords` slots each new page's records into the
+// session/operator groups already on the page rather than regrouping and redrawing
+// everything loaded so far, so "Load older" stays linear in total records loaded instead of
+// quadratic.
+export function createIncidentGroupsBuilder(doc, container) {
+  const sessionIndex = new Map();
+
+  function sessionGroupFor(sessionId) {
+    let session = sessionIndex.get(sessionId);
+    if (session === undefined) {
+      const sessionEl = el(doc, 'section', 'incident-group incident-group--session');
+      sessionEl.appendChild(el(doc, 'h3', 'incident-group__heading', `Session ${sessionId}`));
+      container.appendChild(sessionEl);
+      session = { sessionEl, operatorIndex: new Map() };
+      sessionIndex.set(sessionId, session);
+    }
+    return session;
+  }
+
+  function operatorTbodyFor(session, operatorKey) {
+    let tbody = session.operatorIndex.get(operatorKey);
+    if (tbody === undefined) {
       const opGroup = el(doc, 'div', 'incident-group incident-group--operator');
-      opGroup.appendChild(
-        el(doc, 'h4', 'incident-group__subheading', operatorGroup.operator === null ? 'server' : operatorGroup.operator),
-      );
+      opGroup.appendChild(el(doc, 'h4', 'incident-group__subheading', operatorKey === null ? 'server' : operatorKey));
       const table = el(doc, 'table', 'audit-table');
-      const tbody = el(doc, 'tbody');
-      for (const record of operatorGroup.records) tbody.appendChild(renderAuditRow(doc, record));
+      table.appendChild(incidentTableHead(doc));
+      tbody = el(doc, 'tbody');
       table.appendChild(tbody);
       opGroup.appendChild(table);
-      sessionGroup.appendChild(opGroup);
+      session.sessionEl.appendChild(opGroup);
+      session.operatorIndex.set(operatorKey, tbody);
     }
-    container.appendChild(sessionGroup);
+    return tbody;
   }
+
+  return {
+    addRecords(records) {
+      for (const record of records) {
+        const tbody = operatorTbodyFor(sessionGroupFor(record.sessionId), record.operator);
+        tbody.appendChild(renderAuditRow(doc, record));
+      }
+    },
+  };
+}
+
+export function renderIncidentGroups(doc, records) {
+  const container = el(doc, 'div', 'incident-groups');
+  createIncidentGroupsBuilder(doc, container).addRecords(records);
   return container;
 }
 

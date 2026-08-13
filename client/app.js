@@ -1,4 +1,4 @@
-import { renderAuditRow, renderEvent, renderIncidentGroups, renderPayrollSummary, renderRequisitionRow, renderReviewRow } from './render.js';
+import { createIncidentGroupsBuilder, renderAuditRow, renderEvent, renderPayrollSummary, renderRequisitionRow, renderReviewRow } from './render.js';
 
 const $ = (id) => document.getElementById(id);
 
@@ -27,11 +27,14 @@ const state = {
   // reset that outruns an in-flight "Load older") can never overwrite state a newer call
   // already reset — mirrors `refreshCheckpoints`'s `requestedSessionId` guard.
   auditRequestToken: 0,
-  // S17.5: every record loaded under the current `incidentsOnly` filter, so the grouped
-  // incident view can be rebuilt whole on each page rather than only ever growing a flat
-  // append — grouping by session and by operator has to see the accumulated set, not just
-  // the newest page.
-  auditRecords: [],
+  // S17.5: total records loaded under the current filter, across every page fetched since
+  // the last reset — both views need this count for the empty-state check, but only the
+  // incident view needs the records themselves, and it keeps those in `incidentGroupsBuilder`
+  // below rather than a second array here.
+  auditRecordCount: 0,
+  // S17.5/S17.7: the incident view's session/operator groups, appended to incrementally as
+  // each page arrives — rebuilt fresh on every reset. `null` until the first reset.
+  incidentGroupsBuilder: null,
   // S15: the reviewId of the draft this operator is currently editing for the selected
   // session, if any. Ephemeral — a reload loses it, same as every other piece of UI state
   // this client keeps nowhere durable (D67/D70 keep no per-operator record server-side);
@@ -590,10 +593,17 @@ async function loadAuditPage(reset) {
   if (reset) {
     state.auditCursor = null;
     state.auditFilters = readAuditFilters();
-    state.auditRecords = [];
+    state.auditRecordCount = 0;
     clear($('audit-rows'));
     clear($('audit-incident-groups'));
+    state.incidentGroupsBuilder = createIncidentGroupsBuilder(document, $('audit-incident-groups'));
     $('audit-empty').hidden = true;
+    // S17.5: the incident view groups by session and by operator; the ordinary view stays
+    // the flat table S12 shipped. Set from the filters just pinned above, not after the
+    // fetch below resolves — a 401, an error, or a response this reset itself supersedes
+    // must not leave the *previous* mode's container visible over an empty/stale one.
+    $('audit-table-wrap').hidden = state.auditFilters.incidentsOnly;
+    $('audit-incident-groups').hidden = !state.auditFilters.incidentsOnly;
   }
   // Pinned at the last reset — "Load older" resumes the same query its cursor was minted
   // under, never whatever the filter inputs currently hold.
@@ -605,16 +615,12 @@ async function loadAuditPage(reset) {
   if (result.status === 401) return;
   if (result.status !== 200) return status(describe(result), 'error');
 
-  state.auditRecords.push(...result.payload.records);
+  state.auditRecordCount += result.payload.records.length;
 
-  // S17.5: the incident view groups by session and by operator; the ordinary view stays
-  // the flat table S12 shipped. Both read the same page — grouping is arrangement only.
-  $('audit-table-wrap').hidden = filters.incidentsOnly;
-  $('audit-incident-groups').hidden = !filters.incidentsOnly;
+  // S17.7: each view only ever draws the page just fetched — the incident view appends it
+  // into the groups already on the page rather than regrouping everything loaded so far.
   if (filters.incidentsOnly) {
-    const groups = $('audit-incident-groups');
-    clear(groups);
-    groups.appendChild(renderIncidentGroups(document, state.auditRecords));
+    state.incidentGroupsBuilder.addRecords(result.payload.records);
   } else {
     const tbody = $('audit-rows');
     for (const record of result.payload.records) {
@@ -625,7 +631,7 @@ async function loadAuditPage(reset) {
   // D86/S12.5: round-tripped exactly as received — nothing here parses or constructs it.
   state.auditCursor = result.payload.nextCursor;
   $('audit-load-more').hidden = state.auditCursor === null;
-  if (state.auditRecords.length === 0) $('audit-empty').hidden = false;
+  if (state.auditRecordCount === 0) $('audit-empty').hidden = false;
 }
 
 function openAudit() {

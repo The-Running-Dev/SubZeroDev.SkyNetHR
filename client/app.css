@@ -223,12 +223,6 @@ body {
   gap: var(--space-2);
 }
 
-.field--checkbox .field__input {
-  padding: var(--space-0);
-  border: none;
-  background: none;
-}
-
 .field__input {
   min-width: 0;
   padding: var(--space-2);
@@ -664,6 +658,7 @@ body {
 
 .incident-group--operator {
   margin-top: var(--space-2);
+  overflow-x: auto;
 }
 
 .incident-group__heading {
