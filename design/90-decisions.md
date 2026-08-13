@@ -2517,18 +2517,3 @@ fold rule; nothing persisted changes shape.
 ## Open
 
 Staging only. Once an item becomes an issue it leaves this list.
-
-- **Implement D130: boot marks a restart with a notice, and the payroll fold reads that instead of
-  the turn close.** `20-contract.md` needs the new `SessionNoticeCode` value first — a contract
-  amendment, so `/contract` — after which boot emits one `session.notice` per session that was live
-  at shutdown, and `foldPayroll` drops the interval ending at that notice rather than keying off
-  `turn.ended { stopReason: 'server_restart' }`. D76 and S16.7 both need their wording brought in
-  line: under the unified rule the mid-turn case reports `droppedIntervals: 0`, which S16.7's
-  current fixture asserts as `1`. Until this lands, a restart while a session sits idle between
-  turns is billed as that operator's idle time with `droppedIntervals: 0`.
-- **Make `endedAt` honest about a synthesised end (D130's rejected-but-composing alternative).**
-  Boot writes `record.endedAt ?? nowIso()`, so every ended-by-restart session carries an `endedAt`
-  it invented. D130 fixes the payroll consequence only; any other consumer of `endedAt` — session
-  duration, "how long was this open" — still inherits the fabrication. A durable `endReason` on
-  `meta.json` would fix it at the root and is additive (optional field, absent on existing
-  sessions, no `schemaVersion` bump under D49).
