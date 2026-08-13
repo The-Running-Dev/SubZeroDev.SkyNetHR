@@ -2297,6 +2297,28 @@ Reversibility: cheap. This corrects `10-design.md` prose (*The single-writer inv
 its surrounding paragraph) and `20-contract.md § Unresolved` 7's status; no signature in the
 contract changes, so no code built against the current signatures is affected.
 
+### 2026-08-13 — D121 Kit re-install: two-commit AGENTS.md gap merged forward
+Context: `/install` against `SubZeroDev.AgentKit` at `6bdd8dc` (previously synced at `2b706ca`,
+recorded by D118's install, 2 commits behind). `Sync-Kit.ps1 -DryRun` found zero upstream changes
+to any command file, tool script, or `.claude/COMPANIONS.md` — the two new kit commits touched
+only `AGENTS.md` (and the kit's own `design/90-decisions.md`, never installed). The gap: the
+*Model, effort, and review budget* tier-comparison paragraph was missing the "comparison is
+always by tier, never by literal name" clarification and its `Terra`/`sonnet,medium` worked
+example, and *Vendor model aliases* was missing the `GPT-5 → Implementation` row. `agent.md`'s
+apparent gap (missing the kit's D105/D111 freeze-marker lesson, its D31 restore lesson, and its
+`permission_suggestions`/`--permission-prompt-tool` lesson) is not a real gap — all three trace by
+decision ID back to this repository's own `D31`, `D105`, and `D111` entries above, so per the
+provenance rule they are correctly absent rather than offered back.
+Chosen: merged both `AGENTS.md` paragraphs forward in place, at this repository's existing
+section positions — `## Project identity` and the `Hard rules`-after-`The design freeze` ordering
+from D118 both left untouched.
+Rejected: leaving `AGENTS.md` as-is — would leave the tier-vs-literal-name distinction and the
+`GPT-5` alias unstated here, with the *Vendor model aliases* table then contradicting its own
+lead sentence (which lists `GPT-5` in the text kit ships, once merged) had only the second edit
+been taken and not the first.
+Reversibility: cheap. Wording only; no behavioural change to code, and a later install can
+re-merge or re-word freely.
+
 ## Open
 
 Staging only. Once an item becomes an issue it leaves this list.
