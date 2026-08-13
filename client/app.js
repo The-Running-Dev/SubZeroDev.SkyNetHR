@@ -41,6 +41,11 @@ const state = {
   // there is no "list my drafts" route to recover it from, and none is needed — losing the
   // id after a reload just means starting a new draft.
   reviewDraftId: null,
+  // S18.6/D79: whether the selected session has a running turn right now. Not a server
+  // field — reconstructed from `turn.started`/`turn.ended` on this session's own stream,
+  // the only place this client can observe it. Reset on every `openStream` so a reconnect
+  // rebuilds it from the replay rather than carrying a stale guess forward.
+  turnLive: false,
 };
 
 function currentSession() {
@@ -82,6 +87,47 @@ function applyPolicyBanner(bannerOverride) {
   bar.hidden = false;
   clear(bar);
   bar.appendChild(text('span', 'policy-banner__text', banner));
+}
+
+// ---------------------------------------------------------------------------
+// S18.6/D79 — the status badge. A projection over `state`, the live turn (tracked from this
+// session's own stream, above) and outstanding permission requests (`state.pendingPermissions`,
+// S4/S9) — never a stored field, and never fetched. `ON PIP` (S18.7/D72) is a separate badge,
+// derived in `refreshReviews` from the review fold, and can appear alongside any of these four.
+// ---------------------------------------------------------------------------
+
+function statusBadgeLabel() {
+  const session = currentSession();
+  if (session === null) return null;
+  if (session.state === 'ended') return 'CLOCKED OUT';
+  if (state.pendingPermissions.size > 0) return 'BLOCKED';
+  if (state.turnLive) return 'ON SHIFT';
+  return 'IDLE';
+}
+
+function badgeClassFor(label) {
+  switch (label) {
+    case 'CLOCKED OUT':
+      return 'status-badge status-badge--clocked-out';
+    case 'BLOCKED':
+      return 'status-badge status-badge--blocked';
+    case 'ON SHIFT':
+      return 'status-badge status-badge--on-shift';
+    default:
+      return 'status-badge status-badge--idle';
+  }
+}
+
+function applyStatusBadge() {
+  const badge = $('status-badge');
+  const label = statusBadgeLabel();
+  if (label === null) {
+    badge.hidden = true;
+    return;
+  }
+  badge.hidden = false;
+  badge.className = badgeClassFor(label);
+  badge.textContent = label;
 }
 
 function text(tag, className, value) {
@@ -165,6 +211,8 @@ async function refreshSessions() {
   // withdraw the compose box.
   applySessionAvailability();
   applyPolicyBanner();
+  applyStatusBadge();
+  $('terminate-open').hidden = state.sessionId === null;
 }
 
 function selectSession(sessionId) {
@@ -174,6 +222,7 @@ function selectSession(sessionId) {
   applyPolicyBanner();
   $('checkpoints').hidden = false;
   $('reviews').hidden = false;
+  $('terminate-open').hidden = false;
   resetReviewForm();
   openStream(sessionId);
   void refreshSessions();
@@ -325,7 +374,10 @@ function handleReplayGap() {
 function handleEnvelope(sessionId, envelope) {
   const handlers = {
     onAnswerPermission: answerPermission,
-    onRequestRendered: (requestId, controls) => state.pendingPermissions.set(requestId, controls),
+    onRequestRendered: (requestId, controls) => {
+      state.pendingPermissions.set(requestId, controls);
+      applyStatusBadge();
+    },
     // S9.2: the download link on a truncated `tool.result` — not part of the wire
     // vocabulary any event carries, so it comes from this stream's own session rather
     // than the envelope.
@@ -349,6 +401,15 @@ function handleEnvelope(sessionId, envelope) {
     const session = currentSession();
     if (session !== null) state.sessionsById.set(state.sessionId, { ...session, state: 'ended' });
     applySessionAvailability();
+    applyStatusBadge();
+  }
+  if (envelope.kind === 'turn.started' && envelope.sessionId === state.sessionId) {
+    state.turnLive = true;
+    applyStatusBadge();
+  }
+  if (envelope.kind === 'turn.ended' && envelope.sessionId === state.sessionId) {
+    state.turnLive = false;
+    applyStatusBadge();
   }
   if (envelope.kind === 'checkpoint.created') {
     // A new checkpoint invalidates the list this session already fetched, whether it
@@ -376,6 +437,7 @@ function handleEnvelope(sessionId, envelope) {
       const who = envelope.data.operator ? envelope.data.operator : `server (${envelope.data.reason})`;
       controls.setResolved(`${envelope.data.decision} — ${who}`);
       state.pendingPermissions.delete(envelope.data.requestId);
+      applyStatusBadge();
       state.lastSeq = envelope.seq;
       return;
     }
@@ -481,7 +543,9 @@ function openStream(sessionId) {
   if (state.stream) state.stream.close();
   state.lastSeq = 0;
   state.pendingPermissions = new Map();
+  state.turnLive = false;
   clear($('transcript'));
+  applyStatusBadge();
 
   if (activeEdge() === 'ws') openWsStream(sessionId);
   else openSseStream(sessionId);
@@ -816,6 +880,79 @@ function closeRequisitions() {
 }
 
 // ---------------------------------------------------------------------------
+// S18.1/D78 — the theme switcher. Sets the attribute `theme.js` already set before first
+// paint; writes the choice to the same browser-storage key so it survives a reload
+// (D60/S18.3 — this value never reaches the server, and switching issues no request and
+// changes no markup, S18.2). `theme.js` cannot share this constant: it must stay a classic
+// script and this file is a module, so the four-letter list is duplicated, not imported.
+// ---------------------------------------------------------------------------
+
+const THEME_STORAGE_KEY = 'skynet-hr-theme';
+const THEMES = ['A', 'B', 'C', 'D'];
+
+function applyTheme(themeId) {
+  document.documentElement.setAttribute('data-theme', themeId);
+  try {
+    localStorage.setItem(THEME_STORAGE_KEY, themeId);
+  } catch {
+    // A storage failure still lets the switch take effect for the rest of this load;
+    // it just will not survive a reload.
+  }
+}
+
+function initTheme() {
+  const select = $('theme-select');
+  const current = document.documentElement.getAttribute('data-theme');
+  select.value = THEMES.includes(current) ? current : 'B';
+  select.addEventListener('change', () => applyTheme(select.value));
+}
+
+// ---------------------------------------------------------------------------
+// S18.9/D56 — the termination screen: presentation over `DELETE /api/sessions/:id` and the
+// session state `GET /api/sessions` already returns. No field, route or stored value is
+// introduced. Severance, a context purge, session duplication and a transcript of the
+// departure conversation are all cut (D56/S18.10) — there is nothing here for any of them.
+// ---------------------------------------------------------------------------
+
+function summaryRow(dl, label, value) {
+  const wrapper = document.createElement('div');
+  wrapper.className = 'payroll-summary__row';
+  wrapper.appendChild(text('dt', 'payroll-summary__label', label));
+  wrapper.appendChild(text('dd', 'payroll-summary__value', value));
+  dl.appendChild(wrapper);
+}
+
+function openTerminate() {
+  const session = currentSession();
+  if (session === null) return;
+  const dl = $('terminate-summary');
+  clear(dl);
+  summaryRow(dl, 'Session', session.id);
+  summaryRow(dl, 'Owner', session.owner);
+  summaryRow(dl, 'Agent', session.model ? `${session.vendor} · ${session.model}` : session.vendor);
+  summaryRow(dl, 'Folder', session.cwd);
+  summaryRow(dl, 'Status', session.state);
+  const ended = session.state === 'ended';
+  $('terminate-ended').hidden = !ended;
+  $('terminate-confirm').hidden = ended;
+  $('terminate').hidden = false;
+}
+
+function closeTerminate() {
+  $('terminate').hidden = true;
+}
+
+async function confirmTerminate() {
+  if (state.sessionId === null) return;
+  const result = await api('DELETE', `/api/sessions/${encodeURIComponent(state.sessionId)}`);
+  if (result.status === 401) return;
+  if (result.status !== 200) return status(describe(result), 'error');
+  status('employment terminated', 'ok');
+  closeTerminate();
+  await refreshSessions();
+}
+
+// ---------------------------------------------------------------------------
 // The shared-secret exchange. In the header-trust modes the proxy has already
 // authenticated the operator and this panel is never shown.
 // ---------------------------------------------------------------------------
@@ -826,6 +963,7 @@ function showLogin() {
   // The audit panel is a fixed full-viewport overlay independent of `#console` (S12.7) —
   // left open, it paints above `#login` and hides the very form this function exists to show.
   $('audit').hidden = true;
+  $('terminate').hidden = true;
 }
 
 async function submitLogin(event) {
@@ -852,6 +990,10 @@ function start() {
   $('raise-requisition').addEventListener('submit', raiseRequisition);
   $('review-form').addEventListener('submit', saveReviewDraft);
   $('review-publish').addEventListener('click', () => void publishReview());
+  $('terminate-open').addEventListener('click', openTerminate);
+  $('terminate-close').addEventListener('click', closeTerminate);
+  $('terminate-confirm').addEventListener('click', () => void confirmTerminate());
+  initTheme();
   void refreshSessions();
   void refreshRequisitionOptions();
 }
