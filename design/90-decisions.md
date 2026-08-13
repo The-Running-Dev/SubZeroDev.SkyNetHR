@@ -2323,14 +2323,6 @@ re-merge or re-word freely.
 
 Staging only. Once an item becomes an issue it leaves this list.
 
-- **#31, #35, and now #41 were closed citing decisions that do not exist.** All three closing
-  comments quote resolution text attributed to `D83`, `D87`, and `D93` respectively; none of those
-  decisions' actual content (`design/90-decisions.md`) matches the claim. D120 above supplies the
-  resolution #31 and #35 claimed to already have; D122 below does the same for #41. Worth
-  `/track` opening a bug: whatever closed these issues wrote a plausible resolution comment
-  without writing the decision it cites, and the pattern is now confirmed across three issues, not
-  two — it should be treated as systemic rather than incidental.
-
 ### 2026-08-13 — D122 The checklist applies to every session, and ticking is refused once the session has ended
 Context: issue #41 (S14.1's stop condition) found the checklist-tick route, as drawn, checks only
 ownership and the template — no session-state refusal, unlike every other route that writes to a
