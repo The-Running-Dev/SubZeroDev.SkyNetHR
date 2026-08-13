@@ -1,4 +1,4 @@
-import { createIncidentGroupsBuilder, renderAuditRow, renderEvent, renderPayrollSummary, renderRequisitionRow, renderReviewRow } from './render.js';
+import { createIncidentGroupsBuilder, renderAuditRow, renderEvent, renderPayrollSummary, renderRequisitionRow, renderReviewRow, renderSummaryRow } from './render.js';
 
 const $ = (id) => document.getElementById(id);
 
@@ -96,38 +96,41 @@ function applyPolicyBanner(bannerOverride) {
 // derived in `refreshReviews` from the review fold, and can appear alongside any of these four.
 // ---------------------------------------------------------------------------
 
-function statusBadgeLabel() {
+// One table from state to { label, class } rather than two functions that have to agree on
+// four magic strings by hand — a relabel here can't drift the class it renders with. The
+// class reuses `.status__text--*`'s tone colours (`ok`/`error`/`info`) rather than
+// redeclaring them; only the border-colour and the one tone with no existing match
+// (`--ink-faint`, CLOCKED OUT) are `.status-badge`'s own in app.css.
+const STATUS_BADGE_STATES = {
+  clockedOut: { label: 'CLOCKED OUT', cls: 'status-badge status-badge--clocked-out' },
+  blocked: { label: 'BLOCKED', cls: 'status-badge status-badge--blocked status__text--error' },
+  onShift: { label: 'ON SHIFT', cls: 'status-badge status-badge--on-shift status__text--ok' },
+  idle: { label: 'IDLE', cls: 'status-badge status__text--info' },
+};
+
+function statusBadgeState() {
   const session = currentSession();
   if (session === null) return null;
-  if (session.state === 'ended') return 'CLOCKED OUT';
-  if (state.pendingPermissions.size > 0) return 'BLOCKED';
-  if (state.turnLive) return 'ON SHIFT';
-  return 'IDLE';
-}
-
-function badgeClassFor(label) {
-  switch (label) {
-    case 'CLOCKED OUT':
-      return 'status-badge status-badge--clocked-out';
-    case 'BLOCKED':
-      return 'status-badge status-badge--blocked';
-    case 'ON SHIFT':
-      return 'status-badge status-badge--on-shift';
-    default:
-      return 'status-badge status-badge--idle';
-  }
+  if (session.state === 'ended') return STATUS_BADGE_STATES.clockedOut;
+  if (state.pendingPermissions.size > 0) return STATUS_BADGE_STATES.blocked;
+  if (state.turnLive) return STATUS_BADGE_STATES.onShift;
+  return STATUS_BADGE_STATES.idle;
 }
 
 function applyStatusBadge() {
   const badge = $('status-badge');
-  const label = statusBadgeLabel();
-  if (label === null) {
+  const next = statusBadgeState();
+  if (next === null) {
     badge.hidden = true;
     return;
   }
+  // Selecting a session calls this both from `openStream` and from the `refreshSessions`
+  // that follows it, with nothing in between able to change the answer — skip the write
+  // when nothing actually changed rather than re-render the identical badge twice.
+  if (badge.hidden === false && badge.className === next.cls && badge.textContent === next.label) return;
   badge.hidden = false;
-  badge.className = badgeClassFor(label);
-  badge.textContent = label;
+  badge.className = next.cls;
+  badge.textContent = next.label;
 }
 
 function text(tag, className, value) {
@@ -375,6 +378,10 @@ function handleEnvelope(sessionId, envelope) {
   const handlers = {
     onAnswerPermission: answerPermission,
     onRequestRendered: (requestId, controls) => {
+      // Guarded the same way `turn.started`/`turn.ended` below are: a stream torn down by
+      // `openStream` (a session switch) can still have an event in flight, and that event
+      // must not repopulate the fresh `pendingPermissions` map `openStream` just reset.
+      if (envelope.sessionId !== state.sessionId) return;
       state.pendingPermissions.set(requestId, controls);
       applyStatusBadge();
     },
@@ -914,24 +921,16 @@ function initTheme() {
 // departure conversation are all cut (D56/S18.10) — there is nothing here for any of them.
 // ---------------------------------------------------------------------------
 
-function summaryRow(dl, label, value) {
-  const wrapper = document.createElement('div');
-  wrapper.className = 'payroll-summary__row';
-  wrapper.appendChild(text('dt', 'payroll-summary__label', label));
-  wrapper.appendChild(text('dd', 'payroll-summary__value', value));
-  dl.appendChild(wrapper);
-}
-
 function openTerminate() {
   const session = currentSession();
   if (session === null) return;
   const dl = $('terminate-summary');
   clear(dl);
-  summaryRow(dl, 'Session', session.id);
-  summaryRow(dl, 'Owner', session.owner);
-  summaryRow(dl, 'Agent', session.model ? `${session.vendor} · ${session.model}` : session.vendor);
-  summaryRow(dl, 'Folder', session.cwd);
-  summaryRow(dl, 'Status', session.state);
+  renderSummaryRow(document, dl, 'Session', session.id);
+  renderSummaryRow(document, dl, 'Owner', session.owner);
+  renderSummaryRow(document, dl, 'Agent', session.model ? `${session.vendor} · ${session.model}` : session.vendor);
+  renderSummaryRow(document, dl, 'Folder', session.cwd);
+  renderSummaryRow(document, dl, 'Status', session.state);
   const ended = session.state === 'ended';
   $('terminate-ended').hidden = !ended;
   $('terminate-confirm').hidden = ended;
@@ -949,6 +948,25 @@ async function confirmTerminate() {
   if (result.status !== 200) return status(describe(result), 'error');
   status('employment terminated', 'ok');
   closeTerminate();
+  // DELETE actually removes the session — a subsequent GET 404s — so `refreshSessions`
+  // below will no longer find it in `sessionsById`. Every piece of chrome that reads
+  // `currentSession()`/`state.sessionId` has to go back to the same "nothing selected"
+  // state a fresh page load starts in, not stay pointed at an id nothing on the server
+  // answers to any more (`applySessionAvailability`'s `ended` check is false for a session
+  // that no longer exists, not true, so left alone it would re-enable the compose box).
+  if (state.stream) state.stream.close();
+  state.stream = null;
+  state.sessionId = null;
+  state.lastSeq = 0;
+  state.pendingPermissions = new Map();
+  state.turnLive = false;
+  clear($('transcript'));
+  resetReviewForm();
+  $('compose').hidden = true;
+  $('checkpoints').hidden = true;
+  $('checklist').hidden = true;
+  $('payroll').hidden = true;
+  $('reviews').hidden = true;
   await refreshSessions();
 }
 

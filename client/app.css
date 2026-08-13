@@ -239,10 +239,13 @@ body {
   letter-spacing: 0.06em;
 }
 
+/* Colour comes from `.status__text--*` (above) wherever a tone already exists there — app.js
+   pairs `.status-badge--blocked`/`--on-shift` with `.status__text--error`/`--ok`, and IDLE
+   with `.status__text--info`, so only the border-colour and the one tone with no existing
+   match are declared here. */
 .status-badge--clocked-out { color: var(--ink-faint); }
-.status-badge--blocked { border-color: var(--danger); color: var(--danger); }
-.status-badge--on-shift { border-color: var(--ok); color: var(--ok); }
-.status-badge--idle { color: var(--ink-dim); }
+.status-badge--blocked { border-color: var(--danger); }
+.status-badge--on-shift { border-color: var(--ok); }
 
 .field--inline {
   flex-direction: row;

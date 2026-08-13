@@ -45,6 +45,7 @@ export const STATIC: ReadonlyMap<string, { readonly file: string; readonly type:
   ['/app.js', { file: 'app.js', type: 'text/javascript; charset=utf-8' }],
   ['/render.js', { file: 'render.js', type: 'text/javascript; charset=utf-8' }],
   ['/app.css', { file: 'app.css', type: 'text/css; charset=utf-8' }],
+  ['/theme.js', { file: 'theme.js', type: 'text/javascript; charset=utf-8' }],
 ]);
 
 export const CLIENT_DIR = new URL('../../../client/', import.meta.url);

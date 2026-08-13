@@ -839,6 +839,29 @@ describe('S18.4 — theme.js sets data-theme before anything else runs', () => {
     const stylesheetIndex = html.indexOf('<link rel="stylesheet"');
     assert.ok(html.indexOf(themeScript![0]) < stylesheetIndex, 'theme.js is ordered ahead of the stylesheet link');
   });
+
+  it('agrees with app.js on the storage key, the theme list and the default — the two copies this classic-script/module split forces', async () => {
+    // theme.js can't be `import`ed by app.js (classic script vs. module), so the storage
+    // key, theme list and default are hand-duplicated rather than shared — this is the
+    // regression test for that duplication staying in sync, since nothing else does.
+    const themeJs = await readFile(path.join(CLIENT, 'theme.js'), 'utf8');
+    const appJs = await readFile(path.join(CLIENT, 'app.js'), 'utf8');
+
+    const themeJsKey = themeJs.match(/var KEY = '([^']+)'/);
+    const appJsKey = appJs.match(/const THEME_STORAGE_KEY = '([^']+)'/);
+    assert.ok(themeJsKey && appJsKey, 'both files declare their storage key as expected');
+    assert.equal(appJsKey![1], themeJsKey![1], 'app.js and theme.js use the same storage key');
+
+    const themeJsList = themeJs.match(/var THEMES = (\[[^\]]+\])/);
+    const appJsList = appJs.match(/const THEMES = (\[[^\]]+\])/);
+    assert.ok(themeJsList && appJsList, 'both files declare a THEMES array as expected');
+    assert.equal(appJsList![1], themeJsList![1], 'app.js and theme.js list the same themes in the same order');
+
+    const themeJsDefault = themeJs.match(/var DEFAULT = '([^']+)'/);
+    const appJsDefault = appJs.match(/select\.value = THEMES\.includes\(current\) \? current : '([^']+)'/);
+    assert.ok(themeJsDefault && appJsDefault, 'both files fall back to a default theme as expected');
+    assert.equal(appJsDefault![1], themeJsDefault![1], 'app.js\'s theme-select fallback matches theme.js\'s pre-paint default');
+  });
 });
 
 describe('S18.1 — the four themes are one stylesheet, blocks selected by data-theme', () => {
@@ -860,6 +883,30 @@ describe('S18.1 — the four themes are one stylesheet, blocks selected by data-
       assert.deepEqual(namesByTheme[i], namesByTheme[0], `theme ${blocks[i]![1]} declares the same tokens as theme ${blocks[0]![1]}`);
     }
     assert.ok(namesByTheme[0]!.length >= 10, 'the block actually declares a non-trivial number of tokens');
+  });
+
+  it('gives the shared layout tokens — spacing, type sizes, line-height, border width, sidebar width — the same value in every theme block, not just the same name', async () => {
+    // The previous test only compares property *names*; app.css's own comment claims the
+    // four-block shape makes drift on these specific tokens "impossible to introduce by
+    // accident" — that claim is only true if their values are actually checked, since they
+    // carry no part of any theme's visual identity and have no reason to differ.
+    const css = await readFile(path.join(CLIENT, 'app.css'), 'utf8');
+    const blocks = [...css.matchAll(/:root\[data-theme="([A-Z])"\]\s*\{([\s\S]*?)\}/g)];
+    assert.equal(blocks.length, 4);
+    const SHARED = [
+      '--space-0', '--space-1', '--space-2', '--space-3', '--space-4', '--space-5', '--space-6',
+      '--text-xs', '--text-sm', '--text-md', '--text-lg',
+      '--border-width', '--sidebar-width', '--line-height',
+    ];
+    function valueOf(block: string, name: string): string {
+      const match = block.match(new RegExp(`${name}\\s*:\\s*([^;]+);`));
+      assert.ok(match, `${name} is declared in the block`);
+      return match![1]!.trim();
+    }
+    const valuesByTheme = blocks.map((m) => Object.fromEntries(SHARED.map((name) => [name, valueOf(m[2]!, name)])));
+    for (let i = 1; i < valuesByTheme.length; i++) {
+      assert.deepEqual(valuesByTheme[i], valuesByTheme[0], `theme ${blocks[i]![1]} gives the shared layout tokens the same values as theme ${blocks[0]![1]}`);
+    }
   });
 
   it('carries no <style> and no inline style, and no CSS is generated in the client sources (already covered by S2.12, restated over the new files)', async () => {

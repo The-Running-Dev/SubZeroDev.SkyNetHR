@@ -882,6 +882,13 @@ describe('S2.12 — the document CSP', () => {
     assert.match(css.headers.get('content-type') ?? '', /^text\/css/);
   });
 
+  it('serves theme.js — index.html loads it as a classic script ahead of the stylesheet (S18.4), so a missing route here leaves the document unthemed', async () => {
+    const h = await makeEdge();
+    const res = await fetch(`${h.base}/theme.js`);
+    assert.equal(res.status, 200);
+    assert.match(res.headers.get('content-type') ?? '', /javascript/);
+  });
+
   it('does not serve anything outside the client directory', async () => {
     const h = await makeEdge();
     for (const attempt of ['/../package.json', '/%2e%2e/package.json', '/../../etc/passwd']) {

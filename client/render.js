@@ -189,24 +189,28 @@ export function formatTokenCount(n) {
   return n.toLocaleString('en-US');
 }
 
+// Shared by `renderPayrollSummary` below and `openTerminate` in app.js — both are a `<dl>` of
+// label/value rows over the same `payroll-summary__*` classes, so both build a row here rather
+// than each hand-rolling its own copy of the same three-element wrapper.
+export function renderSummaryRow(doc, dl, label, value) {
+  const wrapper = el(doc, 'div', 'payroll-summary__row');
+  wrapper.appendChild(el(doc, 'dt', 'payroll-summary__label', label));
+  wrapper.appendChild(el(doc, 'dd', 'payroll-summary__value', value));
+  dl.appendChild(wrapper);
+}
+
 // S16.4/S16.7: a pure read — `burn`'s four fields are summed here for display only, never
 // re-derived or second-guessed (the server's sum is authoritative, I28) — and the dropped-
 // interval notice (D76) is shown only when there is one to report.
 export function renderPayrollSummary(doc, view) {
   const totalBurn = view.burn.inputTokens + view.burn.outputTokens + view.burn.cacheRead + view.burn.cacheCreate;
   const dl = el(doc, 'dl', 'payroll-summary');
-  function summaryRow(label, value) {
-    const wrapper = el(doc, 'div', 'payroll-summary__row');
-    wrapper.appendChild(el(doc, 'dt', 'payroll-summary__label', label));
-    wrapper.appendChild(el(doc, 'dd', 'payroll-summary__value', value));
-    dl.appendChild(wrapper);
-  }
-  summaryRow('Burn', `${formatTokenCount(totalBurn)} tokens`);
-  summaryRow('Budget remaining', view.remainingTokens === null ? 'no budget set' : `${formatTokenCount(view.remainingTokens)} tokens`);
-  summaryRow('Idle time', formatDuration(view.idleMs));
+  renderSummaryRow(doc, dl, 'Burn', `${formatTokenCount(totalBurn)} tokens`);
+  renderSummaryRow(doc, dl, 'Budget remaining', view.remainingTokens === null ? 'no budget set' : `${formatTokenCount(view.remainingTokens)} tokens`);
+  renderSummaryRow(doc, dl, 'Idle time', formatDuration(view.idleMs));
   if (view.droppedIntervals > 0) {
     const plural = view.droppedIntervals === 1 ? 'interval' : 'intervals';
-    summaryRow('Unaccounted idle', `${view.droppedIntervals} ${plural} dropped — the server was down for part of it`);
+    renderSummaryRow(doc, dl, 'Unaccounted idle', `${view.droppedIntervals} ${plural} dropped — the server was down for part of it`);
   }
   return dl;
 }
