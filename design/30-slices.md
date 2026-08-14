@@ -5,9 +5,10 @@ stable ids; drift is compared on ids, never prose.
 
 **Two tiers, matching the brief.** S1 to S12 are tier one — the console, finishable on its
 own (D59). S13 to S18 are tier two, the operator's working surfaces of brief items 8 to 12.
-Tier two is binding scope and it is later, not optional. **S12 is tier one despite sorting
-last among them**: it is the read half of brief item 7, which no earlier revision specified
-(D73), and slice numbers append rather than insert.
+Tier two is binding scope and it is later, not optional. **S12 and S19 are tier one despite
+sorting last**: S12 is the read half of brief item 7, which no earlier revision specified
+(D73), and S19 is the two-platform gate without which the brief says tier one is not done at
+all (D64). Slice numbers append rather than insert, so both sort after tier two.
 
 **This supersedes the pre-contract slice set.** The previous version was written before
 `20-contract.md` existed and asserted things the contract has since removed — a
@@ -52,6 +53,7 @@ The design's riskiest bets, and where each is exercised:
 | Codex exposes a live stream resembling its rollout schema | S8.1 |
 | `audit.ndjson` can be read newest-first, bounded, with no index (D73) | S12 |
 | Tier two adds two append-only files and one module and no new architecture (D65, D77) | S13, then S15 |
+| One design compiles into two working behaviours across the eight surfaces `10-design.md § Platform divergence` lists | S19 |
 
 S8 sits eighth because everything after S8.1 needs the adapter interface and the policy
 banner to exist. **S8.1 itself needs neither and is cheap — run it early, out of order, and
@@ -66,7 +68,9 @@ reachable as soon as S4 and S5 have landed. **Letters append the same way number
 to S2d subdivide S2 in place (D106) so that nothing after them renumbered. In tier
 two, S13 comes before S15 because it builds `records`; S14 and S16 depend on neither and can be
 taken in any order; **S17 and S18 are last because each waits on a tier-one slice** — S17 on
-S12's route and S18 on S10's held rules.
+S12's route and S18 on S10's held rules. **S19 is reachable as soon as S7 has landed**, and
+should be taken there rather than left to the end: everything after it is written against a
+suite that has still only ever run on one of the two supported platforms.
 
 **Seven slices open with a stop rather than with code.** S8.1, S10.1, S12.1, S13.1, S14.1,
 S15.1 and S16.2 — one each, in seven slices — name a question the design or the contract has
@@ -1031,6 +1035,89 @@ cost — the theme follows the browser rather than the person — is retained, n
 theme, or a light and dark pair; severance figures, and anything else on the termination screen
 that is not real session state.
 
+## S19 — Prove it on both platforms
+
+**Tier one, and deliberately not a vertical slice.** Every other slice here runs from an entry
+point to persistence; this one runs from a push to a check mark. It is admitted because the
+rule's reason is satisfied more directly here than anywhere else — a slice must end in
+something observable, and this one is green on both legs or it is not. The brief says tier one
+is not done until both supported platforms are proven by an automated run rather than by
+assertion (D64), so the alternative to slicing it is a tier that cannot be finished.
+
+Delivers: Anyone proposing a change finds out before it lands whether it works on Windows and
+on Linux, instead of finding out later from an operator on whichever platform nobody ran. Where
+a check genuinely cannot be made on one of the two, it says so by name rather than passing
+quietly.
+
+Touches: `.github/workflows/verify.yml` (new), the platform-conditional tests in
+`src/jail/index.test.ts` and `src/session-manager/index.test.ts`, and whatever the Linux leg
+turns out to break.
+
+Depends on: S1, S5, S7 — the slices owning the four criteria this gate exists to make
+checkable. The workflow can be authored earlier; it cannot prove anything earlier.
+
+Acceptance:
+  - S19.1 The workflow runs on `pull_request` and on push to `main`, and its platform job runs
+    on both `ubuntu-latest` and `windows-latest` from one `matrix.os`. A pull request shows one
+    check per platform, and both check names are stated in the slice report so branch
+    protection can later be attached to them by name.
+  - S19.2 `fail-fast: false`, so one red leg does not cancel the other: a deliberately failing
+    test on one platform leaves the other platform's conclusion reported. Asserted on a
+    throwaway commit that is not merged, with both conclusions recorded. A cancelled leg reads
+    as an absent result, which is the matrix-level form of the failure this whole slice is
+    about.
+  - S19.3 Every step that gates this repository carries `# verification: true` on the line
+    above its `- name:`, and `/verify`'s discovery finds exactly those steps and no others —
+    the count found is stated and equals the count flagged. Before this slice discovery finds
+    none at all, because no workflow file exists for it to read
+    (`.claude/commands/verify.md § Discover, do not assume`), so `/verify` and `/pr` have been
+    reporting against an empty gate set.
+  - S19.4 Both legs run the same Node version, pinned in the workflow rather than floating, and
+    it satisfies `engines.node`. A gate whose legs differ in runtime as well as platform cannot
+    attribute a divergence to either.
+  - S19.5 A platform-divergent test is **reported skipped on the other platform, never absent
+    from it**: the set of test names in the Linux leg's output equals the set in the Windows
+    leg's, and every name that ran on one and not the other carries a stated skip reason. Today
+    those tests sit inside `if (process.platform === 'win32')` blocks, so on Linux they are
+    indistinguishable from tests that were deleted — and a suite cannot report what it never
+    named.
+  - S19.6 A platform-divergent test that cannot establish its own precondition reports skipped
+    with the reason, and never returns green having asserted nothing. Asserted against S5.7's
+    8.3 short-name case, which returns early when the host generates no short name: on a volume
+    with 8.3 creation disabled — which a hosted Windows runner may well be — it currently reads
+    as a pass.
+  - S19.7 The slice report names, for each of **S1.6**, **S5.2**, **S7.5** and **S7.6**, which
+    leg proved it and which test did. A criterion that no leg proves is reported as still
+    unproven rather than as covered. Those four are the whole reason this slice exists (#28,
+    `10-design.md § Platform divergence`).
+  - S19.8 The suite runs on Linux for the first time and both legs report success on the merge
+    commit, with the run recorded in the slice report. A red Linux leg here is a real defect,
+    not noise, and an implementation defect is fixed inside this slice.
+  - S19.9 Nothing was weakened to reach S19.8: the number of assertions reachable on the
+    Windows leg is the same before and after this slice, and both counts are stated. Adding a
+    skip that carries a reason is allowed; removing, narrowing, or newly platform-gating an
+    assertion that used to run is a finding, reported with its diff rather than absorbed.
+  - S19.10 A Linux failure that turns out to be a contract or a design question **stops the
+    slice** and is stated rather than fixed inside it. This gate exists to make platform
+    divergence visible; deciding what a divergence ought to do belongs to `/contract` or
+    `/design` at its own tier.
+  - S19.11 The `tools/` PowerShell suites are gated in the same file, by a job on
+    `windows-latest` that parse-checks every `*.ps1` and runs Pester over `tools` — the shape
+    `SubZeroDev.AgentKit`, `SubZeroDev.Data.Json` and `SubZeroDev.GameEngine` already use. They
+    are the scripts `/verify` and `/pr` lean on and they are gated by nothing today. Pass and
+    fail counts are stated.
+
+Out of scope: macOS — there are two supported targets, not three, and `getProcessImage`'s macOS
+branch (#118) exists because a developer runs one, not because it is a target; a third leg is a
+brief change first. Enabling branch protection on the two checks — that is a repository-settings
+write and the owner's, so this slice names the checks and stops (`AGENTS.md`, *Git and
+delivery*). A second matrix dimension over Node versions — S19.4 pins one, and covering a range
+is a different question nobody has asked. Deploy, release, container and docs workflows, which
+the neighbouring repositories carry and this one has no artifact for. Running the real `claude`
+CLI in CI: the suite drives `fake-claude-cli.mjs` through the `SKYNET_CLAUDE_EXECUTABLE` seam
+(D91), so the criteria that say a **real** child — S1.1, S4.2 — stay proven locally, and this
+gate must not be reported as having reproven them. Caching, artifact upload and test reporters.
+
 ---
 
 ## What no slice covers
@@ -1038,15 +1125,11 @@ that is not real session state.
 Stated so it is a decision rather than an omission. Every item below is already a GitHub issue
 except the last two, which nothing tracks yet.
 
-**Tier-one work with no slice, and the criteria it blocks:**
-
-- **The two-platform gate** (#28, D64). The brief says tier one is not done until both
-  supported platforms are proven by an automated run, and `.github/workflows/` does not exist.
-  It is not sliced because it is not a vertical path from an entry point to persistence — but
-  four existing criteria cannot be checked without it: **S1.6** (Windows case variation and 8.3
-  short names), **S5.2** (tree termination enumerated on both platforms), and **S7.5** with
-  **S7.6** (the pid reuse guard against a host boot time whose source differs per platform).
-  `10-design.md § Platform divergence` carries the target list the gate needs.
+**The two-platform gate is now S19.** It was listed here as tier-one work with no slice, on the
+grounds that it is not a vertical path from an entry point to persistence. That is still true of
+its shape and it is now sliced anyway — the four criteria it blocks (**S1.6**, **S5.2**,
+**S7.5**, **S7.6**) cannot be checked without it, and a tier one that cannot be finished is the
+worse of the two irregularities. See S19 for why the verticality rule's purpose survives.
 
 **Questions, each already an issue:**
 
