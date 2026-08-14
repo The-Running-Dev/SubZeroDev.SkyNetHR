@@ -60,16 +60,18 @@ test('S1.6 — an unresolvable candidate is refused as unresolvable, not outside
   if (!result.ok) assert.equal(result.error.code, 'unresolvable');
 });
 
-if (process.platform === 'win32') {
-  test('S1.6 — a Windows case variation of a root-contained path resolves inside it', async () => {
-    const root = await makeRoot();
-    const child = path.join(root, 'Project');
-    await mkdir(child);
-    const upperCased = child.toUpperCase();
-    const result = await resolveInsideRoot(upperCased, [root as never]);
-    assert.equal(result.ok, true);
-  });
-}
+test('S1.6 — a Windows case variation of a root-contained path resolves inside it', async (t) => {
+  if (process.platform !== 'win32') {
+    t.skip('Windows-only: case-insensitive path resolution');
+    return;
+  }
+  const root = await makeRoot();
+  const child = path.join(root, 'Project');
+  await mkdir(child);
+  const upperCased = child.toUpperCase();
+  const result = await resolveInsideRoot(upperCased, [root as never]);
+  assert.equal(result.ok, true);
+});
 
 test('S1.7 — the value returned is the resolved real path, not the candidate string', async () => {
   const root = await makeRoot();

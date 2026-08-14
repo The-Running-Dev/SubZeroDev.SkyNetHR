@@ -1374,25 +1374,30 @@ test('S5.7 — the busy check tests overlap, not equality: a parent, a child, an
   }
 });
 
-if (process.platform === 'win32') {
-  test('S5.7 — a Windows 8.3 short name of a live session\'s cwd is also refused workspace_busy', async () => {
-    const { manager, workspaceRoot } = await makeManager('full');
-    const owner = 'operator-1' as OperatorId;
-    const longName = 'a-fairly-long-directory-name-for-8dot3';
-    const parentDir = path.join(workspaceRoot, longName);
-    await mkdir(parentDir);
+test('S5.7 — a Windows 8.3 short name of a live session\'s cwd is also refused workspace_busy', async (t) => {
+  if (process.platform !== 'win32') {
+    t.skip('Windows-only: 8.3 short-name aliasing');
+    return;
+  }
+  const { manager, workspaceRoot } = await makeManager('full');
+  const owner = 'operator-1' as OperatorId;
+  const longName = 'a-fairly-long-directory-name-for-8dot3';
+  const parentDir = path.join(workspaceRoot, longName);
+  await mkdir(parentDir);
 
-    const created = await manager.create(owner, { vendor: 'claude', cwd: parentDir, model: null, sandbox: null, requisitionId: null });
-    assert.equal(created.ok, true);
+  const created = await manager.create(owner, { vendor: 'claude', cwd: parentDir, model: null, sandbox: null, requisitionId: null });
+  assert.equal(created.ok, true);
 
-    const shortName = await shortNameFor(workspaceRoot, longName);
-    if (shortName === null) return; // could not determine one on this host; not this criterion's to diagnose
+  const shortName = await shortNameFor(workspaceRoot, longName);
+  if (shortName === null) {
+    t.skip('could not determine an 8.3 short name on this host (8.3 creation may be disabled)');
+    return;
+  }
 
-    const result = await manager.create(owner, { vendor: 'claude', cwd: path.join(workspaceRoot, shortName), model: null, sandbox: null, requisitionId: null });
-    assert.equal(result.ok, false);
-    if (!result.ok) assert.equal(result.error.code, 'workspace_busy');
-  });
-}
+  const result = await manager.create(owner, { vendor: 'claude', cwd: path.join(workspaceRoot, shortName), model: null, sandbox: null, requisitionId: null });
+  assert.equal(result.ok, false);
+  if (!result.ok) assert.equal(result.error.code, 'workspace_busy');
+});
 
 test('S5.8 — the workspace claim and the turn slot are each claimed in the same synchronous block that tests them', async () => {
   const { manager, workspaceRoot } = await makeManager('full');
