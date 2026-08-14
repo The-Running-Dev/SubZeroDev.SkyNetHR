@@ -611,7 +611,7 @@ The claude equivalents of the remote workflow are:
 "@
         }
 
-        if (-not (Get-Command $v -ErrorAction SilentlyContinue)) { throw "$v is not on PATH." }
+        if (-not $DryRun -and -not (Get-Command $v -ErrorAction SilentlyContinue)) { throw "$v is not on PATH." }
 
         $exe = $v
         $argv = @()
@@ -749,7 +749,7 @@ Commit or stash, then re-run.
         }
 
         $vendorName = Resolve-Vendor -Requested $Vendor -CommandName $commandName -State $state
-        if (-not (Get-Command $vendorName -ErrorAction SilentlyContinue)) {
+        if (-not $DryRun -and -not (Get-Command $vendorName -ErrorAction SilentlyContinue)) {
             throw "$vendorName is not on PATH."
         }
 
