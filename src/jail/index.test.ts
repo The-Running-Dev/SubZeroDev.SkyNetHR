@@ -103,3 +103,9 @@ test('S1.7 — a child spawned with the jail-resolved path reports that exact pa
   });
   assert.equal(await realpath(stdout.trim()), result.value);
 });
+
+test('THROWAWAY — deliberately fails on Linux only, to prove fail-fast:false (S19.2)', () => {
+  if (process.platform !== 'win32') {
+    assert.fail('deliberate failure for S19.2 verification, not a real defect');
+  }
+});
