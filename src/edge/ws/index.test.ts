@@ -325,7 +325,9 @@ describe('S11.1 — the WebSocket edge delivers the same envelope sequence as SS
 
     const wsEnvelopes = await client!.collectEnvelopes(8, 15000);
 
-    // Read the same count of `data:` frames off the SSE stream.
+    // Read the same count of `data:` frames off the SSE stream. `raw` may end mid-event when a
+    // chunk boundary falls inside one — only the segments before the last `\n\n` are complete;
+    // the tail is kept and re-joined with the next read rather than parsed as-is.
     const decoder = new TextDecoder();
     let raw = '';
     const sseEnvelopes: unknown[] = [];
@@ -333,8 +335,10 @@ describe('S11.1 — the WebSocket edge delivers the same envelope sequence as SS
       const { value, done } = await sseReader.read();
       if (done) break;
       raw += decoder.decode(value, { stream: true });
-      const frames = raw.split('\n\n').filter((f) => f.includes('data: '));
-      for (const frame of frames.slice(sseEnvelopes.length)) {
+      const segments = raw.split('\n\n');
+      raw = segments.pop() ?? '';
+      for (const frame of segments.filter((f) => f.includes('data: '))) {
+        if (sseEnvelopes.length >= 8) break;
         sseEnvelopes.push(JSON.parse(frame.split('\n').find((l) => l.startsWith('data: '))!.slice('data: '.length)));
       }
     }
