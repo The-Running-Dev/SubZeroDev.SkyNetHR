@@ -2636,6 +2636,43 @@ Rejected: answering `RecordsError.storage` or `bad_request` instead. Both are eq
 what happened, and `storage` would report a failed write where none was attempted.
 Reversibility: cheap; nothing persisted and no signature changes.
 
+### 2026-08-15 — D137 D130 lands, and the restart notice is appended before boot's synthetic turn close
+Context: D130 (2026-08-13) was decided, recorded, and never delivered. `SessionNoticeCode` carried
+no restart member in either `20-contract.md` or `src/contract/index.ts`, boot emitted no notice, and
+`foldPayroll` still keyed on `turn.ended { stopReason: 'server_restart' }` — the D76 rule D130
+supersedes. `10-design.md` still stated that rule in two places. Found by `/reconcile` reading the
+decision log against the tree, three slices after the decision was taken; nothing else could have
+found it, because no slice, issue or `## Open` entry carried it and no gate fails on a decision that
+was never implemented. The defect D130 names was live throughout: a server that went down while a
+session sat idle between turns billed the whole outage as that operator's idle time and reported
+`droppedIntervals: 0`.
+Chosen: implement D130 as written, and settle the two things it left to the implementer. The code is
+spelled `server_restart` at `level: 'warn'`, emitted once per session found `live` on disk at boot
+and never for one already `ended` — which makes it idempotent across restarts for free, since the
+first boot writes `state: 'ended'`. And the notice is appended **before** step 3's D39 turn close,
+which is what makes D130's "one marker, one rule, both cases" actually hold: the fold stops billing
+at the notice and drops the interval that notice closes *if one was open*. Idle at shutdown leaves an
+interval open, so it is dropped and counted; mid-turn leaves none, because `turn.started` cleared the
+cursor and the close has not been appended yet, so nothing is dropped and the outage stays attributed
+to the turn — D130's stated `droppedIntervals: 0`. `turn.ended`'s stop reason consequently carries no
+fold meaning, exactly as D130 requires, and the fold reads a `restarted` flag rather than that field
+so boot's own close cannot open a fresh interval at the boot clock.
+Rejected: appending the notice after the turn close. The natural order — boot finishes repairing the
+turn, then says why — and it collapses D130's two cases into one: the interval the notice closes is
+then boot's own millisecond between the synthetic `turn.ended` and the notice, which reports
+`droppedIntervals: 1` for the mid-turn case D130 says must report zero. Recovering the distinction
+after that needs the fold to read `turn.ended { server_restart }` again, which is the marker D130
+removed.
+Rejected: a durable `endReason` on `meta.json`. D130 already rejected it as the better *root* fix and
+a separate item — `endedAt` is fabricated at boot and every future consumer inherits that, not only
+payroll. Unchanged by this: it composes rather than competes.
+Rejected: leaving `SessionEndReason`'s `server_restart` note alone. It reads "**No envelope carries
+`server_restart`**", which this makes false by spelling. Narrowed to "no `session.ended` carries" it,
+with the distinction stated — a notice marks where the outage fell and is not a claim about why the
+session ended, which is what keeps D45's retained-knowingly value retained and knowing.
+Reversibility: cheap. One enum member, one boot emission, one fold rule; nothing persisted changes
+shape and no signature moves.
+
 ## Open
 
 Staging only. Once an item becomes an issue it leaves this list.

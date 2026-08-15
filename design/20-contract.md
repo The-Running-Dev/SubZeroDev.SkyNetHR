@@ -272,12 +272,14 @@ interface SessionStarted {
 }
 
 // The three ways into `ended` (D45): D36 operator, D20 restart, D41 storage failure. **No
-// envelope carries `server_restart`.** Boot appending one was D45's rejected alternative,
+// `session.ended` carries `server_restart`.** Boot appending one was D45's rejected alternative,
 // dropped with the derive-state-from-the-stream proposal it belonged to, and nothing has
 // added it since — so this value names a real transition that is never on the wire. It is
 // retained knowingly, exactly as `SessionStarted.state` is, and an implementer must not close
 // the apparent gap by emitting one at boot. A rehydrated session's state is read from
-// `SessionSummary.state`.
+// `SessionSummary.state`. What boot *does* append is `session.notice / server_restart` (D130),
+// which shares the spelling and is a different thing: a notice is not an end reason, and it
+// marks where the outage fell without claiming to say why the session ended.
 type SessionEndReason = 'operator' | 'server_restart' | 'storage_failure';
 
 interface SessionEnded {
@@ -292,7 +294,8 @@ type SessionNoticeCode =
   | 'checkpoint_skipped'       // the pre-turn checkpoint failed; the turn proceeds
   | 'sandbox'                  // the standing sandbox statement for a preauthorised session
   | 'audit_unavailable'        // a permission was denied because the audit append failed
-  | 'storage_failure';         // a spill write failed; the session is ending
+  | 'storage_failure'          // a spill write failed; the session is ending
+  | 'server_restart';          // boot found this session live at shutdown (D130)
 
 interface SessionNotice {
   readonly level: 'info' | 'warn' | 'error';
@@ -623,6 +626,17 @@ interface PayrollView {
   readonly droppedIntervals: number;        // idle intervals discarded for spanning a restart
 }
 ```
+
+**`session.notice / server_restart` is the fold's only restart marker, and `turn.ended`'s
+`server_restart` stop reason carries no fold meaning** (D130). The fold walks the spill and
+stops billing at that notice: the idle interval the notice closes, **if one was open**, is
+dropped and counted in `droppedIntervals`, and nothing after it is billed. Both restart cases
+fall out of the one rule — a server that went down while the session sat idle between turns
+had an interval open, so it reports one dropped; a server that went down mid-turn had none,
+because the outage was inside a turn and was never idle to begin with, so it reports zero and
+the outage is attributed to the turn. Reading `turn.ended { stopReason: 'server_restart' }` as
+the marker instead is what leaves the idle case unmarked entirely, since D39 appends that
+close **only** where the spill ends on an unpaired `turn.started`.
 
 ### Operator
 

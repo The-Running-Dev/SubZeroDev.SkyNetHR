@@ -221,7 +221,8 @@ export type SessionNoticeCode =
   | 'checkpoint_skipped' // the pre-turn checkpoint failed; the turn proceeds
   | 'sandbox' // the standing sandbox statement for a preauthorised session
   | 'audit_unavailable' // a permission was denied because the audit append failed
-  | 'storage_failure'; // a spill write failed; the session is ending
+  | 'storage_failure' // a spill write failed; the session is ending
+  | 'server_restart'; // boot found this session live at shutdown (D130)
 
 export interface SessionNotice {
   readonly level: 'info' | 'warn' | 'error';

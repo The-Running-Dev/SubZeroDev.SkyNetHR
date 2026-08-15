@@ -728,12 +728,19 @@ per-operator budget needs the operator record D3 refuses.
   session, which is the one number on it that must not be silently wrong.
 - **Idle** is wall-clock time the session was `live` with no turn: the gaps between
   `turn.ended` and the next `turn.started`, plus creation-to-first-turn and last-turn-to-end.
-- **Idle excludes any interval containing a restart** (D76). A crash mid-turn is closed at
-  boot by D39, whose synthetic `turn.ended` carries the *boot* timestamp — so an outage of
-  any length is attributable to neither the turn nor the idle gap around it, because the
-  events that would separate "the operator went to lunch" from "the server was down" were
-  never written. The interval is dropped and the view says how many were dropped. Reporting a
-  server outage as an operator's idle time is a wrong number on a screen headed *payroll*.
+- **Idle excludes any interval containing a restart, and boot writes the marker that makes
+  that checkable** (D76, D130). The events that would separate "the operator went to lunch"
+  from "the server was down" are never written by the process that died, so boot appends one:
+  a `session.notice / server_restart` for each session that was still `live` at shutdown, and
+  for no other. The fold stops billing there — the interval that notice closes, if one was
+  open, is dropped and counted, and nothing after it is billed. **The marker is the notice and
+  nothing else.** D39's synthetic `turn.ended { server_restart }` cannot serve: it is appended
+  *only* where the spill ends on an unpaired `turn.started`, so a server that went down while
+  a session sat idle between turns leaves it unwritten, and the whole outage is then billed as
+  that operator's idle time with `droppedIntervals` reading zero — a wrong number on a screen
+  headed *payroll*, which is the one thing this section refuses. The mid-turn case reports
+  zero dropped intervals because the outage fell inside a turn and was never idle: that is
+  "either the turn or the idle gap after it" cut in favour of the turn.
 
 A live session's burn is also tracked as a running counter in `emit`, which sees every
 envelope exactly once and is therefore exact and free. A rehydrated session has no counter
@@ -1588,7 +1595,7 @@ nothing on the wire about why.
 | Review names a session that no longer exists | — | Nothing. It renders from its `SessionSnapshot` (D67) | The review, whole, with the session identity as it was | Correct by construction; D25 cannot orphan a review |
 | Torn trailing line in a record log | Last line fails to parse at boot | Drop it, log it. **The previous line for that id becomes authoritative again** | A review one draft old, or a requisition back at `open` | File untouched; the next append starts a fresh line. Stated in *Persistence summary* as accepted |
 | Payroll fold over an unreadable spill | Read error | `500`; the session itself is unaffected | "Usage unavailable" | Nothing. It is a read of a file the session is still writing |
-| Payroll fold spans a server restart | `turn.ended / server_restart` in the log | Drop that interval from idle and report the count of dropped intervals (D76) | "Idle excludes 2 intervals spanning a restart" | Nothing |
+| Payroll fold spans a server restart | `session.notice / server_restart` in the log, appended by boot for every session live at shutdown — **not** `turn.ended`'s stop reason, which D39 writes only for a mid-turn crash (D130) | Stop billing at the notice; drop the interval it closes, if one was open, and report the count (D76) | "Idle excludes 1 interval spanning a restart" | Nothing |
 | Audit read over a very large log | — | Bounded window with a cursor (D73); never a whole-file scan | Paged history | Nothing. The unbounded-growth cost is named in open question 11 |
 
 **A failed record append must not mutate the registry, and that ordering is the reverse of
@@ -1629,7 +1636,7 @@ it — tracked as issue #28.
 
 | Failure | Detection | System does | Operator sees | State left behind |
 |---|---|---|---|---|
-| Restart with sessions live | Boot rehydration | Load `meta.json`, derive `lastSeq` from the spill tail (D37), mark ended (D20) | Transcript and checkpoints browsable; compose box disabled | Sessions readable, not resumable |
+| Restart with sessions live | Boot rehydration | Load `meta.json`, derive `lastSeq` from the spill tail (D37), mark ended (D20), append one `session.notice / server_restart` (D130) | Transcript and checkpoints browsable, with the outage marked where it fell; compose box disabled | Sessions readable, not resumable |
 | Restart mid-turn — spill ends on an unpaired `turn.started` | Boot scan of the spill tail | **Close the turn on disk** (D39): `permission.resolved / cancelled_process_exit` for each outstanding request, then `turn.ended / stopReason: 'server_restart'` | A turn that ends, saying the server restarted | Ordering guarantees hold unconditionally; no renderer special case |
 | Message to a rehydrated session | `state == 'ended'` | `409 session_ended` | "This session ended when the server restarted" | Nothing started |
 | Restart with a child running | `pids.ndjson` entry with no `exitedAt` | Reap before accepting connections, after checking the reuse guard (D23) | — | Orphan killed, entry tombstoned |
@@ -1918,7 +1925,9 @@ Five steps, and the order is the point:
 2. rehydrate  meta.json → registry, every session marked ended                (D20)
            an unknown schemaVersion is handled as a corrupt file              (D49)
            lastSeq derived from the spill's tail, not read from meta.json      (D37)
-3. close   any turn the spill left unterminated, by appending to the spill     (D39)
+3. mark    one session.notice / server_restart per session live at shutdown    (D130)
+   close   any turn the spill left unterminated, by appending to the spill     (D39)
+           the notice goes first, and that order is what makes one fold rule cover both
 4. load    the two record logs → registries, latest line per id     (tier two, D65)
 5. listen  only now are connections accepted
 ```

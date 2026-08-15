@@ -1813,7 +1813,10 @@ test('S7.2/S7.3 — a rehydrated session is ended with endedAt set and lastSeq d
   if (got.ok) {
     assert.equal(got.value.state, 'ended');
     assert.notEqual(got.value.endedAt, null);
-    assert.equal(got.value.lastSeq, 5, 'lastSeq follows the spill, not the stale meta.json value');
+    // 5 spilled envelopes plus the one `session.notice / server_restart` boot appends for a
+    // session that was `live` on disk (D130) — still derived from the spill's tail, which is
+    // what this asserts, and emphatically not the 99999 meta.json claims.
+    assert.equal(got.value.lastSeq, 6, 'lastSeq follows the spill, not the stale meta.json value');
   }
 
   const messaged = await manager2.message(sessionId as never, record.owner, 'hello');
@@ -1881,7 +1884,20 @@ test('S7.4 — a spill ending on an unpaired turn.started is closed at boot: out
   for (let i = 1; i < seqs.length; i++) assert.equal(seqs[i], seqs[i - 1]! + 1, 'contiguous seq, continuing from where the spill left off');
 
   const kinds = replayed.map((e) => e.kind);
-  assert.deepEqual(kinds, ['turn.started', 'permission.request', 'permission.request', 'permission.resolved', 'permission.resolved', 'turn.ended']);
+  // D130 puts the restart notice ahead of the synthetic close, and inside the still-open
+  // turn: that placement is what lets the payroll fold read one marker for both restart
+  // cases, and the contract expressly allows a session-scoped notice to land between a
+  // `turn.started` and its `turn.ended`.
+  assert.deepEqual(kinds, [
+    'turn.started',
+    'permission.request',
+    'permission.request',
+    'session.notice',
+    'permission.resolved',
+    'permission.resolved',
+    'turn.ended',
+  ]);
+  assert.equal((replayed.find((e) => e.kind === 'session.notice')!.data as { code: string }).code, 'server_restart');
 
   const resolved = replayed.filter((e) => e.kind === 'permission.resolved');
   for (const r of resolved) {
@@ -2747,12 +2763,19 @@ test('S14.11 — a spill failure on the checklist.item.completed append is repor
 // S16 — Payroll: what a session has cost
 // ---------------------------------------------------------------------------
 
-// A rehydrated fixture with known, millisecond-exact gaps (S16.6) and one restart-closed
-// turn (S16.7, D76): creation -> t1.started is 1000ms idle; t1 carries three `usage`
-// events either side of a compaction notice, summed for S16.3/S16.4; t1.ended -> t2.started
-// is 3000ms idle; t2 is closed by a `server_restart`, so t2.ended -> t3.started (3900ms) is
-// dropped rather than billed; t3.ended -> endedAt is 2500ms idle. Total idleMs = 1000 +
-// 3000 + 2500 = 6500; droppedIntervals = 1.
+// A rehydrated fixture with known, millisecond-exact gaps (S16.6) and one restart (S16.7,
+// D76, D130): creation -> t1.started is 1000ms idle; t1 carries three `usage` events either
+// side of a compaction notice, summed for S16.3/S16.4; t1.ended -> t2.started is 3000ms idle;
+// t2.ended -> t3.started is 3900ms idle; and then the server went down while the session sat
+// idle after t3, which boot marked with `session.notice / server_restart` at 12000. That last
+// interval — t3.ended -> the notice, 2500ms — is the one the notice closes, so it is dropped
+// and counted rather than billed. Total idleMs = 1000 + 3000 + 3900 = 7900;
+// droppedIntervals = 1.
+//
+// The record is written `ended` because that is what boot left on disk after the restart this
+// fixture is the aftermath of; the notice is in the spill for the same reason. A fixture with
+// turns *after* a `server_restart` marker, which this one used to be, models a session that
+// cannot exist — D20 ends every rehydrated session and it never runs another turn.
 const T0 = Date.parse('2026-01-01T00:00:00.000Z');
 function isoAt(offsetMs: number): IsoTimestamp {
   return new Date(T0 + offsetMs).toISOString() as IsoTimestamp;
@@ -2778,9 +2801,10 @@ async function bootPayrollFixture(
     [1900, 'usage', { turnId: 't1', usage: { inputTokens: 60, outputTokens: 30, cacheRead: 5, cacheCreate: 0 } }],
     [2000, 'turn.ended', { turnId: 't1', stopReason: 'completed', usage: null }],
     [5000, 'turn.started', { turnId: 't2' }],
-    [5100, 'turn.ended', { turnId: 't2', stopReason: 'server_restart', usage: null }],
+    [5100, 'turn.ended', { turnId: 't2', stopReason: 'completed', usage: null }],
     [9000, 'turn.started', { turnId: 't3' }],
     [9500, 'turn.ended', { turnId: 't3', stopReason: 'completed', usage: null }],
+    [12000, 'session.notice', { level: 'warn', code: 'server_restart', text: 'The server restarted while this session was live; the session has ended and accepts no new turn.' }],
   ];
   let seq = 1;
   for (const [offsetMs, kind, data] of events) {
@@ -2829,13 +2853,98 @@ test('S16.3 — no module above adapters/* reads Envelope.raw to do its own toke
   }
 });
 
-test('S16.6/S16.7 — idleMs is the wall clock live with no turn, to the millisecond; an interval containing a server_restart is dropped and counted instead', async () => {
+test('S16.6/S16.7 — idleMs is the wall clock live with no turn, to the millisecond; the interval a server_restart notice closes is dropped and counted instead', async () => {
   const { manager, sessionId, owner } = await bootPayrollFixture();
   const got = await manager.payroll(sessionId, owner);
   assert.equal(got.ok, true);
   if (!got.ok) return;
-  assert.equal(got.value.idleMs, 6500);
+  assert.equal(got.value.idleMs, 7900);
   assert.equal(got.value.droppedIntervals, 1);
+});
+
+// D130's two cases, end to end through a real boot rather than a hand-written spill: which
+// marker boot writes, for which sessions, and what the fold then reports for each.
+test('D130 — boot marks every session live at shutdown with one session.notice/server_restart, and none for a session already ended', async () => {
+  const { config, store, checkpoints } = await makeManager('full');
+  const wasLive = bootSessionRecord('sess-d130-live');
+  const wasEnded = bootSessionRecord('sess-d130-ended', { state: 'ended', endedAt: isoAt(500) });
+  for (const record of [wasLive, wasEnded]) {
+    assert.equal((await store.createSession(record)).ok, true);
+    assert.equal((await store.appendEvent(record.id, bootEnvelope(record.id, 1, 'message', { turnId: 't1', role: 'user', text: 'm' }))).ok, true);
+  }
+
+  const manager2 = createSessionManager({ config, store, checkpoints, records: notImplementedProxy<Records>('records') });
+  assert.equal((await manager2.boot()).ok, true);
+
+  const notices = async (sessionId: string): Promise<Envelope[]> => {
+    const out: Envelope[] = [];
+    await manager2.subscribe(sessionId as never, wasLive.owner, 0, { deliver: (e) => out.push(e), close: () => {} });
+    return out.filter((e) => e.kind === 'session.notice' && (e.data as { code: string }).code === 'server_restart');
+  };
+
+  const live = await notices('sess-d130-live');
+  assert.equal(live.length, 1, 'exactly one marker for the session that was live at shutdown');
+  assert.equal((live[0]!.data as { level: string }).level, 'warn');
+  assert.equal((await notices('sess-d130-ended')).length, 0, 'a session already ended gets no marker on every later restart');
+
+  // Idempotent across restarts for the same reason: the first boot wrote `state: 'ended'`,
+  // so a second boot sees an already-ended session and adds nothing.
+  const manager3 = createSessionManager({ config, store, checkpoints, records: notImplementedProxy<Records>('records') });
+  assert.equal((await manager3.boot()).ok, true);
+  const afterSecondBoot: Envelope[] = [];
+  await manager3.subscribe('sess-d130-live' as never, wasLive.owner, 0, { deliver: (e) => afterSecondBoot.push(e), close: () => {} });
+  assert.equal(
+    afterSecondBoot.filter((e) => e.kind === 'session.notice' && (e.data as { code: string }).code === 'server_restart').length,
+    1,
+    'a second restart does not append a second marker to a session that is already ended',
+  );
+});
+
+test('D130 — a server that went down between turns reports the outage as one dropped interval, and one that went down mid-turn reports none', async () => {
+  // Between turns: the spill ends on a paired turn.ended, so boot's notice closes a real
+  // idle interval. This is the case D76's `turn.ended { server_restart }` marker could not
+  // see at all, because D39 never appends that close when there is no open turn.
+  const idleAtShutdown = await (async () => {
+    const { config, store, checkpoints } = await makeManager('full');
+    const record = bootSessionRecord('sess-d130-idle', { createdAt: isoAt(0) });
+    assert.equal((await store.createSession(record)).ok, true);
+    const events: Array<[number, string, unknown]> = [
+      [1000, 'turn.started', { turnId: 't1' }],
+      [2000, 'turn.ended', { turnId: 't1', stopReason: 'completed', usage: null }],
+    ];
+    let seq = 1;
+    for (const [offsetMs, kind, data] of events) {
+      assert.equal((await store.appendEvent(record.id, payrollFixtureEnvelope(record.id, seq, offsetMs, kind, data))).ok, true);
+      seq += 1;
+    }
+    const manager2 = createSessionManager({ config, store, checkpoints, records: notImplementedProxy<Records>('records') });
+    assert.equal((await manager2.boot()).ok, true);
+    return manager2.payroll('sess-d130-idle' as never, record.owner);
+  })();
+  assert.equal(idleAtShutdown.ok, true);
+  if (!idleAtShutdown.ok) return;
+  assert.equal(idleAtShutdown.value.droppedIntervals, 1);
+  // 1000ms of real idle before t1, and the outage after t1 excluded rather than billed —
+  // boot stamps the notice and `endedAt` at wall-clock now, decades after the fixture's
+  // 2026 timestamps, so anything billed here would be enormous rather than subtly wrong.
+  assert.equal(idleAtShutdown.value.idleMs, 1000);
+
+  // Mid-turn: the outage fell inside an open turn, so there was never an idle interval to
+  // drop and the turn owns it. Boot's synthetic `turn.ended { server_restart }` follows the
+  // notice and must not open a fresh interval at the boot clock either.
+  const midTurn = await (async () => {
+    const { config, store, checkpoints } = await makeManager('full');
+    const record = bootSessionRecord('sess-d130-midturn', { createdAt: isoAt(0) });
+    assert.equal((await store.createSession(record)).ok, true);
+    assert.equal((await store.appendEvent(record.id, payrollFixtureEnvelope(record.id, 1, 1000, 'turn.started', { turnId: 't1' }))).ok, true);
+    const manager2 = createSessionManager({ config, store, checkpoints, records: notImplementedProxy<Records>('records') });
+    assert.equal((await manager2.boot()).ok, true);
+    return manager2.payroll('sess-d130-midturn' as never, record.owner);
+  })();
+  assert.equal(midTurn.ok, true);
+  if (!midTurn.ok) return;
+  assert.equal(midTurn.value.droppedIntervals, 0, 'an outage inside an open turn is the turn’s, not a dropped idle interval');
+  assert.equal(midTurn.value.idleMs, 1000, 'only the real creation-to-first-turn gap is billed');
 });
 
 test('S16.5 — the payroll read for a live session equals the same read after a restart has rehydrated it, the spill being the only source either way', async () => {
