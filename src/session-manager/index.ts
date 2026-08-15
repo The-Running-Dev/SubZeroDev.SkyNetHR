@@ -485,33 +485,45 @@ export function createSessionManager(deps: {
     const burn: { -readonly [K in keyof Usage]: Usage[K] } = { inputTokens: 0, outputTokens: 0, cacheRead: 0, cacheCreate: 0 };
     let idleMs = 0;
     let droppedIntervals = 0;
+    // D130: `session.notice / server_restart` is the only restart marker this fold reads.
+    // Once it is seen the session's billable timeline stops — a rehydrated session is
+    // `ended` and never runs another turn (D20), so anything after that notice is boot's
+    // own bookkeeping, appended at the boot clock rather than at anything the operator did.
+    let restarted = false;
     // The wall-clock boundary the *next* idle interval starts from: `null` while a turn
     // is open (busy, not idle), the last `turn.ended`'s own `ts` otherwise. Idle time is
     // billed session-creation-to-first-turn (D76/`10-design.md § Derived views`), so it
     // starts at `record.createdAt` rather than at the first envelope read.
     let cursor: IsoTimestamp | null = record.createdAt;
-    // Whether the interval starting at `cursor` sits behind a `server_restart` close and
-    // must be dropped rather than billed (S16.7, D76).
-    let cursorDropped = false;
 
     for await (const result of store.readEventsAfter(sessionId, 0)) {
       if (!result.ok) return { ok: false, error: { code: 'payroll_unavailable', cause: result.error } };
       const envelope = result.value;
       switch (envelope.kind) {
         case 'turn.started': {
-          if (cursor !== null) {
-            const gapMs = new Date(envelope.ts).getTime() - new Date(cursor).getTime();
-            if (cursorDropped) droppedIntervals += 1;
-            else idleMs += gapMs;
-          }
+          if (cursor !== null) idleMs += new Date(envelope.ts).getTime() - new Date(cursor).getTime();
           cursor = null;
-          cursorDropped = false;
           break;
         }
         case 'turn.ended': {
-          const data = envelope.data as EventPayloadMap['turn.ended'];
-          cursor = envelope.ts;
-          cursorDropped = data.stopReason === 'server_restart';
+          // D130: this envelope's `stopReason` carries no fold meaning, `server_restart`
+          // included. The guard is `restarted`, not the stop reason — boot appends its
+          // synthetic close *after* the restart notice (S7.4), and billing an interval
+          // from it would start a fresh one at the boot clock on a session that is over.
+          if (!restarted) cursor = envelope.ts;
+          break;
+        }
+        case 'session.notice': {
+          const data = envelope.data as EventPayloadMap['session.notice'];
+          if (data.code !== 'server_restart') break;
+          // D130's one rule, covering both cases: drop the interval this notice closes if
+          // one was open (the server went down between turns), and count it. Mid-turn
+          // there is no open interval — `turn.started` cleared the cursor and the close
+          // has not been appended yet — so nothing is dropped and the outage stays
+          // attributed to the turn, which is `droppedIntervals: 0`.
+          if (cursor !== null) droppedIntervals += 1;
+          cursor = null;
+          restarted = true;
           break;
         }
         case 'usage': {
@@ -529,11 +541,11 @@ export function createSessionManager(deps: {
 
     // Last-turn-to-`endedAt` (S16.6). A live session mid-turn has `cursor === null` (no
     // trailing idle to bill yet); a live session between turns has no `endedAt` yet
-    // either, so nothing is added until the session actually ends.
+    // either, so nothing is added until the session actually ends. A session that has been
+    // through a restart never reaches this: the notice cleared the cursor, and `endedAt`
+    // on a rehydrated session is stamped at boot rather than at anything it did (D130).
     if (cursor !== null && record.endedAt !== null) {
-      const gapMs = new Date(record.endedAt).getTime() - new Date(cursor).getTime();
-      if (cursorDropped) droppedIntervals += 1;
-      else idleMs += gapMs;
+      idleMs += new Date(record.endedAt).getTime() - new Date(cursor).getTime();
     }
 
     const budgetTokens = config.sessionTokenBudget;
@@ -651,6 +663,13 @@ export function createSessionManager(deps: {
         await reapOne(record, hostBootAt);
       }
 
+      // D130: which sessions were still `live` on disk when the process went down. Boot
+      // marks exactly those with one `session.notice / server_restart` in step 3 — never a
+      // session already `ended`, which would append to every dead session's spill on every
+      // restart. Local to `boot` rather than a field on the entry: it is true once, here,
+      // and a field would invite a later reader to treat it as durable state.
+      const liveAtShutdown = new Set<SessionId>();
+
       // Step 2 (D20, D37, D49): every session comes back `ended`; `lastSeq` is derived
       // from the spill's tail, never trusted off `meta.json`.
       const loaded = await store.readAllMeta();
@@ -662,6 +681,7 @@ export function createSessionManager(deps: {
           continue;
         }
         const record = result.value;
+        if (record.state === 'live') liveAtShutdown.add(sessionId);
         const lastSeqResult = await store.readLastSeq(sessionId);
         if (!lastSeqResult.ok) {
           console.warn(`[session-manager] boot: skipping session ${sessionId}: ${JSON.stringify(lastSeqResult.error)}`);
@@ -700,6 +720,22 @@ export function createSessionManager(deps: {
       // This is also where `entry.completedChecklist` gets folded for each rehydrated
       // entry (S14.7) — the same scan, not a second one.
       for (const entry of sessions.values()) {
+        // D130: the restart notice goes in *before* the synthetic close, and the order is
+        // the whole of why one rule covers both cases. Where the spill ends on an unpaired
+        // `turn.started`, the notice lands inside that still-open turn — so the payroll
+        // fold sees no idle interval to drop and attributes the outage to the turn; where
+        // the session was idle, it lands after the last `turn.ended` and closes the
+        // interval that was genuinely open. A `session.notice` carries no `turnId` and is
+        // expressly allowed to fall between a `turn.started` and its `turn.ended`
+        // (`20-contract.md § Rules the renderer may rely on`), so this costs the renderer
+        // nothing.
+        if (liveAtShutdown.has(entry.record.id)) {
+          await emit(entry, 'session.notice', {
+            level: 'warn',
+            code: 'server_restart',
+            text: 'The server restarted while this session was live; the session has ended and accepts no new turn.',
+          });
+        }
         await closeUnterminatedTurn(entry);
       }
 
