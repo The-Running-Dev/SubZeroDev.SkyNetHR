@@ -1022,8 +1022,9 @@ sessions. The composition happens one level up instead: the **edge** resolves th
 through `session-manager`, applies the ownership check it already applies to every session
 route, and hands the snapshot to `records` as a parameter. `records` never learns that a
 session registry exists. The direction that *is* drawn — `session-manager → records` — exists
-for exactly one call, the once-only requisition claim during session creation, and it is the
-right way round: consuming a requisition is part of creating a session, not the reverse.
+for exactly one protocol, the once-only requisition claim during session creation (`claim`,
+`attachSession` and `release`, the three steps control flow 1 draws), and it is the right way
+round: consuming a requisition is part of creating a session, not the reverse.
 
 `checkpoints` depending only on `config` and `contract` — never on adapters — is what let
 D6 survive the move to two backends unchanged. Keep it that way.
