@@ -965,12 +965,26 @@ interface Adapter {
   kill(): Promise<void>;                             // terminate-then-force, on the process tree
 }
 
+declare const VENDORS: readonly Vendor[];
+
 declare function createAdapter(vendor: Vendor, opts: AdapterOptions): Result<Adapter, AdapterError>;
 ```
 
 `policy` is read at session creation and is what the client renders as either "you will be
 asked" or a standing sandbox banner. `sandbox` is the operator's choice and is validated by
 the adapter.
+
+`VENDORS` is the one enumeration of `Vendor`'s members, and it is declared here — not in
+`contract` — because `createAdapter`'s switch immediately below it is what makes each member
+runnable, and a list that is not beside the dispatch it authorises is a list free to gain a
+member nothing can create (D126). `edge/http-common` imports it to validate a `vendor` on a
+request body, which is the one read D10 permits an edge to make of this module: testing
+membership of a closed union is not asking which vendor this is.
+
+A caller may rely on the array holding every member of `Vendor` and no other value, and on no
+member of it reaching `createAdapter`'s `unsupported_vendor` — that second property is what
+keeping the list and the switch in one file buys, and it is not the same as the call
+succeeding, which `unsupported_sandbox` may still refuse. Nothing may rely on the order.
 
 **A vendor adapter may accept one thing beyond `AdapterOptions`, and it is a test seam, not a
 deployment knob** (D91). `createClaudeAdapter` and `createCodexAdapter` each take an optional

@@ -3094,6 +3094,34 @@ repository's own gate, found by whoever first trusts it.
 Reversibility: cheap. One line, and lowering it again is what a Node dimension on the matrix would
 justify.
 
+### 2026-08-18 — D153 `VENDORS` is declared where it lives, and D150's rule stops at one module
+Context: D150 narrowed `20-contract.md § contract` to admit "the enumeration of a closed union
+where a validator must test membership" and had `RATINGS` declared under it. `adapters` exports
+`VENDORS` for the same job — `edge/http-common` tests membership before accepting a `vendor` on a
+request body — and `§ adapters/*` declared it nowhere. Nothing was false: that section never
+claimed to be runtime-free, which is what made `§ contract`'s sentence a defect rather than an
+omission. But `## Public surface` covers every export crossing a module boundary, and this
+crosses one.
+Chosen: declare `VENDORS` in `§ adapters/*`, beside `createAdapter`, with the reason it is not in
+`contract` written down — D126's argument, that the list belongs beside the switch that makes each
+member runnable, so a member nothing can create cannot be added. The two guarantees a caller gets
+are stated: the array holds every member of `Vendor` and no other value, and `createAdapter`
+accepts each one. That second clause is the whole point of the co-location and was previously
+recoverable only by reading the switch.
+This deliberately does **not** extend D150. D150 said each such export is declared "here", meaning
+`§ contract`, and explicitly refused the `VENDORS` analogy — `Rating` has no dispatch to sit beside.
+Treating D150 as a general rule would have moved `VENDORS` into `contract` and reversed D126.
+Rejected: adding `VENDORS` to `§ contract` alongside `RATINGS`, so one section holds every runtime
+enumeration. Tidier to read and it is what a careless reading of D150 licenses; it contradicts D126,
+draws an `edge → contract` arrow in place of the `edge → adapters` one the design deliberately
+drew, and separates the list from the switch that is its only correctness argument.
+Rejected: recording it in `## Open` for a later pass. `## Open` is a staging area, and this is a
+two-paragraph edit in the command that owns it, running now.
+Rejected: leaving it undeclared on the grounds D126 already settled where it lives. D126 settled the
+module, not the public surface; a reader of `20-contract.md` would find `createAdapter` declared and
+its vocabulary not.
+Reversibility: cheap. Prose plus one declared const; nothing persisted and no signature moves.
+
 ## Open
 
 Staging only. Once an item becomes an issue it leaves this list.
