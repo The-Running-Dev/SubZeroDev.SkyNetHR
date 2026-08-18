@@ -2994,6 +2994,134 @@ Rejected: recording the divergence and changing neither side. `§ Concurrency` w
 that is false on the primary host.
 Reversibility: cheap. Prose, plus this entry.
 
+### 2026-08-18 — D149 D146's notice is specified and unbuilt: the code is the wrong side, and the gap is staged
+Context: D146 added `usage_unavailable` to `SessionNoticeCode` and `20-contract.md § Vendor mapping
+— Codex § Usage` states when it fires — once, at session start, before the first `turn.started`, by
+an adapter on a transport that cannot report usage. `src/contract/index.ts` has no such member and
+the `exec` transport in `src/adapters/codex/index.ts` emits no notice, so a session on the fallback
+still reports a burn of zero indistinguishable from an idle one. That is the exact failure D146 was
+written to close, and it is closed in two documents and nowhere else.
+The gap was untracked. #91 carries this item and both its `Done when` boxes are about documents —
+the contract gaining the member, and the design stating when it is emitted — which D146 satisfied.
+Nothing on that issue says the adapter emits it, so the issue reads one tick from done for
+behaviour that does not exist.
+Chosen: the code changes. The member is added to `src/contract/index.ts` and the Codex adapter
+appends the notice on the `exec` path. Staged in `## Open` rather than edited here: this is
+implementation against a settled contract, which is `/fix`'s tier, and a reconciliation that
+absorbed it would be doing implementation work at deep-reasoning tier — the same boundary D143
+observed when it staged its three rather than fixing them.
+Rejected: withdrawing D146 so the documents match the tree. It costs the whole of that entry's
+argument, decided two commits ago on evidence nothing has since contradicted, and
+`AGENTS.md § Budget discipline` forbids relitigating a recorded decision without new evidence.
+There is none — only an absence.
+Rejected: recording the divergence and changing neither side. The alternative D142, D144 and D148
+each rejected for the same reason: the next pass rediscovers it, and here it costs more than
+rediscovery, because #91 would close green over a behaviour that was never built.
+Reversibility: cheap. A union member with no producer is the case D139 already ruled on, so a
+withdrawal is an annotation rather than a removal.
+
+### 2026-08-18 — D150 The contract admits the enumeration of a closed union; `RATINGS` stays where it is
+Context: `20-contract.md § contract` says "Types only. No runtime export." `src/contract/index.ts`
+exports `const RATINGS`, read once — `edge/http-common` testing membership before it accepts a
+`Rating` on the review routes. It is the same job `VENDORS` does for `Vendor`, and
+`10-design.md § Module boundaries` argues that case explicitly: the enumeration lives beside the
+code that makes each member mean something, so a second independently-typed copy cannot drift.
+`RATINGS` has no such argument written anywhere and sits in the one module declared runtime-free.
+Chosen: the contract changes. `Rating` has no `createRating` switch to sit beside — its members are
+not made runnable by anything, they are validated and stored — so the `VENDORS` argument does not
+transfer, and moving the list to `records` would put the wire-validation vocabulary in a tier-two
+module that the tier-one edge would then import to parse a body. The declared property becomes
+narrower and still checkable: `contract` exports types, plus the enumeration of a closed union
+where a validator must test membership, and each such export is declared here like any other
+public interface.
+**The amendment is not made in this pass.** Adding `RATINGS` to `20-contract.md` adds a public
+interface the document does not carry, which `AGENTS.md § Hard rules` reserves to `/contract` —
+the same boundary D145 declined to cross in the other direction when it kept two methods rather
+than narrowing a declared interface from a reconciliation. Staged in `## Open`.
+Rejected: moving `RATINGS` to `records`, which was this pass's recommendation. It keeps the
+contract's sentence true with no amendment and draws no new module edge, and it was not chosen
+because it puts a validation vocabulary tier one needs behind tier two's module, and because the
+`VENDORS` precedent it leans on rests on a runtime switch `Rating` does not have.
+Rejected: recording it and changing neither. The alternative D142, D144, D148 and D149 each
+rejected for the same reason, and here it leaves a grep-checkable sentence — "no runtime export" —
+false, which is worse than an unstated one because it invites a reader to trust it.
+Reversibility: cheap. Prose plus one declared const; nothing persisted and no signature moves.
+
+### 2026-08-18 — D151 A declared field with no producer states so, the third size in the same series
+Context: `TurnEnded.usage` is declared `Usage | null` in `20-contract.md § Event payloads` with no
+note. Every emission site passes `null` — both adapters' `result` / `turn.completed` and `close`
+paths, and the manager's three synthesised closes for a storage failure, a boot-closed turn and a
+failed spawn. The only statement that the field is empty by design is a comment inside
+`foldPayroll`, where a reader looking at the contract will never find it.
+D139 set this rule for a union member with no producer and D145 raised it to a declared interface
+method with no caller. A field is the third size and had no ruling, which is why this one sat
+unannotated through both passes.
+Chosen: annotate, in `20-contract.md` and `src/contract/index.ts` alike, in the shape the two prior
+entries set. D75 put the vendor-normalised, summable figure on the dedicated `usage` envelope and
+`PayrollView`'s fold reads only that, so the code is right and what was missing was any statement
+of it. The annotation names the hazard rather than only the absence: a reader that summed both
+sources would double-count a turn's burn on the one screen headed *payroll*, which is the failure
+I28 exists to prevent. **The standing rule this extends, and completes: a declared field with no
+producer states so in its own comment, or the field goes** — the same sentence D139 wrote for a
+member and D145 for a method.
+Rejected: removing the field. Cleanest to read, and it makes the double-count impossible rather
+than documented. It narrows a declared public interface, which is `/contract`'s and not a
+reconciliation's — the boundary D145 declined to cross for `isUnderPip` and D150 declined again for
+`RATINGS` — and it forfeits the slot a vendor-reported turn total would occupy if one ever proves
+worth carrying.
+Rejected: recording it and changing neither. It leaves the hazard reachable by anyone reading the
+declaration rather than the fold, and this is the third pass in which the field went unnoticed.
+Reversibility: cheap. Comments only, in two files that change together.
+
+### 2026-08-18 — D152 The supported Node floor is the one the gate runs
+Context: `package.json` declared `engines.node: ">=20.6"`. S19 pinned both CI legs to 22.11.0
+because `node --test "dist/**/*.test.js"` does not resolve an explicit glob argument on 20.18.1, on
+either platform (`657bb91`) — so `npm test`, the whole of this repository's gate, is known-broken on
+the bottom of the range the package advertised. Nothing in `design/` names a Node floor, so this is
+a claim the tree made about itself rather than doc-versus-tree drift, and S19 is what falsified it.
+Chosen: raise the floor to `>=22.11.0`, the only version anything has been proven against on either
+platform. D64's objection was to a two-platform claim gated by nothing, and a runtime range is the
+same species of claim — three majors wide, one of them proven, the bottom one failing the gate. The
+cost is nothing real: this is a self-hosted console whose operators install the runtime beside it,
+and no consumer resolves this package.
+Rejected: keeping the range and fixing the invocation instead — passing directories to `node --test`
+rather than a glob, so the suite runs on 20.x again. It preserves the wider claim honestly and is a
+small change, and it was not chosen because the claim would still be gated by nothing: a second
+runtime is only proven by a second matrix dimension, which S19 put out of scope by name and nobody
+has asked for. A range nothing exercises is what this entry exists to stop declaring.
+Rejected: recording it and changing neither. It leaves an `engines` floor that fails this
+repository's own gate, found by whoever first trusts it.
+Reversibility: cheap. One line, and lowering it again is what a Node dimension on the matrix would
+justify.
+
+### 2026-08-18 — D153 `VENDORS` is declared where it lives, and D150's rule stops at one module
+Context: D150 narrowed `20-contract.md § contract` to admit "the enumeration of a closed union
+where a validator must test membership" and had `RATINGS` declared under it. `adapters` exports
+`VENDORS` for the same job — `edge/http-common` tests membership before accepting a `vendor` on a
+request body — and `§ adapters/*` declared it nowhere. Nothing was false: that section never
+claimed to be runtime-free, which is what made `§ contract`'s sentence a defect rather than an
+omission. But `## Public surface` covers every export crossing a module boundary, and this
+crosses one.
+Chosen: declare `VENDORS` in `§ adapters/*`, beside `createAdapter`, with the reason it is not in
+`contract` written down — D126's argument, that the list belongs beside the switch that makes each
+member runnable, so a member nothing can create cannot be added. The two guarantees a caller gets
+are stated: the array holds every member of `Vendor` and no other value, and `createAdapter`
+accepts each one. That second clause is the whole point of the co-location and was previously
+recoverable only by reading the switch.
+This deliberately does **not** extend D150. D150 said each such export is declared "here", meaning
+`§ contract`, and explicitly refused the `VENDORS` analogy — `Rating` has no dispatch to sit beside.
+Treating D150 as a general rule would have moved `VENDORS` into `contract` and reversed D126.
+Rejected: adding `VENDORS` to `§ contract` alongside `RATINGS`, so one section holds every runtime
+enumeration. Tidier to read and it is what a careless reading of D150 licenses; it contradicts D126,
+draws an `edge → contract` arrow in place of the `edge → adapters` one the design deliberately
+drew, and separates the list from the switch that is its only correctness argument.
+Rejected: recording it in `## Open` for a later pass. `## Open` is a staging area, and this is a
+two-paragraph edit in the command that owns it, running now.
+Rejected: leaving it undeclared on the grounds D126 already settled where it lives. D126 settled the
+module, not the public surface; a reader of `20-contract.md` would find `createAdapter` declared and
+its vocabulary not.
+Reversibility: cheap. Prose plus one declared const; nothing persisted and no signature moves.
+
 ## Open
 
 Staging only. Once an item becomes an issue it leaves this list.
@@ -3010,3 +3138,11 @@ Staging only. Once an item becomes an issue it leaves this list.
   The reason none of the three was caught earlier is itself worth carrying into `agent.md`: every
   slice's acceptance criteria were written against the server route, so the "Operator sees" column
   is a promise nothing in the gate set exercises.
+
+- **`session.notice / usage_unavailable` is specified by D146 and emitted nowhere.** The member is
+  absent from `src/contract/index.ts` and the `exec` transport in `src/adapters/codex/index.ts`
+  appends no notice, so a Codex session on the fallback reports a burn of zero that no reader can
+  tell from an idle session — which is the whole thing D146 exists to prevent. Adjudicated in this
+  pass as D149: **the code is the wrong side.** Wants one bug issue for `/fix` to carry, not a
+  slice, and that issue needs a `Done when` naming the *adapter*, because #91's two boxes are both
+  about documents and are both already ticked.

@@ -326,6 +326,13 @@ type TurnStopReason =
 interface TurnEnded {
   readonly turnId: TurnId;
   readonly stopReason: TurnStopReason;
+  // **No producer, retained knowingly** (D151). Every adapter and every synthesised close
+  // emits `null` here, because D75 puts the vendor-normalised, summable figure on the
+  // dedicated `usage` envelope and `PayrollView`'s fold reads only that. A reader that
+  // summed both sources would double-count a turn's burn the moment anything populated
+  // this — the failure I28 exists to prevent. Kept rather than removed: dropping a field
+  // narrows a declared public interface, and the slot is where a vendor-reported turn
+  // total would go if one ever proves worth carrying.
   readonly usage: Usage | null;
 }
 
@@ -760,7 +767,26 @@ Internal helpers are out of scope. Every signature below crosses a module bounda
 
 ### `contract`
 
-Types only. No runtime export.
+Types, plus the enumeration of a closed union where a validator must test membership. Each
+such export is declared below like any other public interface; everything else this module
+exports is a type and leaves nothing behind at runtime (D150).
+
+```ts
+declare const RATINGS: readonly Rating[];
+```
+
+`RATINGS` is the one runtime enumeration of `Rating`'s members, and it lives here rather than
+beside its consumer because the edge validator that tests membership before accepting a
+`Rating` on a review route would otherwise hand-copy the union — a second, independently typed
+list free to drift from the one it validates. It is deliberately not the `VENDORS` arrangement
+(D126): `Vendor`'s list sits in `adapters` beside the `createAdapter` switch that makes each
+member runnable, and `Rating` has no such switch, its members being validated and stored rather
+than dispatched on. Nor may it move to `records`, which is tier two, while the tier-one edge
+needs this vocabulary to parse a body.
+
+A caller may rely on the array holding every member of `Rating` and no other value. It may not
+rely on the order: the tokens read as a scale, but nothing ranks or compares them, and `Rating`
+is display-independent besides (D82).
 
 ### `config`
 
@@ -939,12 +965,26 @@ interface Adapter {
   kill(): Promise<void>;                             // terminate-then-force, on the process tree
 }
 
+declare const VENDORS: readonly Vendor[];
+
 declare function createAdapter(vendor: Vendor, opts: AdapterOptions): Result<Adapter, AdapterError>;
 ```
 
 `policy` is read at session creation and is what the client renders as either "you will be
 asked" or a standing sandbox banner. `sandbox` is the operator's choice and is validated by
 the adapter.
+
+`VENDORS` is the one enumeration of `Vendor`'s members, and it is declared here — not in
+`contract` — because `createAdapter`'s switch immediately below it is what makes each member
+runnable, and a list that is not beside the dispatch it authorises is a list free to gain a
+member nothing can create (D126). `edge/http-common` imports it to validate a `vendor` on a
+request body, which is the one read D10 permits an edge to make of this module: testing
+membership of a closed union is not asking which vendor this is.
+
+A caller may rely on the array holding every member of `Vendor` and no other value, and on no
+member of it reaching `createAdapter`'s `unsupported_vendor` — that second property is what
+keeping the list and the switch in one file buys, and it is not the same as the call
+succeeding, which `unsupported_sandbox` may still refuse. Nothing may rely on the order.
 
 **A vendor adapter may accept one thing beyond `AdapterOptions`, and it is a test seam, not a
 deployment knob** (D91). `createClaudeAdapter` and `createCodexAdapter` each take an optional
