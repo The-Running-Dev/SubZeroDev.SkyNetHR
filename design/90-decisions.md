@@ -3118,11 +3118,3 @@ Staging only. Once an item becomes an issue it leaves this list.
   pass as D149: **the code is the wrong side.** Wants one bug issue for `/fix` to carry, not a
   slice, and that issue needs a `Done when` naming the *adapter*, because #91's two boxes are both
   about documents and are both already ticked.
-
-- **`20-contract.md § contract` says "Types only. No runtime export." and `src/contract/index.ts`
-  exports `RATINGS`.** Adjudicated in this pass as D150: **the contract is the side that changes** —
-  the declared property becomes "types, plus the enumeration of a closed union where a validator
-  must test membership", and each such export is declared in the document like any other public
-  interface. The edit adds a public interface `20-contract.md` does not carry, so it is `/contract`'s
-  at `opus`/`high` and not a reconciliation's. Wants no issue if `/contract` runs next; wants one if
-  it does not.

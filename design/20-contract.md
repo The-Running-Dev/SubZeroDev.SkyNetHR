@@ -767,7 +767,26 @@ Internal helpers are out of scope. Every signature below crosses a module bounda
 
 ### `contract`
 
-Types only. No runtime export.
+Types, plus the enumeration of a closed union where a validator must test membership. Each
+such export is declared below like any other public interface; everything else this module
+exports is a type and leaves nothing behind at runtime (D150).
+
+```ts
+declare const RATINGS: readonly Rating[];
+```
+
+`RATINGS` is the one runtime enumeration of `Rating`'s members, and it lives here rather than
+beside its consumer because the edge validator that tests membership before accepting a
+`Rating` on a review route would otherwise hand-copy the union — a second, independently typed
+list free to drift from the one it validates. It is deliberately not the `VENDORS` arrangement
+(D126): `Vendor`'s list sits in `adapters` beside the `createAdapter` switch that makes each
+member runnable, and `Rating` has no such switch, its members being validated and stored rather
+than dispatched on. Nor may it move to `records`, which is tier two, while the tier-one edge
+needs this vocabulary to parse a body.
+
+A caller may rely on the array holding every member of `Rating` and no other value. It may not
+rely on the order: the tokens read as a scale, but nothing ranks or compares them, and `Rating`
+is display-independent besides (D82).
 
 ### `config`
 
