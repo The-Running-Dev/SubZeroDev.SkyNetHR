@@ -326,6 +326,13 @@ type TurnStopReason =
 interface TurnEnded {
   readonly turnId: TurnId;
   readonly stopReason: TurnStopReason;
+  // **No producer, retained knowingly** (D151). Every adapter and every synthesised close
+  // emits `null` here, because D75 puts the vendor-normalised, summable figure on the
+  // dedicated `usage` envelope and `PayrollView`'s fold reads only that. A reader that
+  // summed both sources would double-count a turn's burn the moment anything populated
+  // this — the failure I28 exists to prevent. Kept rather than removed: dropping a field
+  // narrows a declared public interface, and the slot is where a vendor-reported turn
+  // total would go if one ever proves worth carrying.
   readonly usage: Usage | null;
 }
 

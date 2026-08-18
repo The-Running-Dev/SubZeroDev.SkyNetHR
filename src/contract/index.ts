@@ -249,6 +249,9 @@ export type TurnStopReason =
 export interface TurnEnded {
   readonly turnId: TurnId;
   readonly stopReason: TurnStopReason;
+  // No producer, retained knowingly (D151): every adapter and every synthesised close
+  // emits `null`, because D75 puts the summable figure on the `usage` envelope and the
+  // payroll fold reads only that. Summing both sources double-counts a turn's burn (I28).
   readonly usage: Usage | null;
 }
 

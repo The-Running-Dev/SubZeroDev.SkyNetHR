@@ -3047,6 +3047,32 @@ rejected for the same reason, and here it leaves a grep-checkable sentence — "
 false, which is worse than an unstated one because it invites a reader to trust it.
 Reversibility: cheap. Prose plus one declared const; nothing persisted and no signature moves.
 
+### 2026-08-18 — D151 A declared field with no producer states so, the third size in the same series
+Context: `TurnEnded.usage` is declared `Usage | null` in `20-contract.md § Event payloads` with no
+note. Every emission site passes `null` — both adapters' `result` / `turn.completed` and `close`
+paths, and the manager's three synthesised closes for a storage failure, a boot-closed turn and a
+failed spawn. The only statement that the field is empty by design is a comment inside
+`foldPayroll`, where a reader looking at the contract will never find it.
+D139 set this rule for a union member with no producer and D145 raised it to a declared interface
+method with no caller. A field is the third size and had no ruling, which is why this one sat
+unannotated through both passes.
+Chosen: annotate, in `20-contract.md` and `src/contract/index.ts` alike, in the shape the two prior
+entries set. D75 put the vendor-normalised, summable figure on the dedicated `usage` envelope and
+`PayrollView`'s fold reads only that, so the code is right and what was missing was any statement
+of it. The annotation names the hazard rather than only the absence: a reader that summed both
+sources would double-count a turn's burn on the one screen headed *payroll*, which is the failure
+I28 exists to prevent. **The standing rule this extends, and completes: a declared field with no
+producer states so in its own comment, or the field goes** — the same sentence D139 wrote for a
+member and D145 for a method.
+Rejected: removing the field. Cleanest to read, and it makes the double-count impossible rather
+than documented. It narrows a declared public interface, which is `/contract`'s and not a
+reconciliation's — the boundary D145 declined to cross for `isUnderPip` and D150 declined again for
+`RATINGS` — and it forfeits the slot a vendor-reported turn total would occupy if one ever proves
+worth carrying.
+Rejected: recording it and changing neither. It leaves the hazard reachable by anyone reading the
+declaration rather than the fold, and this is the third pass in which the field went unnoticed.
+Reversibility: cheap. Comments only, in two files that change together.
+
 ## Open
 
 Staging only. Once an item becomes an issue it leaves this list.
