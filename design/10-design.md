@@ -722,10 +722,11 @@ per-operator budget needs the operator record D3 refuses.
   fold.** That transport's usage basis is undetermined, I28 forbids guessing, and the
   adapter therefore emits no `usage` events at all (`20-contract.md § Usage`,
   `## Unresolved` 12). The fold sums what it is given and is given nothing. Whether a
-  session that reports no burn should *say* so is undecided: it needs a `SessionNoticeCode`
-  that does not exist, and the design's *fail loudly, never degrade quietly* rule argues for
-  adding one. Until then this screen shows a zero it cannot distinguish from an idle
-  session, which is the one number on it that must not be silently wrong.
+  session that reports no burn should *say* so **is decided** (D146): such an adapter emits
+  `session.notice / usage_unavailable` once at session start, which is what tells an
+  unmeasured zero from a real one. What stays open is the consumer, not the signal — this
+  screen still shows a zero it cannot distinguish from an idle session, because `PayrollView`
+  carries no field separating unknown from zero and nothing may infer one by testing `burn`.
 - **Idle** is wall-clock time the session was `live` with no turn: the gaps between
   `turn.ended` and the next `turn.started`, plus creation-to-first-turn and last-turn-to-end.
 - **Idle excludes any interval containing a restart, and boot writes the marker that makes
@@ -742,10 +743,14 @@ per-operator budget needs the operator record D3 refuses.
   zero dropped intervals because the outage fell inside a turn and was never idle: that is
   "either the turn or the idle gap after it" cut in favour of the turn.
 
-A live session's burn is also tracked as a running counter in `emit`, which sees every
-envelope exactly once and is therefore exact and free. A rehydrated session has no counter
-and is folded from the spill. The two must agree; if they ever do not, the spill is right,
-for the same reason it is right about `lastSeq`.
+**There is one read path and no running counter, and that is the point** (D147). A live
+session and a rehydrated one are folded from the spill identically. This section previously
+specified a counter maintained in `emit` for the live case, on the argument that it sees every
+envelope exactly once and is therefore exact and free; the argument is true and the shape is
+wrong, because two sources for one number is a pair that must agree, and a reconciliation rule
+nothing enforces is not a guarantee. The fold is O(spill) per read and that is the cost
+accepted — the same read the audit route's own bound already accepts, and open question 11's
+index is what pays it down if it ever bites.
 
 **Incidents — item 11.** A filtered, bounded read of `audit.ndjson`: denials, decisions the
 server forced rather than an operator (a failed audit append, a `cancelled_process_exit`),
@@ -1775,12 +1780,20 @@ Three properties it must have:
    not currently have, listed under *Open questions*.
 2. **It terminates on Windows.** A child there does not receive `SIGINT` the way the Unix
    path assumes, and `child.kill('SIGINT')` on Windows terminates rather than signals. The
-   sequence is therefore terminate-then-force with a grace period, on a process **tree**,
-   because an agent CLI's own children — a compiler, a test runner — are what hold the
-   workspace open and are exactly what makes D16's Windows guarantee matter. The mechanism
-   is the platform's own — `taskkill /T /F`, or `process.kill(-pgid)` against a group
-   established by `detached: true` — and **boot reaping uses the same one** (D38), which it
-   previously did not: it killed the recorded pid and left the tree behind.
+   kill therefore runs on a process **tree** rather than a process, because an agent CLI's own
+   children — a compiler, a test runner — are what hold the workspace open and are exactly what
+   makes D16's Windows guarantee matter. The mechanism is the platform's own — `taskkill /T /F`,
+   or `process.kill(-pgid)` against a group established by `detached: true` — and **boot reaping
+   uses the same one** (D38), which it previously did not: it killed the recorded pid and left
+   the tree behind.
+
+   **Terminate-then-force with a grace period is the POSIX half only, and this said "the
+   sequence" as though it were both** (D148). On POSIX the two phases are real and distinct —
+   `SIGTERM` to the group, then `SIGKILL` after the grace period, for a tree that ignores the
+   first. Windows has no signal to be graceful with, which is the concession the paragraph
+   above already makes about `SIGINT`, so `taskkill /T /F` is one step and the grace period has
+   nothing to elapse over. Splitting it into `/T` then `/T /F` would buy a phase this design
+   has never named a reason to want.
 3. **Pending permissions resolve.** Every outstanding `permission.request` gets a
    `permission.resolved` carrying `cancelled_process_exit`, the same as an unexpected death,
    so no client waits forever on a prompt whose child is gone.
@@ -2493,8 +2506,9 @@ these are cited by number elsewhere in this document and in the slices.
     a running total and fits each call resending a growing context equally well. I28 forbids
     guessing, because a cumulative figure summed as a delta double-counts burn on the one
     screen headed *payroll*, so that transport emits no `usage` at all and its payroll view
-    reads zero (*Derived views*). Two questions ride on the answer and neither is settled:
-    whether a session reporting no burn says so — which needs a `SessionNoticeCode` this design
-    does not have — and whether `reasoning_output_tokens` counts toward `Usage.outputTokens`.
+    reads zero (*Derived views*). Two questions rode on the answer and one is now settled
+    independently of it: a session reporting no burn **does** say so, by
+    `session.notice / usage_unavailable` (D146), and only whether `reasoning_output_tokens`
+    counts toward `Usage.outputTokens` still waits on the basis.
     Carried as `20-contract.md § Unresolved` 12. So brief item 8's "token burn to date" is
     demonstrable for Claude and for Codex on `app-server`, and unavailable on the fallback.
