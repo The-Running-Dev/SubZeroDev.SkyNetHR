@@ -301,7 +301,11 @@ type SessionNoticeCode =
                               // member narrows a declared union and buys nothing
   | 'audit_unavailable'        // a permission was denied because the audit append failed
   | 'storage_failure'          // a spill write failed; the session is ending
-  | 'server_restart';          // boot found this session live at shutdown (D130)
+  | 'server_restart'           // boot found this session live at shutdown (D130)
+  | 'usage_unavailable';       // this session's transport reports no token usage, so its burn
+                              // is unknown rather than zero (D146). Emitted once, at session
+                              // start, by whichever adapter selects a transport that cannot
+                              // report usage — today only `codex exec --json`
 
 interface SessionNotice {
   readonly level: 'info' | 'warn' | 'error';
@@ -1808,8 +1812,25 @@ one thread — `input_tokens` 46276 → 93393, `cached_input_tokens` 33280 → 6
 consistent with a running total and equally consistent with each call resending a growing context.
 S8.1 did not settle which, and I28 forbids guessing: a cumulative figure summed as a delta
 double-counts burn on the one screen headed *payroll*. A session on this transport therefore emits
-no `usage` events, and whether that silence is itself surfaced — which would need a
-`SessionNoticeCode` this contract does not add — is `## Unresolved` 12.
+no `usage` events.
+
+**That silence is surfaced, and surfacing it is not optional** (D146). An adapter selecting a
+transport that cannot report usage appends `session.notice / usage_unavailable` at `level: 'warn'`
+**once, at session start, before the first `turn.started`** — not per turn, which would say the
+same thing repeatedly and bury it. The notice is the discriminator between a burn of zero because
+the session was idle and a burn of zero because nothing was ever counted, and without it
+`PayrollView.burn` reports the two identically. This is *fail loudly, never degrade quietly*
+applied to the one screen where a silent zero reads as good news.
+
+A notice envelope is the right carrier here, and the `sandbox` member above is not the precedent
+against it: `sandbox` needed to be visible to a client joining at an arbitrary point, which an
+envelope cannot promise and a session field can, whereas `PayrollView` is a fold that walks the
+spill from the beginning (*Types § Payroll view*). `session.notice / server_restart` is already
+folded that way (D130), so this consumes an existing path rather than adding one.
+
+**What the fold does with it is not settled here.** `PayrollView` has no field distinguishing
+unknown from zero, and giving it one is a second public-surface change; `## Unresolved` 12 carries
+it.
 
 ### Item ids, and where the fallback breaks correlation
 
@@ -1934,11 +1955,22 @@ belong to the `exec --json` fallback alone; neither affects a session on `app-se
     roughly doubling across two resumed turns of one thread, which fits a running total and fits a
     growing resent context equally well. I28 requires the adapter to emit something summable, and
     guessing wrong double-counts burn in `PayrollView`. Until a probe distinguishes the two, that
-    transport emits no `usage`. A second question rides on the answer and is not settled either:
-    whether a session that reports no burn says so — which needs a `SessionNoticeCode` that does
-    not exist, and which the design's *fail loudly, never degrade quietly* rule argues for — or
-    whether the fallback should not ship until the basis is known. Related: 8, and whether
-    `reasoning_output_tokens` counts toward `Usage.outputTokens` at all. (#29, #30)
+    transport emits no `usage`. Related: 8, and whether `reasoning_output_tokens` counts toward
+    `Usage.outputTokens` at all. (#29, #30)
+
+    **The rider is resolved by D146 and no longer waits on the basis.** Whether a session that
+    reports no burn says so is answered yes: `SessionNoticeCode` gains `usage_unavailable`,
+    emitted once at session start by an adapter on a transport that cannot report usage, per
+    *Vendor mapping — Codex § Usage*. Deferring it until the basis was known was rejected — the
+    two questions are independent, and the silence misreads as a zero for however long the basis
+    stays open. Shipping the fallback is therefore not gated on this either. (#91)
+
+    **What remains open is the consumer, not the signal.** `PayrollView.burn` is a `Usage` whose
+    all-zero value now has two meanings, and the view carries nothing to separate them. Making
+    `burn` nullable is the honest shape and forces every reader to handle the unknown, where a
+    boolean beside it can be ignored silently — but it is a second public-surface change to a
+    materialised type, it makes `remainingTokens` null by consequence, and it was not decided
+    here. Nothing may infer the distinction by testing `burn` for zero. (#30, #91)
 13. **Tool correlation on `codex exec --json`, whose item ids collide across turns.** Its ids are
     a per-turn counter that restarts each turn of a thread, so `CallId` is not session-unique on
     that transport — measured, not assumed. S8.7 stops before implementing correlation here and
