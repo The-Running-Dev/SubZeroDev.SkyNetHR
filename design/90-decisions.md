@@ -2917,8 +2917,3 @@ Reversibility: cheap. Comments only.
 ## Open
 
 Staging only. Once an item becomes an issue it leaves this list.
-
-- **`edge/ws` serves none of the eight requisition and review routes** (D144). Wire the arms from
-  `edge/sse` into `src/edge/ws/index.ts` — every handler is already in `edge/http-common` and
-  already reachable — and add a parity test that enumerates `## HTTP routes` for both edges rather
-  than asserting parity in prose.
