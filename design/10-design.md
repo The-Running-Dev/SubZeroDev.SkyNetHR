@@ -1661,10 +1661,14 @@ compiles into two behaviours:
 | Checkpoint restore | An open handle blocks the write — which is why D16's per-turn child matters here and not on Linux | No equivalent block | *Concurrency § Process lifetime* |
 | Host boot time, for the pid reuse guard | Different source | Different source | *Data model § Process record* |
 
-**Nothing on this list is verified on both platforms today.** The pair is a requirement of the
-brief and the design carries code paths for both, which is exactly the state D64 objects to:
-a two-platform claim gated by nothing. Building the gate is tier-one work and no slice covers
-it — tracked as issue #28.
+**The gate exists and it does not cover this whole list.** The pair is a requirement of the
+brief and the design carries code paths for both; D64's objection was to a two-platform claim
+gated by nothing, and S19 answered it — `.github/workflows/verify.yml` runs the suite on
+`ubuntu-latest` and `windows-latest` from one matrix, `fail-fast: false`. What that proves is
+the four criteria S19 was sliced for, S1.6, S5.2, S7.5 and S7.6, and whatever else the suite
+happens to assert on both legs. The remaining rows here are surfaces with code paths for both
+platforms and no criterion naming them, which is a narrower gap than the one this paragraph
+used to describe and is not the same as being ungated.
 
 ### Server lifecycle
 

@@ -2994,6 +2994,32 @@ Rejected: recording the divergence and changing neither side. `§ Concurrency` w
 that is false on the primary host.
 Reversibility: cheap. Prose, plus this entry.
 
+### 2026-08-18 — D149 D146's notice is specified and unbuilt: the code is the wrong side, and the gap is staged
+Context: D146 added `usage_unavailable` to `SessionNoticeCode` and `20-contract.md § Vendor mapping
+— Codex § Usage` states when it fires — once, at session start, before the first `turn.started`, by
+an adapter on a transport that cannot report usage. `src/contract/index.ts` has no such member and
+the `exec` transport in `src/adapters/codex/index.ts` emits no notice, so a session on the fallback
+still reports a burn of zero indistinguishable from an idle one. That is the exact failure D146 was
+written to close, and it is closed in two documents and nowhere else.
+The gap was untracked. #91 carries this item and both its `Done when` boxes are about documents —
+the contract gaining the member, and the design stating when it is emitted — which D146 satisfied.
+Nothing on that issue says the adapter emits it, so the issue reads one tick from done for
+behaviour that does not exist.
+Chosen: the code changes. The member is added to `src/contract/index.ts` and the Codex adapter
+appends the notice on the `exec` path. Staged in `## Open` rather than edited here: this is
+implementation against a settled contract, which is `/fix`'s tier, and a reconciliation that
+absorbed it would be doing implementation work at deep-reasoning tier — the same boundary D143
+observed when it staged its three rather than fixing them.
+Rejected: withdrawing D146 so the documents match the tree. It costs the whole of that entry's
+argument, decided two commits ago on evidence nothing has since contradicted, and
+`AGENTS.md § Budget discipline` forbids relitigating a recorded decision without new evidence.
+There is none — only an absence.
+Rejected: recording the divergence and changing neither side. The alternative D142, D144 and D148
+each rejected for the same reason: the next pass rediscovers it, and here it costs more than
+rediscovery, because #91 would close green over a behaviour that was never built.
+Reversibility: cheap. A union member with no producer is the case D139 already ruled on, so a
+withdrawal is an annotation rather than a removal.
+
 ## Open
 
 Staging only. Once an item becomes an issue it leaves this list.
@@ -3010,3 +3036,11 @@ Staging only. Once an item becomes an issue it leaves this list.
   The reason none of the three was caught earlier is itself worth carrying into `agent.md`: every
   slice's acceptance criteria were written against the server route, so the "Operator sees" column
   is a promise nothing in the gate set exercises.
+
+- **`session.notice / usage_unavailable` is specified by D146 and emitted nowhere.** The member is
+  absent from `src/contract/index.ts` and the `exec` transport in `src/adapters/codex/index.ts`
+  appends no notice, so a Codex session on the fallback reports a burn of zero that no reader can
+  tell from an idle session — which is the whole thing D146 exists to prevent. Adjudicated in this
+  pass as D149: **the code is the wrong side.** Wants one bug issue for `/fix` to carry, not a
+  slice, and that issue needs a `Done when` naming the *adapter*, because #91's two boxes are both
+  about documents and are both already ticked.
