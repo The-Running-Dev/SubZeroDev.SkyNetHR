@@ -2862,21 +2862,3 @@ signature.
 ## Open
 
 Staging only. Once an item becomes an issue it leaves this list.
-
-- **`error / agent_unavailable` is promised by both documents and emitted nowhere** (D143). In
-  `session-manager.message`, emit `error { kind: 'agent_unavailable', fatal: true }` before the
-  paired `turn.ended` when the cause is `AdapterError.agent_unavailable`, so a subscriber watching
-  the stream learns why the turn failed. Local to `session-manager`.
-- **The four server-wide append-only files need one append stream each** (D143). Hold one
-  `FileHandle` and one promise chain per file in `store`, mirroring `emit`'s per-session chain;
-  `appendAudit` and `appendReview` keep their fsync on the shared handle. Roughly thirty lines in
-  `src/store/index.ts`.
-- **A slow live subscriber is never dropped and never gapped** (D143). In the edges, check
-  `res.write`'s return value, count envelopes queued while un-drained, and past
-  `caps.subscriberQueueHighWater` drop the subscriber with the same `gapEnvelope` shape
-  `session-manager.subscribe` already mints. Touches `edge/sse` and `edge/ws`, so the handling
-  belongs in `edge/http-common` to keep the two transports answering identically.
-- **Codex transport detection should be probed once per process and cached** (D141). Today
-  `detectTransport` runs up to two 2-second `spawnSync` probes inside every `manager.create`,
-  stalling the single-threaded server for every other operator. Caching keeps `createAdapter`
-  synchronous, which is what rules out making the probe async.
