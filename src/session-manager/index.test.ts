@@ -1224,7 +1224,13 @@ test('S5.1/S5.3/S5.4 — interrupt resolves an outstanding permission cancelled_
   if (!messaged.ok) return;
   const { turnId } = messaged.value;
 
-  await waitUntil(() => received.some((e) => e.kind === 'permission.request'));
+  // `session.started` and `permission.request` reach `emit` off two independent async
+  // chains (the former behind its own `await store.writeMeta`, D-cli-session-order),
+  // so under load the first can still be in flight once the second has already
+  // arrived. Waiting on both before taking the `before` snapshot below is what keeps
+  // that unrelated, still-settling envelope from being miscounted as something the
+  // stale interrupt produced.
+  await waitUntil(() => received.some((e) => e.kind === 'permission.request') && received.some((e) => e.kind === 'session.started'));
 
   // S5.3: a turnId that does not name the live turn is also a no-op and emits nothing.
   const before = received.length;
