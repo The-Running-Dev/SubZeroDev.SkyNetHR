@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { appendFileSync, readFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, readFileSync, writeFileSync, writeSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 // A deterministic stand-in for the real `claude` binary, used because
 // `--permission-prompt-tool stdio` does not emit `control_request` on the real CLI
@@ -38,7 +38,16 @@ const scenario = process.env.SKYNET_TEST_SCENARIO ?? 'full';
 const sessionId = 'fake-cli-session-' + Math.random().toString(36).slice(2);
 
 function line(obj) {
-  process.stdout.write(JSON.stringify(obj) + '\n');
+  // Node's stdio-to-pipe writes are dispatched via overlapped (asynchronous) I/O on
+  // Windows even for a few hundred bytes, unlike a POSIX pipe write below PIPE_BUF,
+  // which normally completes synchronously at the syscall. A scenario that calls
+  // process.exit() right after several of these writes (die-with-pending, no-init,
+  // no-result) can tear the process down before Windows has flushed the later ones,
+  // silently truncating what the parent adapter reads — S17.3's "1 !== 2" on
+  // windows-latest CI (#130) was exactly this: the second control_request lost. A
+  // synchronous write blocks until the OS pipe buffer has the bytes, which is a
+  // kernel-level guarantee that survives the writer exiting.
+  writeSync(1, JSON.stringify(obj) + '\n');
 }
 
 function toolResultFor(behavior, callId) {
