@@ -1300,7 +1300,7 @@ operator, because that would need a container per session and is explicitly out 
 | **A malicious page in an operator's browser** | Yes | Origin allow-list on every mutating route and the WS handshake (D29). **Not** the bind check, and **not** the auth check |
 | A curious operator starting a session outside their workspace | Yes | Path jail, resolved after symlinks — see below for what this does *not* cover |
 | An agent reaching outside the workspace once running | Partly | Permission prompt (Claude) or vendor sandbox (Codex). **Not the jail** |
-| An operator reading another's session | Yes | Ownership check on every session route |
+| An operator reading another's session | Yes, **except under `shared-secret`** | Ownership check on every session route — see *One auth mode has one operator* |
 | **An operator reading another's audit records, reviews or requisitions** | **No — deliberately** | None, and the absence is the design. See *The record logs are not private* |
 | **An operator writing a review about another's session** | **No — deliberately** | None. `author` is recorded; a review is an attributable claim, not a privileged one |
 | **Operator-authored text reaching another operator's browser** | Yes | The no-`innerHTML` rule, widened past agent-derived content to cover everything stored (D74) |
@@ -1347,6 +1347,25 @@ is a prompt, **the prompt must show what is actually being run**, not a summary 
 the audit log must record the exact input that was approved. Where the control is a sandbox,
 the operator must be told which one, which is what D5's standing banner is for.
 
+**One auth mode has one operator, and every control keyed on identity loosens accordingly.** A
+shared secret authenticates *the deployment*, not a person: everyone who holds it presents the same
+credential, and there is nothing in it to tell two holders apart. D3 refuses the operator record
+that would fix that, so under `auth.mode === 'shared-secret'` the identity edge resolves every
+caller to one `OperatorId` and four things above follow from it. `GET /api/sessions` returns every
+session rather than the caller's. The ownership check on every session route passes for anyone with
+the cookie, so `404 no_such_session` stops being access control. `AuditRecord.operator` is the same
+string on every line, so the log answers "what was approved" but not "by whom" — which is most of
+what makes it the artifact this section leans on. And D70's one carve-out collapses: a `draft`
+review is its author's alone, and under this mode every reader *is* the author.
+
+This is the honest reading of "a shared secret in a cookie, for a bare LAN box", not a defect in
+the identity module — but it means brief DoD #1's "see only their own sessions" is met under the
+two header modes and not under this one. **The mode is for a deployment with one operator.** A
+deployment with several who need to be told apart runs a proxy in front, which is what the primary
+mode is. Nothing here is enforced: the server does not refuse to start under `shared-secret`, and
+the threat model already concedes that a determined operator has shell access as the server's user,
+so a refusal would be an enforcement claim with nothing behind it.
+
 **The record logs are not private, and that is a decision** (D70). Every authenticated
 operator can read the whole audit log, every requisition, and every **final** review —
 including reviews about sessions they do not own and reviews they did not write. Three
@@ -1391,9 +1410,18 @@ believe the agent is confined, and that belief is the one that gets someone hurt
 ## Security controls
 
 **Auth by delegation.** Primary mode trusts an identity header set by a reverse proxy
-(Authelia, Authentik, oauth2-proxy, Cloudflare Access). A third mode consumes Open WebUI's
-proxy contract — `X-User-Id`, `X-Session-Id`, bearer upstream auth (D11). Fallback mode is
-a shared secret in a cookie, for a bare LAN box. We do not store credentials, hash
+(Authelia, Authentik, oauth2-proxy, Cloudflare Access). A third mode is registered against Open
+WebUI's proxy contract (D11). Fallback mode is a shared secret in a cookie, for a bare LAN box.
+
+**Of D11's three-part contract this server consumes one part, and the other two are named here so
+the silence is not read as an oversight.** `X-User-Id` resolves the `OperatorId`. `X-Session-Id`
+is declared on the mode as `sessionHeader` and read by nothing: Open WebUI's own comment calls it
+per-session cwd tracking, which is a thing that deployment does and this console has no use for —
+the field is kept so a deployment's configuration stays portable if that changes. Bearer upstream
+auth is the proxy's credential for reaching us, and what constrains who may set an identity header
+here is `trustProxy` plus the loopback-by-default bind below, not a token this server validates.
+The mode is therefore `proxy-header` plus a declared-and-unread field, and that is the whole of
+it today. We do not store credentials, hash
 passwords, or implement reset flows — for a handful of trusted operators that is code with
 a real vulnerability surface and no corresponding benefit. See `90-decisions.md` D3.
 
@@ -1719,9 +1747,14 @@ if the operator has something to act with, so interrupt is a first-class path ra
 convenience, and its semantics are stated here rather than left to the adapter (D24).
 
 **Interrupt is the manager killing the turn's child.** The adapter exposes `kill` as
-mechanism; everything about what it *means* — which events fire, what state is left, whether
-it counts as a failure — belongs to the manager, for the same reason D17 moved turn state
-there. `POST /interrupt` on a session with no live turn is `{ok: true}` and emits nothing;
+mechanism; the manager decides *that* an interrupt happens, owns the state it leaves, and owns
+whether the session stays live — for the same reason D17 moved turn state there. **One thing is
+the adapter's, and it has to be**: naming the stop reason. Only the `close` handler knows whether
+the process stopped under a kill or on its own, and a manager inferring it from "I called `kill`"
+would report a turn that crashed in the same instant as an expected interruption — the exact
+misattribution property 1 below exists to prevent. So the adapter carries a per-turn
+`killRequested` flag and emits `turn.ended` with `interrupted` or `process_exit` accordingly; what
+that end *means* is still the manager's. `POST /interrupt` on a session with no live turn is `{ok: true}` and emits nothing;
 an interrupt is a statement about a desired end state, not a command that can arrive too
 late.
 
