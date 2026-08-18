@@ -2914,6 +2914,39 @@ Rejected: serving PIP from the server so `isUnderPip` gains a caller. It removes
 outright and contradicts D72 and D79 to do it; reopening either is `/design`'s.
 Reversibility: cheap. Comments only.
 
+### 2026-08-18 — D146 A transport that cannot report usage says so, once, and the payroll fold reads it
+Context: `codex exec --json` emits no `usage` events, because S8.1 could not settle whether its
+`turn.completed.usage` is a running total or a growing resent context, and I28 forbids guessing
+(`20-contract.md § Vendor mapping — Codex § Usage`). The consequence is that `PayrollView.burn`
+sums to zero on that transport — **indistinguishable from a session that genuinely burned
+nothing**, on the one screen headed *payroll*, where a zero reads as good news rather than as an
+absence of measurement. `20-contract.md § Unresolved` 12 carried this as a rider on the basis
+question, needing a `SessionNoticeCode` that did not exist. #91 asked for it at this command's
+tier.
+Chosen: add `usage_unavailable` to `SessionNoticeCode`, `level: 'warn'`, appended **once at
+session start, before the first `turn.started`**, by whichever adapter selects a transport that
+cannot report usage — today only `codex exec --json`, but the member is written against the
+capability rather than against the vendor, so a second such transport needs no second code. The
+notice is the discriminator between an unmeasured zero and a real one.
+A notice envelope rather than a session field, which is the shape `'sandbox'` was superseded *for*:
+that member lost to `PermissionPolicy.banner` because a client joining at an arbitrary point must
+still see a standing sandbox banner, and an envelope cannot promise that. The consumer here is
+`PayrollView`, a fold that walks the spill from the beginning (D75, D76), and `session.notice /
+server_restart` is already folded exactly that way (D130) — so this reuses an existing path
+instead of adding a session field for a reader that does not need one.
+Rejected: deferring until the usage basis is known, and gating the fallback's shipping on it. The
+two questions are independent — one asks what the number means, the other asks what to say while
+nobody knows — and the silence misreads as a zero for however long the basis stays open, which is
+precisely the interval the notice exists to cover.
+Rejected: emitting it per turn. Same statement repeated, and a standing condition rendered as
+recurring noise buries it rather than surfacing it.
+Rejected: deciding `PayrollView`'s discriminator in the same pass. Making `burn` nullable is the
+honest shape and forces every reader to handle the unknown where a boolean beside it can be
+ignored — but it is a second public-surface change to a materialised type and makes
+`remainingTokens` null by consequence. It is left in `## Unresolved` 12 for its own sign-off.
+Reversibility: cheap in the contract, and additive in the tree — a union member with no producer
+is the case D139 already ruled on. Expensive only if a `PayrollView` shape is built on it first.
+
 ## Open
 
 Staging only. Once an item becomes an issue it leaves this list.
