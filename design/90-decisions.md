@@ -3073,6 +3073,27 @@ Rejected: recording it and changing neither. It leaves the hazard reachable by a
 declaration rather than the fold, and this is the third pass in which the field went unnoticed.
 Reversibility: cheap. Comments only, in two files that change together.
 
+### 2026-08-18 — D152 The supported Node floor is the one the gate runs
+Context: `package.json` declared `engines.node: ">=20.6"`. S19 pinned both CI legs to 22.11.0
+because `node --test "dist/**/*.test.js"` does not resolve an explicit glob argument on 20.18.1, on
+either platform (`657bb91`) — so `npm test`, the whole of this repository's gate, is known-broken on
+the bottom of the range the package advertised. Nothing in `design/` names a Node floor, so this is
+a claim the tree made about itself rather than doc-versus-tree drift, and S19 is what falsified it.
+Chosen: raise the floor to `>=22.11.0`, the only version anything has been proven against on either
+platform. D64's objection was to a two-platform claim gated by nothing, and a runtime range is the
+same species of claim — three majors wide, one of them proven, the bottom one failing the gate. The
+cost is nothing real: this is a self-hosted console whose operators install the runtime beside it,
+and no consumer resolves this package.
+Rejected: keeping the range and fixing the invocation instead — passing directories to `node --test`
+rather than a glob, so the suite runs on 20.x again. It preserves the wider claim honestly and is a
+small change, and it was not chosen because the claim would still be gated by nothing: a second
+runtime is only proven by a second matrix dimension, which S19 put out of scope by name and nobody
+has asked for. A range nothing exercises is what this entry exists to stop declaring.
+Rejected: recording it and changing neither. It leaves an `engines` floor that fails this
+repository's own gate, found by whoever first trusts it.
+Reversibility: cheap. One line, and lowering it again is what a Node dimension on the matrix would
+justify.
+
 ## Open
 
 Staging only. Once an item becomes an issue it leaves this list.
