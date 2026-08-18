@@ -2947,6 +2947,66 @@ ignored — but it is a second public-surface change to a materialised type and 
 Reversibility: cheap in the contract, and additive in the tree — a union member with no producer
 is the case D139 already ruled on. Expensive only if a `PayrollView` shape is built on it first.
 
+### 2026-08-18 — D147 Payroll has one read path; the running burn counter is dropped
+Context: `10-design.md § Derived views` said a live session's burn "is also tracked as a running
+counter in `emit`", that a rehydrated session is folded from the spill instead, and that "the two
+must agree; if they ever do not, the spill is right." No counter was ever built. `foldPayroll`
+(`src/session-manager/index.ts`) walks the spill for every read, live and rehydrated alike, and
+S16.5's own comment says that is deliberate. So the design specified a second source of truth, and
+a reconciliation rule between the two, for a pair that does not exist — the document described a
+mechanism the tree does not have, which is exactly what makes a reconciliation generative rather
+than a check.
+Chosen: the document changes. One read path, folded from the spill, for every session in every
+state. The counter's argument — `emit` sees every envelope exactly once, so the count is exact and
+free — is true, and it is not the question. Two sources for one number is a pair that must agree,
+and **an agreement rule nothing enforces is not a guarantee, it is a sentence.** The same shape was
+already refused twice for the same reason: D37 derives `lastSeq` from the spill rather than keeping
+`meta.json` current, and D72 derives PIP rather than storing a flag. The cost is O(spill) per
+payroll read, stated in `§ Derived views` rather than hidden, and open question 11's offset index
+is what pays it down if the volume ever justifies one.
+Rejected: building the counter to match the document. It buys a cheaper live read and costs the
+one property the fold currently has for free — that a live read and a post-restart read cannot
+disagree, because they are the same code over the same bytes. It would also need the cross-check
+the old wording asserted and nothing implemented, which is a third thing to get wrong.
+Rejected: keeping the paragraph and softening it to an option not taken. `§ Derived views` would
+then still carry a mechanism absent from the tree, and the next reconciliation finds it again.
+Reversibility: cheap. Adding a counter later is additive, and this entry is what a future pass
+reads before re-arguing it.
+
+### 2026-08-18 — D148 The interrupt grace period is the POSIX half, not both platforms
+Context: `10-design.md § Concurrency § Interrupt` property 2 read "The sequence is therefore
+terminate-then-force with a grace period, on a process **tree**", as one sequence for both
+platforms. The tree does that only on POSIX — `SIGTERM` to the group, then `SIGKILL` after the
+grace period (`src/adapters/claude/index.ts`). On Windows the adapter issues `taskkill /T /F` in a
+single step with no grace period at all, and the reasoning for that lived in a code comment and in
+neither document.
+Chosen: the document changes. Windows has no signal to be graceful with — the concession the same
+paragraph already makes about `child.kill('SIGINT')` terminating rather than signalling — so there
+is nothing for a grace period to elapse over, and `/F` is both phases collapsed by the platform
+rather than a phase skipped by this code. What is genuinely cross-platform is the *tree*, and the
+amended wording says that instead.
+Rejected: adding a `taskkill /T` phase before the forced one so the code matches the sentence. It
+would give a child tree a window to close its own handles, which is not nothing on the platform
+where an open handle blocks a checkpoint restore — but D16's per-turn child already makes that a
+non-issue by construction (no turn, no child, no handle), and the design has never named an
+observed failure the window would fix. A kill phase with no stated purpose is one nobody exercises.
+Rejected: recording the divergence and changing neither side. `§ Concurrency` would keep a sentence
+that is false on the primary host.
+Reversibility: cheap. Prose, plus this entry.
+
 ## Open
 
 Staging only. Once an item becomes an issue it leaves this list.
+
+- **Three operator controls `10-design.md § Failure modes` promises are absent from the client,
+  and the routes they need are all built.** `POST /api/sessions/:id/interrupt` is referenced
+  nowhere in `client/`; there is no elapsed-since-last-envelope indicator, which is the detection
+  the *Child hangs with no output* row names and the control D21 traded every server-side timer
+  for; and `POST /api/sessions/:id/end` is unreachable, so the console's only session exit is the
+  `DELETE` behind "Terminate", which destroys the transcript, the checkpoints and the blobs —
+  the pair D36 exists to separate. Adjudicated in this pass: **the code is the wrong side in all
+  three**, and the fix is `client/app.js` and `client/index.html` only, since every route, its
+  refusals and its tests landed with S5. Wants one bug issue for `/fix` to carry, not a slice.
+  The reason none of the three was caught earlier is itself worth carrying into `agent.md`: every
+  slice's acceptance criteria were written against the server route, so the "Operator sees" column
+  is a promise nothing in the gate set exercises.
