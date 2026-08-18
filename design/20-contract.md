@@ -999,6 +999,10 @@ interface Records {
   // Requisitions
   raise(raisedBy: OperatorId, input: RaiseRequisitionInput): Promise<Result<Requisition, RecordsError>>;
   listRequisitions(): readonly Requisition[];                 // every authenticated operator (D70)
+  // No caller today: every read path the client has goes through `listRequisitions`.
+  // Reserved for a single-requisition read, and retained rather than removed because a
+  // decision route that wants to report the current state without listing all of them is
+  // the obvious next caller (D145).
   getRequisition(requisitionId: RequisitionId): Result<Requisition, RecordsError>;
   decide(requisitionId: RequisitionId, decidedBy: OperatorId, decision: RequisitionDecision): Promise<Result<Requisition, RecordsError>>;
 
@@ -1014,7 +1018,13 @@ interface Records {
   finaliseReview(reviewId: ReviewId, author: OperatorId): Promise<Result<Review, RecordsError>>;
   getReview(reviewId: ReviewId, reader: OperatorId): Result<Review, RecordsError>;   // a draft resolves for its author only
   listReviews(subject: SessionId): readonly Review[];         // finals only, every operator (D70)
-  isUnderPip(subject: SessionId): boolean;                    // the D72 fold; drafts excluded
+  // The D72 fold; drafts excluded. **No caller above `records` today, and that is the
+  // shape D72 forces rather than an omission**: PIP is derived and never served as a
+  // session field, so the fold has to run wherever the finals already are — which for the
+  // badge is the client, over `GET /api/reviews?subject=`. This is the server-side
+  // statement of I35, kept so the invariant can be asserted against an implementation in
+  // the module that owns it instead of only against browser code (D145).
+  isUnderPip(subject: SessionId): boolean;
 }
 
 declare function createRecords(deps: {

@@ -111,6 +111,9 @@ export function createRecords(deps: { readonly config: Config; readonly store: S
       return Array.from(requisitions.values());
     },
 
+    // D145: no caller above this module — the client's every read goes through
+    // `listRequisitions`. Reserved for a single-requisition read rather than dead, and
+    // said here so the next reader does not have to grep the tree to find that out.
     getRequisition(requisitionId) {
       const found = requisitions.get(requisitionId);
       if (!found) return err({ code: 'no_such_requisition', requisitionId });
@@ -295,6 +298,13 @@ export function createRecords(deps: { readonly config: Config; readonly store: S
     },
 
     isUnderPip(subject) {
+      // D145: nothing above `records` calls this, and D72 is why rather than an
+      // omission — PIP is derived and never served as a session field, so the fold runs
+      // wherever the finals already are, which for the badge is `client/app.js` over
+      // `GET /api/reviews?subject=`. This is I35's server-side statement, kept so the
+      // invariant is assertable in the module that owns it. The two folds are one rule in
+      // two places; change them together.
+      //
       // I35/D72/D83: the `pip` of the final review for `subject` with the greatest
       // `updatedAt`, ties broken by the later line. `reviews` iterates oldest write
       // first, so scanning forward and taking `>=` lets the later-written entry win a

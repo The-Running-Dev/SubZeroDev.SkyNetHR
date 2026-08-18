@@ -2710,7 +2710,7 @@ retained-knowingly notes and were fine. Three did not: `SessionNoticeCode.'sandb
 `PermissionResolvedReason.'superseded'` (the only member of its union with no comment at all), and
 `ErrorEventKind.'agent_unavailable'` — and separating "dead by choice" from "dead by omission" took
 a grep-and-trace per value, with a different answer each time. `'agent_unavailable'` turned out to
-be the third kind: behaviour both documents promise and nothing delivers, which is D145's.
+be the third kind: behaviour both documents promise and nothing delivers, which is D143's.
 Chosen: annotate rather than remove, in `20-contract.md` and in `src/contract/index.ts` alike, in
 the shape the two already-noted values set. `'sandbox'` is superseded by `PermissionPolicy.banner`,
 which the client renders instead and which survives a replay because it is a session field rather
@@ -2859,6 +2859,66 @@ on a bad connection.
 Reversibility: cheap for all three fixes; each is local and none changes a persisted shape or a
 signature.
 
+### 2026-08-18 — D144 `edge/ws` must serve the record routes, and the contract was already right
+Context: `20-contract.md § edge/sse and edge/ws` says `createWsEdge`'s `RequestListener` "serves
+the whole `## HTTP routes` table exactly as `edge/sse`'s does, with one substitution" — the events
+route, which moves to the upgrade handler. It serves eight fewer. `src/edge/ws/index.ts` wires no
+`/api/requisitions`, no `/api/requisitions/:id/decision`, and none of the four `/api/reviews`
+routes; they fall to the catch-all and answer `422 bad_request`. Session sub-routes are at parity,
+so this is the two record collections alone. Under `config.edge === 'ws'` a deployment loses all of
+tier two's record surface, with nothing anywhere saying it would, and `422` tells the client the
+build serves no such route — which is true and is not what the contract promises.
+Chosen: the code changes. Every handler already exists in `edge/http-common` and is already
+reachable from this edge — `records` is in `EdgeDeps` and reaches `createWsEdge`, which simply
+never routes to it, so `EW --> RC` in the module diagram is an arrow the types draw and the code
+never traverses. The fix is the eight route arms, copied from `edge/sse`, plus a parity test that
+**enumerates** the table rather than asserting parity in prose: the claim is a sentence today and
+no test can fail on it, which is why a whole reconciliation pass (D138–D143) read both documents
+against the tree and missed it. Staged in `## Open` rather than implemented here — this is
+implementation against a settled contract, and a reconciliation decides which side is wrong.
+Rejected: narrowing the contract to declare the record routes `edge/sse`-only. Free, and it makes
+tier two transport-conditional for no stated reason. D77 put the shared handlers in
+`edge/http-common` precisely so two transports could not answer one request differently; conceding
+this divergence spends that argument to keep a routing table unchanged, and leaves a deployment
+choosing its transport by which features it needs — a choice the design nowhere says exists.
+Rejected: recording it as known and changing neither. The alternative D142 rejected, for the same
+reason: it leaves the next reader to rediscover exactly what this pass just did.
+Reversibility: cheap. The arms delete cleanly and no persisted shape or signature moves.
+
+### 2026-08-18 — D145 A declared method with no caller states so, the same as a union member
+Context: `Records.isUnderPip` and `Records.getRequisition` are declared in `20-contract.md`,
+implemented, and covered by `records`' own tests — and called by nothing above the module. D139 set
+the standing rule one size down, for a union member with no producer, after separating "dead by
+choice" from "dead by omission" cost a grep-and-trace per value. These cost the same again, one
+size up, and the two answers were different: `getRequisition` is simply never wired, and
+`isUnderPip` is not dead at all.
+`isUnderPip` is the one that mattered. I35 names `records` as the owner of the PIP fold; the fold
+anyone observes is `client/app.js`, scanning the finals from `GET /api/reviews?subject=` for the
+greatest `updatedAt` with ties to the later entry. It is the same rule, and the client's own
+comment says so. That is not a defect: **D72 forbids serving PIP as a session field and D79 forbids
+an employment-status field on the wire**, so the fold has to run wherever the finals already are,
+and for a badge in a browser that is the browser. What was missing was any statement that the
+duplication is deliberate — leaving a reader to conclude either that the client re-implemented
+server logic by accident, or that `records`' copy is dead.
+Chosen: annotate both, in `20-contract.md` and `src/records/index.ts` alike, in the shape D139 set.
+`isUnderPip` is I35's server-side statement, kept so the invariant is assertable in the module that
+owns it rather than only against browser code, and marked as one rule in two places that change
+together. `getRequisition` is reserved for a single-requisition read. **The standing rule this
+extends: a declared interface method with no caller states why in its own comment, or the method
+goes.**
+Rejected: removing both. Cleanest to read, and it narrows a declared public interface, which is
+`/contract`'s and not a reconciliation's — the boundary D139 declined to cross for `'sandbox'` and
+`'superseded'`. It also deletes the only implementation I35 can be asserted against, leaving an
+invariant owned by `records` with nothing in `records` to check.
+Rejected: serving PIP from the server so `isUnderPip` gains a caller. It removes the duplication
+outright and contradicts D72 and D79 to do it; reopening either is `/design`'s.
+Reversibility: cheap. Comments only.
+
 ## Open
 
 Staging only. Once an item becomes an issue it leaves this list.
+
+- **`edge/ws` serves none of the eight requisition and review routes** (D144). Wire the arms from
+  `edge/sse` into `src/edge/ws/index.ts` — every handler is already in `edge/http-common` and
+  already reachable — and add a parity test that enumerates `## HTTP routes` for both edges rather
+  than asserting parity in prose.
