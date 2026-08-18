@@ -3020,6 +3020,33 @@ rediscovery, because #91 would close green over a behaviour that was never built
 Reversibility: cheap. A union member with no producer is the case D139 already ruled on, so a
 withdrawal is an annotation rather than a removal.
 
+### 2026-08-18 — D150 The contract admits the enumeration of a closed union; `RATINGS` stays where it is
+Context: `20-contract.md § contract` says "Types only. No runtime export." `src/contract/index.ts`
+exports `const RATINGS`, read once — `edge/http-common` testing membership before it accepts a
+`Rating` on the review routes. It is the same job `VENDORS` does for `Vendor`, and
+`10-design.md § Module boundaries` argues that case explicitly: the enumeration lives beside the
+code that makes each member mean something, so a second independently-typed copy cannot drift.
+`RATINGS` has no such argument written anywhere and sits in the one module declared runtime-free.
+Chosen: the contract changes. `Rating` has no `createRating` switch to sit beside — its members are
+not made runnable by anything, they are validated and stored — so the `VENDORS` argument does not
+transfer, and moving the list to `records` would put the wire-validation vocabulary in a tier-two
+module that the tier-one edge would then import to parse a body. The declared property becomes
+narrower and still checkable: `contract` exports types, plus the enumeration of a closed union
+where a validator must test membership, and each such export is declared here like any other
+public interface.
+**The amendment is not made in this pass.** Adding `RATINGS` to `20-contract.md` adds a public
+interface the document does not carry, which `AGENTS.md § Hard rules` reserves to `/contract` —
+the same boundary D145 declined to cross in the other direction when it kept two methods rather
+than narrowing a declared interface from a reconciliation. Staged in `## Open`.
+Rejected: moving `RATINGS` to `records`, which was this pass's recommendation. It keeps the
+contract's sentence true with no amendment and draws no new module edge, and it was not chosen
+because it puts a validation vocabulary tier one needs behind tier two's module, and because the
+`VENDORS` precedent it leans on rests on a runtime switch `Rating` does not have.
+Rejected: recording it and changing neither. The alternative D142, D144, D148 and D149 each
+rejected for the same reason, and here it leaves a grep-checkable sentence — "no runtime export" —
+false, which is worse than an unstated one because it invites a reader to trust it.
+Reversibility: cheap. Prose plus one declared const; nothing persisted and no signature moves.
+
 ## Open
 
 Staging only. Once an item becomes an issue it leaves this list.
@@ -3044,3 +3071,11 @@ Staging only. Once an item becomes an issue it leaves this list.
   pass as D149: **the code is the wrong side.** Wants one bug issue for `/fix` to carry, not a
   slice, and that issue needs a `Done when` naming the *adapter*, because #91's two boxes are both
   about documents and are both already ticked.
+
+- **`20-contract.md § contract` says "Types only. No runtime export." and `src/contract/index.ts`
+  exports `RATINGS`.** Adjudicated in this pass as D150: **the contract is the side that changes** —
+  the declared property becomes "types, plus the enumeration of a closed union where a validator
+  must test membership", and each such export is declared in the document like any other public
+  interface. The edit adds a public interface `20-contract.md` does not carry, so it is `/contract`'s
+  at `opus`/`high` and not a reconciliation's. Wants no issue if `/contract` runs next; wants one if
+  it does not.
