@@ -210,11 +210,13 @@ interface ProcessTombstone {
 }
 ```
 
-**A reader folds the two shapes; it does not treat the latest line as a whole record.**
-Liveness comes from the latest line for a `pid`; `startedAt`, `image`, `sessionId` and
-`turnId` come from that pid's most recent **spawn** line. The reuse guard reads all three of
-`exitedAt`, `startedAt` and `image` (I19), and a reader that took them off the tombstone
-would find two of them missing and reap on a guard that never ran.
+**A reader must never hand back a tombstone as an open record.** Liveness comes from the latest
+line for a `pid`; `startedAt` and `image` must come from that pid's most recent **spawn** line,
+because the reuse guard reads all three of `exitedAt`, `startedAt` and `image` (I19) and a reader
+that took them off the tombstone would find two of them missing and reap on a guard that never
+ran. That is the requirement; folding the two shapes is one way to meet it and not the only one.
+Filtering the latest line on `exitedAt === null` meets it too, because a tombstone always carries
+a non-null `exitedAt` and so never survives the filter — which is what `store` does.
 
 ### Event envelope
 
@@ -292,7 +294,11 @@ type SessionNoticeCode =
   | 'resume_unavailable'       // spawning with no --resume; context not carried forward
   | 'checkpoints_unavailable'  // ckpt.git could not be initialised
   | 'checkpoint_skipped'       // the pre-turn checkpoint failed; the turn proceeds
-  | 'sandbox'                  // the standing sandbox statement for a preauthorised session
+  | 'sandbox'                  // **no producer, retained knowingly.** Superseded by
+                              // `PermissionPolicy.banner`, which the client renders instead and
+                              // which survives a replay because it is a session field rather
+                              // than an envelope (S8.3). Kept rather than removed: dropping a
+                              // member narrows a declared union and buys nothing
   | 'audit_unavailable'        // a permission was denied because the audit append failed
   | 'storage_failure'          // a spill write failed; the session is ending
   | 'server_restart';          // boot found this session live at shutdown (D130)
@@ -386,7 +392,9 @@ type PermissionResolvedReason =
   | 'answered'                // an operator answered
   | 'preapproved'             // matched a standing rule held by this server
   | 'cancelled_process_exit'  // the child died, or was interrupted, or boot closed the turn
-  | 'superseded'
+  | 'superseded'             // **no producer, and reserved rather than dead.** Nothing resolves
+                             // one request because another replaced it; if such a path is ever
+                             // added this is its reason, and until then it must not be repurposed
   | 'audit_unavailable';      // denied because the audit record could not be appended
 
 interface PermissionResolved {
@@ -685,7 +693,7 @@ interface Config {
   readonly includeRaw: boolean;
   readonly sessionTokenBudget: number | null;              // (tier two) per session; null disables the view's budget
   readonly checklist: readonly ChecklistItemTemplate[];    // (tier two) empty disables the checklist
-  // D10/D113: which transport edge this deployment binds. `server.ts` constructs
+  // D10/D117: which transport edge this deployment binds. `server.ts` constructs
   // `createSseEdge` or `createWsEdge` accordingly; exactly one binds (S11.5).
   readonly edge: 'sse' | 'ws';
 }
@@ -935,8 +943,9 @@ asked" or a standing sandbox banner. `sandbox` is the operator's choice and is v
 the adapter.
 
 **A vendor adapter may accept one thing beyond `AdapterOptions`, and it is a test seam, not a
-deployment knob** (D91). `createClaudeAdapter` takes an optional `executable`, defaulting to
-`SKYNET_CLAUDE_EXECUTABLE` and then to the vendor's own name, so a fixture CLI speaking the
+deployment knob** (D91). `createClaudeAdapter` and `createCodexAdapter` each take an optional
+`executable`, defaulting to `SKYNET_<VENDOR>_EXECUTABLE` and then to the vendor's own name, so
+a fixture CLI speaking the
 documented wire shape can stand in for the real binary over a real child process — which is
 what D88's verification of the permission round trip rests on. It is deliberately **not** a
 `Config` field: a deployment that can repoint the agent binary from the environment is a
@@ -1149,7 +1158,7 @@ handshake, not at first-message auth.
 
 `createWsEdge`'s `RequestListener` serves the whole `## HTTP routes` table exactly as
 `edge/sse`'s does, with one substitution: `GET /api/sessions/:id/events` is not reachable as a
-plain request under this edge — a client that tries it is refused `400 bad_request`, naming
+plain request under this edge — a client that tries it is refused `422 bad_request`, naming
 the field `upgrade` — because that route's real handler runs on the `http.Server`'s
 `'upgrade'` event, which a bare `RequestListener` is never given. `createWsEdge` attaches its
 upgrade handler to the returned function as `.handleUpgrade` — `(req, socket, head) => void`,
@@ -1251,7 +1260,7 @@ rewrites `Origin`.
 
 | Method | Path | Request | Success | Refusals |
 |---|---|---|---|---|
-| `GET` | `/api/audit` | `AuditQuery` as query parameters | `200 AuditPage` | `401 unauthenticated`, `422 bad_request` |
+| `GET` | `/api/audit` | `AuditQuery` as query parameters | `200 AuditPage` | `401 unauthenticated`, `422 bad_request`, `503 agent_unavailable` |
 
 Readable by every authenticated operator, not scoped to the caller's own sessions (D70): the
 question this log answers crosses sessions, and scoped to one operator it answers only "what
@@ -1713,9 +1722,9 @@ schema-generated (`codex app-server generate-json-schema`, `v2/`), not hand-tran
 | `item/completed`, type `agentMessage` | `message`, role assistant |
 | `item/started`, type `commandExecution` | `tool.call`; `callId` is the item's `id` |
 | `item/commandExecution/outputDelta` | *nothing*; accumulated |
-| `item/completed`, type `commandExecution` | `tool.result`, same `callId`; `ok` from `status`, `output` from `aggregated_output` |
+| `item/completed`, type `commandExecution` | `tool.result`, same `callId`; `ok` from `status`, `output` from `aggregatedOutput` |
 | `thread/tokenUsage/updated` → `last` | `usage` |
-| `turn/completed` → `last` | `usage`, then `turn.ended`, `stopReason: 'completed'` |
+| `turn/completed` | `turn.ended`; `stopReason` from `turn.status` — `completed`, `interrupted`, `error`, and anything else is `schema_mismatch`. Its `last` is **not** mapped: see *Usage* |
 | `item/commandExecution/requestApproval` | **unreachable under the shipped policy** — see below |
 | `close` with no `turn/completed` seen | `turn.ended`, `stopReason: 'process_exit'` |
 
@@ -1729,8 +1738,7 @@ Newline-delimited JSON on stdout. **No deltas of any kind**: text arrives whole,
 | `turn.started` | *nothing* |
 | `item.completed`, `item.type == 'reasoning'` | `thinking` |
 | `item.completed`, `item.type == 'agent_message'` | `message`, role assistant |
-| `item.started`, `item.type == 'command_execution'` | `tool.call` — **but see *Item ids* below** |
-| `item.completed`, `item.type == 'command_execution'` | `tool.result`; `ok` from `exit_code == 0`, `output` from `aggregated_output` |
+| `item.started` / `item.completed`, `item.type == 'command_execution'` | *not mapped* — recognised and dropped, deliberately. The item's `aggregated_output`, `exit_code` and `status` are all there; what is missing is a session-unique `CallId` to correlate on. See *Item ids* below and `## Unresolved` 13 |
 | `turn.completed` | `turn.ended`, `stopReason: 'completed'`. Its `usage` is **not** mapped — see *Usage* |
 | `close` with no `turn.completed` seen | `turn.ended`, `stopReason: 'process_exit'` |
 
@@ -1774,10 +1782,15 @@ in evidence already — and it is that adapter's, never `session-manager`'s (I46
 
 ### Usage
 
-**`app-server` needs no arithmetic.** `turn/completed` and `thread/tokenUsage/updated` both carry
-explicit `total` and `last` sub-objects. The adapter reads `last`, which is that turn's own
+**`app-server` needs no arithmetic, and it reads exactly one of the two records that offer it.**
+`turn/completed` and `thread/tokenUsage/updated` both carry explicit `total` and `last`
+sub-objects. The adapter reads `thread/tokenUsage/updated`'s `last`, which is that turn's own
 marginal figure, so D75's summability requirement is met by reading rather than by subtracting —
-the same shape of answer S1 reached for Claude.
+the same shape of answer S1 reached for Claude. **`turn/completed`'s `last` is deliberately not
+mapped**, and the table above says so: it is the *same* marginal figure by a second route, so
+emitting `usage` from both would put two envelopes carrying one turn's burn into the fold that
+sums them — double-counting on the one screen headed *payroll*, which is the failure I28 exists
+to prevent. Which of the two is read is arbitrary; reading only one is not.
 
 **`exec --json`'s basis is undetermined, so its usage is not mapped at all.** Its
 `turn.completed.usage` was observed almost exactly doubling across two sequential resumed turns of

@@ -219,7 +219,11 @@ export type SessionNoticeCode =
   | 'resume_unavailable' // spawning with no --resume; context not carried forward
   | 'checkpoints_unavailable' // ckpt.git could not be initialised
   | 'checkpoint_skipped' // the pre-turn checkpoint failed; the turn proceeds
-  | 'sandbox' // the standing sandbox statement for a preauthorised session
+  // No producer, retained knowingly: superseded by `PermissionPolicy.banner`, which the
+  // client renders instead and which survives a replay because it is a session field rather
+  // than an envelope (S8.3). Kept rather than removed — dropping a member narrows a declared
+  // union and buys nothing.
+  | 'sandbox'
   | 'audit_unavailable' // a permission was denied because the audit append failed
   | 'storage_failure' // a spill write failed; the session is ending
   | 'server_restart'; // boot found this session live at shutdown (D130)
@@ -316,6 +320,9 @@ export type PermissionResolvedReason =
   | 'answered' // an operator answered
   | 'preapproved' // matched a standing rule held by this server
   | 'cancelled_process_exit' // the child died, or was interrupted, or boot closed the turn
+  // No producer, and reserved rather than dead: nothing resolves one request because another
+  // replaced it. If such a path is ever added this is its reason; until then it must not be
+  // repurposed.
   | 'superseded'
   | 'audit_unavailable'; // denied because the audit record could not be appended
 

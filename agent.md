@@ -55,6 +55,13 @@ and preferences belong in `AGENTS.md`.
   rediscovering a decision already made.** A decision taken outside a slice names the slice or
   the issue that will carry it, in the entry itself — a decision with no landing point does not
   land.
+- **A declared-but-unemitted enum member is the same failure one size down.** Five values in
+  `20-contract.md` had no producer anywhere in the tree. Two said so in their own comment; three
+  said nothing, and separating deliberate silence from omission took a grep-and-trace per value
+  with a different answer each time — one of which, `error / agent_unavailable`, turned out to be
+  behaviour both documents promise and nothing delivers. **Cost: a reconciliation pass spent
+  establishing, value by value, which silences were meant.** A union member with no producer says
+  so in its own comment, or the member goes (D139).
 
 ## Sequences and arguments
 

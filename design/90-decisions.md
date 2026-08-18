@@ -2673,6 +2673,210 @@ session ended, which is what keeps D45's retained-knowingly value retained and k
 Reversibility: cheap. One enum member, one boot emission, one fold rule; nothing persisted changes
 shape and no signature moves.
 
+### 2026-08-18 — D138 The Codex mapping table is reconciled to the adapter, in both directions at once
+Context: `/reconcile` read `20-contract.md § Vendor mapping — Codex` against
+`src/adapters/codex/index.ts` and found the table wrong twice, in opposite directions. The
+`app-server` row for `turn/completed` mapped it to `usage` (from `last`) and to `turn.ended` with
+`stopReason: 'completed'`; the adapter emits neither the `usage` nor two of the three stop reasons
+it actually produces. And the `exec --json` rows for `item.started`/`item.completed`
+`command_execution` mapped a `tool.call`/`tool.result` pair that the same section's *Item ids*
+subsection, forty lines below, says is "not specified here" and that S8.7 stopped before
+implementing. The tree followed the prose; a reader consulting the table would not have.
+Chosen: correct the table on all three counts. `turn/completed` maps to `turn.ended` alone, with
+`stopReason` from `turn.status` over `completed | interrupted | error` and `schema_mismatch` for
+anything else; its `last` is marked not mapped, and *Usage* now carries why. The two
+`command_execution` rows collapse to one row reading *not mapped — recognised and dropped,
+deliberately*, naming what is present on the item and what is missing (a session-unique `CallId`)
+and pointing at `## Unresolved` 13.
+The usage half is the one that mattered: S8.1 observed **both** `turn/completed` and
+`thread/tokenUsage/updated` carrying `last`, and `last` is that turn's own marginal figure by
+either route. Implementing the row literally therefore emits two `usage` envelopes carrying one
+turn's burn into a fold that sums them (`session-manager.foldPayroll`), double-counting on the one
+screen headed *payroll* — the failure I28 and D75 exist to prevent. Which of the two records is
+read is arbitrary; reading only one is not, and the contract said nothing about that until now.
+Rejected: changing the adapter to emit `usage` from `turn/completed` as well. It satisfies a table
+row nothing asked for, at the cost of the payroll number, unless the adapter also de-duplicates
+the two — machinery the Claude adapter already needed for `message.id`, and no reason to build it
+here.
+Rejected: deleting the two `exec --json` rows outright. Marking them reserved keeps the work
+visible in the place a reader looks for it; deleting them makes the fallback's missing correlation
+discoverable only from `## Unresolved`.
+Reversibility: cheap. Documentation only; no signature and no behaviour moves.
+
+### 2026-08-18 — D139 An unproduced union member is annotated, never quietly left
+Context: the same pass found five values in `20-contract.md` with no producer anywhere in the tree.
+Two — `SessionEndReason.'server_restart'` and `SessionStarted.state` — already carry explicit
+retained-knowingly notes and were fine. Three did not: `SessionNoticeCode.'sandbox'`,
+`PermissionResolvedReason.'superseded'` (the only member of its union with no comment at all), and
+`ErrorEventKind.'agent_unavailable'` — and separating "dead by choice" from "dead by omission" took
+a grep-and-trace per value, with a different answer each time. `'agent_unavailable'` turned out to
+be the third kind: behaviour both documents promise and nothing delivers, which is D145's.
+Chosen: annotate rather than remove, in `20-contract.md` and in `src/contract/index.ts` alike, in
+the shape the two already-noted values set. `'sandbox'` is superseded by `PermissionPolicy.banner`,
+which the client renders instead and which survives a replay because it is a session field rather
+than an envelope (S8.3). `'superseded'` is reserved rather than dead: nothing resolves one request
+because another replaced it, and until such a path exists it must not be repurposed. **The standing
+rule this sets: a union member with no producer states so in its own comment, or the member goes.**
+Two more corrections ride along, both the same species. `GET /api/audit`'s route row declared `401`
+and `422` and the handler answers `503 agent_unavailable` on a storage failure — the row gains the
+cell, because that is the treatment `SessionError.storage` already gets everywhere else in the
+document. And `pids.ndjson`'s bolded "a reader folds the two shapes; it does not treat the latest
+line as a whole record" forbade a correct implementation: `store.readOpenPids` does exactly the
+forbidden thing and is right, because a tombstone always carries a non-null `exitedAt` and so never
+survives its `exitedAt === null` filter, leaving I19's guard its three fields every time. Restated
+as the requirement — a reader must never hand back a tombstone as an open record — with folding
+named as one way to meet it rather than the only one.
+Rejected: removing `'sandbox'` and `'superseded'`. Cleanest to read, and it narrows a declared
+public union, which is `/contract`'s to do and not a reconciliation's — and a persisted
+`permission.resolved` line carrying one would stop parsing as its own type.
+Rejected: mapping `/api/audit`'s storage failure to a declared code instead. The contract already
+rejects the only honest candidate by name — "a `storage_unavailable` variant whose only caller is
+this one path" — so the alternative is reusing a code that does not fit to keep a table unchanged.
+Rejected: making `readOpenPids` fold properly. Buys nothing observable and costs a second pass at
+boot; the sentence was the thing that was wrong.
+Reversibility: cheap throughout.
+
+### 2026-08-18 — D140 A shared secret authenticates the deployment, not a person, and the design now says so
+Context: `src/identity/index.ts` resolves every caller under `auth.mode === 'shared-secret'` to a
+single `OperatorId`, `'shared'`. The module's own comment argues it correctly from D3; `design/`
+had no idea. The consequences are load-bearing and were nowhere: `GET /api/sessions` returns every
+session rather than the caller's; the ownership check on every session route passes for anyone
+holding the cookie, so `404 no_such_session` stops being access control; `AuditRecord.operator` is
+the same string on every line, so the log answers what was approved and not by whom, which is most
+of what `§ Threat model` leans on it for; and D70's one carve-out collapses, because a `draft`
+review is its author's alone and under this mode every reader is the author. Brief DoD #1 — "see
+only their own sessions" — is met under the two header modes and not under this one.
+Chosen: record it, and add *One auth mode has one operator* to `§ Threat model` stating all four
+consequences and the conclusion — the mode is for a deployment with one operator, and a deployment
+with several who must be told apart runs a proxy in front, which is what the primary mode is. This
+documents; it constrains nothing new. The alternative reading, that the identity module is
+unfinished, is the one that had to be foreclosed.
+Rejected: minting a per-browser `OperatorId` under this mode. That is the operator record D3
+refuses, and reopening D3 is `/design`'s, not a reconciliation's.
+Rejected: refusing to start under `shared-secret` when tier-two record routes are reachable. It is
+the one consequence that is silently wrong rather than merely coarse — a draft every operator can
+edit — but the threat model already concedes a determined operator has shell access as the server's
+user, so the refusal would be an enforcement claim with nothing behind it, and it couples config
+validation to feature flags the design does not have.
+Reversibility: cheap. Prose only.
+
+### 2026-08-18 — D141 Two implementation choices with observable consequences are recorded
+Context: neither had a decision entry, and both are things a future reader would ask "why?" about.
+Chosen, first: **an audit cursor's lifetime ends at process restart.** `store` mints the HMAC key
+for `AuditCursor` with `randomBytes(32)` at `createStore` and never persists it, so a client paging
+history across a restart is answered `422 bad_request` on its next page rather than silently served
+from a stale offset. This is consistent with D86 — the cursor stays opaque and what it encodes
+stays `store`'s business — and D86's rejection of "a byte offset" was of *publishing* the layout,
+which an authenticated offset does not do.
+Rejected: persisting the key. It survives restarts and becomes a secret with a lifecycle, a file,
+and a rotation question, to spare a caller one refetch of a page it can simply request again.
+Rejected: an unauthenticated offset. D86's rejected shape; a caller could then seek anywhere in the
+file by construction.
+Chosen, second: **Codex transport detection is a synchronous probe at session creation.**
+`detectTransport` runs up to two `spawnSync` `--help` calls, each bounded at 2 s, inside
+`createAdapter` inside `manager.create`. D107 fixed selection at create and did not price it: on a
+healthy binary this is tens of milliseconds, and on a slow or hung one it stalls the whole
+single-threaded server — every other operator's session included — for up to four seconds. Recorded
+rather than changed, because `createAdapter` is synchronous in the contract and the honest fix is
+to probe once per process and cache rather than to make the call async.
+Rejected: probing at first `send`. It moves the stall into the turn and contradicts D107's "once,
+at create".
+Rejected: an async probe. `createAdapter`'s signature is `Result`, not `Promise<Result>`; widening
+it is a contract amendment for a cost that caching removes entirely.
+Reversibility: cheap. Both are records of what is already true; the caching follow-up is staged in
+`## Open`.
+
+### 2026-08-18 — D142 The interrupt boundary and the Open WebUI mode are narrowed to what the tree does
+Context: two `10-design.md` statements described more than the tree has, in ways that read as
+defects rather than as choices. `§ Interrupt` said everything an interrupt *means* — "which events
+fire, what state is left, whether it counts as a failure" — belongs to the manager; both adapters
+in fact hold a per-turn `killRequested` flag and emit `turn.ended` with `interrupted` or
+`process_exit` from their own `close` handler. And `§ Security controls` presented `open-webui` as
+consuming a three-part contract — `X-User-Id`, `X-Session-Id`, bearer upstream auth (D11) — where
+the tree reads `X-User-Id` only, declares `sessionHeader` and reads it nowhere, requires
+`AUTH_SESSION_HEADER` at startup regardless, and validates no bearer. The mode is `proxy-header`
+plus a dead field.
+Chosen: narrow both statements. Interrupt — the manager decides *that* an interrupt happens and
+owns the state it leaves; the adapter names the stop reason, because only the `close` handler knows
+whether the process stopped under a kill or on its own, and a manager inferring it from "I called
+`kill`" would report a turn that crashed in the same instant as an expected interruption, which is
+exactly the misattribution D24's first property exists to prevent. Open WebUI — say which part is
+consumed and why the other two are not: `X-Session-Id` is per-session cwd tracking in Open WebUI's
+own terms and this console has no use for it, and what constrains who may set an identity header
+here is `trustProxy` plus the loopback-by-default bind, not a token this server validates.
+Rejected: moving the stop reason into the manager. It keeps D17's ownership sentence literally true
+and duplicates the kill-versus-crash discrimination into a module that can only guess at it.
+Rejected: dropping `sessionHeader` and collapsing `open-webui` to an alias of `proxy-header`.
+Smallest and most honest, and it removes a declared field from a public type, which is
+`/contract`'s call — and it costs a deployment its configuration portability if the field is ever
+read.
+Rejected, for both: recording the divergence as known and changing neither document. It leaves the
+next reader to rediscover precisely what this pass just did.
+Reversibility: cheap. Prose only; no code moves.
+
+### 2026-08-18 — D143 Three stated behaviours the tree does not have: the code is the wrong side, and the work is staged
+Context: `/reconcile` found three places where `design/` or `20-contract.md` describes behaviour
+that is not implemented, and in each the document's argument is the sound one. They are adjudicated
+here so the next pass does not re-derive them, and staged in `## Open` so they have a landing point
+— a decision with none does not land (`agent.md`).
+Chosen: the code changes in all three.
+**`error / agent_unavailable` is never emitted.** `10-design.md § Failure modes` row one and
+`20-contract.md`'s error table both promise it, `fatal: true`, when the CLI cannot spawn; a failed
+`adapter.send` produces only `turn.ended { stopReason: 'error' }` and a `503` on the HTTP response.
+The event is the half a subscriber can see, and the design's own "Operator sees: Agent unavailable"
+column has no source without it.
+**The four server-wide append-only files are not a single append stream.** `§ Concurrency` rests
+the no-lock claim on it verbatim — "each is opened once, as a single append stream owned by
+`store`" — and `store.appendLine` opens a fresh handle per append and closes it. `events.ndjson`
+has `emit`'s per-session chain; `audit.ndjson`, `pids.ndjson`, `reviews.ndjson` and
+`requisitions.ndjson` have nothing, so two sessions resolving permissions concurrently issue two
+overlapping `O_APPEND` writes. `AuditRecord.input` is the one field the design forbids truncating,
+which makes it the one line long enough to split.
+**`caps.subscriberQueueHighWater` bounds only the spill catch-up window.** It is read in one place,
+the proxy that buffers while a replay runs; once that flips to live the sink writes straight to the
+socket and neither edge checks `res.write`'s return value or waits for `drain`. So `§ Failure modes
+— Client boundary`'s "slow client stalls the stream → drop that subscriber, report a gap to it
+alone" is true during replay and false afterwards, and the steady state is D18's *second rejected
+alternative*, unbounded per-subscriber buffering — moved into Node's socket queue rather than
+removed. S3.7 passes because it holds a replay open deliberately and never exercises a live
+subscriber.
+The last of these exposed an assumption neither document notices: **D18's per-subscriber queue and
+D89/I27's synchronous fan-out pull against each other.** `emit`'s prefix delivers to every
+subscriber synchronously, which is what orders `seq` without a lock; a bounded queue needs
+somewhere to hold an envelope a subscriber is not ready for, and there is no such place inside a
+synchronous prefix — it has to live in the edge, where `subscriberQueueHighWater` is not visible.
+The tree resolved it by keeping the prefix and dropping the queue, silently. That is the root of
+the third item, and the fix belongs in the edges for the same reason.
+Rejected, for the first: striking the event from both documents and marking `ErrorEventKind
+.'agent_unavailable'` retained-knowingly. Free, and it accepts that a client watching the stream
+cannot tell a missing CLI from any other turn failure.
+Rejected, for the second: rewording `§ Concurrency` to rest the no-lock claim on `write()`
+atomicity for one line instead of on a stream. Honest and free, and it weakens the claim exactly
+where the audit log is the artifact the threat model leans on.
+Rejected, for the third: narrowing D18 and the Failure-modes row to the catch-up window. Free, and
+it concedes an unbounded memory path with no stated limit in a console whose whole point is a phone
+on a bad connection.
+Reversibility: cheap for all three fixes; each is local and none changes a persisted shape or a
+signature.
+
 ## Open
 
 Staging only. Once an item becomes an issue it leaves this list.
+
+- **`error / agent_unavailable` is promised by both documents and emitted nowhere** (D143). In
+  `session-manager.message`, emit `error { kind: 'agent_unavailable', fatal: true }` before the
+  paired `turn.ended` when the cause is `AdapterError.agent_unavailable`, so a subscriber watching
+  the stream learns why the turn failed. Local to `session-manager`.
+- **The four server-wide append-only files need one append stream each** (D143). Hold one
+  `FileHandle` and one promise chain per file in `store`, mirroring `emit`'s per-session chain;
+  `appendAudit` and `appendReview` keep their fsync on the shared handle. Roughly thirty lines in
+  `src/store/index.ts`.
+- **A slow live subscriber is never dropped and never gapped** (D143). In the edges, check
+  `res.write`'s return value, count envelopes queued while un-drained, and past
+  `caps.subscriberQueueHighWater` drop the subscriber with the same `gapEnvelope` shape
+  `session-manager.subscribe` already mints. Touches `edge/sse` and `edge/ws`, so the handling
+  belongs in `edge/http-common` to keep the two transports answering identically.
+- **Codex transport detection should be probed once per process and cached** (D141). Today
+  `detectTransport` runs up to two 2-second `spawnSync` probes inside every `manager.create`,
+  stalling the single-threaded server for every other operator. Caching keeps `createAdapter`
+  synchronous, which is what rules out making the probe async.
