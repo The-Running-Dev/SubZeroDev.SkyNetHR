@@ -29,11 +29,10 @@ a pointer in the same commit**. That replacement is descriptive drift corrected 
 found (`AGENTS.md` *Hard rules*), not a contract amendment, and it needs no approval. It is
 one-way: a later pass never turns a pointer back into a scaffold.
 
-Two slices owe a scaffold each, and every outstanding one is listed here:
+One slice owes a scaffold, and it is listed here:
 
 | Scaffold | Owed by |
 |---|---|
-| `ServerLock`, `StartupError.storage_locked`, `Store.claimLock` / `releaseLock`, `LivenessProbe` | S22 |
 | `Caps.sessionToolOutputBytes` | S23 |
 
 **A comment in the tree is not the canonical statement of a rule.** The declarations in
@@ -208,6 +207,18 @@ latest line for a `pid`; `startedAt` and `image` must come from that pid's most 
 that never ran. That is the requirement. Folding the two shapes meets it; so does filtering
 the latest line on `exitedAt === null`, because a tombstone always carries a non-null
 `exitedAt` and so never survives the filter — which is what `store` does.
+
+### Server lock
+
+Declared in `src/contract/index.ts`: `ServerLock`, `LivenessProbe`.
+
+**`ServerLock` carries no `exitedAt`, unlike `ProcessRecord`, and that absence is deliberate**:
+`releaseLock` removes the file at clean shutdown, so the file's absence *is* the first limb of
+D23's three-part liveness test. `LivenessProbe` therefore reads only the other two — `startedAt`
+later than the host's last boot, and a matching process `image` — against the lock it is
+handed. `store` acquires no dependency on process enumeration this way: the probe is supplied
+by the caller, one implementation of D23's test shared with `pids.ndjson`'s own reap guard,
+called from two places (`20-contract.md § store`, D161).
 
 ### Event envelope
 
@@ -749,8 +760,8 @@ sandbox.
 `src/store/index.ts` (the factory).
 
 `store` owns `meta.json`, the spill, the tool-output and attachment blobs, `audit.ndjson`,
-`pids.ndjson`, the ring buffer, the two record logs, and — from S22 — `server.lock`. It depends
-on `config` and `contract` and on nothing else.
+`pids.ndjson`, `server.lock`, the ring buffer, and the two record logs. It depends on `config`
+and `contract` and on nothing else.
 
 What the declarations cannot say:
 
@@ -775,28 +786,9 @@ What the declarations cannot say:
   can answer the read route's allow-list check without scanning the session's spill for the
   `AttachmentRef` that named the id.
 
-**Scaffold — S22 owes these** (D161). `server.lock` has no declaration in the tree yet:
-
-```ts
-// Supplied by the caller so that D23's three-part liveness test has exactly one
-// implementation and `store` acquires no dependency on process enumeration. `true` means
-// the named holder is a live server process on this host.
-type LivenessProbe = (holder: ServerLock) => Promise<boolean>;
-
-interface Store {
-  // ... the materialised members above, plus:
-
-  // Claim `<storage>/server.lock` for `self`. Called as boot's step 0, before the reap step
-  // and not merely before `listen`. Returns `StartupError` rather than `StoreError` because
-  // `storage_locked` is a startup refusal and because `SessionManager.boot` already returns
-  // that union, so it composes with no wrapper.
-  claimLock(self: ServerLock, isLive: LivenessProbe): Promise<Result<void, StartupError>>;
-
-  // Remove the lock at clean shutdown. A failure here is logged and is not fatal: the next
-  // boot's staleness path is what recovers from a lock nobody removed.
-  releaseLock(): Promise<Result<void, StoreError>>;
-}
-```
+**`ServerLock`, `LivenessProbe`, and `Store.claimLock` / `releaseLock` are declared in
+`src/contract/index.ts` (the types) and `src/store/index.ts` (`claimLock` and `releaseLock`'s
+bodies).**
 
 **`claimLock`'s decision table, which the signature cannot carry:**
 
@@ -1354,25 +1346,11 @@ makes D21's no-server-side-timer rule cost nothing on the wire.
 it is retryable, and what the caller is expected to do are not, and they are the whole of what
 makes an error type a contract rather than a spelling.
 
-**Scaffold — S22 owes both** (D161). `StartupError` in the tree is
-`storage_unwritable | ConfigError`; this variant and the type it carries are not yet declared:
-
-```ts
-// Another server holds this storage root. The holder is named because a refusal that does not
-// say who is holding it leaves an operator with nothing to act on — which is most of the value
-// when an operator is looking at one, and is why an OS advisory lock was rejected.
-| { readonly code: 'storage_locked'; readonly path: string; readonly holder: ServerLock }
-
-// `<storage>/server.lock`. Read at boot and reclaimed only when its holder fails D23's liveness
-// test, and never when `hostname` is another host. It carries no `exitedAt`: `releaseLock`
-// removes the file, so the file's absence is that limb of the test.
-interface ServerLock {
-  readonly pid: number;
-  readonly hostname: string;
-  readonly startedAt: IsoTimestamp;   // load-bearing, exactly as ProcessRecord.startedAt is
-  readonly image: string;
-}
-```
+`StartupError.storage_locked` carries the holder as a `ServerLock` (declared in
+`src/contract/index.ts`, and see *Types § Server lock* above). The holder is named because a
+refusal that does not say who is holding it leaves an operator with nothing to act on — which
+is most of the value when an operator is looking at one, and is why an OS advisory lock was
+rejected (D161).
 
 | HTTP | `code` | Meaning |
 |---|---|---|

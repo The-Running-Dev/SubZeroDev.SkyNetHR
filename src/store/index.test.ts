@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
 import { createStore } from './index.js';
-import type { AuditCursor, AuditRecord, Config, Envelope, SessionRecord } from '../contract/index.js';
+import type { AuditCursor, AuditRecord, Config, Envelope, ServerLock, SessionRecord, Store } from '../contract/index.js';
 
 function baseConfig(storageRoot: string): Config {
   return {
@@ -735,4 +735,162 @@ test('S12.9 — no read scans the whole file: first-page elapsed time at 100,000
   // bounded read stays close regardless of file size. Generous factor to keep this from
   // being timing-flaky while still catching an accidental full scan.
   assert.ok(elapsed100k < elapsed10k * 5 + 50, `first-page time grew with file size: 10k=${elapsed10k}ms, 100k=${elapsed100k}ms`);
+});
+
+function lock(overrides: Partial<ServerLock> = {}): ServerLock {
+  return {
+    pid: 4242,
+    hostname: 'holder-host',
+    startedAt: new Date().toISOString() as never,
+    image: 'node',
+    ...overrides,
+  };
+}
+
+async function newStore(): Promise<{ storageRoot: string; store: Store }> {
+  const storageRoot = await mkdtemp(path.join(tmpdir(), 'skynet-store-'));
+  const storeResult = await createStore(baseConfig(storageRoot));
+  assert.equal(storeResult.ok, true);
+  if (!storeResult.ok) throw new Error('store failed to init');
+  return { storageRoot, store: storeResult.value };
+}
+
+// D161's decision table, row 1: absent → write `self`, claimed.
+test('S22 — claimLock against an absent server.lock writes self and claims, without consulting the liveness probe', async () => {
+  const { storageRoot, store } = await newStore();
+  let probed = false;
+  const self = lock({ pid: process.pid, hostname: 'self-host' });
+  const claimed = await store.claimLock(self, async () => {
+    probed = true;
+    return true;
+  });
+  assert.equal(claimed.ok, true);
+  assert.equal(probed, false, 'nothing to probe: there was no holder');
+
+  const raw = await readFile(path.join(storageRoot, 'server.lock'), 'utf8');
+  assert.deepEqual(JSON.parse(raw), self);
+});
+
+// D161's decision table, row 2 / I50: a lock naming a different host is never reclaimed,
+// whatever its pid says — asserted with a probe that would say "live" if consulted, so a
+// bug that skips the hostname check and reclaims anyway is caught by the probe having run.
+test('S22.4 — a lock naming a different hostname always refuses, and the liveness probe is never consulted', async () => {
+  const { storageRoot, store } = await newStore();
+  const holder = lock({ hostname: 'other-host' });
+  await writeFile(path.join(storageRoot, 'server.lock'), JSON.stringify(holder));
+
+  let probed = false;
+  const claimed = await store.claimLock(lock({ hostname: 'self-host' }), async () => {
+    probed = true;
+    return true; // if this were consulted, the wrong answer would let the claim through
+  });
+  assert.equal(claimed.ok, false);
+  if (!claimed.ok) {
+    assert.equal(claimed.error.code, 'storage_locked');
+    if (claimed.error.code === 'storage_locked') assert.deepEqual(claimed.error.holder, holder);
+  }
+  assert.equal(probed, false, 'the liveness test cannot see another machine\'s process table');
+
+  const raw = await readFile(path.join(storageRoot, 'server.lock'), 'utf8');
+  assert.deepEqual(JSON.parse(raw), holder, 'the lock file is untouched by a refused claim');
+});
+
+// D161's decision table, row 3: present, this host, isLive true → refuse, naming the holder.
+test('S22.1 — a live holder on this host refuses with storage_locked, naming pid, hostname and startedAt', async () => {
+  const { storageRoot, store } = await newStore();
+  const holder = lock({ pid: 777, hostname: 'self-host', startedAt: '2026-01-01T00:00:00.000Z' as never });
+  await writeFile(path.join(storageRoot, 'server.lock'), JSON.stringify(holder));
+
+  const claimed = await store.claimLock(lock({ hostname: 'self-host' }), async () => true);
+  assert.equal(claimed.ok, false);
+  if (!claimed.ok) {
+    assert.equal(claimed.error.code, 'storage_locked');
+    if (claimed.error.code === 'storage_locked') {
+      assert.equal(claimed.error.holder.pid, 777);
+      assert.equal(claimed.error.holder.hostname, 'self-host');
+      assert.equal(claimed.error.holder.startedAt, '2026-01-01T00:00:00.000Z');
+    }
+  }
+});
+
+// D161's decision table, row 4 (S22.3): present, this host, isLive false → reclaim: the
+// stale holder is logged, self is written, and the claim succeeds.
+test('S22.3 — a stale holder on this host is reclaimed automatically, logged, and self takes the lock', async () => {
+  const { storageRoot, store } = await newStore();
+  const holder = lock({ pid: 555, hostname: 'self-host' });
+  await writeFile(path.join(storageRoot, 'server.lock'), JSON.stringify(holder));
+
+  const originalWarn = console.warn;
+  const warnings: string[] = [];
+  console.warn = (...args: unknown[]) => {
+    warnings.push(args.map(String).join(' '));
+  };
+  let claimed;
+  try {
+    claimed = await store.claimLock(lock({ pid: process.pid, hostname: 'self-host' }), async () => false);
+  } finally {
+    console.warn = originalWarn;
+  }
+  assert.equal(claimed.ok, true);
+  assert.ok(
+    warnings.some((w) => w.includes('555') && w.includes('self-host')),
+    `expected a reclaim log naming the stale holder; got: ${JSON.stringify(warnings)}`,
+  );
+
+  const raw = await readFile(path.join(storageRoot, 'server.lock'), 'utf8');
+  assert.equal(JSON.parse(raw).pid, process.pid, 'self now holds the lock');
+});
+
+// D161's decision table, row 5: unparseable → treated as a stale holder and reclaimed,
+// logged — refusing on it would make every unclean shutdown need manual intervention.
+test('S22 — an unparseable server.lock is treated as a stale holder: reclaimed, logged, and boot proceeds', async () => {
+  const { storageRoot, store } = await newStore();
+  await writeFile(path.join(storageRoot, 'server.lock'), 'not json at all');
+
+  const originalWarn = console.warn;
+  const warnings: string[] = [];
+  console.warn = (...args: unknown[]) => {
+    warnings.push(args.map(String).join(' '));
+  };
+  let claimed;
+  try {
+    claimed = await store.claimLock(lock({ pid: process.pid, hostname: 'self-host' }), async () => {
+      throw new Error('must not be consulted for an unparseable lock');
+    });
+  } finally {
+    console.warn = originalWarn;
+  }
+  assert.equal(claimed.ok, true);
+  assert.ok(warnings.some((w) => w.toLowerCase().includes('unparseable') || w.toLowerCase().includes('reclaim')));
+
+  const raw = await readFile(path.join(storageRoot, 'server.lock'), 'utf8');
+  assert.equal(JSON.parse(raw).pid, process.pid);
+});
+
+// S22.5: a clean shutdown removes the lock, and the next boot takes it without invoking
+// the staleness path at all.
+test('S22.5 — releaseLock removes the lock; the next claim against an absent lock never consults the liveness probe', async () => {
+  const { storageRoot, store } = await newStore();
+  const self = lock({ pid: process.pid, hostname: 'self-host' });
+  assert.equal((await store.claimLock(self, async () => true)).ok, true);
+
+  const released = await store.releaseLock();
+  assert.equal(released.ok, true);
+  await assert.rejects(readFile(path.join(storageRoot, 'server.lock'), 'utf8'), /ENOENT/);
+
+  let probed = false;
+  const claimed = await store.claimLock(self, async () => {
+    probed = true;
+    return false;
+  });
+  assert.equal(claimed.ok, true);
+  assert.equal(probed, false, 'no holder to test the staleness of');
+});
+
+// releaseLock on an already-absent lock is not an error — a repeat clean shutdown, or a
+// process that never claimed, must not fail here.
+test('S22.5 — releaseLock is a no-op, not an error, when there is no lock to remove', async () => {
+  const { store } = await newStore();
+  const released = await store.releaseLock();
+  assert.equal(released.ok, true);
 });

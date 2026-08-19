@@ -162,6 +162,25 @@ export interface ProcessTombstone {
 }
 
 // ---------------------------------------------------------------------------
+// Server lock
+// ---------------------------------------------------------------------------
+
+// `<storage>/server.lock`. Read at boot and reclaimed only when its holder fails D23's
+// liveness test, and never when `hostname` is another host. It carries no `exitedAt`:
+// `releaseLock` removes the file, so the file's absence is that limb of the test.
+export interface ServerLock {
+  readonly pid: number;
+  readonly hostname: string;
+  readonly startedAt: IsoTimestamp; // load-bearing, exactly as ProcessRecord.startedAt is
+  readonly image: string;
+}
+
+// Supplied by the caller so that D23's three-part liveness test has exactly one
+// implementation and `store` acquires no dependency on process enumeration. `true` means
+// the named holder is a live server process on this host.
+export type LivenessProbe = (holder: ServerLock) => Promise<boolean>;
+
+// ---------------------------------------------------------------------------
 // Event envelope
 // ---------------------------------------------------------------------------
 
@@ -887,6 +906,16 @@ export interface Store {
   readAllReviews(): Promise<readonly Review[]>;
   appendRequisition(record: Requisition): Promise<Result<void, StoreError>>;
   readAllRequisitions(): Promise<readonly Requisition[]>;
+
+  // Claim `<storage>/server.lock` for `self`. Called as boot's step 0, before the reap step
+  // and not merely before `listen`. Returns `StartupError` rather than `StoreError` because
+  // `storage_locked` is a startup refusal and because `SessionManager.boot` already returns
+  // that union, so it composes with no wrapper.
+  claimLock(self: ServerLock, isLive: LivenessProbe): Promise<Result<void, StartupError>>;
+
+  // Remove the lock at clean shutdown. A failure here is logged and is not fatal: the next
+  // boot's staleness path is what recovers from a lock nobody removed.
+  releaseLock(): Promise<Result<void, StoreError>>;
 }
 
 // ---------------------------------------------------------------------------
@@ -958,7 +987,14 @@ export type ConfigError =
   | { readonly code: 'missing_field'; readonly field: string }
   | { readonly code: 'invalid_field'; readonly field: string; readonly detail: string };
 
-export type StartupError = { readonly code: 'storage_unwritable'; readonly path: string; readonly detail: string } | ConfigError;
+export type StartupError =
+  | { readonly code: 'storage_unwritable'; readonly path: string; readonly detail: string }
+  // Another server holds this storage root. The holder is named because a refusal that does
+  // not say who is holding it leaves an operator with nothing to act on — which is most of
+  // the value when an operator is looking at one, and is why an OS advisory lock was
+  // rejected (D161).
+  | { readonly code: 'storage_locked'; readonly path: string; readonly holder: ServerLock }
+  | ConfigError;
 
 export type IdentityError =
   | { readonly code: 'no_identity' }
