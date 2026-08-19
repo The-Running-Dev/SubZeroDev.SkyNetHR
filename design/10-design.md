@@ -783,6 +783,7 @@ encodes is `store`'s business.
   meta.json           schemaVersion + Session, minus turn/buffer/subscribers   (D49)
   events.ndjson       envelopes, append-only
   tool-output/<turnId>/<callId>   untruncated tool output, one file per call  (D22)
+  attachments/<turnId>/<attachmentId>   operator uploads, one file each      (D160)
   ckpt.git/           shadow git dir, work-tree = the session's workspace
 <storage>/audit.ndjson
 <storage>/pids.ndjson                                                (D23)
@@ -1110,6 +1111,8 @@ spend and a second approval to ask for. Both claims release on any later failure
 POST /api/sessions/:id/message {text}
   edge     → origin allow-list check                → 403 bad_origin        (D29)
   edge     → identity, then manager.get(id, owner)  → 404 if not owner
+  edge     : attachments? adapter.acceptsAttachments, count and size caps
+                                     any failing → 422 bad_request, nothing written (D160)
   manager  : state == 'live'?  else → 409 session_ended
   manager  : turn == null?     else → 409 turn_in_flight
   manager  : turn = {turnId, phase:'starting'}         SYNCHRONOUS          (D32)
@@ -1118,7 +1121,9 @@ POST /api/sessions/:id/message {text}
                                      on failure    → session.notice/warn; turn proceeds
                                                      with no restore point   (D42)
   manager  : turn.phase = 'running'                → turn.started
-  manager  → adapter.send(text)
+  manager  → store.writeAttachment(...) per upload    fsync'd BEFORE the envelope   (I49, D160)
+                                                     bytes never enter the spill
+  manager  → adapter.send(text, attachments)
   adapter  → spawn(claude, --stream-json --permission-prompt-tool stdio [--resume id])
                        resume id is the LATEST init reported, or absent      (D34)
                     → notify{spawned: pid, pgid, image}                      (D46)
@@ -1318,6 +1323,7 @@ operator, because that would need a container per session and is explicitly out 
 | **An operator writing a review about another's session** | **No — deliberately** | None. `author` is recorded; a review is an attributable claim, not a privileged one |
 | **Operator-authored text reaching another operator's browser** | Yes | The no-`innerHTML` rule, widened past agent-derived content to cover everything stored (D74) |
 | A confused agent, or prompt injection reaching one | Partly | Permission prompts, sandbox mode, checkpoints to undo |
+| **Operator-supplied content entering the agent's context** | Partly, and it is the row above with a known author | None beyond the row above, **deliberately** (D160). An attachment adds no filesystem reach — the agent already runs with the server user's full access — so this is not a jail question. It puts bytes the operator chose in front of the agent, at the same trust level as the message text beside them. What the design does add is a record: the `message` envelope names every attachment, ordered and replayable |
 | A determined operator | **No** | Out of scope — needs per-session containers |
 | A compromised server | No | Out of scope |
 
@@ -2463,7 +2469,8 @@ these are cited by number elsewhere in this document and in the slices.
    D45 for `session.exit` and where `state` lives, D47 for the undefined `Attachment`, and
    D50 for the vendor authorisation the contract asserted and nothing could hold. Two gaps
    the derivation exposed are open rather than closed and are now issues: attachment
-   handling (#22), and who owns `ToolCall.summary` (#23).
+   handling (#22 — **closed by D160**, which restores the field against types that now exist),
+   and who owns `ToolCall.summary` (#23).
    **The round this pass opened is closed too.** D65 to D86, D73's audit read route and the
    whole tier-two surface reached `20-contract.md` — the types, the routes, `RecordsError`
    and invariants I29 to I39 — and reached `30-slices.md` as S12 to S18. `90-decisions.md

@@ -27,6 +27,9 @@ type Brand<T, B extends string> = T & { readonly __brand: B };
 type SessionId  = Brand<string, 'SessionId'>;    // UUIDv4
 type TurnId     = Brand<string, 'TurnId'>;       // UUIDv4
 type Seq        = Brand<number, 'Seq'>;          // integer >= 1
+// (D160) Server-minted, and the only thing that ever names an attachment's file. The
+// operator's `filename` is display text and never reaches a path (I49).
+type AttachmentId = Brand<string, 'AttachmentId'>;  // UUIDv4
 
 // Server-minted, tier two.
 type ReviewId      = Brand<string, 'ReviewId'>;       // UUIDv4
@@ -340,6 +343,25 @@ interface MessageEvent {
   readonly turnId: TurnId;
   readonly role: 'user' | 'assistant';
   readonly text: string;
+  // (D160) Refs only, never bytes: the spill is the transcript. Empty on every `assistant`
+  // message — an attachment originates with an operator. Bytes are fetched from
+  // `GET /api/sessions/:id/attachments/:turnId/:attachmentId`.
+  readonly attachments: readonly AttachmentRef[];
+}
+
+// (D160) What the operator uploads, inline on `POST /message`.
+interface AttachmentUpload {
+  readonly filename: string;      // display only; never used to build a path (I49)
+  readonly mediaType: string;     // the client's claim, stored verbatim, never trusted on the way out
+  readonly dataBase64: string;    // decoded size is what `Caps.attachmentBytes` bounds
+}
+
+// (D160) What the envelope carries and the client renders.
+interface AttachmentRef {
+  readonly attachmentId: AttachmentId;
+  readonly filename: string;
+  readonly mediaType: string;
+  readonly bytes: number;         // decoded size
 }
 
 interface MessageDelta {
@@ -682,6 +704,8 @@ interface Caps {
   readonly keepaliveMs: number;              // SSE comment interval
   readonly auditPageMax: number;             // largest window `GET /api/audit` will serve
   readonly standingRuleBytes: number;        // rejection threshold for one StandingRuleExpression
+  readonly attachmentBytes: number;          // (D160) rejection threshold, decoded, per attachment
+  readonly attachmentCount: number;          // (D160) rejection threshold, attachments per message
   readonly reviewBodyBytes: number;          // (tier two) rejection threshold for Review.body
   readonly requisitionTextBytes: number;     // (tier two) per field: title, justification
 }
@@ -740,6 +764,7 @@ interface SessionMetaFile {
 | `meta.json` | `sessionId` from the directory name | — | Written by temp-file-then-atomic-rename, never in place, on exactly three occasions: create, a `state` transition, a `cliSessionId` change. Never per event |
 | `events.ndjson` | `(sessionId, seq)` | `seq` ascending, contiguous from 1 | Append-only, written in `seq` order through the session's own append chain (D89). Not fsync'd per line. Read from the start and skipped to `after`; no offset index exists |
 | `tool-output/<turnId>/<callId>` | `(sessionId, turnId, callId)` | — | Written once, never appended. `turnId` is in the path because `callId` is vendor-minted and only *assumed* session-unique |
+| `attachments/<turnId>/<attachmentId>` | `(sessionId, turnId, attachmentId)` | — | Written once, never appended, fsync'd before the envelope naming it exists (I49). `attachmentId` is server-minted, so the operator's `filename` never reaches a path. Removed with the session (D25, D160) |
 | `audit.ndjson` | append order | append order, read newest first | Server-wide. fsync'd before the decision it records reaches the child. Never truncated, never deleted with a session. Every read is a bounded window resumed by `AuditCursor` |
 | `pids.ndjson` | append order; `pid` is not unique over time | append order | Server-wide. Two line shapes: a `ProcessRecord` at spawn, a `ProcessTombstone` at exit (D95). The latest line for a `pid` decides liveness; the spawn line carries everything else |
 | `reviews.ndjson` *(tier two)* | `reviewId` | append order; the latest line for an id wins | Server-wide. Never rewritten. Survives deletion of the session it names (D67). A `final` line is terminal — no later line for that id is written |
@@ -758,7 +783,7 @@ shipped shape:
 | `meta.json` | none | `schemaVersion` gates rehydration. An unknown version is treated exactly as a corrupt file: the session is skipped, logged, and its files left untouched |
 | `events.ndjson`, `audit.ndjson`, `pids.ndjson` | none | Readers ignore unknown fields and drop an unparseable trailing line. Added fields must be optional; a removed or retyped field is a new `schemaVersion` on `meta.json` and a refusal to rehydrate older sessions |
 | `reviews.ndjson`, `requisitions.ndjson` | none | Readers ignore unknown fields; added fields must be optional. A dropped trailing line does not shorten the record, it reverts it to the previous line for that id — accepted in `10-design.md § Persistence summary`. **A removed or retyped field has no discriminator to gate on in these two files**; see `## Unresolved` 11 |
-| `tool-output/*` | none | Opaque bytes; no schema to migrate |
+| `tool-output/*`, `attachments/*` | none | Opaque bytes; no schema to migrate |
 | `ckpt.git/` | none | Git's own format; not ours to migrate |
 
 ## Public signatures
@@ -956,11 +981,22 @@ interface AdapterOptions {
   readonly notify: (n: AdapterNotification) => void;
 }
 
+// (D160) An attachment as the adapter receives it: the ref the envelope carries, plus the bytes.
+// The manager reads them from `store` and hands them down, because an adapter depends on
+// `contract` and nothing else and may not be given a store handle.
+interface AttachmentPayload {
+  readonly ref: AttachmentRef;
+  readonly data: Uint8Array;
+}
+
 interface Adapter {
   readonly vendor: Vendor;
   readonly policy: PermissionPolicy;                 // the vendor's capability, fixed at create
+  // (D160) Whether this vendor's transport carries non-text content at all. Read by the edge to
+  // refuse `attachments` with `422 bad_request`; a capability, not a vendor test, so I20 holds.
+  readonly acceptsAttachments: boolean;
   // Spawns the turn's child, writes the message to stdin, and holds stdin open.
-  send(text: string, resume: CliSessionId | null, turnId: TurnId): Promise<Result<void, AdapterError>>;
+  send(text: string, attachments: readonly AttachmentPayload[], resume: CliSessionId | null, turnId: TurnId): Promise<Result<void, AdapterError>>;
   respond(requestId: RequestId, decision: PermissionDecision): Result<void, AdapterError>;
   kill(): Promise<void>;                             // terminate-then-force, on the process tree
 }
@@ -1275,7 +1311,7 @@ The `404` is `no_such_session` because `ApiErrorCode` carries no route-level not
 | Method | Path | Request | Success | Refusals |
 |---|---|---|---|---|
 | `POST` | `/api/sessions` | `CreateSessionInput` | `201 { sessionId }` | `403 bad_origin`, `401 unauthenticated`, `409 outside_workspace_root`, `409 workspace_busy`, `404 no_such_requisition`, `409 requisition_not_approved`, `409 requisition_consumed`, `422 bad_request`, `503 agent_unavailable` |
-| `POST` | `/api/sessions/:id/message` | `{ text: string }` | `202 { turnId }` | `403 bad_origin`, `404 no_such_session`, `409 session_ended`, `409 turn_in_flight`, `422 bad_request`, `503 agent_unavailable` |
+| `POST` | `/api/sessions/:id/message` | `{ text: string, attachments?: AttachmentUpload[] }` | `202 { turnId }` | `403 bad_origin`, `404 no_such_session`, `409 session_ended`, `409 turn_in_flight`, `422 bad_request`, `503 agent_unavailable` |
 | `POST` | `/api/sessions/:id/permission` | `PermissionAnswer` | `200 { accepted: boolean }` | `403 bad_origin`, `404 no_such_session`, `422 bad_request` |
 | `POST` | `/api/sessions/:id/interrupt` | `{ turnId: TurnId }` | `200 { ok: true }` | `403 bad_origin`, `404 no_such_session`, `422 bad_request` |
 | `POST` | `/api/sessions/:id/end` | `{}` | `200 { ok: true }` | `403 bad_origin`, `404 no_such_session`, `409 turn_in_flight` |
@@ -1286,6 +1322,7 @@ The `404` is `no_such_session` because `ApiErrorCode` carries no route-level not
 | `GET` | `/api/sessions/:id/events` | `Last-Event-ID` header | `200 text/event-stream` | `404 no_such_session` |
 | `GET` | `/api/sessions/:id/checkpoints` | — | `200 { checkpoints: Checkpoint[] }` | `404 no_such_session` |
 | `GET` | `/api/sessions/:id/tool-output/:turnId/:callId` | — | `200 text/plain; charset=utf-8` | `404 no_such_session`, `404 no_such_output` |
+| `GET` | `/api/sessions/:id/attachments/:turnId/:attachmentId` | — | `200`, media type per the allow-list below | `404 no_such_session`, `404 no_such_attachment` |
 
 `GET /api/sessions/:id` is the single-resource read of the same `SessionSummary` the list
 route returns, under the same ownership check, and it exists so that a client holding one
@@ -1305,6 +1342,20 @@ command that can arrive too late.
 
 The tool-output route serves `X-Content-Type-Options: nosniff` and
 `Content-Disposition: attachment` alongside `text/plain`.
+
+**The attachment route never echoes an upload's declared media type unguarded** (D160). It serves
+`X-Content-Type-Options: nosniff` and `Content-Disposition: attachment` on every response, and
+sets `Content-Type` to the stored `mediaType` only when that value is in a server-side allow-list
+of image types — `image/png`, `image/jpeg`, `image/gif`, `image/webp` — and to
+`application/octet-stream` otherwise. An operator-uploaded `text/html` served under its own type
+on the console's origin is stored XSS holding the console's credentials, which is D74's population
+arriving as bytes rather than as text. The allow-list is what lets the client render a screenshot
+with `<img src>` under the document's existing `img-src 'self'` while everything else downloads.
+
+`POST /message` refuses, with `422 bad_request` naming the field and nothing written: an
+attachment whose decoded size exceeds `Caps.attachmentBytes`; a message carrying more than
+`Caps.attachmentCount` of them; and any attachment at all on a session whose adapter declares
+`acceptsAttachments: false`. None is truncated, shortened or silently dropped (D84, D160).
 
 Read routes are deliberately not under the origin check: a cross-origin `GET` cannot be read
 back by the attacking page, and checking `GET /events` would break a reverse proxy that
@@ -1675,6 +1726,7 @@ it; where two are named, the second is where a violation would first be observab
 | I45 | A standing rule exists only in its session's in-memory state. Nothing writes one to disk, and a session rehydrated at boot holds none | `session-manager` |
 | I46 | `match` reads only `rule`, `request.tool` and `request.matchTarget`. It never reads `input`, and no tool name appears in `session-manager` | `session-manager` |
 | I47 | `updatedPermissions` is never written to a child's stdin, under any decision or scope | `adapters/*`, `session-manager` |
+| I49 | An attachment's bytes never enter `events.ndjson`, and an operator's `filename` never reaches a filesystem path — the server-minted `AttachmentId` is the only path segment. The blob is written and fsync'd before the `message` envelope naming it is constructed | `store`, `session-manager` |
 
 **I40, I41 and I42 were never allocated, and the gap is left open rather than closed.** The
 numbering jumps from I39 to I43 and nothing is missing. Ids here are cited by number in
@@ -1937,12 +1989,18 @@ D92 gives Claude one. Adding to it is an adapter change, never a change to `Erro
 Signatures the design does not determine. Nothing downstream may invent them. Items 5 to 11
 are new in this pass and each names the issue that carries it.
 
-1. **`Attachment`.** `POST /api/sessions/:id/message` previously carried
-   `attachments?: Attachment[]` against a type that was never defined, and no section of
-   `10-design.md` describes attachment handling — not the transport to the CLI, not storage,
-   not the byte cap, not the audit consequence of a file reaching an agent. The field is
-   removed from the route rather than left dangling. Restoring it needs a design decision
-   first. (#22)
+1. **Resolved by D160.** The field is restored, against types that now exist. Each gap D47 named
+   is answered: the **transport** is the Anthropic content-block array the adapter already writes,
+   with `Adapter.acceptsAttachments` declaring vendor support and S21.1 probing whether the Claude
+   CLI accepts non-text blocks before anything is built on it; **storage** is
+   `attachments/<turnId>/<attachmentId>`, D22's tool-output shape reversed, with bytes kept out of
+   the spill (I49); the **byte cap** is `Caps.attachmentBytes` and `Caps.attachmentCount`, both
+   refusals rather than truncations (D84); and the **audit consequence** is that there is none —
+   `audit.ndjson` records tool approvals and S14.10 already refused to dilute it, so the `message`
+   envelope is the record. The jail objection is answered too, and not by a control: *Threat model*
+   already holds that `workspaceRoot` is not a sandbox, so an attachment adds no filesystem reach —
+   it adds operator-chosen content to the agent's context, which is the *confused agent* row with
+   a known author. (#22)
 2. **Resolved by S10.1 and this pass** (D108–D110). Open question 8 is answered, and the answer
    is narrower than "insufficient": `permission_suggestions` is **unobservable** — the
    `control_request` carrying it has never appeared on this transport across two independent
