@@ -380,7 +380,8 @@ interface ToolCall {
   readonly callId: CallId;
   readonly name: string;
   readonly input: Readonly<Record<string, unknown>>;
-  readonly summary: string;   // one line, server-rendered, safe to show collapsed
+  readonly summary: string;   // one line, adapter-rendered, safe to show collapsed. Display only:
+                              // nothing above `adapters/*` may parse it or branch on it (I48, D159)
 }
 
 interface ToolResult {
@@ -665,8 +666,26 @@ interface PayrollView {
                                              // null when budgetTokens is null (D129)
   readonly idleMs: number;                  // live-with-no-turn wall clock
   readonly droppedIntervals: number;        // idle intervals discarded for spanning a restart
+  readonly costCurrency: number | null;     // burn priced at Config.tokenRates (D158); null when
+                                             // rates are unset, and null on a session whose
+                                             // transport reports no usage — never 0.00
+  readonly currency: string | null;          // Config.currency, echoed; null whenever cost is
 }
 ```
+
+**The cost figure is an estimate against operator-set rates, never a vendor's billed amount**
+(D158). It is `burn`'s four components each multiplied by their rate in `Config.tokenRates` and
+summed. Rates are flat per deployment: `Usage` carries no model identifier and `UsageEvent` is
+`{ turnId, usage }`, so a session that switched models is priced approximately, and that
+imprecision is recorded rather than hidden. `currency` is a label the server stores and echoes and
+never interprets — no conversion, no lookup, no network call.
+
+**`costCurrency` is null on exactly the sessions that cannot report burn, and the test is not
+`burn === 0`.** `## Unresolved` 12 rules that nothing may infer the zero-versus-unknown distinction
+by testing `burn`, and a fabricated `0.00` misreads harder than `0 tokens` does. The signal is the
+same one behind `session.notice / usage_unavailable` (D146). Null also covers an unpriced
+deployment: `Config.tokenRates` null means the operator set no rates, and the tile is absent rather
+than zero.
 
 **`session.notice / server_restart` is the fold's only restart marker, and `turn.ended`'s
 `server_restart` stop reason carries no fold meaning** (D130). The fold walks the spill and
@@ -710,6 +729,15 @@ interface Caps {
   readonly requisitionTextBytes: number;     // (tier two) per field: title, justification
 }
 
+// (tier two, D158) One rate per `Usage` component, in `currency` units per token. Flat per
+// deployment: nothing records which model produced a session's burn, so nothing can key on one.
+interface TokenRates {
+  readonly inputTokens: number;
+  readonly outputTokens: number;
+  readonly cacheRead: number;
+  readonly cacheCreate: number;
+}
+
 interface Config {
   readonly bind: { readonly host: string; readonly port: number };
   readonly auth: AuthConfig;
@@ -727,6 +755,8 @@ interface Config {
   readonly sessionCookieMaxAgeSeconds: number;
   readonly includeRaw: boolean;
   readonly sessionTokenBudget: number | null;              // (tier two) per session; null disables the view's budget
+  readonly tokenRates: TokenRates | null;                  // (tier two) null disables the cost tile (D158)
+  readonly currency: string | null;                        // (tier two) label only; never interpreted (D158)
   readonly checklist: readonly ChecklistItemTemplate[];    // (tier two) empty disables the checklist
   // D10/D117: which transport edge this deployment binds. `server.ts` constructs
   // `createSseEdge` or `createWsEdge` accordingly; exactly one binds (S11.5).
@@ -1726,6 +1756,7 @@ it; where two are named, the second is where a violation would first be observab
 | I45 | A standing rule exists only in its session's in-memory state. Nothing writes one to disk, and a session rehydrated at boot holds none | `session-manager` |
 | I46 | `match` reads only `rule`, `request.tool` and `request.matchTarget`. It never reads `input`, and no tool name appears in `session-manager` | `session-manager` |
 | I47 | `updatedPermissions` is never written to a child's stdin, under any decision or scope | `adapters/*`, `session-manager` |
+| I48 | `ToolCall.summary` is display-only: above `adapters/*` it is rendered as a text node and nothing else. No module parses it, matches against it, or derives anything persisted or security-relevant from it; its shape is not contractual. Testing it for empty, to decide whether to show the line at all, is display and is permitted | `adapters/*`, `session-manager`, `client` |
 | I49 | An attachment's bytes never enter `events.ndjson`, and an operator's `filename` never reaches a filesystem path — the server-minted `AttachmentId` is the only path segment. The blob is written and fsync'd before the `message` envelope naming it is constructed | `store`, `session-manager` |
 
 **I40, I41 and I42 were never allocated, and the gap is left open rather than closed.** The
@@ -2021,11 +2052,16 @@ are new in this pass and each names the issue that carries it.
    the three rows are filled: there is no wire-level `tool.call` / `tool.result` pair on either
    interface, and the adapter synthesises it from one item's two lifecycle states. What the
    experiment exposed instead is carried as 12 and 13 below. (#14, #18)
-4. **`ToolCall.summary`'s renderer.** The design calls it "server-rendered" and names no
-   owner. It is emitted by the adapter in the shape above, which makes it vendor code
-   producing a display string — the one place that reading is uncomfortable. It is not
-   moved here because moving it would put tool-shape knowledge in the session manager, which
-   is exactly what the vendor boundary forbids. (#23)
+4. **Resolved by D159.** `ToolCall.summary` is the adapter's, and D109 had already governed it:
+   the tool-to-string projection behind `matchTarget` faced the identical question and was ruled
+   the adapter's, because a per-tool field table is one vendor's vocabulary and hard-codes it into
+   vendor-neutral code. Summarising a call in one line needs the same table under a different name.
+   The discomfort this item recorded — vendor code producing a display string — is bounded rather
+   than removed, by I48: `summary` is display-only, nothing above `adapters/*` parses or branches on
+   it, and its shape is not contractual, so an adapter may change how it reads without breaking a
+   consumer. Rejected alternatives are in D159; the sharpest is deriving it from `name` +
+   `matchTarget`, which fails because `matchTarget` is `null` outside Claude's four mapped rows and
+   because it would couple a display string to the field I43 and I46 match against. (#23)
 5. **Resolved by S12.** `session-manager.readAudit` serves the route, delegating straight to
    `Store.readAuditPage`; `session-manager` was chosen over `records` because `records` is
    tier two and does not exist when tier one's `GET /api/audit` must already work, and every

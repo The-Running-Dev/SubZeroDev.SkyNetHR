@@ -727,6 +727,20 @@ per-operator budget needs the operator record D3 refuses.
   unmeasured zero from a real one. What stays open is the consumer, not the signal — this
   screen still shows a zero it cannot distinguish from an idle session, because `PayrollView`
   carries no field separating unknown from zero and nothing may infer one by testing `burn`.
+- **Cost in money is burn priced at rates the deployment sets, and it is an estimate rather
+  than a bill** (D158). It is the fourth clause of brief item 8 and it replaced a prototype tile,
+  cost per shipped PR, that had no source inside this server at all — what a shipped PR is lives
+  in a forge, and reaching one means a credential class this design has never held and an
+  outbound-network assumption the brief's constraints do not make. Pricing burn needs neither: it
+  is the same fold plus four `config` rates, one per `Usage` component. **The rates are flat per
+  deployment because nothing records which model produced a session's burn** — `Usage` carries no
+  model identifier — so a session that switched models is priced approximately, and that is
+  written down rather than smoothed over. **The figure is absent, not zero, wherever it cannot be
+  computed honestly**: no rates configured, or a session whose transport reports no usage. The
+  second reuses D146's notice as its signal and never a test of `burn` against zero, for the
+  reason the bullet above gives — and a currency-formatted `0.00` misreads as authoritative in a
+  way `0 tokens` does not, which is why this tile sharpens the open consumer question rather than
+  inheriting it quietly.
 - **Idle** is wall-clock time the session was `live` with no turn: the gaps between
   `turn.ended` and the next `turn.started`, plus creation-to-first-turn and last-turn-to-end.
 - **Idle excludes any interval containing a restart, and boot writes the marker that makes
@@ -2468,9 +2482,10 @@ these are cited by number elsewhere in this document and in the slices.
    that document, at commit `0535303`. Three needed decisions of their own and carry them:
    D45 for `session.exit` and where `state` lives, D47 for the undefined `Attachment`, and
    D50 for the vendor authorisation the contract asserted and nothing could hold. Two gaps
-   the derivation exposed are open rather than closed and are now issues: attachment
+   the derivation exposed are open rather than closed and were issues: attachment
    handling (#22 — **closed by D160**, which restores the field against types that now exist),
-   and who owns `ToolCall.summary` (#23).
+   and who owns `ToolCall.summary` (#23 — **closed by D159**: the adapter, on D109's argument,
+   with I48 bounding it to display only).
    **The round this pass opened is closed too.** D65 to D86, D73's audit read route and the
    whole tier-two surface reached `20-contract.md` — the types, the routes, `RecordsError`
    and invariants I29 to I39 — and reached `30-slices.md` as S12 to S18. `90-decisions.md

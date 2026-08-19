@@ -3252,6 +3252,85 @@ in `src/` changed to produce them, and none of `design/00-brief.md`, `design/20-
 `design/30-slices.md` needed a word altered — the "Hosting the model" non-goal already drew the
 boundary this artifact stays inside of.
 
+### 2026-08-19 — D158 Payroll's fourth tile is session cost in currency, at flat deployment rates
+Context: the prototype's payroll screen draws four tiles. D53 kept the screen whole by the owner's
+ruling but recorded the asymmetry plainly — three tiles need no credential, while the fourth, cost
+per shipped PR, has "no source and is left open". Nothing in this server knows what a shipped PR is:
+that fact lives in a forge, and reaching it means a forge credential, an outbound-network assumption
+`00-brief.md § Constraints` does not make, and a session-to-repository-to-PR mapping nothing records.
+Brief item 8 names three tiles, so cutting the fourth needed no brief change and keeping it did.
+Chosen: replace the tile rather than cut it. The fourth tile becomes **session cost in currency** —
+`burn` priced against four operator-set rates, one per `Usage` component, with a currency label the
+server never interprets. This is the reading of item 8's own headline sentence, "see what a session
+has cost", that the three sub-clauses under-serve, and it stays what the other three tiles are: a
+fold over data already written plus a `config` value, needing no credential and no network call.
+D61 is not reversed by this and was never in tension with it — D61 explicitly *rejected* narrowing
+the model-hosting non-goal to forbid pricing lookups, on the grounds that doing so would pre-decide
+this very item. This decision is the one D61 held the door open for.
+Rates are **flat per deployment**, not per model. `Usage` carries four token components and no model
+identifier, and `UsageEvent` is `{ turnId, usage }`, so pricing per model would mean a new field on a
+public event payload and a corresponding change in every adapter. The known cost of flat rates is
+stated rather than hidden: a session that switched models is priced approximately, and the figure is
+an estimate against operator-set rates, never a vendor's billed amount.
+Rejected: dropping the tile. It was the recommendation and the owner ruled against it, consistent
+with D53's ruling on the same screen; recorded here as known-and-retained rather than dropped
+silently.
+Rejected: a forge integration to source the original figure. A new credential class, a new network
+assumption, and a brief amendment, for one tile.
+Rejected: per-model rates. Materially more correct and materially larger — it changes a public event
+payload and every adapter, and turns a fold into a plumbing change. The imprecision it would fix is
+recorded above and is tracked, not accepted silently.
+Reversibility: cheap in code — the tile is a fold and a `config` read, and nothing persists it.
+The brief edit adding a fourth clause to item 8 is the expensive half to reverse, because the
+definition of done is what everything downstream is checked against.
+
+**One coupling this creates, and it is not closed here.** `20-contract.md § Unresolved` 12 records
+that `PayrollView.burn`'s all-zero value already carries two meanings — a genuinely free session,
+and `codex exec --json` reporting nothing — and rules that nothing may infer the distinction by
+testing `burn` for zero. A currency figure inherits that and sharpens it: a fabricated `0.00` reads
+as authoritative in a way `0 tokens` does not. `costCurrency` is therefore `null` on exactly the
+sessions that emit `session.notice / usage_unavailable` (D146), derived from the same signal and
+never from testing `burn`. Whether `burn` itself should become nullable stays open on #30 and #91;
+this decision adds weight to it and does not settle it.
+
+### 2026-08-19 — D159 `ToolCall.summary` is the adapter's, and D109 already governed it
+Context: `20-contract.md § Unresolved` 4 carried the owner of `ToolCall.summary` as open, calling
+the adapter's authorship "the one place that reading is uncomfortable" — vendor code producing a
+display string. It has sat open since the contract was first derived. What the item does not say is
+that the identical question was answered three days later for a sibling field: D109 asked whether
+the tool-to-string projection behind `matchTarget` belongs to the adapter or to `session-manager`,
+and ruled for the adapter, because a projection table is tool-shape knowledge and
+`Bash`/`Read`/`Edit`/`Write` are one vendor's vocabulary — "a table there hard-codes Claude's
+vocabulary into vendor-neutral code and is wrong the moment another adapter ships".
+Chosen: the adapter owns `summary`, and this is recorded as decided rather than tolerated. D109's
+argument transfers without modification: summarising a tool call in one line requires knowing which
+field of that tool's input is the interesting one, which is the same table by a different name. The
+tree already reflects it and reflects the kinship — `summariseToolCall` sits in its own module
+beside the Claude adapter, `summariseCommand` beside the Codex one, and `projectMatchTarget` shares
+`BASH_COMMAND_FIELD` with the summariser precisely "so the two can't silently disagree about it".
+**A constraint is added rather than left implied: `summary` is display-only.** Above `adapters/*`
+it is rendered as a text node and nothing else — no parsing, no matching, nothing persisted or
+security-relevant derived from it (I48). That is what bounds the cost of vendor code producing a
+display string: it makes the string's shape non-contractual, so an adapter may change how it reads
+without breaking a consumer. The invariant was checked against the tree before it was written, not
+asserted: `client/render.js` renders it with `el(doc, 'div', 'tool__summary', data.summary)` and
+tests only whether it is empty, which is a display decision and is why I48 permits that one case
+explicitly rather than leaving a true statement looking like a violation.
+Rejected: **moving it to `session-manager`**. It reopens D109 with no new evidence and reintroduces
+the exact boundary violation D109 refused.
+Rejected: **removing `summary` from the wire and letting the client compose one from `name` and
+`input`.** It relocates tool-shape knowledge into the client, which S2.11 forbids outright — a
+search of client sources for `claude` and `codex` must return nothing, and a per-tool field table is
+that vocabulary in all but spelling.
+Rejected: **deriving `summary` above the adapter from `name` + `matchTarget`.** Superficially
+attractive, since it would delete a field and reuse a projection that already exists. It fails
+twice: `matchTarget` is `null` for every tool outside Claude's four mapped rows while a summary must
+exist for all of them, and it couples a display string to a security primitive that I43 and I46
+require be matched anchored and untruncated. A change to how a summary looks would then bear on the
+field the standing-rule grammar matches against.
+Reversibility: cheap. `summary` stays where it already is; the change is a settled owner, a stated
+constraint and one invariant.
+
 ### 2026-08-19 — D160 Attachments ride inline with the message, and their bytes never enter the spill
 Context: D47 removed `attachments?: Attachment[]` from `POST /message` because the type was never
 defined and nothing described handling — "it is a feature, not a type, and inventing one at the
