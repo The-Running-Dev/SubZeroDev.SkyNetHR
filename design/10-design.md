@@ -2477,7 +2477,8 @@ these are cited by number elsewhere in this document and in the slices.
    D45 for `session.exit` and where `state` lives, D47 for the undefined `Attachment`, and
    D50 for the vendor authorisation the contract asserted and nothing could hold. Two gaps
    the derivation exposed are open rather than closed and are now issues: attachment
-   handling (#22), and who owns `ToolCall.summary` (#23).
+   handling (#22), and who owns `ToolCall.summary` (#23 — **closed by D159**: the adapter, on
+   D109's argument, with I48 bounding it to display only).
    **The round this pass opened is closed too.** D65 to D86, D73's audit read route and the
    whole tier-two surface reached `20-contract.md` — the types, the routes, `RecordsError`
    and invariants I29 to I39 — and reached `30-slices.md` as S12 to S18. `90-decisions.md
