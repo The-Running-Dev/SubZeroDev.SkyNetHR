@@ -28,6 +28,8 @@ function baseConfig(storageRoot: string, requisitionTextBytes = 1024, reviewBody
     sessionCookieMaxAgeSeconds: 2592000,
     includeRaw: false,
     sessionTokenBudget: null,
+    tokenRates: null,
+    currency: null,
     checklist: [],
     edge: 'sse',
   };

@@ -104,6 +104,7 @@ async function loadPayrollSummaryRenderer() {
   const mod = (await import(pathToFileURL(path.join(CLIENT, 'render.js')).href)) as {
     renderPayrollSummary: (doc: unknown, view: unknown) => StubNode;
     formatDuration: (ms: number) => string;
+    formatCost: (costCurrency: number, currency: string | null) => string;
   };
   return mod;
 }
@@ -378,12 +379,15 @@ describe('S16 — the payroll panel renders burn, remaining budget, idle time, a
       remainingTokens: null,
       idleMs: 65000,
       droppedIntervals: 0,
+      costCurrency: null,
+      currency: null,
     };
     const dl = renderPayrollSummary(doc, view);
     const rendered = allText(dl).join(' ');
     assert.ok(rendered.includes('165'), 'burn is the component-wise sum of the four fields (100+50+10+5)');
     assert.ok(rendered.includes('no budget set'));
     assert.ok(!rendered.includes('dropped'), 'no dropped-interval row when droppedIntervals is 0');
+    assert.ok(!rendered.includes('cost'), 'no cost row when costCurrency is null');
   });
 
   it('shows the dropped-interval count when there is one, and a numeric remaining budget when there is a budget', async () => {
@@ -396,6 +400,8 @@ describe('S16 — the payroll panel renders burn, remaining budget, idle time, a
       remainingTokens: 850,
       idleMs: 0,
       droppedIntervals: 2,
+      costCurrency: null,
+      currency: null,
     };
     const dl = renderPayrollSummary(doc, view);
     const rendered = allText(dl).join(' ');
@@ -444,6 +450,53 @@ describe('S16 — the payroll panel renders burn, remaining budget, idle time, a
     } finally {
       await restore();
     }
+  });
+});
+
+describe('S20 — the payroll panel prices burn against configured rates, and never fabricates a zero', () => {
+  it('renders the priced figure with its currency label when costCurrency is available', async () => {
+    const { renderPayrollSummary } = await loadPayrollSummaryRenderer();
+    const { doc } = makeDoc();
+    const view = {
+      sessionId: 'sess-1',
+      burn: { inputTokens: 100, outputTokens: 50, cacheRead: 0, cacheCreate: 0 },
+      budgetTokens: null,
+      remainingTokens: null,
+      idleMs: 0,
+      droppedIntervals: 0,
+      costCurrency: 1.5,
+      currency: 'USD',
+    };
+    const dl = renderPayrollSummary(doc, view);
+    const rendered = allText(dl).join(' ');
+    assert.ok(rendered.includes('USD 1.50'), 'the priced figure and its currency label both render');
+    assert.ok(rendered.includes('estimate'), 'the tile says it is an estimate, not a vendor bill, wherever it is shown (S20.5)');
+  });
+
+  it('S20.4 — renders no cost row at all when costCurrency is null, never a currency-formatted zero', async () => {
+    const { renderPayrollSummary } = await loadPayrollSummaryRenderer();
+    const { doc } = makeDoc();
+    const view = {
+      sessionId: 'sess-1',
+      burn: { inputTokens: 0, outputTokens: 0, cacheRead: 0, cacheCreate: 0 },
+      budgetTokens: null,
+      remainingTokens: null,
+      idleMs: 0,
+      droppedIntervals: 0,
+      costCurrency: null,
+      currency: null,
+    };
+    const dl = renderPayrollSummary(doc, view);
+    const rendered = allText(dl).join(' ');
+    assert.ok(!rendered.includes('0.00'), 'never a currency-formatted zero');
+    assert.ok(!rendered.includes('Estimated cost'), 'no tile at all, not even an empty one');
+  });
+
+  it('formatCost concatenates the currency label rather than interpreting it (D158)', async () => {
+    const { formatCost } = await loadPayrollSummaryRenderer();
+    assert.equal(formatCost(1.5, 'USD'), 'USD 1.50');
+    assert.equal(formatCost(0, null), '0.00', 'an unpriced deployment has no label to prepend');
+    assert.equal(formatCost(2, 'not-a-real-currency-code'), 'not-a-real-currency-code 2.00', 'a nonsense label round-trips unchanged — the server never interprets it');
   });
 });
 
@@ -648,7 +701,7 @@ async function runConsole(sessions: ReadonlyArray<Record<string, unknown>>) {
         : String(input).endsWith('/checklist')
           ? { items: [] }
           : String(input).endsWith('/payroll')
-            ? { sessionId: 's1', burn: { inputTokens: 0, outputTokens: 0, cacheRead: 0, cacheCreate: 0 }, budgetTokens: null, remainingTokens: null, idleMs: 0, droppedIntervals: 0 }
+            ? { sessionId: 's1', burn: { inputTokens: 0, outputTokens: 0, cacheRead: 0, cacheCreate: 0 }, budgetTokens: null, remainingTokens: null, idleMs: 0, droppedIntervals: 0, costCurrency: null, currency: null }
             : String(input) === '/api/sessions'
             ? { sessions }
             : String(input) === '/api/requisitions'

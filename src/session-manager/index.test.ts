@@ -105,6 +105,8 @@ async function makeManager(
     sessionCookieMaxAgeSeconds: 2592000,
     includeRaw: false,
     sessionTokenBudget: null,
+    tokenRates: null,
+    currency: null,
     checklist: checklistOverride,
     edge: 'sse',
     ...configOverride,
@@ -3032,4 +3034,78 @@ test('S16.9 — the route carries the ownership check: another operator gets no_
   const got = await manager.payroll(created.value.sessionId, other);
   assert.equal(got.ok, false);
   if (!got.ok) assert.equal(got.error.code, 'no_such_session');
+});
+
+// D158/S20: burn = { inputTokens: 240, outputTokens: 120, cacheRead: 15, cacheCreate: 25 }
+// (the same fixture S16.3/S16.4 assert against) priced at these rates is
+// 240*0.01 + 120*0.02 + 15*0.005 + 25*0.02 = 2.4 + 2.4 + 0.075 + 0.5 = 5.375.
+const RATES = { inputTokens: 0.01, outputTokens: 0.02, cacheRead: 0.005, cacheCreate: 0.02 };
+
+test('S20.1 — costCurrency is burn priced against Config.tokenRates and summed, with currency echoed from configuration', async () => {
+  const { manager, sessionId, owner } = await bootPayrollFixture({ tokenRates: RATES, currency: 'USD' });
+  const got = await manager.payroll(sessionId, owner);
+  assert.equal(got.ok, true);
+  if (!got.ok) return;
+  assert.ok(Math.abs(got.value.costCurrency! - 5.375) < 1e-9, `expected 5.375, got ${got.value.costCurrency}`);
+  assert.equal(got.value.currency, 'USD');
+});
+
+test('S20.2 — costCurrency and currency are both null, never 0, when Config.tokenRates is unset', async () => {
+  const { manager, sessionId, owner } = await bootPayrollFixture({ tokenRates: null, currency: 'USD' });
+  const got = await manager.payroll(sessionId, owner);
+  assert.equal(got.ok, true);
+  if (!got.ok) return;
+  assert.equal(got.value.costCurrency, null);
+  assert.equal(got.value.currency, null);
+});
+
+test('S20.2/S20.3 — costCurrency and currency are both null on a session whose transport reports no usage, derived from session.notice/usage_unavailable and never from testing burn for zero', async () => {
+  const { config, store, checkpoints } = await makeManager('full', {}, undefined, undefined, undefined, undefined, { tokenRates: RATES, currency: 'USD' });
+  const sessionId = 'sess-payroll-unavailable';
+  const owner = 'operator-1' as OperatorId;
+  const record = bootSessionRecord(sessionId, { owner, createdAt: isoAt(0), state: 'ended', endedAt: isoAt(2000) });
+  assert.equal((await store.createSession(record)).ok, true);
+  const events: Array<[number, string, unknown]> = [
+    [0, 'session.notice', { level: 'warn', code: 'usage_unavailable', text: 'This session cannot report token usage.' }],
+    [1000, 'turn.started', { turnId: 't1' }],
+    [1500, 'turn.ended', { turnId: 't1', stopReason: 'completed', usage: null }],
+  ];
+  let seq = 1;
+  for (const [offsetMs, kind, data] of events) {
+    assert.equal((await store.appendEvent(record.id, payrollFixtureEnvelope(sessionId, seq, offsetMs, kind, data))).ok, true);
+    seq += 1;
+  }
+  await store.writeMeta({ ...record, lastSeq: (seq - 1) as never });
+  const manager = createSessionManager({ config, store, checkpoints, records: notImplementedProxy<Records>('records') });
+  assert.equal((await manager.boot()).ok, true);
+
+  const got = await manager.payroll(sessionId as SessionId, owner);
+  assert.equal(got.ok, true);
+  if (!got.ok) return;
+  assert.deepEqual(got.value.burn, { inputTokens: 0, outputTokens: 0, cacheRead: 0, cacheCreate: 0 });
+  assert.equal(got.value.costCurrency, null);
+  assert.equal(got.value.currency, null);
+});
+
+test('S20.3 — a session that genuinely burned nothing, with rates configured, still prices a real 0 rather than null', async () => {
+  const { manager, config, store, checkpoints, workspaceRoot } = await makeManager('full', {}, undefined, undefined, undefined, undefined, { tokenRates: RATES, currency: 'USD' });
+  const owner = 'operator-1' as OperatorId;
+  const projectDir = path.join(workspaceRoot, 'proj-s203');
+  await mkdir(projectDir);
+  const created = await manager.create(owner, { vendor: 'claude', cwd: projectDir, model: null, sandbox: null, requisitionId: null });
+  assert.equal(created.ok, true);
+  if (!created.ok) return;
+  const { sessionId } = created.value;
+  await manager.end(sessionId, owner);
+
+  const got = await manager.payroll(sessionId, owner);
+  assert.equal(got.ok, true);
+  if (!got.ok) return;
+  assert.deepEqual(got.value.burn, { inputTokens: 0, outputTokens: 0, cacheRead: 0, cacheCreate: 0 });
+  assert.equal(got.value.costCurrency, 0, 'priced zero, not null — the session simply never burned anything');
+  assert.equal(got.value.currency, 'USD');
+  // S20.3: the discriminator is the notice, never a comparison against burn.
+  const src = await readFile(path.join(process.cwd(), 'src', 'session-manager', 'index.ts'), 'utf8');
+  const fold = src.slice(src.indexOf('async function foldPayroll'), src.indexOf('async function foldPayroll') + 3500);
+  assert.equal(/burn\.\w+\s*===\s*0|totalBurn\s*===\s*0/.test(fold), false, 'the fold does not derive costCurrency by comparing burn against zero');
 });
