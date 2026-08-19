@@ -1409,8 +1409,10 @@ describe('S21 — attachments', () => {
   it('S21.9 — DELETE removes attachments/ with the rest, and audit.ndjson stays byte-identical', async () => {
     const h = await makeEdge(undefined, undefined, 'error-result');
     const id = await newSession(h, 'att5');
-    await sendWithAttachment(h, id, [attachmentUpload()]);
-    await new Promise((resolve) => setTimeout(resolve, 200)); // let the write land
+    const { events } = await sendWithAttachment(h, id, [attachmentUpload()]);
+    // DELETE refuses 409 turn_in_flight while the turn is running — wait for it to end,
+    // the same way every other test in this file that deletes after a message does.
+    await readFrames(events, (f) => f.some((x) => x.includes('event: turn.ended')));
 
     const attachmentsDir = path.join(h.storageRoot, 'sessions', id, 'attachments');
     assert.equal(existsSync(attachmentsDir), true, 'the attachment was actually written before deletion');
