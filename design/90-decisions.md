@@ -3561,6 +3561,71 @@ unanswered question.
 Reversibility: cheap. Nothing is built; the slice may still stop at S25.1 and report the flag
 unusable, which is a real outcome rather than a failure.
 
+### 2026-08-19 — D166 `20-contract.md` states meaning and points at the tree for shape
+Context: `/contract` has always required that the slice materialising a declaration replace the
+scaffold with a pointer in the same commit, and `AGENTS.md § Single ownership` says a document
+states only what the tree cannot. Neither was ever discharged: `src/contract/index.ts` had grown
+to 1,022 lines declaring every type, every module interface and every error union in this
+document, comments included, near byte-for-byte. The rot the rule predicts had already started —
+the document declared `Caps.sessionToolOutputBytes`, `StartupError.storage_locked` and
+`ServerLock`, none of which the tree carried, while the tree declared
+`ApiErrorCode.no_such_attachment`, which this document's own routes table used and its union
+omitted. Two copies, already disagreeing in four places, with no mechanism that would have said so.
+Chosen: convert wholesale. Every block the tree materialises becomes a named pointer to its
+declaring file plus the semantics a declaration cannot carry; a scaffold survives only where the
+code does not exist yet, and each surviving one names the slice that owes it — S22 and S23 today.
+Section headings are unchanged, so every `20-contract.md § X` citation in `30-slices.md`, the
+issues and `src/` still resolves; `## Public signatures` is renamed `## Public surface`, which
+nothing cited. `## Unresolved` is carried forward unchanged and no invariant or decision citation
+was dropped, checked by set comparison rather than by eye.
+**A comment in the tree is not the canonical statement of a rule**, and the new preamble says so.
+The declarations carry explanatory comments copied from earlier revisions of this document; they
+are a convenience for a reader already in the file, and where one disagrees with this document it
+is the defect.
+Rejected: **keeping the scaffolds.** The document stays self-contained and a frozen contract stays
+genuinely fixed — the strongest argument against this change, since `AGENTS.md § The design freeze`
+has slices implement against `20-contract.md` "as a fixed artifact at the SHA the marker names",
+and a pointer into a moving tree weakens that. It loses because the tree at the freeze SHA is
+pinned exactly as the document is, and because the alternative is keeping an arrangement that had
+already diverged in four members with nothing able to detect it.
+Rejected: **converting only the sections S22 touches**, leaving the rest for future slices. It
+produces a document where an absent scaffold means either "in the tree" or "not yet decided" and a
+reader cannot tell which, which is worse than either end.
+Reversibility: expensive in effort, cheap in risk. The declarations are all still in git history,
+and nothing downstream reads this document mechanically.
+
+### 2026-08-19 — D167 `store` claims the storage lock; the liveness test is injected, not duplicated
+Context: D161 decided the lock and `30-slices.md § S22` named `store.claimLock` / `releaseLock` as
+the surface, but neither settled how D23's three-part liveness test is reused. The test lives in
+`session-manager` (S7.5, S7.6, I19); the lock file lives under `<storage>`, which is `store`'s;
+and `store → session-manager` is an edge `10-design.md § Module boundaries` forbids. D161 says
+"the reuse guard pointed at a second file" — reuse, not duplication — and stops there.
+Chosen: `claimLock` takes the liveness test as a parameter, `LivenessProbe = (holder: ServerLock)
+=> Promise<boolean>`. `SessionManager.boot` calls it as step 0 and passes its own reuse guard, so
+there is exactly one implementation of D23's test, called from two places, and `store` acquires no
+dependency on process enumeration and no forbidden edge — the guard arrives as a value. `boot`
+already returns `Result<void, StartupError>`, so `storage_locked` composes with no wrapper and no
+signature change. `server.ts` calls `releaseLock` on clean shutdown.
+**The first limb of the three-part test is satisfied structurally rather than by a field.** A
+`ProcessRecord` carries `exitedAt` and a `ServerLock` does not, because `releaseLock` removes the
+file: the lock's absence *is* that limb. The probe reads the other two. `30-slices.md § S22.3`
+lists "an `exitedAt`" as one of three independently asserted limbs, which names a field
+`ServerLock` has never had — reported as drift rather than reconciled here, since an acceptance
+criterion is a decision and `20-contract.md` outranks `30-slices.md` (**#S22 drift**).
+Rejected: **`store` implementing the test itself.** No wiring, and it could then claim at
+`createStore` time beside the `storage_unwritable` refusal it belongs with. Rejected because it is
+a second implementation of a guard whose failure mode is a wrong kill — the drift `agent.md`
+warns about hardest, against D161's own word "reuse".
+Rejected: **moving the claim into `session-manager`**, leaving `store` only file primitives.
+Cleanest against I19 and the module table, and rejected because it contradicts `30-slices.md
+§ S22`'s stated surface, so the contract and the slices would then disagree about which module
+owns the method.
+Rejected: **listing the signature under `## Unresolved` and stopping**, which is `/contract`'s
+literal instruction for a signature the design does not determine. Rejected because the answer is
+a wiring choice rather than an architectural one, and it would block S22 on a question one answer
+settles.
+Reversibility: cheap. One parameter, one boot step; nothing is built yet.
+
 ## Open
 
 Staging only. Once an item becomes an issue it leaves this list.

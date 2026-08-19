@@ -11,478 +11,345 @@ rendered.
 **The design has two tiers and so does this document.** Everything unmarked is tier one.
 Structures marked **(tier two)** are the operator's working surfaces admitted by D53 to D55
 and D58; they are binding scope, and they are separable — tier one is finishable without any
-of them (D59). One tier-one surface is new in this pass and is marked as such: the audit read
-route (D73), which brief item 7 always needed and which no earlier revision specified.
+of them (D59).
 
-Language is TypeScript, per `00-brief.md § Constraints`. Signatures only; no bodies.
+## Shape lives in the tree; this document carries meaning
+
+**A declaration written here and present in `src/` is two copies, and this one is the copy
+that rots.** So where a type or a signature is materialised, this document names the file
+that declares it and states only what a declaration cannot express: which fields are
+meaningful under which state, what must never be normalised away, what a caller may rely on,
+what it must never do. That is the part no parameter list can carry, and it is the reason
+this document exists.
+
+**Where the code does not exist yet there is nowhere else for shape to live**, so it is
+written here as a scaffold — a full declaration in the project's language, types and
+signatures only, no bodies — and **the slice that materialises it replaces the scaffold with
+a pointer in the same commit**. That replacement is descriptive drift corrected where it is
+found (`AGENTS.md` *Hard rules*), not a contract amendment, and it needs no approval. It is
+one-way: a later pass never turns a pointer back into a scaffold.
+
+Two slices owe a scaffold each, and every outstanding one is listed here:
+
+| Scaffold | Owed by |
+|---|---|
+| `ServerLock`, `StartupError.storage_locked`, `Store.claimLock` / `releaseLock`, `LivenessProbe` | S22 |
+| `Caps.sessionToolOutputBytes` | S23 |
+
+**A comment in the tree is not the canonical statement of a rule.** The declarations in
+`src/contract/index.ts` carry explanatory comments, many of them copied from earlier
+revisions of this document. They are a convenience for a reader already in the file; the
+binding statement is here, and a comment that disagrees with this document is the defect.
+
+Language is TypeScript, per `00-brief.md § Constraints`.
 
 ## Types
 
+Every type below is declared in **`src/contract/index.ts`**, which is the `contract` module
+of `10-design.md § Module boundaries`: the normalised vocabulary, depending on nothing, and
+leaving nothing behind at runtime except the single enumeration `RATINGS` (D150). `VENDORS` is
+the other runtime enumeration in this contract and it is **not** here — it lives in `adapters`,
+for the reason given under *Public surface*.
+
 ### Identifiers and scalars
 
-```ts
-type Brand<T, B extends string> = T & { readonly __brand: B };
+Every identifier is a branded string or number, so that two identifiers of different
+namespaces cannot be assigned to one another by accident. Six namespaces coexist and
+conflating them is the most likely source of a subtle cross-vendor bug
+(`10-design.md § Data model — Identity spaces`).
 
-// Server-minted.
-type SessionId  = Brand<string, 'SessionId'>;    // UUIDv4
-type TurnId     = Brand<string, 'TurnId'>;       // UUIDv4
-type Seq        = Brand<number, 'Seq'>;          // integer >= 1
-// (D160) Server-minted, and the only thing that ever names an attachment's file. The
-// operator's `filename` is display text and never reaches a path (I49).
-type AttachmentId = Brand<string, 'AttachmentId'>;  // UUIDv4
+**Who may mint one, which is the part a `Brand` cannot say:**
 
-// Server-minted, tier two.
-type ReviewId      = Brand<string, 'ReviewId'>;       // UUIDv4
-type RequisitionId = Brand<string, 'RequisitionId'>;  // UUIDv4
+- `SessionId`, `TurnId`, `Seq`, `AttachmentId`, `ReviewId`, `RequisitionId`, `AuditCursor` —
+  the server. `Seq` is assigned by `session-manager` alone and by no adapter.
+- `OperatorId` — the identity edge, from an upstream claim. Never minted here, never stored
+  as a record of its own (D3).
+- `CliSessionId`, `CallId`, `RequestId` — **the vendor**. These are the one deliberate
+  exception to "no vendor above the adapter", and they are **opaque**: no code above
+  `adapters/*` may parse one, compare one for ordering, or infer structure from one.
+  Equality is the only permitted operation (I21).
+- `ResolvedPath` — **only `jail`**. A `ResolvedPath` is a path *proven*, once, to resolve
+  inside a configured workspace root; a module that constructs one by assertion has defeated
+  the jail. `Requisition.workspace` is deliberately not one (I34).
+- `StandingRuleExpression` — **only `parseStandingRule`**. Its grammar is below.
+- `ChecklistItemId` — a deployment, in its `config` checklist template.
 
-// Identity, from the identity edge.
-type OperatorId = Brand<string, 'OperatorId'>;
+**`AuditCursor` is opaque to every caller including the client.** It encodes a position in
+`audit.ndjson` and what it encodes is `store`'s business. No caller may parse, compare or
+construct one; round-tripping it back to `GET /api/audit` is the only permitted use. A byte
+offset was rejected as the cursor precisely because it would make the file's physical layout
+a public interface, and `(ts, index)` was rejected because it collides at millisecond
+precision under a fast stream (D86).
 
-// Vendor-minted and opaque above the adapter layer: equality only, never parsed,
-// never compared for ordering, never used to infer structure.
-type CliSessionId = Brand<string, 'CliSessionId'>;
-type CallId       = Brand<string, 'CallId'>;
-type RequestId    = Brand<string, 'RequestId'>;
+**`IsoTimestamp` is UTC, millisecond precision, `Z` suffix.** `GitSha` is a 40-character
+lowercase hexadecimal git object id. Neither is validated by its brand; both are minted by
+the module that owns the fact.
 
-// A path proven, once, to resolve inside a configured workspace root. Only `jail`
-// may mint one.
-type ResolvedPath = Brand<string, 'ResolvedPath'>;
+**`StandingRuleExpression`'s grammar is contractual and is stated here in full**, because a
+brand on a string says none of it and `parseStandingRule`'s implementation is not a
+specification (D108):
 
-// ISO 8601, UTC, millisecond precision, `Z` suffix.
-type IsoTimestamp = Brand<string, 'IsoTimestamp'>;
+- The form is `"<tool>:<pattern>"`, matching `/^[A-Za-z0-9_][A-Za-z0-9_.-]*:[^\r\n]+$/`, and
+  no longer than `Caps.standingRuleBytes` as UTF-8.
+- The half before the **first** colon is compared for equality against
+  `PermissionRequest.tool`. Every later colon belongs to the pattern.
+- The pattern is matched against `PermissionRequest.matchTarget` **in full, anchored at both
+  ends, byte for byte and case-sensitively, with no normalisation on either side**.
+- `*` is the only metacharacter. It matches any run of characters including the empty run,
+  **except** `;` `&` `|` `<` `>` `` ` `` `$` CR LF. There is no escape, so no rule matches a
+  literal `*`. Nothing else in the pattern is special.
 
-// A 40-character lowercase hexadecimal git object id.
-type GitSha = Brand<string, 'GitSha'>;
+`Vendor`, `SandboxMode` and `SessionState` are closed unions. `Vendor`'s runtime enumeration
+lives in `adapters` and `Rating`'s in `contract`; the reasons differ and are given under
+*Public surface*.
 
-// An identifier declared by a deployment's checklist template in `config`. Tier two.
-type ChecklistItemId = Brand<string, 'ChecklistItemId'>;
-
-// Server-minted, opaque to every caller: a position in `audit.ndjson` from which the
-// next page continues. Equality and round-tripping only; no caller may parse one.
-type AuditCursor = Brand<string, 'AuditCursor'>;
-
-type Vendor = 'claude' | 'codex';
-type SandboxMode = 'read-only' | 'workspace-write' | 'unrestricted';
-type SessionState = 'live' | 'ended';
-```
-
-Every fallible operation crossing a module boundary returns this rather than throwing.
-
-```ts
-type Result<T, E> =
-  | { readonly ok: true; readonly value: T }
-  | { readonly ok: false; readonly error: E };
-```
+**`Result<T, E>` is how failure crosses a module boundary.** Every fallible operation that
+crosses one returns it rather than throwing. This is the whole of the "no bare exceptions, no
+string errors" rule: a thrown value has no declared type, and a caller cannot be held to
+handling what the signature does not name.
 
 ### Session
 
-```ts
-interface PermissionPolicy {
-  readonly mode: 'interactive' | 'preauthorised';
-  readonly sandbox: SandboxMode | null;
-  readonly banner: string | null;   // non-null exactly when mode === 'preauthorised'
-}
+Declared in `src/contract/index.ts`: `PermissionPolicy`, `SessionRecord`, `SessionSummary`,
+`LiveSession`, `SessionSnapshot`.
 
-// The persisted session record: exactly what `meta.json` carries, and nothing more. The
-// live turn is deliberately absent — `meta.json` is the session minus turn, buffer and
-// subscribers (D49) — and `LiveSession` below is where it lives instead.
-interface SessionRecord {
-  readonly id: SessionId;
-  readonly owner: OperatorId;
-  readonly vendor: Vendor;
-  readonly cwd: ResolvedPath;
-  readonly model: string | null;
-  readonly policy: PermissionPolicy;
-  readonly sandbox: SandboxMode | null;
-  cliSessionId: CliSessionId | null;   // last-write-wins, from every system/init
-  lastSeq: Seq | 0;                    // 0 before the first emit; a hint on disk only
-  state: SessionState;
-  readonly createdAt: IsoTimestamp;
-  endedAt: IsoTimestamp | null;        // non-null iff state === 'ended'
-}
+**`SessionRecord` is exactly what `meta.json` carries and nothing more** — the session minus
+turn, buffer and subscribers (D49). What the declaration cannot say:
 
-// What crosses to the client. The persisted record minus `cliSessionId`, which is
-// vendor-opaque and has no client use.
-interface SessionSummary {
-  readonly id: SessionId;
-  readonly owner: OperatorId;
-  readonly vendor: Vendor;
-  readonly cwd: ResolvedPath;
-  readonly model: string | null;
-  readonly policy: PermissionPolicy;
-  readonly sandbox: SandboxMode | null;
-  readonly lastSeq: Seq | 0;
-  readonly state: SessionState;
-  readonly createdAt: IsoTimestamp;
-  readonly endedAt: IsoTimestamp | null;
-}
+- `id`, `owner`, `vendor`, `cwd`, `model`, `policy`, `sandbox` and `createdAt` are immutable
+  for the life of the session. `policy` and `sandbox` are immutable because both are
+  properties of how the child was launched: changing a Codex sandbox means a new session,
+  never a mutation.
+- **`cwd` is the resolved real path, resolved exactly once, at session creation** (I7). Every
+  later spawn reuses the stored resolution rather than re-resolving the client's string. This
+  is a deliberate TOCTOU trade — a root re-pointed by symlink mid-session is not re-checked —
+  accepted because re-resolving per turn lets a session silently migrate between turns, which
+  is worse (D4).
+- **`cliSessionId` is last-write-wins, from every `system/init`, never write-once** (D34). The
+  CLI mints a fresh id on each `--resume`, so a write-once cell would have turn 3 resuming the
+  id turn 1 reported. Where a child dies before emitting `init` at all the cell stays null, the
+  next turn spawns **without** `--resume`, and that emits
+  `session.notice / resume_unavailable`.
+- **`lastSeq` on disk is a diagnostic hint and not authority** (D37, I17). Boot derives it from
+  the tail of `events.ndjson`; where the two disagree the spill is right.
+- `state` is one-way. It distinguishes the two ways a session has no turn running: a **live,
+  idle** session accepts a new message, an **ended** one answers `409 session_ended`. There
+  are exactly three ways in — the operator (D36), a restart (D20), a storage failure (D41).
+- `endedAt` is non-null **exactly when** `state === 'ended'` (I8).
+- **`policy` is the adapter's capability; `sandbox` is the operator's choice.** Only the second
+  answers "which sandbox governed this session?" after the fact, which the threat model
+  requires and which is why it is copied onto every audit record — D25 deletes `meta.json` and
+  keeps `audit.ndjson`.
+- `PermissionPolicy.banner` is non-null **exactly when** `mode === 'preauthorised'`.
 
-// The two fields of the session manager's registry entry that the invariants are stated
-// over: the persisted record, plus the one piece of state that is never written.
-// `turn === null` means idle, and it is always null once `state === 'ended'` — which is what
-// makes I8 assertable against a declared field rather than against a field only
-// `10-design.md § Data model — Session` names.
-//
-// **The manager's actual entry extends this**, and the extension is deliberately not
-// declared: fan-out bookkeeping, the per-session append chain, the standing-rule list and
-// the flags that decide whether a later turn retries a doomed checkpoint are scheduling
-// state that crosses no module boundary, and a contract that enumerated them would have to
-// be amended every time the manager learned a new thing about its own turns. What is
-// declared is what something outside `session-manager` may assume. The ring buffer and the
-// subscriber set are named here only to say they are *not* it: the ring is `store`'s,
-// reached by `pushRing` / `readRingAfter` on a `SessionId`, and the subscriber set never
-// leaves the manager's fan-out.
-interface LiveSession {
-  readonly record: SessionRecord;
-  turn: Turn | null;
-}
+**`SessionSummary` is what crosses to the client**: the persisted record minus
+`cliSessionId`, which is vendor-opaque and has no client use. It is the authoritative
+statement of a session's current `state`; a `state` read off a replayed `session.started` is
+not (see *Rules the renderer may rely on*).
 
-// The denormalised session identity a review copies at authorship (D67). It is a copy,
-// never a reference: after D25 deletes the session, this is what still resolves.
-interface SessionSnapshot {
-  readonly sessionId: SessionId;
-  readonly owner: OperatorId;
-  readonly vendor: Vendor;
-  readonly cwd: ResolvedPath;
-  readonly createdAt: IsoTimestamp;
-}
-```
+**`LiveSession` declares only what the invariants are stated over** — the persisted record
+plus the one piece of state that is never written. `turn === null` means idle, and it is
+always null once `state === 'ended'`, which is what makes I8 assertable against a declared
+field. **The manager's actual registry entry extends this, and the extension is deliberately
+not declared**: fan-out bookkeeping, the per-session append chain, the standing-rule list and
+the flags deciding whether a later turn retries a doomed checkpoint are scheduling state
+crossing no module boundary, and a contract enumerating them would need amending every time
+the manager learned a new thing about its own turns. The ring buffer and the subscriber set
+are named here only to say they are **not** it: the ring is `store`'s, reached by `pushRing`
+and `readRingAfter` on a `SessionId`, and the subscriber set never leaves the manager's
+fan-out.
 
-There is no employment-status field, and none may be added: D79 makes the badge a client-side
-projection over `state`, the live turn and outstanding permission requests.
+**`SessionSnapshot` is a copy, never a reference** (D67, I30). It is the denormalised session
+identity a review takes at authorship; after D25 deletes the session, this is what still
+resolves. Nothing re-resolves it, and no read of a review resolves its `subject`.
+
+**There is no employment-status field and none may be added.** D79 makes the badge a
+client-side projection over `state`, the live turn and outstanding permission requests.
 
 ### Turn
 
-In memory only. No `turns.json` exists; turn history is reconstructed from the event log by
-pairing `turn.started` with `turn.ended`.
+Declared in `src/contract/index.ts`: `Turn`, `PendingPermission`.
 
-```ts
-interface Turn {
-  readonly turnId: TurnId;
-  phase: 'starting' | 'running';
-  readonly startedAt: IsoTimestamp;
-  readonly pending: Map<RequestId, PendingPermission>;
-}
+**In memory only.** No `turns.json` exists; turn history is reconstructed from the event log
+by pairing `turn.started` with `turn.ended`, and that reconstruction is the only durable
+record. A live `Turn` is scheduling state, it hangs off `LiveSession.turn` and nowhere else,
+and at most one per session is non-null at any time (I4).
 
-interface PendingPermission {
-  readonly callId: CallId;
-  readonly tool: string;
-  readonly input: Readonly<Record<string, unknown>>;
-  // Carried from the originating `PermissionRequest` so that `answerPermission` can enforce
-  // I43 — `scope: 'always'` against an unprojectable request is `bad_request` — without
-  // re-reading `input`, which would put tool-shape knowledge in `session-manager` and break
-  // I46. It is a copy of the adapter's projection, never a second projection.
-  readonly matchTarget: string | null;
-}
-```
+**It carries no child-process handle, and the absence is the design.** The child is spawned
+inside `Adapter.send` and terminated through `Adapter.kill`, so the handle never crosses into
+`session-manager`. A second reference here would give the manager a way to reach a process the
+adapter is the only declared owner of — which is the whole of why interrupt goes through
+`kill` rather than through a stored handle.
 
-A live `Turn` hangs off `LiveSession.turn` and nowhere else. **It carries no child-process
-handle.** The child is spawned inside `Adapter.send` and terminated through `Adapter.kill`, so
-the handle never crosses into `session-manager`, and declaring a second reference to it here
-would give the manager a way to reach a process the adapter is the only declared owner of.
-
-`pending`'s value type is all four fields of `PendingPermission`, because `answerPermission`
-must enforce I43 — `scope: 'always'` against a request whose `matchTarget` is `null` is
-`bad_request` — and append I11's audit record carrying `tool` and `input`, without re-reading
-the originating request. Re-reading it is what would put tool-shape knowledge in
-`session-manager` and break I46 (D109).
-
-Both of these stood here as declared divergences from `10-design.md § Data model — Turn`,
-which listed a `child` row and typed `pending` as `{callId}`. That section now states neither;
-the divergences are closed.
+**`pending`'s value type carries four fields rather than a `callId`, and each is load-bearing**
+(D109). `answerPermission` must enforce I43 — `scope: 'always'` against a request whose
+`matchTarget` is `null` is `bad_request` — and append I11's audit record carrying `tool` and
+`input`, **without re-reading the originating request**. Re-reading it is what would put
+tool-shape knowledge in `session-manager` and break I46. `matchTarget` here is a copy of the
+adapter's projection, never a second projection.
 
 ### Process record
 
-```ts
-interface ProcessRecord {
-  readonly pid: number;
-  readonly pgid: number | null;        // null on Windows
-  readonly sessionId: SessionId;
-  readonly turnId: TurnId;
-  readonly startedAt: IsoTimestamp;    // load-bearing: the pid-reuse guard reads it
-  readonly image: string;
-  exitedAt: IsoTimestamp | null;       // null while live; set by folding in the tombstone
-}
+Declared in `src/contract/index.ts`: `ProcessRecord`, `ProcessTombstone`.
 
-// The exit line. `pids.ndjson` carries two line shapes and this is the second: a full
-// `ProcessRecord` is written at spawn, and this narrower line at exit, because
-// `tombstonePid` is given a pid and a timestamp and nothing else (D95).
-interface ProcessTombstone {
-  readonly pid: number;
-  readonly exitedAt: IsoTimestamp;
-}
-```
+`pids.ndjson` carries **two line shapes**: a full `ProcessRecord` at spawn, and the narrower
+`ProcessTombstone` at exit, because `tombstonePid` is given a pid and a timestamp and nothing
+else (D95). `pgid` is `null` on Windows, which has no equivalent to record.
 
-**A reader must never hand back a tombstone as an open record.** Liveness comes from the latest
-line for a `pid`; `startedAt` and `image` must come from that pid's most recent **spawn** line,
-because the reuse guard reads all three of `exitedAt`, `startedAt` and `image` (I19) and a reader
-that took them off the tombstone would find two of them missing and reap on a guard that never
-ran. That is the requirement; folding the two shapes is one way to meet it and not the only one.
-Filtering the latest line on `exitedAt === null` meets it too, because a tombstone always carries
-a non-null `exitedAt` and so never survives the filter — which is what `store` does.
+**`startedAt` is load-bearing rather than decoration**: the pid-reuse guard reads it, and a
+bare pid is not safe to kill. Operating systems reuse process ids, so a pid recorded before a
+reboot may name something unrelated afterwards — reaping it would kill an innocent process, as
+root on some hosts.
+
+**A reader must never hand back a tombstone as an open record.** Liveness comes from the
+latest line for a `pid`; `startedAt` and `image` must come from that pid's most recent
+**spawn** line, because the reuse guard reads all three of `exitedAt`, `startedAt` and `image`
+(I19) and a reader taking them off the tombstone would find two missing and reap on a guard
+that never ran. That is the requirement. Folding the two shapes meets it; so does filtering
+the latest line on `exitedAt === null`, because a tombstone always carries a non-null
+`exitedAt` and so never survives the filter — which is what `store` does.
 
 ### Event envelope
 
-```ts
-interface EventPayloadMap {
-  'session.started':     SessionStarted;
-  'session.ended':       SessionEnded;
-  'session.notice':      SessionNotice;
-  'turn.started':        TurnStarted;
-  'turn.ended':          TurnEnded;
-  'message':             MessageEvent;
-  'message.delta':       MessageDelta;
-  'thinking':            Thinking;
-  'tool.call':           ToolCall;
-  'tool.result':         ToolResult;
-  'permission.request':  PermissionRequest;
-  'permission.resolved': PermissionResolved;
-  'checkpoint.created':  CheckpointCreated;
-  'usage':               UsageEvent;
-  'error':               ErrorEvent;
-  'checklist.item.completed': ChecklistItemCompleted;   // tier two (D71)
-}
+Declared in `src/contract/index.ts`: `EventPayloadMap`, `EventKind`, `Envelope`.
 
-type EventKind = keyof EventPayloadMap;
+**`(sessionId, seq)` is the primary key of the entire system.** Everything replayable is keyed
+on it, which is why `seq` assignment sits in the session manager (D2) and why it is expensive
+to change. **`seq` is never assigned by an adapter**: an adapter that restarts must not restart
+the sequence.
 
-type Envelope<K extends EventKind = EventKind> = K extends EventKind
-  ? {
-      readonly seq: Seq;
-      readonly sessionId: SessionId;
-      readonly ts: IsoTimestamp;
-      readonly kind: K;
-      readonly data: EventPayloadMap[K];
-      readonly raw?: unknown;   // present only when config.includeRaw
-    }
-  : never;
-```
-
-`seq` is the replay key and is assigned by the session manager, never by an adapter: an
-adapter that restarts must not restart the sequence.
-
-The vocabulary is closed (D44). `checklist.item.completed` is the one kind tier two adds, and
-it is session-scoped: it carries no `turnId` and may land between a `turn.started` and its
+**The vocabulary is closed** (D44). A vendor record that fits none of it is
+`error / adapter_unknown_record` with the record preserved in `raw`, never a new kind invented
+at the edge. `checklist.item.completed` is the one kind tier two adds, and it is
+session-scoped: it carries no `turnId` and may land between a `turn.started` and its
 `turn.ended`.
+
+`raw` is present only when `config.includeRaw`. It exists for debugging and **must never be
+rendered**.
 
 ### Event payloads
 
-```ts
-interface SessionStarted {
-  readonly vendor: Vendor;          // display only; no logic may branch on it
-  readonly cwd: ResolvedPath;
-  readonly model: string | null;
-  readonly policy: PermissionPolicy;
-  readonly state: SessionState;     // the state at emission, and therefore always 'live'
-  readonly createdAt: IsoTimestamp;
-}
+Declared in `src/contract/index.ts`, one per member of `EventPayloadMap`: `SessionStarted`,
+`SessionEnded`, `SessionNotice`, `TurnStarted`, `TurnEnded`, `MessageEvent`, `MessageDelta`,
+`Thinking`, `ToolCall`, `ToolResult`, `PermissionRequest`, `PermissionResolved`,
+`CheckpointCreated`, `UsageEvent`, `ErrorEvent`, and tier two's `ChecklistItemCompleted`. The
+supporting unions and value types are declared beside them: `SessionEndReason`,
+`SessionNoticeCode`, `TurnStopReason`, `AttachmentUpload`, `AttachmentRef`,
+`StandingRuleExpression`, `PermissionDecision`, `AnswerScope`, `ResolvedScope`,
+`PermissionResolvedReason`, `Usage` and `ErrorEventKind`.
 
-// The three ways into `ended` (D45): D36 operator, D20 restart, D41 storage failure. **No
-// `session.ended` carries `server_restart`.** Boot appending one was D45's rejected alternative,
-// dropped with the derive-state-from-the-stream proposal it belonged to, and nothing has
-// added it since — so this value names a real transition that is never on the wire. It is
-// retained knowingly, exactly as `SessionStarted.state` is, and an implementer must not close
-// the apparent gap by emitting one at boot. A rehydrated session's state is read from
-// `SessionSummary.state`. What boot *does* append is `session.notice / server_restart` (D130),
-// which shares the spelling and is a different thing: a notice is not an end reason, and it
-// marks where the outage fell without claiming to say why the session ended.
-type SessionEndReason = 'operator' | 'server_restart' | 'storage_failure';
+**`AnswerScope` and `ResolvedScope` are two types rather than one, and the asymmetry is the
+point.** `AnswerScope` is what a *client may send* — `'once' | 'always'`. `ResolvedScope` is
+what a resolution *reports*, and it adds `'standing'`, which no client can ask for because it
+means the server matched a rule it was already holding and answered without asking anyone. A
+single union would let a client claim a scope only the server can produce.
 
-interface SessionEnded {
-  readonly reason: SessionEndReason;
-  readonly endedAt: IsoTimestamp;
-}
+What the declarations cannot say, payload by payload where there is anything to say:
 
-type SessionNoticeCode =
-  | 'compaction'               // the CLI is compacting, or reported a compact boundary
-  | 'resume_unavailable'       // spawning with no --resume; context not carried forward
-  | 'checkpoints_unavailable'  // ckpt.git could not be initialised
-  | 'checkpoint_skipped'       // the pre-turn checkpoint failed; the turn proceeds
-  | 'sandbox'                  // **no producer, retained knowingly.** Superseded by
-                              // `PermissionPolicy.banner`, which the client renders instead and
-                              // which survives a replay because it is a session field rather
-                              // than an envelope (S8.3). Kept rather than removed: dropping a
-                              // member narrows a declared union and buys nothing
-  | 'audit_unavailable'        // a permission was denied because the audit append failed
-  | 'storage_failure'          // a spill write failed; the session is ending
-  | 'server_restart'           // boot found this session live at shutdown (D130)
-  | 'usage_unavailable';       // this session's transport reports no token usage, so its burn
-                              // is unknown rather than zero (D146). Emitted once, at session
-                              // start, by whichever adapter selects a transport that cannot
-                              // report usage — today only `codex exec --json`
+**`SessionStarted.state` is the state at emission and is therefore always `'live'`.** It is
+retained knowingly (D45); the authoritative current state is `SessionSummary.state`. `vendor`
+here is display only and no logic may branch on it (I20).
 
-interface SessionNotice {
-  readonly level: 'info' | 'warn' | 'error';
-  readonly code: SessionNoticeCode;
-  readonly text: string;
-}
+**`SessionEndReason` names three transitions and one of them is never on the wire.** The three
+ways into `ended` are D36's operator, D20's restart and D41's storage failure — but **no
+`session.ended` carries `server_restart`**. Boot appending one was D45's rejected alternative,
+dropped with the derive-state-from-the-stream proposal it belonged to, and nothing has added
+it since. The value is retained knowingly and **an implementer must not close the apparent gap
+by emitting one at boot**. What boot does append is `session.notice / server_restart` (D130),
+which shares the spelling and is a different thing: a notice is not an end reason, and it marks
+where an outage fell without claiming to say why the session ended.
 
-interface TurnStarted { readonly turnId: TurnId }
+**`SessionNoticeCode` members, and the two with no producer:**
 
-type TurnStopReason =
-  | 'completed'        // the CLI reported a successful result
-  | 'error'            // the CLI reported an unsuccessful result
-  | 'process_exit'     // the child died without reporting a result
-  | 'interrupted'      // POST /interrupt
-  | 'server_restart'   // boot closed a turn the crash left open
-  | 'storage_failure'; // a spill write failed mid-turn
+| Member | Fires when |
+|---|---|
+| `compaction` | the CLI is compacting, or reported a compact boundary |
+| `resume_unavailable` | spawning with no `--resume`; conversation context is not carried forward |
+| `checkpoints_unavailable` | `ckpt.git` could not be initialised; the session proceeds without checkpoints |
+| `checkpoint_skipped` | the pre-turn checkpoint failed; the turn proceeds with no restore point (D42) |
+| `sandbox` | **never — no producer, retained knowingly.** Superseded by `PermissionPolicy.banner`, which the client renders instead and which survives a replay because it is a session field rather than an envelope (S8.3). Dropping a member narrows a declared union and buys nothing |
+| `audit_unavailable` | a permission was denied because the audit append failed |
+| `storage_failure` | a spill write failed; the session is ending |
+| `server_restart` | boot found this session live at shutdown (D130) |
+| `usage_unavailable` | this session's transport reports no token usage, so its burn is unknown rather than zero (D146) |
 
-interface TurnEnded {
-  readonly turnId: TurnId;
-  readonly stopReason: TurnStopReason;
-  // **No producer, retained knowingly** (D151). Every adapter and every synthesised close
-  // emits `null` here, because D75 puts the vendor-normalised, summable figure on the
-  // dedicated `usage` envelope and `PayrollView`'s fold reads only that. A reader that
-  // summed both sources would double-count a turn's burn the moment anything populated
-  // this — the failure I28 exists to prevent. Kept rather than removed: dropping a field
-  // narrows a declared public interface, and the slot is where a vendor-reported turn
-  // total would go if one ever proves worth carrying.
-  readonly usage: Usage | null;
-}
+**`usage_unavailable` is emitted once, at session start, before the first `turn.started`** —
+not per turn, which would say the same thing repeatedly and bury it. It is emitted by whichever
+adapter selects a transport that cannot report usage, today only `codex exec --json`. It is the
+discriminator between a burn of zero because the session was idle and a burn of zero because
+nothing was ever counted, and **nothing may infer that distinction by testing `burn` against
+zero** instead.
 
-interface MessageEvent {
-  readonly turnId: TurnId;
-  readonly role: 'user' | 'assistant';
-  readonly text: string;
-  // (D160) Refs only, never bytes: the spill is the transcript. Empty on every `assistant`
-  // message — an attachment originates with an operator. Bytes are fetched from
-  // `GET /api/sessions/:id/attachments/:turnId/:attachmentId`.
-  readonly attachments: readonly AttachmentRef[];
-}
+**`TurnStopReason`** distinguishes an expected end from a failure, and the distinction is the
+point: an operator who interrupts has not caused a crash and must not be shown one.
+`completed` and `error` are the CLI's own reported result; `process_exit` is a child that died
+without reporting one; `interrupted` is `POST /interrupt`; `server_restart` is boot closing a
+turn a crash left open (D39); `storage_failure` is D41.
 
-// (D160) What the operator uploads, inline on `POST /message`.
-interface AttachmentUpload {
-  readonly filename: string;      // display only; never used to build a path (I49)
-  readonly mediaType: string;     // the client's claim, stored verbatim, never trusted on the way out
-  readonly dataBase64: string;    // decoded size is what `Caps.attachmentBytes` bounds
-}
+**`TurnEnded.usage` has no producer and is retained knowingly** (D151). Every adapter and every
+synthesised close emits `null`, because D75 puts the vendor-normalised summable figure on the
+dedicated `usage` envelope and `PayrollView`'s fold reads only that. A reader summing both
+sources would double-count a turn's burn the moment anything populated this — the failure I28
+exists to prevent. The slot is where a vendor-reported turn total would go if one ever proved
+worth carrying.
 
-// (D160) What the envelope carries and the client renders.
-interface AttachmentRef {
-  readonly attachmentId: AttachmentId;
-  readonly filename: string;
-  readonly mediaType: string;
-  readonly bytes: number;         // decoded size
-}
+**`MessageEvent.attachments` carries refs only, never bytes** (D160, I49): the spill is the
+transcript, and an attachment's bytes never enter it. It is empty on every `assistant` message,
+because an attachment originates with an operator. Bytes are fetched from
+`GET /api/sessions/:id/attachments/:turnId/:attachmentId`.
 
-interface MessageDelta {
-  readonly turnId: TurnId;
-  readonly role: 'assistant';
-  readonly text: string;    // append-only
-}
+**On `AttachmentUpload`, two fields are the client's claim and neither is trusted.**
+`filename` is display text and **never reaches a filesystem path** — the server-minted
+`AttachmentId` is the only path segment (I49). `mediaType` is stored verbatim and is never
+echoed unguarded on the way out; the read route's allow-list is in *HTTP routes*.
+`Caps.attachmentBytes` bounds the **decoded** size.
 
-interface Thinking {
-  readonly turnId: TurnId;
-  readonly text: string;
-}
+**`ToolResult.output` is truncated before the envelope is constructed** (I3, D22), and
+`bytes` is the pre-truncation size. The envelope in the ring and the line in the spill are the
+same bytes; a design where the spill held the full output and the wire the truncated one would
+make replay-from-disk and replay-from-memory return different transcripts.
 
-interface ToolCall {
-  readonly turnId: TurnId;
-  readonly callId: CallId;
-  readonly name: string;
-  readonly input: Readonly<Record<string, unknown>>;
-  readonly summary: string;   // one line, adapter-rendered, safe to show collapsed. Display only:
-                              // nothing above `adapters/*` may parse it or branch on it (I48, D159)
-}
+**`ToolCall.summary` is display-only** (I48, D159). Above `adapters/*` it is rendered as a text
+node and nothing else: no module parses it, matches against it, or derives anything persisted
+or security-relevant from it, and **its shape is not contractual**, so an adapter may change
+how it reads without breaking a consumer. Testing it for empty, to decide whether to show the
+line at all, is display and is permitted.
 
-interface ToolResult {
-  readonly turnId: TurnId;
-  readonly callId: CallId;
-  readonly ok: boolean;
-  readonly output: string;    // truncated before this envelope was constructed
-  readonly truncated: boolean;
-  readonly bytes: number;     // pre-truncation size
-}
+**`PermissionRequest.input` is exactly what will run, never a summary.** Where the control is a
+prompt, the prompt must show what is actually being run.
 
-// `"<tool>:<pattern>"`. Constrained: /^[A-Za-z0-9_][A-Za-z0-9_.-]*:[^\r\n]+$/ , and no
-// longer than `Caps.standingRuleBytes` as UTF-8. The half before the first colon is compared
-// for equality against `PermissionRequest.tool`; every later colon belongs to the pattern.
-// The pattern is matched against `PermissionRequest.matchTarget` in full, anchored at both
-// ends, byte for byte and case-sensitively, with no normalisation on either side. `*` is the
-// only metacharacter: it matches any run of characters, including the empty run, except
-// `;` `&` `|` `<` `>` `` ` `` `$` CR LF. There is no escape, so no rule matches a literal
-// `*`. Nothing else in the pattern is special. Minted only by `parseStandingRule`.
-type StandingRuleExpression = Brand<string, 'StandingRuleExpression'>;
+**`PermissionRequest.matchTarget` is the one string a rule's pattern is matched against**,
+projected from `input` by the adapter and emitted verbatim. It is `null` where the adapter
+defines no projection for that tool, and then **no standing rule may be created against this
+request** (I43). Its projection table is the adapter's and is the only place tool-shape
+knowledge is permitted to live (I46).
 
-interface PermissionRequest {
-  readonly turnId: TurnId;
-  readonly requestId: RequestId;
-  readonly callId: CallId;
-  readonly tool: string;
-  readonly input: Readonly<Record<string, unknown>>;   // exactly what will run, never a summary
-  // The one string a rule's pattern is matched against, projected from `input` by the adapter
-  // and emitted verbatim. `null` where the adapter defines no projection for this tool, and
-  // then no standing rule may be created against this request (I43).
-  readonly matchTarget: string | null;
-  // The vendor's `permission_suggestions`, forwarded exactly as it arrived (D104). Unverified
-  // on this transport; no module narrows, parses, or indexes it (I44).
-  readonly suggestions: readonly unknown[];
-}
+**`PermissionRequest.suggestions` is the vendor's `permission_suggestions`, forwarded exactly
+as it arrived, and read by nothing** (D104, I44). No module narrows, parses, indexes or derives
+a `StandingRuleExpression` from it. The field is unobservable on this transport — the
+`control_request` that would carry it has never appeared across two independent probes — and
+forwarding it costs nothing while keeping the payload from being dropped silently if the
+channel ever starts firing.
 
-type PermissionDecision = 'allow' | 'deny';
-type AnswerScope   = 'once' | 'always';                // what a client may send
-type ResolvedScope = 'once' | 'always' | 'standing';   // 'standing' = matched a stored rule
+**`PermissionResolvedReason.superseded` has no producer and is reserved rather than dead.**
+Nothing resolves one request because another replaced it; if such a path is ever added this is
+its reason, and until then **it must not be repurposed**.
 
-type PermissionResolvedReason =
-  | 'answered'                // an operator answered
-  | 'preapproved'             // matched a standing rule held by this server
-  | 'cancelled_process_exit'  // the child died, or was interrupted, or boot closed the turn
-  | 'superseded'             // **no producer, and reserved rather than dead.** Nothing resolves
-                             // one request because another replaced it; if such a path is ever
-                             // added this is its reason, and until then it must not be repurposed
-  | 'audit_unavailable';      // denied because the audit record could not be appended
+`PermissionResolved.operator` is `null` exactly when the server decided rather than an
+operator.
 
-interface PermissionResolved {
-  readonly turnId: TurnId;
-  readonly requestId: RequestId;
-  readonly decision: PermissionDecision;
-  readonly scope: ResolvedScope;
-  readonly operator: OperatorId | null;   // null when the server decided
-  readonly reason: PermissionResolvedReason;
-}
+**`CheckpointCreated.turnId` is `null` for the safety checkpoint taken before a restore**, and
+non-null for a pre-turn checkpoint.
 
-interface CheckpointCreated {
-  readonly turnId: TurnId | null;   // null for the safety checkpoint taken before a restore
-  readonly sha: GitSha;
-  readonly label: string;
-}
+**`Usage` is incremental and summable by construction** (D75, I28). The adapter normalises
+whatever the vendor reports into deltas before emitting; nothing above `adapters/*` performs
+arithmetic on a vendor's own token numbers. Whether a given vendor reports cumulatively is the
+adapter's problem and never a caller's. `Usage` carries **no model identifier**, which is why
+`Config.tokenRates` is flat per deployment.
 
-// Incremental and summable by construction: the adapter normalises whatever the vendor
-// reports into deltas before emitting (D75). Nothing above `adapters/*` may do arithmetic
-// on a vendor's own numbers. Whether a given vendor reports cumulatively is open
-// question 14 and is the adapter's problem, never a caller's.
-interface Usage {
-  readonly inputTokens: number;
-  readonly outputTokens: number;
-  readonly cacheRead: number;
-  readonly cacheCreate: number;
-}
-
-interface UsageEvent {
-  readonly turnId: TurnId;
-  readonly usage: Usage;
-}
-
-// Tier two (D71). Session-scoped: no `turnId`, and it may interleave with a turn's events.
-interface ChecklistItemCompleted {
-  readonly itemId: ChecklistItemId;
-  readonly by: OperatorId;
-}
-
-type ErrorEventKind =
-  | 'replay_gap'
-  | 'agent_unavailable'
-  | 'adapter_unknown_record'
-  | 'adapter_bad_line'
-  | 'adapter_schema_mismatch'
-  | 'checkpoint_restore_failed'
-  | 'session_delete_incomplete';
-
-interface ErrorEvent {
-  readonly kind: ErrorEventKind;
-  readonly message: string;
-  readonly fatal: boolean;
-}
-```
+`ErrorEvent.fatal` distinguishes a diagnostic line from a stream that has stopped meaning
+anything: `adapter_schema_mismatch` is fatal, `adapter_unknown_record` and `adapter_bad_line`
+are not.
 
 ### Rules the renderer may rely on
 
@@ -499,10 +366,9 @@ interface ErrorEvent {
   reports `system/init` on every turn.
 - **`SessionStarted.state` is the state at emission and is therefore always `'live'`.** The
   authoritative current state is `SessionSummary.state` from `GET /api/sessions` or
-  `GET /api/sessions/:id`, or the
-  presence of a `session.ended` later in the stream. A client that reads `state` off a
-  replayed `session.started` will show an enabled compose box for an ended session. The field
-  is retained knowingly (D45).
+  `GET /api/sessions/:id`, or the presence of a `session.ended` later in the stream. A client
+  that reads `state` off a replayed `session.started` will show an enabled compose box for an
+  ended session. The field is retained knowingly (D45).
 - The untruncated bytes behind a `tool.result` with `truncated: true` are at
   `GET /api/sessions/:id/tool-output/:turnId/:callId`. Both segments come from the same
   envelope.
@@ -521,255 +387,211 @@ interface ErrorEvent {
 
 ### Checkpoint
 
-```ts
-interface Checkpoint {
-  readonly sha: GitSha;
-  readonly label: string;
-  readonly ts: IsoTimestamp;
-}
-```
+Declared in `src/contract/index.ts`: `Checkpoint`.
 
-Entirely derived from the shadow `GIT_DIR`. No mirror is persisted.
+**Entirely derived from the shadow `GIT_DIR`.** The checkpoint list is `git log`; no mirror is
+persisted, because git is the store and a second copy would be a second thing to fall out of
+sync. `ts` is the git commit time, not a server clock reading.
 
 ### Audit record
 
-```ts
-interface AuditRecord {
-  readonly ts: IsoTimestamp;
-  readonly operator: OperatorId | null;    // null when the server decided
-  readonly sessionId: SessionId;
-  readonly vendor: Vendor;                 // copied from the session at decision time
-  readonly sandbox: SandboxMode | null;    // copied from the session at decision time
-  readonly tool: string;
-  readonly input: Readonly<Record<string, unknown>>;   // never truncated, never summarised
-  readonly decision: PermissionDecision;
-  readonly scope: ResolvedScope;
-  // On `scope === 'standing'` this is the matched `StandingRuleExpression`, verbatim. That
-  // is what makes an auto-approval explain itself without a new persisted field.
-  readonly reason: string | null;
-}
-```
+Declared in `src/contract/index.ts`: `AuditRecord`, `AuditQuery`, `AuditPage`.
 
-The read side (D73), which serves brief item 7 in tier one and the incident view of item 11
-in tier two. It is one read with filters, never two shapes:
+**This is the artifact that makes multi-operator use defensible, and three properties are the
+whole of why:**
 
-```ts
-interface AuditQuery {
-  readonly before: AuditCursor | null;   // newest-first; null starts at the newest record
-  readonly limit: number;                // clamped to Caps.auditPageMax
-  readonly sessionId: SessionId | null;
-  readonly operator: OperatorId | null;
-  readonly since: IsoTimestamp | null;
-  readonly until: IsoTimestamp | null;
-  // The incident view: decision === 'deny', or operator === null (the server forced it),
-  // or scope === 'standing'. Grouping by session and by operator is the reader's.
-  readonly incidentsOnly: boolean;
-}
+- **`input` is never truncated, summarised, or derived** (I12). It is the exact input that was
+  approved — the same bytes shown to the operator. This is the only place in the system where
+  the byte cap governing `tool.result` does not apply, and that is deliberate: an audit record
+  of a truncated command records something that did not run.
+- **`vendor` and `sandbox` are copied from the session at decision time**, not looked up later,
+  and the redundancy is the point. D25 deletes `meta.json` and keeps `audit.ndjson`, so a
+  record storing only `sessionId` could not answer "which sandbox governed this?" about exactly
+  the session someone had reason to remove.
+- **`audit.ndjson` is never deleted, rewritten or shortened**, including when the session it
+  names is deleted (I13). A log a subject can delete is not evidence.
 
-interface AuditPage {
-  readonly records: readonly AuditRecord[];   // newest first
-  readonly nextCursor: AuditCursor | null;    // null when the read reached the oldest record
-}
-```
+`operator` is `null` exactly when the server decided rather than an operator. On
+`scope === 'standing'`, `reason` carries the matched `StandingRuleExpression` **verbatim** —
+which is what makes an auto-approval explain itself without a new persisted field. On a denial
+it carries the operator's stated reason, and where the server forced the decision it names the
+cause.
+
+**The read side is one read with filters, never two shapes** (D73). `AuditQuery` serves brief
+item 7 in tier one and the incident view of item 11 in tier two; the incident view is
+`incidentsOnly: true`, which selects `decision === 'deny'`, **or** `operator === null` (the
+server forced it), **or** `scope === 'standing'`. Grouping by session and by operator is the
+reader's.
+
+**`Caps.auditPageMax` bounds records *examined*, not only records returned, and the consequence
+is that a page may be short — or empty — with a cursor still to follow** (I39). A filter bounded
+only by its result count is not bounded at all: a query matching nothing walks to the start of
+the file, which is exactly the scan D73 refuses and the one that grows with the deployment
+rather than with the answer. A read stops at whichever comes first, `limit` matches or
+`Caps.auditPageMax` records inspected, and reports where to resume either way. **A short page
+is therefore not the end of the log and a caller must not read it as one**; only
+`nextCursor === null` is.
+
+`before` is newest-first: `null` starts at the newest record.
 
 ### Review (tier two)
 
-Every field is `readonly`: a line in `reviews.ndjson` is immutable, and editing a draft
-appends a new line for the same `reviewId` (D65). The latest line wins.
+Declared in `src/contract/index.ts`: `Rating`, `ReviewState`, `Review`.
 
-```ts
-type Rating =
-  | 'does_not_meet'
-  | 'meets_some'
-  | 'meets'
-  | 'exceeds'
-  | 'exceptional';
+**Every field is `readonly` because a line in `reviews.ndjson` is immutable.** Editing a draft
+appends a new line for the same `reviewId` and the latest line wins (D65); the earlier drafts
+stay on disk. That is not a storage compromise — it is the behaviour an employment record
+should have.
 
-type ReviewState = 'draft' | 'final';
+**`state` is one-way and it governs two things rather than one** (D70, I29, I31). A `final`
+review is terminal — a further append for that `reviewId` is refused — **and it is the point at
+which the review becomes visible to anyone but its author.** A draft is readable and writable
+by its author alone; a final is readable by every authenticated operator. This is the one
+carve-out in D70's open-read rule, and it is what makes "draft state" a state rather than a
+label: the purpose of drafting is not having published yet.
 
-interface Review {
-  readonly reviewId: ReviewId;
-  readonly subject: SessionId;
-  readonly snapshot: SessionSnapshot;   // copied at authorship; never re-resolved (D67)
-  readonly author: OperatorId;
-  readonly state: ReviewState;          // one-way; `final` is terminal
-  readonly rating: Rating | null;
-  readonly pip: boolean;
-  readonly body: string;                // UTF-8, at most Caps.reviewBodyBytes bytes
-  readonly createdAt: IsoTimestamp;
-  readonly updatedAt: IsoTimestamp;     // on the `final` line, this is the finalisation time
-}
-```
+**`Rating` is display-independent** (D82). The tokens are what persists and the wording an
+operator sees is the client's, because rewording the scale later must not become a migration of
+`reviews.ndjson`. It is deliberately not numeric: a numeric scale invites arithmetic on a
+judgement whose five points are not evenly spaced. **Nothing ranks or compares the tokens**,
+and no caller may rely on their order.
 
-`Rating` is display-independent: the tokens are what persists, and the wording an operator
-sees is the client's (D82). `updatedAt` on a `final` line is the ordering key for "the most
-recent final review", and it can be, because `final` refuses every further append (D83).
+**`updatedAt` on a `final` line is the finalisation time, and it is the ordering key for "the
+most recent final review"** (D83, I35). It can be, precisely because `final` refuses every
+further append — which is why no separate finalisation timestamp is needed. Ties break on the
+later line in the file.
+
+`snapshot` is copied at authorship and never refreshed (I30).
 
 ### Requisition (tier two)
 
+Declared in `src/contract/index.ts`: `RequisitionState`, `RequisitionDecision`, `Requisition`.
+
 Same file discipline as `Review`: append-only, latest line per id wins.
 
-```ts
-type RequisitionState = 'open' | 'approved' | 'rejected' | 'consumed';
-type RequisitionDecision = 'approve' | 'reject';
+**The lifecycle is `open → approved → consumed`, or `open → rejected`, and nothing else** (I32).
+Every other transition is refused. There is no revocation and no expiry: an approval stays
+spendable until it is spent (D81).
 
-interface Requisition {
-  readonly requisitionId: RequisitionId;
-  readonly raisedBy: OperatorId;
-  readonly title: string;           // UTF-8, at most Caps.requisitionTextBytes bytes
-  readonly justification: string;   // UTF-8, at most Caps.requisitionTextBytes bytes
-  // The client's string, stored unresolved and never passed to `jail` before session
-  // creation (D68). It is deliberately not a ResolvedPath: an approval is permission to
-  // try, not a grant.
-  readonly workspace: string;
-  readonly vendor: Vendor;
-  readonly state: RequisitionState;   // open → approved → consumed, or open → rejected
-  readonly decidedBy: OperatorId | null;
-  readonly decidedAt: IsoTimestamp | null;
-  readonly sessionId: SessionId | null;   // set once, at consumption
-  readonly raisedAt: IsoTimestamp;
-}
-```
+**`workspace` is the client's string, stored unresolved, and it is deliberately not a
+`ResolvedPath`** (D68, I34). This is the one place the design declines to reuse D4's
+resolve-once discipline, because a requisition can sit unapproved for a day: resolving at raise
+time would store a path whose meaning may have changed by the time it is used, and would leak
+whether a directory exists to any operator who can raise one. **An approval is permission to
+try, not a grant** — the jail runs at session creation as it always has, so a requisition for a
+path outside every root is approvable and then fails `409 outside_workspace_root` at the moment
+it is used.
+
+**Consumption is once and is claimed synchronously** (I33, I5). A second claim is refused,
+never queued.
+
+`decidedBy` may equal `raisedBy`: self-approval is permitted and recorded (D69).
 
 ### Onboarding checklist (tier two)
 
-The template is a `config` value; completion lives in the session's event stream and the
-checklist is the fold over it (D71). Nothing is persisted for a checklist, and it dies with
-its session under D25.
+Declared in `src/contract/index.ts`: `ChecklistItemTemplate`, `ChecklistItemState`.
 
-```ts
-interface ChecklistItemTemplate {
-  readonly id: ChecklistItemId;
-  readonly label: string;
-}
+**The template is a `config` value and completion lives in the session's event stream; the
+checklist is the fold over it** (D71). Nothing is persisted for a checklist and it dies with
+its session under D25, which is correct: it is first-run provisioning, not evidence.
 
-interface ChecklistItemState {
-  readonly id: ChecklistItemId;
-  readonly label: string;                     // from the template, at read time
-  readonly completedBy: OperatorId | null;
-  readonly completedAt: IsoTimestamp | null;  // the `ts` of the completing envelope
-}
-```
+The template is **not** per-requisition and not per-vendor — a checklist varying by who raised
+the requisition is a workflow engine, which nothing has asked for. Every session has one.
+
+`ChecklistItemState.label` is read from the template at read time, so a deployment editing a
+label does not rewrite history. `completedAt` is the `ts` of the completing envelope.
 
 ### Payroll view (tier two)
 
-Brief item 8. A fold over the session's own event log and a `config` value; no entity, no
-file (D75, D76).
+Declared in `src/contract/index.ts`: `PayrollView`.
 
-```ts
-interface PayrollView {
-  readonly sessionId: SessionId;
-  readonly burn: Usage;                     // component-wise sum of every `usage` event
-  readonly budgetTokens: number | null;     // Config.sessionTokenBudget; null when unset
-  readonly remainingTokens: number | null;  // budgetTokens minus burn's full component-wise sum
-                                             // (input, output, cache reads, cache creation);
-                                             // null when budgetTokens is null (D129)
-  readonly idleMs: number;                  // live-with-no-turn wall clock
-  readonly droppedIntervals: number;        // idle intervals discarded for spanning a restart
-  readonly costCurrency: number | null;     // burn priced at Config.tokenRates (D158); null when
-                                             // rates are unset, and null on a session whose
-                                             // transport reports no usage — never 0.00
-  readonly currency: string | null;          // Config.currency, echoed; null whenever cost is
-}
-```
+**A fold over the session's own event log and a `config` value. No entity, no file, no running
+counter** (D147). A live session and a rehydrated one are folded from the spill identically; two
+sources for one number is a pair that must agree, and a reconciliation rule nothing enforces is
+not a guarantee. The fold is O(spill) per read and that is the cost accepted.
 
-**The cost figure is an estimate against operator-set rates, never a vendor's billed amount**
-(D158). It is `burn`'s four components each multiplied by their rate in `Config.tokenRates` and
-summed. Rates are flat per deployment: `Usage` carries no model identifier and `UsageEvent` is
-`{ turnId, usage }`, so a session that switched models is priced approximately, and that
-imprecision is recorded rather than hidden. `currency` is a label the server stores and echoes and
-never interprets — no conversion, no lookup, no network call.
-
-**`costCurrency` is null on exactly the sessions that cannot report burn, and the test is not
-`burn === 0`.** `## Unresolved` 12 rules that nothing may infer the zero-versus-unknown distinction
-by testing `burn`, and a fabricated `0.00` misreads harder than `0 tokens` does. The signal is the
-same one behind `session.notice / usage_unavailable` (D146). Null also covers an unpriced
-deployment: `Config.tokenRates` null means the operator set no rates, and the tile is absent rather
-than zero.
+- `burn` is the component-wise sum of every `usage` event for the session. It is a sum **only
+  because the adapter guarantees the numbers are summable** (D75, I28).
+- `remainingTokens` subtracts `burn`'s **full** component-wise sum — input, output, cache reads
+  and cache creation all count against the budget — from `budgetTokens`, and is `null` whenever
+  `budgetTokens` is (D129). The budget is per session (`Config.sessionTokenBudget`): the only
+  scope needing no new persisted entity, and the only one where the number on a session's
+  screen is about that session.
+- `idleMs` is wall-clock time the session was `live` with no turn: the gaps between `turn.ended`
+  and the next `turn.started`, plus creation-to-first-turn and last-turn-to-end.
+- **`costCurrency` is an estimate against operator-set rates, never a vendor's billed amount**
+  (D158). It is `burn`'s four components each multiplied by their rate in `Config.tokenRates`
+  and summed. Rates are flat per deployment because `Usage` carries no model identifier, so a
+  session that switched models is priced approximately — recorded rather than smoothed over.
+- **`costCurrency` is null on exactly the sessions that cannot report burn, and the test is not
+  `burn === 0`.** A fabricated `0.00` misreads as authoritative in a way `0 tokens` does not.
+  The signal is `session.notice / usage_unavailable` (D146). Null also covers an unpriced
+  deployment: `tokenRates` null means the operator set no rates, and the tile is absent rather
+  than zero. `currency` is a label the server stores and echoes and **never interprets** — no
+  conversion, no lookup, no network call — and is null whenever cost is.
 
 **`session.notice / server_restart` is the fold's only restart marker, and `turn.ended`'s
-`server_restart` stop reason carries no fold meaning** (D130). The fold walks the spill and
+`server_restart` stop reason carries no fold meaning** (D130, D76). The fold walks the spill and
 stops billing at that notice: the idle interval the notice closes, **if one was open**, is
 dropped and counted in `droppedIntervals`, and nothing after it is billed. Both restart cases
-fall out of the one rule — a server that went down while the session sat idle between turns
-had an interval open, so it reports one dropped; a server that went down mid-turn had none,
-because the outage was inside a turn and was never idle to begin with, so it reports zero and
-the outage is attributed to the turn. Reading `turn.ended { stopReason: 'server_restart' }` as
-the marker instead is what leaves the idle case unmarked entirely, since D39 appends that
-close **only** where the spill ends on an unpaired `turn.started`.
+fall out of the one rule — a server that went down while the session sat idle between turns had
+an interval open and reports one dropped; a server that went down mid-turn had none, because the
+outage was inside a turn and was never idle, so it reports zero and the outage is attributed to
+the turn. Reading `turn.ended { stopReason: 'server_restart' }` as the marker instead is what
+leaves the idle case unmarked entirely, since D39 appends that close **only** where the spill
+ends on an unpaired `turn.started` — and the whole outage is then billed as that operator's idle
+time, a wrong number on a screen headed *payroll*.
+
+**`PayrollView` carries no field separating unknown from zero**, and giving it one is a second
+public-surface change that is not made here; see `## Unresolved` 12.
 
 ### Operator
 
-```ts
-interface Operator { readonly id: OperatorId }
-```
+Declared in `src/contract/index.ts`: `Operator`.
 
-Not persisted. An operator exists as a string on a `SessionRecord`, an `AuditRecord`, a
-`Review` and a `Requisition`, and nowhere else (D3, D66). Tier two adds no operator record
-and no preference: the theme is browser state and never reaches this server (D60, D78).
+**Not persisted.** There is no user record, no profile, no preferences — D3 chose delegated
+identity precisely so that no credential or account state lives here. An operator exists as a
+string on a `SessionRecord`, an `AuditRecord`, a `Review` and a `Requisition`, and nowhere
+else (D66). Tier two adds no operator record and no preference: the theme is browser state and
+never reaches this server (D60, D78).
 
 ### Config
 
+Declared in `src/contract/index.ts`: `AuthConfig`, `Caps`, `TokenRates`, `Config`.
+
+**This document declares the fields and sets none of the values** (D84). The values are a
+deployment's.
+
+**A cap is a threshold, not a truncation**, for every text field that names one: a review body,
+a requisition title or justification, a standing rule or an attachment over its cap is refused
+with `422 bad_request`, never silently shortened. `Caps.toolResultBytes` is the one exception
+and is a genuine truncation, because the untruncated bytes survive in a blob.
+
+**Caps exist as configuration rather than as constants because a buried constant is a cap that
+cannot be changed without a release.** That reasoning applies hardest to
+`sessionCookieMaxAgeSeconds`, which is a deployment's security posture and is what a deployment
+shortens after an incident. It is read **only** under `auth.mode === 'shared-secret'` and is
+ignored under either header mode, where the credential is the upstream proxy's and its lifetime
+is not ours to set.
+
+**`Config.edge` selects which transport edge this deployment binds** (D10, D117). `server.ts`
+constructs `createSseEdge` or `createWsEdge` accordingly; exactly one binds.
+
+`TokenRates` is one rate per `Usage` component, in `currency` units per token, flat per
+deployment (D158). `null` disables the cost tile. `checklist` empty disables the checklist.
+`sessionTokenBudget` null disables the view's budget.
+
+**Scaffold — S23 owes this member** (D162). `Caps` is otherwise materialised; this field is
+not:
+
 ```ts
-type AuthConfig =
-  | { readonly mode: 'proxy-header'; readonly userHeader: string }
-  | { readonly mode: 'open-webui'; readonly userHeader: string; readonly sessionHeader: string }
-  | { readonly mode: 'shared-secret'; readonly cookieName: string; readonly secret: string };
-
-interface Caps {
-  readonly ringCapacity: number;             // envelopes retained in memory per session
-  readonly toolResultBytes: number;          // truncation threshold for tool.result
-  readonly sessionToolOutputBytes: number;   // (D162) total blob bytes one session may store;
-                                             // past it the blob is not written and the fetch
-                                             // route answers 404, per S9.5's existing path
-  readonly subscriberQueueHighWater: number; // envelopes queued per subscriber before it is dropped
-  readonly keepaliveMs: number;              // SSE comment interval
-  readonly auditPageMax: number;             // largest window `GET /api/audit` will serve
-  readonly standingRuleBytes: number;        // rejection threshold for one StandingRuleExpression
-  readonly attachmentBytes: number;          // (D160) rejection threshold, decoded, per attachment
-  readonly attachmentCount: number;          // (D160) rejection threshold, attachments per message
-  readonly reviewBodyBytes: number;          // (tier two) rejection threshold for Review.body
-  readonly requisitionTextBytes: number;     // (tier two) per field: title, justification
-}
-
-// (tier two, D158) One rate per `Usage` component, in `currency` units per token. Flat per
-// deployment: nothing records which model produced a session's burn, so nothing can key on one.
-interface TokenRates {
-  readonly inputTokens: number;
-  readonly outputTokens: number;
-  readonly cacheRead: number;
-  readonly cacheCreate: number;
-}
-
-interface Config {
-  readonly bind: { readonly host: string; readonly port: number };
-  readonly auth: AuthConfig;
-  readonly workspaceRoots: readonly ResolvedPath[];
-  readonly storageRoot: string;
-  readonly allowedOrigins: readonly string[];
-  readonly trustProxy: readonly string[];    // upstream addresses permitted to set the identity header
-  readonly caps: Caps;
-  // `Max-Age` on the cookie `POST /api/login` mints. Only read under
-  // `auth.mode === 'shared-secret'`; ignored under either header mode, where the credential
-  // is the upstream proxy's and its lifetime is not ours to set. A session lifetime is a
-  // deployment's security posture, not a constant — a literal here is the buried-constant
-  // failure `10-design.md § Module boundaries` names for caps, and it applies harder to
-  // this, because shortening it is what a deployment does after an incident.
-  readonly sessionCookieMaxAgeSeconds: number;
-  readonly includeRaw: boolean;
-  readonly sessionTokenBudget: number | null;              // (tier two) per session; null disables the view's budget
-  readonly tokenRates: TokenRates | null;                  // (tier two) null disables the cost tile (D158)
-  readonly currency: string | null;                        // (tier two) label only; never interpreted (D158)
-  readonly checklist: readonly ChecklistItemTemplate[];    // (tier two) empty disables the checklist
-  // D10/D117: which transport edge this deployment binds. `server.ts` constructs
-  // `createSseEdge` or `createWsEdge` accordingly; exactly one binds (S11.5).
-  readonly edge: 'sse' | 'ws';
-}
+// Total blob bytes one session may store. Past it the blob is not written, the envelope
+// still carries `truncated: true` and the true pre-truncation size, and the fetch route
+// answers `404 no_such_output` exactly as S9.5 already specifies. Nothing already written
+// is ever evicted, and the rule does not reach `attachments/` (D160): a tool blob is a
+// re-runnable command's output, an attachment is the operator's only copy.
+readonly sessionToolOutputBytes: number;
 ```
-
-A cap is a threshold, not a truncation, for the two tier-two text fields: a body or a
-justification over the cap is refused with `422 bad_request`, never silently shortened. The
-values are a deployment's; this document declares the fields and sets none of them (D84).
 
 ## Persisted schemas
 
@@ -778,560 +600,563 @@ values are a deployment's; this document declares the fields and sets none of th
   meta.json                                   SessionMetaFile
   events.ndjson                               one Envelope per line, append-only
   tool-output/<turnId>/<callId>               untruncated bytes, one file per call
+  attachments/<turnId>/<attachmentId>         operator uploads, one file each
   ckpt.git/                                   shadow GIT_DIR, work-tree = the session's cwd
 <storage>/audit.ndjson                        one AuditRecord per line, append-only
-<storage>/pids.ndjson                         one ProcessRecord per line, append-only
+<storage>/pids.ndjson                         ProcessRecord and ProcessTombstone lines
+<storage>/server.lock                         one ServerLock object                    (D161)
 <storage>/reviews.ndjson                      (tier two) one Review per line, append-only
 <storage>/requisitions.ndjson                 (tier two) one Requisition per line, append-only
 ```
 
-```ts
-interface SessionMetaFile {
-  readonly schemaVersion: 1;
-  readonly session: SessionRecord;   // `lastSeq` here is a diagnostic hint, not authority
-}
-```
+`SessionMetaFile` is declared in `src/contract/index.ts`. Its `schemaVersion` is the one
+discriminator in the system, and an unknown value is **a corrupt file, never a migration
+attempt** (D49): the file rehydration depends on is the one place where reading old data as
+though it were new is silent wrong state rather than a parse error.
 
 | File | Key | Ordering / index | Constraints |
 |---|---|---|---|
-| `meta.json` | `sessionId` from the directory name | — | Written by temp-file-then-atomic-rename, never in place, on exactly three occasions: create, a `state` transition, a `cliSessionId` change. Never per event |
+| `meta.json` | `sessionId` from the directory name | — | Written by temp-file-then-atomic-rename, never in place, on exactly three occasions: create, a `state` transition, a `cliSessionId` change. Never per event (I16) |
 | `events.ndjson` | `(sessionId, seq)` | `seq` ascending, contiguous from 1 | Append-only, written in `seq` order through the session's own append chain (D89). Not fsync'd per line. **Read backwards from the tail to locate `after + 1`, then emitted forward** — O(envelopes since the disconnect), not O(file). No offset index exists and none is planned (D163) |
-| `tool-output/<turnId>/<callId>` | `(sessionId, turnId, callId)` | — | Written once, never appended. `turnId` is in the path because `callId` is vendor-minted and only *assumed* session-unique. Bounded per session by `Caps.sessionToolOutputBytes`: past the budget the blob is **not written**, and the fetch answers `404 no_such_output` exactly as S9.5 already specifies (D162). Nothing already written is ever evicted |
+| `tool-output/<turnId>/<callId>` | `(sessionId, turnId, callId)` | — | Written once, never appended. `turnId` is in the path because `callId` is vendor-minted and only *assumed* session-unique (I22). Bounded per session by `Caps.sessionToolOutputBytes`: past the budget the blob is **not written**, and the fetch answers `404 no_such_output` exactly as S9.5 already specifies (D162). Nothing already written is ever evicted |
 | `attachments/<turnId>/<attachmentId>` | `(sessionId, turnId, attachmentId)` | — | Written once, never appended, fsync'd before the envelope naming it exists (I49). `attachmentId` is server-minted, so the operator's `filename` never reaches a path. A sidecar `attachments/<turnId>/<attachmentId>.meta` holds the stored `mediaType` as UTF-8 text, written the same way, so the read route can echo it for an allow-listed image type without scanning the spill for the `AttachmentRef` that named this id. Removed with the session (D25, D160) |
-| `audit.ndjson` | append order | append order, read newest first | Server-wide. fsync'd before the decision it records reaches the child. Never truncated, never deleted with a session. Every read is a bounded window resumed by `AuditCursor` |
+| `audit.ndjson` | append order | append order, read newest first | Server-wide. fsync'd before the decision it records reaches the child (I10). Never truncated, never deleted with a session (I13). Every read is a bounded window resumed by `AuditCursor` (I39) |
 | `pids.ndjson` | append order; `pid` is not unique over time | append order | Server-wide. Two line shapes: a `ProcessRecord` at spawn, a `ProcessTombstone` at exit (D95). The latest line for a `pid` decides liveness; the spawn line carries everything else |
-| `server.lock` | — | — | Server-wide, one `ServerLock` object, written before boot's first step and removed at clean shutdown (D161). Not append-only. Reclaimed on a stale holder by D23's three-part test; never reclaimed when `hostname` is another host |
-| `reviews.ndjson` *(tier two)* | `reviewId` | append order; the latest line for an id wins | Server-wide. Never rewritten. Survives deletion of the session it names (D67). A `final` line is terminal — no later line for that id is written |
-| `requisitions.ndjson` *(tier two)* | `requisitionId` | append order; the latest line for an id wins | Server-wide. Never rewritten. Written before the session it opens exists |
-| `ckpt.git/` | git object ids | git history | Git is the store. `add -A` honours the workspace's own `.gitignore` |
+| `server.lock` | — | — | Server-wide, one `ServerLock` object, written before boot's first step and removed at clean shutdown (D161). Not append-only. Reclaimed on a stale holder by D23's liveness test; never reclaimed when `hostname` is another host |
+| `reviews.ndjson` *(tier two)* | `reviewId` | append order; the latest line for an id wins | Server-wide. Never rewritten. Survives deletion of the session it names (D67). Durable per line (D128). A `final` line is terminal — no later line for that id is written |
+| `requisitions.ndjson` *(tier two)* | `requisitionId` | append order; the latest line for an id wins | Server-wide. Never rewritten. **Not durable per line**, which is why a lost consumption line reverts an approval to spendable — D68's written exception |
+| `ckpt.git/` | git object ids | git history | Git is the store. `add -A` honours the workspace's own `.gitignore`, and neither `read-tree` nor `clean -fd` takes `-x`, so exactly the same set is left alone |
 
-**Authority.** `lastSeq` is derived at boot from the tail of `events.ndjson`. Where
-`meta.json` and the spill disagree, the spill is right.
+**The four server-wide append files are the design's only shared mutable state on disk**, and
+the claim that no lock is needed rests on each being opened once, as a single append stream
+owned by `store`, with every writer going through it. Ordered appends through one stream in one
+single-threaded process cannot interleave a partial line. **Two server processes over one
+storage root would break that for all four, which is what `server.lock` prevents** (D161) —
+so the single-process premise is enforced rather than assumed.
+
+**"Durable" means fsync**, and for a rename the containing directory too. An append that has
+reached the OS survives a process crash; it does not survive a host crash. Exactly two writes
+are durable per line: the audit record before a permission response reaches the child (D26,
+I10), and every review line before a review route's response reaches the caller (D128).
+Ordinary spill appends are **not** fsync'd per line — the cost is unjustifiable at event rates
+and the loss window is bounded by the OS writeback interval.
+
+**A torn trailing line is dropped at read, and what dropping costs differs by file.** In an
+*event* log the transcript is one event short. In a *latest-wins* log the previous line becomes
+authoritative again — the record does not lose its tail, it travels backwards. A review reverts
+to its prior draft; a requisition reverts to its prior state, and the sharpest case is a lost
+consumption line, where an approval that was spent shows as `approved` again and one approval
+can produce two sessions. Both new sessions still face the jail and the workspace busy check,
+so the consequence is a bookkeeping lie rather than a hazard. It is accepted rather than
+solved, and it is the one place D68's once-only claim can be untrue.
+
+**Authority.** `lastSeq` is derived at boot from the tail of `events.ndjson`. Where `meta.json`
+and the spill disagree, the spill is right (I17).
 
 **Migration.** There is no deployed data. `spike/.data` is throwaway proof-of-concept storage
-in an unversioned shape and is not migrated; it is deleted. Forward rules for the first
-shipped shape:
+in an unversioned shape and is not migrated; it is deleted. Forward rules for the first shipped
+shape:
 
 | File | Existing data | Rule |
 |---|---|---|
 | `meta.json` | none | `schemaVersion` gates rehydration. An unknown version is treated exactly as a corrupt file: the session is skipped, logged, and its files left untouched |
 | `events.ndjson`, `audit.ndjson`, `pids.ndjson` | none | Readers ignore unknown fields and drop an unparseable trailing line. Added fields must be optional; a removed or retyped field is a new `schemaVersion` on `meta.json` and a refusal to rehydrate older sessions |
-| `reviews.ndjson`, `requisitions.ndjson` | none | Readers ignore unknown fields; added fields must be optional. A dropped trailing line does not shorten the record, it reverts it to the previous line for that id — accepted in `10-design.md § Persistence summary`. **A removed or retyped field has no discriminator to gate on in these two files**; see `## Unresolved` 11 |
+| `reviews.ndjson`, `requisitions.ndjson` | none | Readers ignore unknown fields; added fields must be optional. A dropped trailing line does not shorten the record, it reverts it to the previous line for that id. **A removed or retyped field has no discriminator to gate on in these two files**; see `## Unresolved` 11 |
+| `server.lock` | none | Rewritten whole at every claim and removed at every clean release. Nothing reads a lock it did not just find, so there is nothing to migrate |
 | `tool-output/*`, `attachments/*` | none | Opaque bytes; no schema to migrate |
 | `ckpt.git/` | none | Git's own format; not ours to migrate |
 
-## Public signatures
+## Public surface
 
-Internal helpers are out of scope. Every signature below crosses a module boundary.
+Internal helpers are out of scope. Every entry below crosses a module boundary, and each names
+the file that declares it. A **Markdown command file has no separate declaration to point at**;
+this project has none, so every entry here is code.
 
 ### `contract`
 
-Types, plus the enumeration of a closed union where a validator must test membership. Each
-such export is declared below like any other public interface; everything else this module
-exports is a type and leaves nothing behind at runtime (D150).
-
-```ts
-declare const RATINGS: readonly Rating[];
-```
+Declared in `src/contract/index.ts`. Types, plus **one runtime enumeration**: `RATINGS`.
+Everything else this module exports is a type and leaves nothing behind at runtime (D150).
 
 `RATINGS` is the one runtime enumeration of `Rating`'s members, and it lives here rather than
 beside its consumer because the edge validator that tests membership before accepting a
 `Rating` on a review route would otherwise hand-copy the union — a second, independently typed
-list free to drift from the one it validates. It is deliberately not the `VENDORS` arrangement
-(D126): `Vendor`'s list sits in `adapters` beside the `createAdapter` switch that makes each
-member runnable, and `Rating` has no such switch, its members being validated and stored rather
-than dispatched on. Nor may it move to `records`, which is tier two, while the tier-one edge
-needs this vocabulary to parse a body.
+list free to drift from the one it validates. It is deliberately **not** the `VENDORS`
+arrangement (D126): `Vendor`'s list sits in `adapters` beside the `createAdapter` switch that
+makes each member runnable, and `Rating` has no such switch, its members being validated and
+stored rather than dispatched on. Nor may it move to `records`, which is tier two, while the
+tier-one edge needs this vocabulary to parse a body.
 
-A caller may rely on the array holding every member of `Rating` and no other value. It may not
-rely on the order: the tokens read as a scale, but nothing ranks or compares them, and `Rating`
-is display-independent besides (D82).
+**A caller may rely on the array holding every member of `Rating` and no other value. It may
+not rely on the order**: the tokens read as a scale, but nothing ranks or compares them, and
+`Rating` is display-independent besides (D82).
 
 ### `config`
 
-```ts
-declare function loadConfig(env: Readonly<Record<string, string | undefined>>): Result<Config, ConfigError>;
-```
+`loadConfig` is declared in `src/config/index.ts`. It reads the environment and returns a
+validated `Config` or a `ConfigError`; it never partially applies a configuration and never
+warns instead of refusing.
+
+**`config` depends on `jail`, and the edge runs that way round and not the other** (D94).
+`config` must canonicalise each declared workspace root with **the same normalisation** the
+jail applies to a candidate, or a legitimate `cwd` is refused for spelling — a Windows 8.3
+short name, a `\\?\` prefix, a case variation. That is why `workspaceRoots` is
+`readonly ResolvedPath[]` and why `jail` exports `stripExtendedPrefix`.
 
 ### `identity`
 
-```ts
-interface IdentityRequest {
-  readonly headers: Readonly<Record<string, string | readonly string[] | undefined>>;
-  readonly remoteAddress: string;
-}
+`IdentityRequest`, `IdentityResolver` and `resolverFor` are declared in
+`src/contract/index.ts` (the types) and `src/identity/index.ts` (the function).
 
-type IdentityResolver = (req: IdentityRequest) => Result<OperatorId, IdentityError>;
+One resolver per deployment mode. The resolver is handed the request's headers and its
+`remoteAddress`, and **the second is not decoration**: under the header-trust modes a trusted
+header is only trustworthy if the client cannot set it, so the resolver refuses
+`untrusted_proxy` for an identity header arriving from an address outside `trustProxy`.
 
-declare function resolverFor(auth: AuthConfig, trustProxy: readonly string[]): IdentityResolver;
-```
+**Under `auth.mode === 'shared-secret'` the resolver returns one `OperatorId` for every
+caller**, because a shared secret authenticates the deployment and not a person, and D3 refuses
+the operator record that would fix it. Four consequences follow and are stated in
+`10-design.md § Threat model`; the contract-level one is that
+`404 no_such_session` stops being access control under that mode. **Nothing here enforces a
+refusal**: the server does not decline to start under `shared-secret`.
 
 ### `jail`
 
-```ts
-declare function resolveInsideRoot(
-  candidate: string,
-  roots: readonly ResolvedPath[],
-): Promise<Result<ResolvedPath, JailError>>;
+`resolveInsideRoot`, `pathsOverlap` and `stripExtendedPrefix` are declared in
+`src/jail/index.ts`.
 
-// The one containment predicate in this server: true when the two paths are equal or
-// either contains the other, under the same normalisation `resolveInsideRoot` applies.
-// Both arguments must already be jail-resolved. `session-manager`'s workspace busy check
-// (D30) calls this; no module hand-rolls a second one.
-declare function pathsOverlap(a: ResolvedPath, b: ResolvedPath): boolean;
+- **`resolveInsideRoot` is the only minter of a `ResolvedPath`.** It accepts a candidate only
+  if its fully resolved real path — symlinks followed, `..` collapsed, case-normalised on
+  Windows — is inside a root. `JailError.unresolvable` is a refusal, not a fallback: the jail
+  admits only paths *proven* inside a root.
+- **`pathsOverlap` is the one containment predicate in this server**, and no module may
+  hand-roll a second. It is true when the two paths are equal **or either contains the other**,
+  under the same normalisation `resolveInsideRoot` applies. Both arguments must already be
+  jail-resolved. `session-manager`'s workspace busy check calls this (D30, I6).
+- `stripExtendedPrefix` normalises away the `\\?\` extended-length prefix a native realpath
+  returns on Windows. It is exported for `config`'s use, above.
 
-// Normalises away the `\\?\` extended-length prefix a native realpath returns on
-// Windows. Exported because `config` must canonicalise a declared workspace root with
-// exactly the normalisation a candidate gets here (D94) — a root spelled differently
-// from the candidates tested against it refuses legitimate paths.
-declare function stripExtendedPrefix(p: string): string;
-```
+**The roots arrive as a parameter**, which is what keeps `jail → config` undrawn. `jail`
+depends on `contract` alone.
 
-`jail` depends on `contract` alone. The roots arrive as a parameter, so there is no
-`jail → config` edge; the edge runs the other way (`10-design.md § Module boundaries`).
+**What this module does not do is stated because the misreading is the likely one** (D28): the
+jail decides where a session may *start* and pins `cwd` so it cannot drift between turns. It
+does nothing about where the child process may reach once running. `workspaceRoot` is not a
+sandbox.
 
 ### `store`
 
+`LoadedMeta`, `Store` and `createStore` are declared in `src/contract/index.ts` (the types) and
+`src/store/index.ts` (the factory).
+
+`store` owns `meta.json`, the spill, the tool-output and attachment blobs, `audit.ndjson`,
+`pids.ndjson`, the ring buffer, the two record logs, and — from S22 — `server.lock`. It depends
+on `config` and `contract` and on nothing else.
+
+What the declarations cannot say:
+
+- **`readAllMeta` never aborts boot.** It returns one `LoadedMeta` per session directory, each
+  carrying its own `Result`, so a corrupt or unknown-version `meta.json` costs that session and
+  no other.
+- **`readRingAfter` returning `null` means "cannot serve", not "nothing to serve".** An empty
+  array is a real answer; `null` sends the caller to the spill.
+- **`readEventsAfter` locates `after + 1` by reading backwards from the tail**, then emits
+  forward. It is O(envelopes since the disconnect) and not O(file), which matches the access
+  pattern rather than fighting it: a reconnect's `Last-Event-ID` is recent almost by definition.
+  No offset index exists and none is planned (D163).
+- **`appendAudit` and `appendReview` are durable: fsync'd before they return** (I10, D128).
+  No other append is.
+- **`readOpenPids` must never hand back a tombstone as an open record** — see *Types § Process
+  record* for the requirement and why.
+- **`readAuditPage` is bounded and never scans the whole file** (I39). See *Types § Audit
+  record* for what the bound counts.
+- **A record-log read failure yields an empty list and never aborts boot** (I38). Tier two
+  failing must not deny an operator tier one.
+- `writeAttachment` carries `mediaType` alongside the bytes so that a later `openAttachment`
+  can answer the read route's allow-list check without scanning the session's spill for the
+  `AttachmentRef` that named the id.
+
+**Scaffold — S22 owes these** (D161). `server.lock` has no declaration in the tree yet:
+
 ```ts
-interface LoadedMeta {
-  readonly sessionId: SessionId;
-  readonly result: Result<SessionRecord, StoreError>;   // a per-session failure never aborts boot
-}
+// Supplied by the caller so that D23's three-part liveness test has exactly one
+// implementation and `store` acquires no dependency on process enumeration. `true` means
+// the named holder is a live server process on this host.
+type LivenessProbe = (holder: ServerLock) => Promise<boolean>;
 
 interface Store {
-  // Session directory and metadata
-  createSession(record: SessionRecord): Promise<Result<void, StoreError>>;
-  writeMeta(record: SessionRecord): Promise<Result<void, StoreError>>;
-  readAllMeta(): Promise<readonly LoadedMeta[]>;
-  deleteSession(sessionId: SessionId): Promise<Result<void, StoreError>>;
+  // ... the materialised members above, plus:
 
-  // Spill
-  appendEvent(sessionId: SessionId, envelope: Envelope): Promise<Result<void, StoreError>>;
-  readEventsAfter(sessionId: SessionId, after: Seq | 0): AsyncIterable<Result<Envelope, StoreError>>;
-  readLastSeq(sessionId: SessionId): Promise<Result<Seq | 0, StoreError>>;
+  // Claim `<storage>/server.lock` for `self`. Called as boot's step 0, before the reap step
+  // and not merely before `listen`. Returns `StartupError` rather than `StoreError` because
+  // `storage_locked` is a startup refusal and because `SessionManager.boot` already returns
+  // that union, so it composes with no wrapper.
+  claimLock(self: ServerLock, isLive: LivenessProbe): Promise<Result<void, StartupError>>;
 
-  // Ring buffer (in memory, bounded by Caps.ringCapacity)
-  pushRing(sessionId: SessionId, envelope: Envelope): void;
-  readRingAfter(sessionId: SessionId, after: Seq | 0): readonly Envelope[] | null;  // null = cannot serve
-  dropRing(sessionId: SessionId): void;
-
-  // Tool output blobs
-  writeToolOutput(sessionId: SessionId, turnId: TurnId, callId: CallId, bytes: Buffer): Promise<Result<void, StoreError>>;
-  openToolOutput(sessionId: SessionId, turnId: TurnId, callId: CallId): Promise<Result<NodeJS.ReadableStream, StoreError>>;
-
-  // (D160) Attachment blobs, D22's tool-output shape reversed — fsync'd before the envelope
-  // naming them exists (I49). `mediaType` rides alongside so a later `open` can answer the
-  // read route's allow-list check (S21.6) without scanning the spill.
-  writeAttachment(sessionId: SessionId, turnId: TurnId, attachmentId: AttachmentId, bytes: Buffer, mediaType: string): Promise<Result<void, StoreError>>;
-  openAttachment(sessionId: SessionId, turnId: TurnId, attachmentId: AttachmentId): Promise<Result<{ readonly stream: NodeJS.ReadableStream; readonly mediaType: string }, StoreError>>;
-
-  // Server-wide append-only files
-  appendAudit(record: AuditRecord): Promise<Result<void, StoreError>>;   // durable: fsync before it returns
-  readAuditPage(query: AuditQuery): Promise<Result<AuditPage, StoreError>>;   // bounded; never a whole-file scan
-  appendPid(record: ProcessRecord): Promise<Result<void, StoreError>>;
-  tombstonePid(pid: number, exitedAt: IsoTimestamp): Promise<Result<void, StoreError>>;
-  readOpenPids(): Promise<readonly ProcessRecord[]>;
-
-  // Record logs (tier two). A read failure yields an empty list and never aborts boot.
-  appendReview(record: Review): Promise<Result<void, StoreError>>;   // durable: fsync before it returns (D128)
-  readAllReviews(): Promise<readonly Review[]>;              // latest line per reviewId
-  appendRequisition(record: Requisition): Promise<Result<void, StoreError>>;
-  readAllRequisitions(): Promise<readonly Requisition[]>;    // latest line per requisitionId
+  // Remove the lock at clean shutdown. A failure here is logged and is not fatal: the next
+  // boot's staleness path is what recovers from a lock nobody removed.
+  releaseLock(): Promise<Result<void, StoreError>>;
 }
-
-declare function createStore(config: Config): Promise<Result<Store, StoreError>>;
 ```
+
+**`claimLock`'s decision table, which the signature cannot carry:**
+
+| Lock file | Outcome |
+|---|---|
+| absent | Write `self`. Claimed. |
+| present, `hostname` is another host | **Refuse, always.** `StartupError.storage_locked` naming the holder. The liveness test cannot see another machine's process table, and guessing there is how two servers over one network share both start (I50) |
+| present, this host, `isLive` true | Refuse. `StartupError.storage_locked` naming the holder's `pid`, `hostname` and `startedAt` |
+| present, this host, `isLive` false | Reclaim: log the stale holder, overwrite with `self`. Claimed |
+| present but unparseable | Treated as a stale holder and reclaimed, logged. A file nothing can read names no holder, and refusing on it would make every unclean shutdown need manual intervention — D161's first rejected alternative |
+
+**The first limb of D23's three-part test is satisfied structurally rather than by a field.**
+A `ProcessRecord` carries `exitedAt` and a `ServerLock` does not, because `releaseLock` removes
+the file: **the lock's absence is that limb**. `isLive` therefore reads the other two —
+`startedAt` later than the host's last boot, and a matching process `image` — against the lock
+it is handed. This is the same test, pointed at a second file, and not a second implementation
+of it.
+
+**A failed `claimLock` must leave every server-wide file byte-identical.** The claim precedes
+reaping specifically so that a second server cannot take down the first server's running work
+before anything else goes wrong (D161).
 
 ### `checkpoints`
 
-```ts
-interface Checkpoints {
-  init(sessionId: SessionId, cwd: ResolvedPath): Promise<Result<void, CheckpointError>>;
-  commit(sessionId: SessionId, cwd: ResolvedPath, label: string): Promise<Result<Checkpoint, CheckpointError>>;
-  list(sessionId: SessionId, cwd: ResolvedPath): Promise<Result<readonly Checkpoint[], CheckpointError>>;
-  // commit(safety) → read-tree --reset -u <sha> → clean -fd → verify. Returns the safety
-  // checkpoint, never the target. See below for why the middle operation is not D31's.
-  restore(sessionId: SessionId, cwd: ResolvedPath, sha: GitSha): Promise<Result<Checkpoint, CheckpointError>>;
-  destroy(sessionId: SessionId): Promise<Result<void, CheckpointError>>;
-}
+`Checkpoints` and `createCheckpoints` are declared in `src/contract/index.ts` (the type) and
+`src/checkpoints/index.ts` (the factory). It depends on `config` and `contract` and **never on
+adapters**, which is what let the shadow-git mechanism survive the move to two backends
+unchanged.
 
-declare function createCheckpoints(config: Config): Checkpoints;
+**`restore` returns the safety checkpoint, never the target**, and its sequence is four
+operations of which the middle one is not D31's (D112):
+
+```
+commit    --allow-empty -m "before restore to <sha>"    a way back
+read-tree --reset -u <sha>                              make the work-tree match, exactly
+clean     -fd                                           remove directories read-tree emptied
+verify    diff --quiet <sha>, ls-files --others         prove it, do not infer it
 ```
 
-**Restore's middle operation is `read-tree --reset -u`, not D31's `checkout <sha> -- .`**
-(D112). D31 pairs `checkout` with `clean -fd` so that a file created after the target is
-removed rather than left behind, and against untracked files that holds. It does not hold
-against tracked ones, and the safety checkpoint is what makes them tracked: `commit` runs
-`add -A` first, so every file the agent created is in the index by the time `checkout` runs.
-`checkout <sha> -- .` writes only paths present in the target's tree and `clean` never
-removes a tracked path, so such a file survives both operations — the exact failure D31 was
-written to close, reintroduced by D31's own first step. `read-tree --reset -u` makes index
-and work-tree match the target exactly, additions, edits and removals alike, without moving
-`HEAD`, so the shadow history stays linear and `list`'s `git log` still walks it.
+**D31 specified `checkout <sha> -- .` and that sequence cannot do what D31 says it does.** The
+argument was that `clean -fd` removes what the agent created since the target. It does not,
+because D31's own first step prevents it: the safety commit runs `add -A`, so every file the
+agent created is *tracked* by the time the second step runs, `checkout <sha> -- .` writes only
+paths the target's tree holds, and `clean` never removes a tracked path. That is precisely the
+failure D31 exists to close, reintroduced by D31's own opening move. `read-tree --reset -u`
+makes index and work-tree match the target exactly — additions, edits and removals alike —
+**without moving `HEAD`**, so the shadow history stays linear and `list`'s `git log` still walks
+it.
 
-`clean -fd` is retained behind it, for the directories `read-tree` empties but does not
-remove. No `-x` under either operation, so a path the workspace's own `.gitignore` covers is
-untouched — D31's symmetry argument is unchanged, and a restore still cannot force a
-dependency reinstall.
+**Ignored paths are neither checkpointed nor cleaned.** `add -A` reads the workspace's own
+`.gitignore`, and neither `read-tree` nor `clean -fd` takes `-x`, so exactly the same set is
+left alone. The pair is deliberate and symmetric: a restore can only remove things a checkpoint
+could have restored, so it never forces a dependency reinstall — the failure that would make
+operators stop using restores.
 
-**Success is verified, not inferred from an exit code.** `read-tree` exits 0 with a warning
-when it cannot remove a directory an embedded repository occupies, and `clean` declines such
-a directory unless forced twice, which this deliberately never does. So the sequence ends
-with `diff --quiet <sha>` for tracked content and `ls-files --others --exclude-standard` for
-what was left behind; either coming back dirty is `CheckpointError.restore_incomplete`. The
-partially-restored row in `10-design.md § Failure modes` is unchanged and is now *detected*
-rather than assumed absent.
+**Success is verified, not inferred from an exit code.** `read-tree` exits 0 with only a warning
+when it cannot remove a directory an embedded repository occupies, and `clean` declines such a
+directory unless forced twice, which this deliberately never does. So the sequence ends with
+`diff --quiet <sha>` for tracked content and `ls-files --others --exclude-standard` for what was
+left behind. Either coming back dirty is `CheckpointError.restore_incomplete`, and the workspace
+is then **partially restored** — a state this code detects and reports rather than one it
+accepts silently. No step is atomic; the safety checkpoint is the way back.
 
-**This amendment is discharged.** `10-design.md § Data model — Checkpoint` describes the
-`read-tree` sequence and why D31's own `add -A` defeats `checkout`, and D31 carries a
-supersession banner naming D112. Nothing is queued here for a later pass.
+**`init` failing is not fatal to a session.** The session proceeds without checkpoints and says
+so; DoD #6 is unavailable for it and nothing else changes. A workspace needs no git repository
+of its own — the shadow `GIT_DIR` is in server storage and the operator's real `.git` is never
+touched.
 
 ### `adapters/*`
 
-The only module that knows a vendor exists. Depends on `contract` and nothing else: it is
-handed a resolved `cwd` and one outbound channel, and that is its entire world.
+`AdapterNotification`, `AdapterEmitted`, `AdapterEvent`, `AdapterOptions`, `AttachmentPayload`
+and `Adapter` are declared in `src/contract/index.ts`; `VENDORS` and `createAdapter` in
+`src/adapters/index.ts`; the two adapters in `src/adapters/claude/` and `src/adapters/codex/`.
 
-```ts
-// Everything an adapter tells the manager. Event payloads carry no `seq`, no `sessionId`
-// and no `ts` — the manager assigns those.
-type AdapterNotification =
-  | { readonly kind: 'event'; readonly event: AdapterEvent }
-  | { readonly kind: 'cli-session'; readonly cliSessionId: CliSessionId }   // every system/init
-  | { readonly kind: 'spawned'; readonly pid: number; readonly pgid: number | null; readonly image: string }
-  | { readonly kind: 'exited'; readonly code: number | null; readonly signal: string | null };
+**Adapters are leaves.** They depend on `contract` and nothing else: they do not read config,
+do not touch the store, do not write audit records, and do not know whether a turn is in
+flight. They are handed a resolved `cwd` and one outbound channel and that is their entire
+world. This is what keeps a second vendor from becoming a second architecture, and two edges
+must never be drawn: **adapter → session-manager**, to ask whether a turn is running, and
+**adapter → store**, to write the audit record where the decision is known.
 
-type AdapterEmitted = Exclude<
-  EventKind,
-  | 'session.started'
-  | 'session.ended'
-  | 'checkpoint.created'
-  | 'checklist.item.completed'
-  | 'permission.resolved'
->;
+**The outbound channel is `notify`, a four-member union rather than a bare `emit`** (D46).
+Three facts have to reach the manager that are not normalised events — the `cliSessionId` from
+every `system/init`, the spawned child's pid, pgid and image, and the child's exit — and with an
+envelope-only callback there is no signature for any of them, so the first implementer either
+draws a forbidden edge or smuggles them through `raw`. **The adapter emits payloads carrying no
+`seq`, no `sessionId`, no `ts` and no `turnId`; the manager assigns all four.**
 
-type AdapterEvent = {
-  [K in AdapterEmitted]:
-    { readonly kind: K; readonly data: Omit<EventPayloadMap[K], 'turnId'>; readonly raw?: unknown }
-}[AdapterEmitted];
+**Five kinds an adapter may never emit**, and `AdapterEmitted` excludes each for a reason:
+`session.started` and `session.ended` are the manager's lifecycle, `checkpoint.created` is
+`checkpoints`', `checklist.item.completed` originates with an operator rather than a child
+process, and **`permission.resolved` is the manager's because resolution owes an audit record**
+(D97, I11). The manager holds the `pending` map, deletes from it synchronously (D33) and appends
+the record every resolution owes; an adapter resolving a request of its own would produce a
+resolution with no audit record and leave the manager's map holding an entry nothing will clear.
+What the adapter contributes when its child dies is the `exited` notification — deciding that
+every outstanding request is now `cancelled_process_exit` is the manager's, in the same place it
+decides it for an interrupt and for a turn boot closes.
 
-interface AdapterOptions {
-  readonly cwd: ResolvedPath;
-  readonly model: string | null;
-  readonly sandbox: SandboxMode | null;
-  readonly notify: (n: AdapterNotification) => void;
-}
+**`send` spawns the turn's child, writes the message to stdin, and holds stdin open for the
+life of the turn.** Closing it after the prompt forecloses the permission feature entirely and
+is the obvious first implementation. `kill` is terminate-then-force **on the process tree**, not
+on the pid: the recorded process is the agent CLI, and what holds the workspace open is whatever
+it spawned. Terminate-then-force is the POSIX half only — Windows has no signal to be graceful
+with, so `taskkill /T /F` is one step and the grace period has nothing to elapse over (D148).
 
-// (D160) An attachment as the adapter receives it: the ref the envelope carries, plus the bytes.
-// The manager reads them from `store` and hands them down, because an adapter depends on
-// `contract` and nothing else and may not be given a store handle.
-interface AttachmentPayload {
-  readonly ref: AttachmentRef;
-  readonly data: Uint8Array;
-}
+**`policy` is the vendor's capability, fixed at create**, and is what the client renders as
+either "you will be asked" or a standing sandbox banner. `sandbox` is the operator's choice and
+is validated by the adapter.
 
-interface Adapter {
-  readonly vendor: Vendor;
-  readonly policy: PermissionPolicy;                 // the vendor's capability, fixed at create
-  // (D160) Whether this vendor's transport carries non-text content at all. Read by the edge to
-  // refuse `attachments` with `422 bad_request`; a capability, not a vendor test, so I20 holds.
-  readonly acceptsAttachments: boolean;
-  // Spawns the turn's child, writes the message to stdin, and holds stdin open.
-  send(text: string, attachments: readonly AttachmentPayload[], resume: CliSessionId | null, turnId: TurnId): Promise<Result<void, AdapterError>>;
-  respond(requestId: RequestId, decision: PermissionDecision): Result<void, AdapterError>;
-  kill(): Promise<void>;                             // terminate-then-force, on the process tree
-}
+**`acceptsAttachments` is a capability, not a vendor test** (D160). The edge reads it to refuse
+`attachments` with `422 bad_request` on a vendor whose transport carries no non-text content,
+which is a question about a capability and not about which vendor this is — so I20 holds.
 
-declare const VENDORS: readonly Vendor[];
+**`VENDORS` is the one enumeration of `Vendor`'s members and it is declared beside
+`createAdapter`'s switch, not in `contract`** (D126), because a list that is not beside the
+dispatch it authorises is a list free to gain a member nothing can create.
+`edge/http-common` imports it to validate a `vendor` on a request body, which is the one read
+D10 permits an edge to make of this module: **testing membership of a closed union is not asking
+which vendor this is.** A caller may rely on the array holding every member of `Vendor` and no
+other value, and on no member of it reaching `createAdapter`'s `unsupported_vendor` — that
+second property is what keeping the list and the switch in one file buys, and it is not the same
+as the call succeeding, which `unsupported_sandbox` may still refuse. Nothing may rely on the
+order.
 
-declare function createAdapter(vendor: Vendor, opts: AdapterOptions): Result<Adapter, AdapterError>;
-```
+**A vendor adapter may accept one thing beyond `AdapterOptions`, and it is a test seam rather
+than a deployment knob** (D91). `createClaudeAdapter` and `createCodexAdapter` each take an
+optional `executable`, defaulting to `SKYNET_<VENDOR>_EXECUTABLE` and then to the vendor's own
+name, so a fixture CLI speaking the documented wire shape can stand in for the real binary over
+a real child process — which is what verifying the permission round trip rests on. It is
+deliberately **not** a `Config` field: a deployment that can repoint the agent binary from the
+environment is a deployment where the audit log names a program nobody chose. `createAdapter`
+does not expose it, so nothing above `adapters/*` can reach it.
 
-`policy` is read at session creation and is what the client renders as either "you will be
-asked" or a standing sandbox banner. `sandbox` is the operator's choice and is validated by
-the adapter.
-
-`VENDORS` is the one enumeration of `Vendor`'s members, and it is declared here — not in
-`contract` — because `createAdapter`'s switch immediately below it is what makes each member
-runnable, and a list that is not beside the dispatch it authorises is a list free to gain a
-member nothing can create (D126). `edge/http-common` imports it to validate a `vendor` on a
-request body, which is the one read D10 permits an edge to make of this module: testing
-membership of a closed union is not asking which vendor this is.
-
-A caller may rely on the array holding every member of `Vendor` and no other value, and on no
-member of it reaching `createAdapter`'s `unsupported_vendor` — that second property is what
-keeping the list and the switch in one file buys, and it is not the same as the call
-succeeding, which `unsupported_sandbox` may still refuse. Nothing may rely on the order.
-
-**A vendor adapter may accept one thing beyond `AdapterOptions`, and it is a test seam, not a
-deployment knob** (D91). `createClaudeAdapter` and `createCodexAdapter` each take an optional
-`executable`, defaulting to `SKYNET_<VENDOR>_EXECUTABLE` and then to the vendor's own name, so
-a fixture CLI speaking the
-documented wire shape can stand in for the real binary over a real child process — which is
-what D88's verification of the permission round trip rests on. It is deliberately **not** a
-`Config` field: a deployment that can repoint the agent binary from the environment is a
-deployment where the audit log names a program nobody chose. `createAdapter` does not expose
-it, so nothing above `adapters/*` can reach it.
-
-An adapter never emits `checklist.item.completed`: that envelope originates with an operator,
-not with a child process.
-
-**Nor does it emit `permission.resolved`** (D97). The manager holds the `pending` map, deletes
-from it synchronously (D33) and appends the audit record every resolution owes (I11), so an
-adapter that resolved a request of its own would produce a resolution with no audit record and
-leave the manager's map holding an entry nothing will clear. What the adapter contributes when
-its child dies is the `exited` notification; deciding that every outstanding request is now
-`cancelled_process_exit` is the manager's, in the same place it decides it for an interrupt and
-for a turn boot closes.
+**Transport selection is the adapter's alone and it ends there.** `createAdapter` takes no
+transport parameter and none is added: a transport is a vendor fact and I20 forbids one above
+`adapters/*`.
 
 ### `records` *(tier two)*
 
-Owns the review and requisition lifecycles and their in-memory registries. Depends on
+`RaiseRequisitionInput`, `CreateReviewInput`, `ReviewPatch` and `Records` are declared in
+`src/contract/index.ts`; `createRecords` in `src/records/index.ts`.
+
+It owns the review and requisition lifecycles and their in-memory registries, and depends on
 `config`, `store` and `contract` — **never on `session-manager`** (D77). It is handed a
-`SessionSnapshot` as a parameter; it does not know a session registry exists.
+`SessionSnapshot` as a parameter; **it does not know a session registry exists.** The edge is
+what composes the two: the edge resolves the session through `session-manager`, applies the
+ownership check it applies to every session route, and hands the snapshot down. Making `records`
+ask the manager for one would put a live-session dependency inside the module whose whole point
+is outliving sessions.
 
-```ts
-interface RaiseRequisitionInput {
-  readonly title: string;
-  readonly justification: string;
-  readonly workspace: string;    // stored unresolved; the jail runs at session creation
-  readonly vendor: Vendor;
-}
+**Both registries are held in memory as well as on disk, and that is not convenience**: the
+once-only requisition claim has to be tested and taken in one synchronous block (D32, I5), which
+a file read cannot be.
 
-interface CreateReviewInput {
-  readonly subject: SessionId;
-  readonly rating: Rating | null;
-  readonly pip: boolean;
-  readonly body: string;
-}
+What the declarations cannot say:
 
-// Absent fields are left as they stand on the latest line for that review.
-interface ReviewPatch {
-  readonly rating?: Rating | null;
-  readonly pip?: boolean;
-  readonly body?: string;
-}
-
-interface Records {
-  // Boot: load both logs into the registries. Never fails — an unreadable log yields an
-  // empty registry and a log line, because tier two must not deny an operator tier one.
-  boot(): Promise<void>;
-
-  // Requisitions
-  raise(raisedBy: OperatorId, input: RaiseRequisitionInput): Promise<Result<Requisition, RecordsError>>;
-  listRequisitions(): readonly Requisition[];                 // every authenticated operator (D70)
-  // No caller today: every read path the client has goes through `listRequisitions`.
-  // Reserved for a single-requisition read, and retained rather than removed because a
-  // decision route that wants to report the current state without listing all of them is
-  // the obvious next caller (D145).
-  getRequisition(requisitionId: RequisitionId): Result<Requisition, RecordsError>;
-  decide(requisitionId: RequisitionId, decidedBy: OperatorId, decision: RequisitionDecision): Promise<Result<Requisition, RecordsError>>;
-
-  // Consumption, in the three steps control flow 1 draws. `claim` is **synchronous**: it
-  // tests `state === 'approved'` and takes the claim in the same block, per D32.
-  claim(requisitionId: RequisitionId): Result<void, RecordsError>;
-  attachSession(requisitionId: RequisitionId, sessionId: SessionId): Promise<Result<void, RecordsError>>;
-  release(requisitionId: RequisitionId): void;   // in-process only; a crash leaves it spent (D80)
-
-  // Reviews. `snapshot` is supplied by the caller; `records` never resolves a session.
-  createReview(author: OperatorId, snapshot: SessionSnapshot, input: CreateReviewInput): Promise<Result<Review, RecordsError>>;
-  appendReview(reviewId: ReviewId, author: OperatorId, patch: ReviewPatch): Promise<Result<Review, RecordsError>>;
-  finaliseReview(reviewId: ReviewId, author: OperatorId): Promise<Result<Review, RecordsError>>;
-  getReview(reviewId: ReviewId, reader: OperatorId): Result<Review, RecordsError>;   // a draft resolves for its author only
-  listReviews(subject: SessionId): readonly Review[];         // finals only, every operator (D70)
-  // The D72 fold; drafts excluded. **No caller above `records` today, and that is the
-  // shape D72 forces rather than an omission**: PIP is derived and never served as a
-  // session field, so the fold has to run wherever the finals already are — which for the
-  // badge is the client, over `GET /api/reviews?subject=`. This is the server-side
-  // statement of I35, kept so the invariant can be asserted against an implementation in
-  // the module that owns it instead of only against browser code (D145).
-  isUnderPip(subject: SessionId): boolean;
-}
-
-declare function createRecords(deps: {
-  readonly config: Config;
-  readonly store: Store;
-}): Records;
-```
-
-`CreateReviewInput` is the wire shape and carries `subject`; the `SessionSnapshot` the edge
-supplies carries `sessionId`. The two must name the same session, and `records` refuses with
-`bad_request` when they do not — it is the one consistency check it can make without
-resolving a session it is forbidden to resolve.
-
-`getReview` and `appendReview` answer `no_such_review` — never a distinct forbidden — for a
-draft belonging to someone else, matching D50's treatment of a session an operator does not
-own.
-
-There is no `revoke` and no expiry: an approval stays spendable until it is spent (D81).
+- **`boot` never fails.** An unreadable log yields an empty registry and a log line, because
+  tier two must not deny an operator tier one (I38).
+- **`claim` is synchronous** — it tests `state === 'approved'` and takes the claim in the same
+  block. `attachSession` and `release` complete the three steps control flow 1 draws.
+  **`release` is in-process only: a crash between claim and attach leaves the approval spent**
+  (D80). That is a dead approval and a new one is raised; it is not recovered.
+- **A failed append leaves the registry unmutated** (I37), which is the reverse of the audit
+  path's ordering and deliberately so (D26). Neither write is irreversible and nothing
+  downstream acts on it, so losing a retypable edit is a smaller failure than the registry
+  claiming a `state` the disk does not have — which the next boot, reading the disk, would
+  silently revert.
+- **What is claimed synchronously for `decide`, `appendReview` and `finaliseReview` is an
+  exclusivity lock distinct from `state`** (D120). The lock is tested the way `turn == null` is
+  tested and is never itself written back as the answer; it releases when the write settles
+  either way, and `state` changes only once that write has durably succeeded. D32 still holds
+  without exception — the correction is naming the protected thing correctly as the lock, not
+  the state it will eventually hold.
+- **`getReview` and `appendReview` answer `no_such_review` — never a distinct forbidden — for a
+  draft belonging to someone else**, matching D50's treatment of a session an operator does not
+  own.
+- **`listReviews` returns finals only**, for every caller including a draft's own author (I31).
+  An author reaches their own draft by id.
+- **`CreateReviewInput` carries `subject` and the supplied `SessionSnapshot` carries
+  `sessionId`; the two must name the same session**, and `records` refuses with `bad_request`
+  when they do not. It is the one consistency check it can make without resolving a session it
+  is forbidden to resolve.
+- **`getRequisition` has no caller today and is retained rather than removed** (D145): every
+  client read path goes through `listRequisitions`, and a decision route reporting current state
+  without listing all of them is the obvious next caller.
+- **`isUnderPip` has no caller above `records` today, and that is the shape D72 forces rather
+  than an omission**: PIP is derived and never served as a session field, so the fold runs
+  wherever the finals already are — which for the badge is the client, over
+  `GET /api/reviews?subject=`. It is kept as the server-side statement of I35, so the invariant
+  can be asserted against an implementation in the module that owns it instead of only against
+  browser code (D145).
+- **There is no `revoke` and no expiry** (D81, I32).
 
 ### `session-manager`
 
-```ts
-interface CreateSessionInput {
-  readonly vendor: Vendor;
-  readonly cwd: string;                  // the client's string; never used after the jail check
-  // Constrained, not free text: `/^[A-Za-z0-9][A-Za-z0-9.:/_-]*$/`, else `422 bad_request`
-  // on `model`. It reaches a child's argv, which Windows passes through a shell (D90).
-  readonly model: string | null;
-  readonly sandbox: SandboxMode | null;
-  readonly requisitionId: RequisitionId | null;   // (tier two) optional; never a gate (D68)
-}
+`CreateSessionInput`, `PermissionAnswer`, `SubscriberSink`, `Subscription` and `SessionManager`
+are declared in `src/contract/index.ts`; `createSessionManager`, `parseStandingRule` and `match`
+in `src/session-manager/index.ts`.
 
-interface PermissionAnswer {
-  readonly requestId: RequestId;
-  readonly decision: PermissionDecision;
-  readonly scope: AnswerScope;
-  // Required, and only permitted, when scope === 'always'. Operator-typed at answer time and
-  // never parsed from a vendor suggestion. `scope === 'always'` additionally requires
-  // `decision === 'allow'` and a non-null `matchTarget` on the named request (I43).
-  readonly rule: StandingRuleExpression | null;
-  readonly reason: string | null;                 // the operator's stated reason
-}
+It owns ownership, turn state, `seq`, fan-out, reaping, the payroll fold, and the audit read and
+the incident view over it. **The audit read is here and not on `records`** because `records` is
+tier two and `GET /api/audit` is tier one, which must work in a build where tier two's module
+does not exist (D157, `## Unresolved` 5).
 
-interface SubscriberSink {
-  deliver(envelope: Envelope): void;
-  close(): void;
-}
+What the declarations cannot say:
 
-interface Subscription { close(): void }
+- **`boot` runs six steps and the order is the point**, and nothing in it may abort boot:
 
-interface SessionManager {
-  boot(): Promise<Result<void, StartupError>>;     // reap → rehydrate → close open turns; before listen
+  ```
+  0. lock       claim <storage>/server.lock, or refuse to start                    (D161)
+  1. reap       pids.ndjson entries with no exitedAt, subject to the reuse guard   (D23)
+                kill the process TREE, not the recorded pid                        (D38)
+  2. rehydrate  meta.json → registry, every session marked ended                   (D20)
+  3. mark       one session.notice / server_restart per session live at shutdown   (D130)
+     close      any turn the spill left unterminated, by appending to the spill    (D39)
+  4. load       the two record logs → registries, latest line per id  (tier two, D65)
+  5. listen     only now are connections accepted                                 (I18)
+  ```
 
-  create(owner: OperatorId, input: CreateSessionInput): Promise<Result<{ sessionId: SessionId }, SessionError>>;
-  list(owner: OperatorId): readonly SessionSummary[];
-  get(sessionId: SessionId, owner: OperatorId): Result<SessionSummary, SessionError>;
+  **Step 0 precedes step 1 and that ordering is the whole point of the lock.** Reaping kills
+  process trees it believes are orphans and cannot tell another server's live agents from its
+  own dead ones, so the claim comes before the first destructive act rather than merely before
+  `listen`. **The manager supplies its own reuse guard as `claimLock`'s `LivenessProbe`**, which
+  is what makes D161's "reuse" literal: one implementation of D23's test, called from two
+  places, with no `store → session-manager` edge because the guard arrives as a value.
+  **Reaping precedes rehydration** so no rehydrated session is adopted by an orphan still
+  holding its workspace. **Listening comes last** so no client observes a half-loaded registry —
+  a `GET /api/sessions` answered mid-rehydration reports a partial list as though it were
+  complete, which is a wrong answer rather than a slow one. **Step 4 runs before listening
+  because the requisition guards are synchronous** and a claim that must be taken without an
+  `await` cannot read a file to find out whether the requisition is approved.
+- **`CreateSessionInput.cwd` is the client's string and is never used after the jail check.**
+  `model` is constrained rather than free text — `/^[A-Za-z0-9][A-Za-z0-9.:/_-]*$/`, else
+  `422 bad_request` — because it reaches a child's argv, which Windows passes through a shell
+  (D90). `requisitionId` is optional and **never a gate** (D68): supplied, it is claimed once and
+  only from `approved`; absent, nothing in the path changes.
+- **`PermissionAnswer.rule` is required, and only permitted, when `scope === 'always'`**, and is
+  operator-typed at answer time rather than parsed from a vendor suggestion. `scope: 'always'`
+  additionally requires `decision === 'allow'` and a non-null `matchTarget` on the named request
+  (I43). **None of those four failures is silently downgraded to `once`.**
+- **`answerPermission` returning `{ accepted: false }` is not an error.** It means another
+  client answered first, and it carries `200`.
+- **`interrupt` takes a `turnId` and that is not a formality.** Two clients are an explicitly
+  supported shape: client 1's interrupt for turn N can be in flight as turn N ends on its own
+  and client 2 starts turn N+1. Unscoped, that interrupt terminates a turn nobody asked to stop,
+  seconds in, reported as an expected interruption and attributable to no one. It returns
+  `{ ok: true }` and emits nothing when there is no live turn or when `turnId` does not name it:
+  **an interrupt is a statement about a desired end state, not a command that can arrive too
+  late.**
+- **Interrupt does not undo anything.** Files the agent already wrote stay written; the
+  checkpoint taken before the turn is what returns the workspace, and that is a separate operator
+  action.
+- **`subscribe` replays from the ring, else from the spill, else delivers one
+  `error / replay_gap`, then joins the live stream** — for live and ended sessions alike (D40).
+- **`tickChecklistItem` is idempotent**: a second tick for an item already complete emits no
+  second envelope and still succeeds (I36).
+- **`readAudit` and `getSnapshotForReview` take no owner and apply no ownership check**, unlike
+  every other method here, because D70 opens both reads to every authenticated operator
+  regardless of session ownership. They sit on this interface only because it already bridges
+  edges to `store`, not because either read is about a session the caller owns (D127).
+- **The `records` dependency is one-directional and exists for the claim during `create` alone.**
+  Nothing else in the manager may call it, and `records` may never call back.
 
-  message(sessionId: SessionId, owner: OperatorId, text: string, attachments: readonly AttachmentUpload[]): Promise<Result<{ turnId: TurnId }, SessionError>>;
-  answerPermission(sessionId: SessionId, owner: OperatorId, answer: PermissionAnswer): Promise<Result<{ accepted: boolean }, SessionError>>;
-  interrupt(sessionId: SessionId, owner: OperatorId, turnId: TurnId): Promise<Result<void, SessionError>>;
-  end(sessionId: SessionId, owner: OperatorId): Promise<Result<void, SessionError>>;
-  remove(sessionId: SessionId, owner: OperatorId): Promise<Result<void, SessionError>>;
+**Standing rules.** `parseStandingRule` and `match` are pure and total: no I/O, no state, no tool
+knowledge, no vendor knowledge.
 
-  listCheckpoints(sessionId: SessionId, owner: OperatorId): Promise<Result<readonly Checkpoint[], SessionError>>;
-  restore(sessionId: SessionId, owner: OperatorId, sha: GitSha): Promise<Result<void, SessionError>>;
-  openToolOutput(sessionId: SessionId, owner: OperatorId, turnId: TurnId, callId: CallId): Promise<Result<NodeJS.ReadableStream, SessionError>>;
-  // (D160) Same ownership check as `openToolOutput`; the edge maps a missing or unreadable
-  // blob to `404 no_such_attachment` (S21.6, S21.7).
-  openAttachment(sessionId: SessionId, owner: OperatorId, turnId: TurnId, attachmentId: AttachmentId): Promise<Result<{ readonly stream: NodeJS.ReadableStream; readonly mediaType: string }, SessionError>>;
-
-  // Replays from the ring, else from the spill, else delivers one `error / replay_gap`,
-  // then joins the live stream.
-  subscribe(sessionId: SessionId, owner: OperatorId, after: Seq | 0, sink: SubscriberSink): Promise<Result<Subscription, SessionError>>;
-
-  // Tier two. Both are folds over what this session has already written.
-  payroll(sessionId: SessionId, owner: OperatorId): Promise<Result<PayrollView, SessionError>>;
-  checklist(sessionId: SessionId, owner: OperatorId): Promise<Result<readonly ChecklistItemState[], SessionError>>;
-  tickChecklistItem(sessionId: SessionId, owner: OperatorId, itemId: ChecklistItemId): Promise<Result<void, SessionError>>;
-
-  // Not session-scoped and takes no owner, like `boot`: D70 opens this read to every
-  // authenticated operator. A pure delegation to `Store.readAuditPage` — it exists here,
-  // not on `records`, because `records` is tier two and this route is tier one (`## Unresolved` 5).
-  readAudit(query: AuditQuery): Promise<Result<AuditPage, StoreError>>;
-
-  // Tier two. No owner, shaped like `readAudit` for the same reason: D70 opens a review about
-  // any session to every operator, not only the session's own owner. `null` for a session that
-  // does not exist; `POST /api/reviews` turns that into `404 no_such_session` (D127).
-  getSnapshotForReview(sessionId: SessionId): SessionSnapshot | null;
-}
-
-declare function createSessionManager(deps: {
-  readonly config: Config;
-  readonly store: Store;
-  readonly checkpoints: Checkpoints;
-  readonly records: Records;   // (tier two) for the requisition claim during create, only
-}): SessionManager;
-
-// The grammar, owned by `session-manager` per D35. Both are pure and total: no I/O, no state,
-// no tool knowledge, no vendor knowledge.
-declare function parseStandingRule(text: string, caps: Caps): StandingRuleExpression | null;
-declare function match(rule: StandingRuleExpression, request: PermissionRequest): boolean;
-```
-
-`tickChecklistItem` is idempotent: a second tick for an item already complete emits no second
-envelope and still succeeds.
-
-**Standing rules.** `parseStandingRule` is the only way to mint a `StandingRuleExpression`; it
-returns `null` for anything failing the constraint on that type, which `answerPermission` maps
-to `bad_request` naming `rule`. `match` reads `rule`, `request.tool` and `request.matchTarget`
-and nothing else — never `input` — which is what keeps tool-shape knowledge inside `adapters/*`
-where `## Unresolved` 4 says it belongs (I46). It returns `false` whenever `matchTarget` is
-`null`, so an unprojectable tool is unmatched rather than universally matched.
-
-A rule lives in its session's in-memory state and nowhere else: no field on `SessionRecord`, no
-line in any file, no entry in `meta.json`. **There is therefore no persisted schema and no
-migration story for standing rules — that is the ruling, not an omission.** A session rehydrated
-at boot holds none, and the operator is asked again (I45). This is narrower than S10.5, which
-only requires that a *new* session on the same workspace asks again; the stronger form is chosen
-because a grant that outlives the process holding it cannot be revoked by ending the session,
-which is the only revocation this design offers.
-
-A standing rule is never handed to the child. `updatedPermissions` is not written to stdin under
-any decision (I47) — that is the whole of D35 and the reason this grammar exists at all.
-
-The `records` dependency is one-directional and exists for the claim during `create`. Nothing
-else in the manager may call it, and `records` may never call back.
+- `parseStandingRule` is **the only way to mint a `StandingRuleExpression`**. It returns `null`
+  for anything failing the grammar in *Types § Identifiers and scalars*, which `answerPermission`
+  maps to `bad_request` naming `rule`.
+- **`match` reads `rule`, `request.tool` and `request.matchTarget` and nothing else — never
+  `input`** — which is what keeps tool-shape knowledge inside `adapters/*` (I46). It returns
+  `false` whenever `matchTarget` is `null`, so **an unprojectable tool is unmatched rather than
+  universally matched.**
+- **A rule lives in its session's in-memory state and nowhere else**: no field on
+  `SessionRecord`, no line in any file, no entry in `meta.json`. **There is therefore no
+  persisted schema and no migration story for standing rules — that is the ruling, not an
+  omission** (I45). A session rehydrated at boot holds none and the operator is asked again.
+  This is stronger than "a new session on the same workspace asks again", and deliberately: a
+  grant outliving the process holding it cannot be revoked by ending the session, which is the
+  only revocation this design offers.
+- **A standing rule is never handed to the child.** `updatedPermissions` is not written to
+  stdin under any decision (I47) — that is the whole of D35 and the reason this grammar exists
+  at all. Handing the grant to the CLI persists it outside this server's storage, where every
+  later match runs with no `can_use_tool` on the wire: no event, no audit record, in this
+  session or in a later one on the same workspace owned by someone else.
 
 ### `edge/sse` and `edge/ws`
 
-```ts
-interface EdgeDeps {
-  readonly config: Config;
-  readonly identity: IdentityResolver;
-  readonly manager: SessionManager;
-  readonly records: Records;   // (tier two) the edge composes it with the manager (D77)
-}
+`EdgeDeps` is declared in `src/contract/index.ts`; `createSseEdge` in `src/edge/sse/index.ts`,
+`createWsEdge` in `src/edge/ws/index.ts`. The two modules they compose through are
+`src/edge/error-envelope/index.ts` (the one `ApiErrorCode → HTTP status` mapping) and
+`src/edge/http-common/index.ts` (everything about a request that is not framing: the origin
+check, identity resolution, login, body reading, the `AuditQuery` parse, and the handlers both
+edges share).
 
-declare function createSseEdge(deps: EdgeDeps): import('node:http').RequestListener;
-declare function createWsEdge(deps: EdgeDeps): import('node:http').RequestListener;
-```
+**D10 forbids the two edges importing each other; it does not forbid a third module both
+compose through**, and that distinction is what keeps two transports answering one request
+identically instead of by parallel maintenance.
 
-Both edges apply the origin allow-list before resolving identity. `edge/ws` applies it at the
-handshake, not at first-message auth.
+**Both edges apply the origin allow-list before resolving identity** (I24). `edge/ws` applies it
+at the **handshake**, not at first-message auth: browsers do not apply the same-origin policy to
+WebSocket connections, `Origin` is the only signal the handshake carries, and deferring the check
+means the connection is already open and driven by whoever opened it.
 
-`createWsEdge`'s `RequestListener` serves the whole `## HTTP routes` table exactly as
-`edge/sse`'s does, with one substitution: `GET /api/sessions/:id/events` is not reachable as a
-plain request under this edge — a client that tries it is refused `422 bad_request`, naming
-the field `upgrade` — because that route's real handler runs on the `http.Server`'s
-`'upgrade'` event, which a bare `RequestListener` is never given. `createWsEdge` attaches its
-upgrade handler to the returned function as `.handleUpgrade` — `(req, socket, head) => void`,
-Node's own `'upgrade'` listener signature — and `server.ts` reads it off and wires
-`server.on('upgrade', listener.handleUpgrade)` whenever `config.edge === 'ws'`. This is an
-implementation-only extension of the returned value, not a widened contract signature: the
-function is still exactly a `RequestListener` to every caller that only calls it as one.
+**`createWsEdge` serves the whole `## HTTP routes` table exactly as `createSseEdge` does, with
+one substitution.** `GET /api/sessions/:id/events` is not reachable as a plain request under this
+edge — a client that tries it is refused `422 bad_request` naming the field `upgrade` — because
+that route's real handler runs on the `http.Server`'s `'upgrade'` event, which a bare
+`RequestListener` is never given. `createWsEdge` attaches its upgrade handler to the returned
+function as `.handleUpgrade`, Node's own `'upgrade'` listener signature, and `server.ts` wires
+`server.on('upgrade', listener.handleUpgrade)` whenever `config.edge === 'ws'`. **This is an
+extension of the returned value, not a widened contract**: the function is still exactly a
+`RequestListener` to every caller that only calls it as one.
 
-The WebSocket connection, once the handshake and first-message auth (S11.3) both succeed,
-carries the same `Envelope` stream `edge/sse` writes as SSE `data:` lines — one JSON-encoded
-`Envelope` per text frame, in `seq` order, nothing else multiplexed onto the same socket. The
-first client frame is JSON `{ after?: Seq }`, read exactly as `Last-Event-ID` is on the SSE
-edge (S11.4): omitted or `0` replays from the start, otherwise from `after + 1`, including the
-spill-served case (S3.2) and the gap case (S3.3), where `error / replay_gap` is sent as a
-frame carrying no resumable position, exactly as SSE's gap frame carries no `id:`.
+**The WebSocket stream is the same `Envelope` stream `edge/sse` writes**, one JSON-encoded
+`Envelope` per text frame, in `seq` order, with **nothing else multiplexed onto the same
+socket**. The first client frame is JSON `{ after?: Seq }`, read exactly as `Last-Event-ID` is on
+the SSE edge: omitted or `0` replays from the start, otherwise from `after + 1`, including the
+spill-served case and the gap case, where `error / replay_gap` is sent as a frame carrying no
+resumable position exactly as SSE's gap frame carries no `id:`.
 
-**How the client learns which edge is live (S11.5).** `index.html` carries
+**How the client learns which edge is live.** `index.html` carries
 `<meta name="skynet-edge" content="sse">` or `content="ws"`, set by whichever edge serves the
-document — this is a `<meta>` tag, not a `<script>`, so it costs the strict CSP nothing. The
-client reads it once at load and never probes.
+document — a `<meta>` tag and not a `<script>`, so it costs the strict CSP nothing. The client
+reads it once at load and never probes.
 
 ### `client`
 
-No runtime interface. It consumes `Envelope` and the HTTP routes below. Its rendering rules
-are binding and are in `10-design.md § Security controls`: a strict CSP with no
-`unsafe-inline`, no `innerHTML` for anything this codebase did not write (D74), and the four
-themes as CSS custom properties toggled by a root attribute, with the choice held in browser
-storage and never sent here (D60, D78).
+No runtime interface. It consumes `Envelope` and the HTTP routes below. **Its rendering rules
+are binding** and are in `10-design.md § Security controls`:
+
+- A strict CSP with no `unsafe-inline` and no `unsafe-eval`, served on the document.
+- **No `innerHTML` for anything this codebase did not write** (D74, I26) — agent output, tool
+  results and stored operator text alike. The rule is not "agent-derived", because "is this
+  string agent-derived?" is a question a renderer eventually gets wrong and "did we write this
+  literal?" is one it cannot. Text nodes only; diffs, code, tool output and prose are built into
+  elements the client constructs, never parsed as markup.
+- **The four themes are CSS custom properties in a stylesheet served from `'self'`, toggled by
+  an attribute on the root element** (D78). No style text is generated, injected or interpolated
+  at runtime, which is what keeps the theme feature compatible with a `style-src 'self'` that has
+  no `unsafe-inline`. The choice is held in browser storage and **never reaches this server**
+  (D60).
 
 ## HTTP routes
+
+The routing table is this document's, not the tree's: it is a surface a client is held to and
+no single declaration expresses it.
 
 All request and response bodies are JSON unless stated. **Every route under `/api/` requires
 authentication, with exactly one exception — `POST /api/login`, which cannot, because it is
 what mints the credential.** The static client assets the same listener serves — `/`,
-`/app.js`, `/render.js`, `/app.css`, `/theme.js` — are outside `/api/` and outside this rule: they are the
-console's own code, they carry no operator's data, and a page that refused to load before
-authentication would have nothing left to authenticate with.
+`/app.js`, `/render.js`, `/app.css`, `/theme.js` — are outside `/api/` and outside this rule:
+they are the console's own code, they carry no operator's data, and a page that refused to load
+before authentication would have nothing left to authenticate with.
 
-Every `POST` and `DELETE` under `/api/` requires an origin match, checked before identity is
-resolved — `POST /api/login` included, since the origin check precedes both.
+**Every `POST` and `DELETE` under `/api/` requires an origin match, checked before identity is
+resolved** — `POST /api/login` included (I24). **Read routes are deliberately not covered**: a
+cross-origin `GET` cannot be read back by the attacking page, and checking `GET /events` would
+break the one client shape that is otherwise legitimate, a reverse proxy rewriting `Origin`.
 
 ### Identity
 
@@ -1340,11 +1165,12 @@ resolved — `POST /api/login` included, since the origin check precedes both.
 | `POST` | `/api/login` | `{ secret: string }` | `200 { ok: true }` + `Set-Cookie` | `403 bad_origin`, `401 unauthenticated`, `404 no_such_session`, `422 bad_request` |
 
 **Served only under `auth.mode === 'shared-secret'`**; under either header mode the route does
-not exist and answers `404`, because the credential it would mint is one the deployment has
-said it does not use. The secret is compared in constant time. The cookie is
+not exist and answers `404`, because the credential it would mint is one the deployment has said
+it does not use. The secret is compared in constant time. The cookie is
 `<auth.cookieName>=<secret>; SameSite=Strict; HttpOnly; Path=/; Max-Age=<Config.sessionCookieMaxAgeSeconds>`
-— the attributes are defence in depth and the origin check is the control (D29,
-`10-design.md § Security controls`).
+— **the attributes are defence in depth and the origin check is the control** (D29). `SameSite`
+governs *our* cookie, and the proxy modes are authenticated by a cookie belonging to Authelia or
+oauth2-proxy that we do not set and cannot attribute.
 
 The `404` is `no_such_session` because `ApiErrorCode` carries no route-level not-found; see
 *Error semantics*.
@@ -1367,47 +1193,41 @@ The `404` is `no_such_session` because `ApiErrorCode` carries no route-level not
 | `GET` | `/api/sessions/:id/tool-output/:turnId/:callId` | — | `200 text/plain; charset=utf-8` | `404 no_such_session`, `404 no_such_output` |
 | `GET` | `/api/sessions/:id/attachments/:turnId/:attachmentId` | — | `200`, media type per the allow-list below | `404 no_such_session`, `404 no_such_attachment` |
 
-`GET /api/sessions/:id` is the single-resource read of the same `SessionSummary` the list
-route returns, under the same ownership check, and it exists so that a client holding one
-`sessionId` can re-read that session's authoritative `state` without fetching every session
-it owns. It answers `404 no_such_session` for a session that is not the caller's, exactly as
-every other route under `/api/sessions/:id` does.
+**Every route that reads or mutates a session's data is under `/api/sessions/:id` and applies
+the ownership check** (I23). That is not a style preference: a route keyed on a vendor-minted
+identifier instead — fetching untruncated tool output by `callId` alone — is reachable by any
+authenticated operator who can guess or observe one, and no amount of care elsewhere fixes it.
 
-The permission route resolves identity and the ownership check like every other session
-route; the operator it resolves is the one written to `AuditRecord.operator`.
+`GET /api/sessions/:id` is the single-resource read of the same `SessionSummary` the list route
+returns, and it exists so a client holding one `sessionId` can re-read that session's
+authoritative `state` without fetching every session it owns.
 
-`accepted: false` on the permission route means another client answered first. It is not an
-error and carries `200`.
+The permission route resolves identity and the ownership check like every other session route;
+**the operator it resolves is the one written to `AuditRecord.operator`.**
 
-`POST /interrupt` returns `{ ok: true }` when the session has no live turn, or when `turnId`
-does not name the live turn. An interrupt is a statement about a desired end state, not a
-command that can arrive too late.
+`POST /interrupt` returns `{ ok: true }` when the session has no live turn, or when `turnId` does
+not name the live turn.
 
-The tool-output route serves `X-Content-Type-Options: nosniff` and
-`Content-Disposition: attachment` alongside `text/plain`.
+**The tool-output route serves `Content-Type: text/plain; charset=utf-8` with
+`X-Content-Type-Options: nosniff` and `Content-Disposition: attachment`**, so a tool result that
+happens to be HTML cannot render as a document in the console's own origin.
 
-**The attachment route never echoes an upload's declared media type unguarded** (D160). It serves
-`X-Content-Type-Options: nosniff` on every response, and sets `Content-Type` to the stored
-`mediaType` only when that value is in a server-side allow-list of image types — `image/png`,
-`image/jpeg`, `image/gif`, `image/webp` — and to `application/octet-stream` otherwise. An
-operator-uploaded `text/html` served under its own type on the console's origin is stored XSS
-holding the console's credentials, which is D74's population arriving as bytes rather than as
-text. `Content-Disposition` follows the same allow-list check — `inline` for an allow-listed
-image, `attachment` otherwise — because Safari/WebKit honors `Content-Disposition: attachment`
-even on an `<img>` subresource fetch and would show a broken-image icon instead of painting it;
-`nosniff` plus the `Content-Type` allow-list (not `Content-Disposition`) is what stops a
-non-image type from ever being rendered as markup. This is what lets the client render a
-screenshot with `<img src>` under the document's existing `img-src 'self'` while everything else
-downloads.
+**The attachment route never echoes an upload's declared media type unguarded** (D160). It
+serves `nosniff` on every response, and sets `Content-Type` to the stored `mediaType` only when
+that value is in a server-side allow-list of image types — `image/png`, `image/jpeg`,
+`image/gif`, `image/webp` — and to `application/octet-stream` otherwise. An operator-uploaded
+`text/html` served under its own type on the console's origin is stored XSS holding the
+console's credentials, which is D74's population arriving as bytes rather than as text.
+`Content-Disposition` follows the same allow-list check — `inline` for an allow-listed image,
+`attachment` otherwise — because WebKit honours `Content-Disposition: attachment` even on an
+`<img>` subresource fetch and would show a broken-image icon instead of painting it. **`nosniff`
+plus the `Content-Type` allow-list, not `Content-Disposition`, is what stops a non-image type
+from ever being rendered as markup.**
 
-`POST /message` refuses, with `422 bad_request` naming the field and nothing written: an
+**`POST /message` refuses, with `422 bad_request` naming the field and nothing written**: an
 attachment whose decoded size exceeds `Caps.attachmentBytes`; a message carrying more than
 `Caps.attachmentCount` of them; and any attachment at all on a session whose adapter declares
-`acceptsAttachments: false`. None is truncated, shortened or silently dropped (D84, D160).
-
-Read routes are deliberately not under the origin check: a cross-origin `GET` cannot be read
-back by the attacking page, and checking `GET /events` would break a reverse proxy that
-rewrites `Origin`.
+`acceptsAttachments: false`. None is truncated, shortened or silently dropped (D84).
 
 ### Audit — tier one (D73)
 
@@ -1415,20 +1235,15 @@ rewrites `Origin`.
 |---|---|---|---|---|
 | `GET` | `/api/audit` | `AuditQuery` as query parameters | `200 AuditPage` | `401 unauthenticated`, `422 bad_request`, `503 agent_unavailable` |
 
-Readable by every authenticated operator, not scoped to the caller's own sessions (D70): the
-question this log answers crosses sessions, and scoped to one operator it answers only "what
-did I approve". The window is bounded by `Caps.auditPageMax` and resumed by `nextCursor`;
-there is no unbounded read, because this is the one file that grows for the deployment's
-lifetime. The incident view of brief item 11 is this route with `incidentsOnly: true`.
+**Readable by every authenticated operator, not scoped to the caller's own sessions** (D70): the
+question this log answers crosses sessions, and scoped to one operator it answers only "what did
+I approve", which nobody needed a log for. The window is bounded by `Caps.auditPageMax` and
+resumed by `nextCursor`; **there is no unbounded read**, because this is the one file that grows
+for the deployment's lifetime — never truncated, never shortened, and explicitly outliving every
+session it names. The incident view of brief item 11 is this route with `incidentsOnly: true`.
 
-**`Caps.auditPageMax` bounds records *examined*, not only records returned, and the
-consequence is that a page may be short — or empty — with a cursor still to follow.** A
-filter bounded only by its result count is not bounded at all: a query matching nothing walks
-to the start of the file, which is exactly the scan D73 refuses and the one that grows with
-the deployment rather than with the answer. So a read stops at whichever comes first, `limit`
-matches or `Caps.auditPageMax` records inspected, and reports where to resume either way. **A
-short page is therefore not the end of the log and a caller must not read it as one**; only
-`nextCursor === null` is.
+What the bound counts, and why a short page is not the end of the log, is in *Types § Audit
+record*.
 
 ### Requisitions — tier two
 
@@ -1438,9 +1253,17 @@ short page is therefore not the end of the log and a caller must not read it as 
 | `GET` | `/api/requisitions` | — | `200 { requisitions: Requisition[] }`, all of them | `401 unauthenticated` |
 | `POST` | `/api/requisitions/:id/decision` | `{ decision: RequisitionDecision }` | `200 { requisition }` | `403 bad_origin`, `404 no_such_requisition`, `409 already_decided`, `422 bad_request`, `500 record_write_failed` |
 
+**The decision route belongs to `records` alone and never touches the session manager.** A
+requisition at this point has no session, no workspace claim and no turn — nothing the manager
+owns.
+
+**`already_decided` is a refusal, not a last-write-wins.** Two operators reaching a requisition
+in the same tick — one approving, one rejecting — is not exotic on a shared list, and a
+latest-line-wins file would resolve it silently in favour of whichever `await` completed second.
+
 `workspace` is stored as the client sent it and is not resolved here. A requisition naming a
 path outside every root is approvable, and fails `409 outside_workspace_root` at the moment a
-session tries to spend it — with the claim not taken, because the jail runs first (D68).
+session tries to spend it — **with the claim not taken, because the jail runs first** (D68).
 
 Self-approval is permitted and recorded: `decidedBy` may equal `raisedBy` (D69).
 
@@ -1454,13 +1277,15 @@ Self-approval is permitted and recorded: `decidedBy` may equal `raisedBy` (D69).
 | `GET` | `/api/reviews` | `?subject=<SessionId>` | `200 { reviews: Review[] }`, finals only | `401 unauthenticated`, `422 bad_request` |
 | `GET` | `/api/reviews/:id` | — | `200 { review }` | `404 no_such_review` |
 
-`GET /api/reviews` returns finals and no drafts at all, for every caller including a draft's
-own author (`10-design.md § Failure modes — Records boundary`). An author reaches their draft
-by `GET /api/reviews/:id` with the `reviewId` that `POST /api/reviews` returned.
+`GET /api/reviews` returns finals and **no drafts at all**, for every caller including a draft's
+own author. An author reaches their draft by `GET /api/reviews/:id` with the `reviewId` that
+`POST /api/reviews` returned.
 
-`404 no_such_review` covers three cases and distinguishes none of them: no such id, a draft
+**`404 no_such_review` covers three cases and distinguishes none of them**: no such id, a draft
 that is not the caller's, and a review the caller may not touch. `404` rather than `403`,
 matching D50.
+
+`ReviewPatch`'s absent fields are left as they stand on the latest line for that review.
 
 ### Session records — tier two
 
@@ -1471,17 +1296,17 @@ matching D50.
 | `POST` | `/api/sessions/:id/checklist/:itemId` | `{}` | `200 { ok: true }` | `403 bad_origin`, `404 no_such_session`, `409 session_ended`, `404 no_such_item` |
 
 Both checklist routes are under `/api/sessions/:id` and carry the ownership check: only the
-session's owner may read or tick its checklist. Every session has a checklist, and a tick on
+session's owner may read or tick its checklist. **Every session has a checklist**, and a tick on
 an ended session is `409 session_ended` (D122).
 
-A tick is idempotent and is **not** audited: `audit.ndjson` records tool approvals, and
-diluting it with provisioning clicks makes the artifact the threat model leans on harder to
-read.
+**A tick is idempotent and is not audited**: `audit.ndjson` records tool approvals, and diluting
+it with provisioning clicks makes the artifact the threat model leans on harder to read for no
+gain.
 
 ### Streaming
 
-`GET /api/sessions/:id/events` is Server-Sent Events. One envelope per SSE message, with
-`id:` set to `seq`:
+`GET /api/sessions/:id/events` is Server-Sent Events. One envelope per SSE message, with `id:`
+set to `seq`:
 
 ```
 id: 42
@@ -1489,11 +1314,11 @@ event: tool.call
 data: {"seq":42,"sessionId":"...","ts":"...","kind":"tool.call","data":{...}}
 ```
 
-On reconnect the browser's `EventSource` sends `Last-Event-ID`. The server replays from
+On reconnect the browser's `EventSource` sends `Last-Event-ID`. **The server replays from
 `seq + 1` — from the ring buffer where it can, otherwise from the spill, for live and ended
-sessions alike. Only where the spill cannot serve the range does the server send a single
-`error` with `kind: 'replay_gap'`, after which the client refetches. A resume point past the
-session's own `lastSeq` is one such range: no store holds it and waiting for `seq` to climb to
+sessions alike** (D40). Only where the spill cannot serve the range does the server send a single
+`error` with `kind: 'replay_gap'`, after which the client refetches. **A resume point past the
+session's own `lastSeq` is one such range**: no store holds it and waiting for `seq` to climb to
 it would stream nothing forever, so it is reported as a gap rather than served as a complete
 replay of nothing.
 
@@ -1501,43 +1326,52 @@ replay of nothing.
 third attempt** (D155). A refetch is a fresh stream carrying no `Last-Event-ID`, so it asks for
 the transcript from `seq` 1. If *that* gaps too, the spill cannot be read at all, and reopening
 again is a reconnect loop rather than a recovery — so the client stops and says the history is
-unavailable and it is showing live events only. Stated because "the client refetches" alone
-reads as a loop with no exit, and because the state it terminates in is one an operator sees.
+unavailable and it is showing live events only.
 
-**A `replay_gap` envelope restates the watermark its subscriber is complete through; it does
-not consume a `seq`** (D156). It is the one envelope `emit` never produces: no `seq` is
-assigned, nothing is appended to the spill, nothing reaches the ring, and it goes to a single
-subscriber rather than to fan-out. Its `seq` field therefore repeats a value that subscriber
-already holds, which is the one place a reader of the delivered stream sees `seq` not advance —
-I1 governs what `emit` assigns and is not weakened by it. The alternative is what makes this
-worth declaring rather than leaving to a code comment: stamping a gap with a *fresh* `seq` makes
-the gap frame itself the next resume point, past the very history it just failed to serve, which
-converts one reported gap into permanent silent loss. The SSE edge expresses this by writing no
-`id:` line for a frame that does not advance; on the WebSocket edge the body's `seq` is the only
-resume signal a client has, so the rule is the contract's rather than a framing detail.
+**A `replay_gap` envelope restates the watermark its subscriber is complete through; it does not
+consume a `seq`** (D156). It is the one envelope `emit` never produces: no `seq` is assigned,
+nothing is appended to the spill, nothing reaches the ring, and it goes to a single subscriber
+rather than to fan-out. Its `seq` field therefore repeats a value that subscriber already holds,
+which is the one place a reader of the delivered stream sees `seq` not advance — I1 governs what
+`emit` assigns and is not weakened by it. The alternative is what makes this worth declaring:
+**stamping a gap with a fresh `seq` makes the gap frame itself the next resume point, past the
+very history it just failed to serve**, converting one reported gap into permanent silent loss.
+The SSE edge expresses this by writing no `id:` line for such a frame; on the WebSocket edge the
+body's `seq` is the only resume signal a client has, so the rule is the contract's rather than a
+framing detail.
 
-A comment line (`: keepalive`) every `Caps.keepaliveMs` keeps intermediaries from closing an
-idle stream, and is what lets a client tell a silent agent from a dead connection.
+A comment line (`: keepalive`) every `Caps.keepaliveMs` keeps intermediaries from closing an idle
+stream, and **is what lets a client tell a silent agent from a dead connection** — which is what
+makes D21's no-server-side-timer rule cost nothing on the wire.
 
 ## Error semantics
 
-```ts
-interface ApiError {
-  readonly error: {
-    readonly code: ApiErrorCode;
-    readonly message: string;
-    readonly detail?: unknown;
-  };
-}
+`ApiError`, `ApiErrorCode`, and every per-module error union — `ConfigError`, `StartupError`,
+`IdentityError`, `JailError`, `StoreError`, `CheckpointError`, `AdapterError`, `RecordsError`,
+`SessionError` — are declared in `src/contract/index.ts`.
 
-type ApiErrorCode =
-  | 'unauthenticated' | 'bad_origin' | 'no_such_session' | 'no_such_output'
-  | 'no_such_checkpoint' | 'turn_in_flight' | 'session_ended' | 'workspace_busy'
-  | 'outside_workspace_root' | 'bad_request' | 'checkpoint_failed' | 'agent_unavailable'
-  // tier two
-  | 'no_such_requisition' | 'requisition_not_approved' | 'requisition_consumed'
-  | 'already_decided' | 'no_such_review' | 'review_final' | 'no_such_item'
-  | 'record_write_failed' | 'payroll_unavailable';
+**This section never becomes a pointer.** A variant's name is in the tree; when it fires, whether
+it is retryable, and what the caller is expected to do are not, and they are the whole of what
+makes an error type a contract rather than a spelling.
+
+**Scaffold — S22 owes both** (D161). `StartupError` in the tree is
+`storage_unwritable | ConfigError`; this variant and the type it carries are not yet declared:
+
+```ts
+// Another server holds this storage root. The holder is named because a refusal that does not
+// say who is holding it leaves an operator with nothing to act on — which is most of the value
+// when an operator is looking at one, and is why an OS advisory lock was rejected.
+| { readonly code: 'storage_locked'; readonly path: string; readonly holder: ServerLock }
+
+// `<storage>/server.lock`. Read at boot and reclaimed only when its holder fails D23's liveness
+// test, and never when `hostname` is another host. It carries no `exitedAt`: `releaseLock`
+// removes the file, so the file's absence is that limb of the test.
+interface ServerLock {
+  readonly pid: number;
+  readonly hostname: string;
+  readonly startedAt: IsoTimestamp;   // load-bearing, exactly as ProcessRecord.startedAt is
+  readonly image: string;
+}
 ```
 
 | HTTP | `code` | Meaning |
@@ -1546,6 +1380,7 @@ type ApiErrorCode =
 | 403 | `bad_origin` | `Origin` / `Sec-Fetch-Site` did not match the allow-list on a mutating route |
 | 404 | `no_such_session` | Unknown, or not the caller's |
 | 404 | `no_such_output` | The tool-output blob is missing or unreadable |
+| 404 | `no_such_attachment` | The attachment blob is missing or unreadable |
 | 404 | `no_such_checkpoint` | No such `sha` in this session's shadow git |
 | 409 | `turn_in_flight` | A turn is running |
 | 409 | `session_ended` | The session is ended: it accepts no new turn, no checklist tick, and no restore |
@@ -1570,146 +1405,67 @@ prefix.** This union carries no route-level not-found, so:
 - A path **outside `/api/`** that is not one of the five static client assets answers
   `404 no_such_session`. So does `POST /api/login` under a header auth mode, where the route
   genuinely does not exist for that deployment.
-- A path **under `/api/`** that this build does not serve — including an unrecognised
-  sub-route under an existing session id — answers `422 bad_request`, naming the offending
-  path or sub-route in `detail.field`.
+- A path **under `/api/`** that this build does not serve — including an unrecognised sub-route
+  under an existing session id — answers `422 bad_request`, naming the offending path or
+  sub-route in `detail.field`.
 
-The consequence of the first is stated so a client does not read more into it than it holds: a
-`404 no_such_session` distinguishes "no such session", "not your session" and "no such route"
-from each other in none of the three cases. The consequence of the second is that a `422` from
-a session sub-route means *this build serves no such route*, and is deliberately not a `404`
-against the session — a client must not read it as "this session does not exist". Adding a code
-to separate route-level not-found from both is additive and is not done here (D116).
+The consequence of the first is stated so a client does not read more into it than it holds: **a
+`404 no_such_session` distinguishes "no such session", "not your session" and "no such route" in
+none of the three cases.** The consequence of the second is that a `422` from a session
+sub-route means *this build serves no such route*, and is deliberately not a `404` against the
+session — a client must not read it as "this session does not exist". Adding a code to separate
+route-level not-found from both is additive and is not done here (D116).
 
-**`SessionError.storage` reaching an edge is reported as `503 agent_unavailable`.** Every
-storage failure the error table below routes by call site — a spill append ends the session,
-an audit append denies the permission, a blob read is `404 no_such_output`, a record-log
-append is `500 record_write_failed` — and what is left is a storage failure during `create`,
-where no more specific declared refusal exists. `503` is right (it is transient and the
-caller should retry); the code name is not, and it is retained rather than multiplied because
-the alternative is a `storage_unavailable` variant whose only caller is this one path.
+**`SessionError.storage` reaching an edge is reported as `503 agent_unavailable`.** Every storage
+failure the table below routes by call site — a spill append ends the session, an audit append
+denies the permission, a blob read is a `404`, a record-log append is `500 record_write_failed` —
+and what is left is a storage failure during `create`, where no more specific declared refusal
+exists. `503` is right, since it is transient and the caller should retry; the code name is not,
+and it is retained rather than multiplied because the alternative is a `storage_unavailable`
+variant whose only caller is this one path.
 
-`404` rather than `403` for another operator's session is deliberate: session existence is
+**`404` rather than `403` for another operator's session is deliberate**: session existence is
 not something a non-owner should be able to probe. There is no `403 forbidden` for session
 access, and no per-operator vendor authorisation — there is no operator record to hold one.
-What that `404` buys narrowed when tier two arrived: reviews and audit records name
-`SessionId`s, so existence is discoverable through the record logs and the `404` is now access
-control rather than concealment (D70).
+**What that `404` buys narrowed when tier two arrived**: reviews and audit records name
+`SessionId`s, so existence is discoverable through the record logs, and the `404` is now access
+control rather than concealment (D50, D70).
 
 ### Per-module error types
-
-```ts
-type ConfigError =
-  | { readonly code: 'insecure_bind'; readonly bind: string }
-  | { readonly code: 'missing_field'; readonly field: string }
-  | { readonly code: 'invalid_field'; readonly field: string; readonly detail: string };
-
-type StartupError =
-  | { readonly code: 'storage_unwritable'; readonly path: string; readonly detail: string }
-  // (D161) Another server holds this storage root. The holder is named because a refusal that
-  // does not say who is holding it leaves an operator with nothing to act on.
-  | { readonly code: 'storage_locked'; readonly path: string; readonly holder: ServerLock }
-  | ConfigError;
-
-// (D161) `<storage>/server.lock`. Read at boot and reclaimed only when its holder fails the same
-// three-part liveness test D23 built for `pids.ndjson`, and never when `hostname` is another host.
-interface ServerLock {
-  readonly pid: number;
-  readonly hostname: string;
-  readonly startedAt: IsoTimestamp;   // load-bearing, exactly as ProcessRecord.startedAt is
-  readonly image: string;
-}
-
-type IdentityError =
-  | { readonly code: 'no_identity' }
-  | { readonly code: 'untrusted_proxy'; readonly remoteAddress: string }
-  | { readonly code: 'bad_secret' };
-
-type JailError =
-  | { readonly code: 'outside_workspace_root'; readonly candidate: string; readonly roots: readonly string[] }
-  | { readonly code: 'unresolvable'; readonly candidate: string; readonly detail: string };
-
-type StoreError =
-  | { readonly code: 'io'; readonly path: string; readonly detail: string }
-  | { readonly code: 'not_found'; readonly path: string }
-  | { readonly code: 'corrupt'; readonly path: string; readonly detail: string }
-  | { readonly code: 'unsupported_schema_version'; readonly path: string; readonly found: number };
-
-type CheckpointError =
-  | { readonly code: 'git_unavailable'; readonly detail: string }
-  | { readonly code: 'init_failed'; readonly detail: string }
-  | { readonly code: 'locked'; readonly detail: string }          // ckpt.git/index.lock
-  | { readonly code: 'no_such_checkpoint'; readonly sha: GitSha }
-  | { readonly code: 'commit_failed'; readonly detail: string }
-  | { readonly code: 'restore_incomplete'; readonly detail: string };
-
-type AdapterError =
-  | { readonly code: 'agent_unavailable'; readonly image: string; readonly detail: string }
-  | { readonly code: 'unsupported_vendor'; readonly vendor: string }
-  | { readonly code: 'unsupported_sandbox'; readonly sandbox: string }
-  | { readonly code: 'no_child' }
-  | { readonly code: 'schema_mismatch'; readonly detail: string }
-  | { readonly code: 'write_failed'; readonly detail: string };
-
-// tier two
-type RecordsError =
-  | { readonly code: 'no_such_requisition'; readonly requisitionId: RequisitionId }
-  | { readonly code: 'already_decided'; readonly requisitionId: RequisitionId; readonly decidedBy: OperatorId; readonly state: RequisitionState }
-  | { readonly code: 'requisition_not_approved'; readonly requisitionId: RequisitionId; readonly state: RequisitionState }
-  | { readonly code: 'requisition_consumed'; readonly requisitionId: RequisitionId; readonly sessionId: SessionId | null }
-  | { readonly code: 'no_such_review'; readonly reviewId: ReviewId }
-  | { readonly code: 'review_final'; readonly reviewId: ReviewId }
-  | { readonly code: 'bad_request'; readonly field: string; readonly detail: string }
-  | { readonly code: 'storage'; readonly cause: StoreError };
-
-type SessionError =
-  | { readonly code: 'no_such_session'; readonly sessionId: SessionId }
-  | { readonly code: 'session_ended'; readonly sessionId: SessionId }
-  | { readonly code: 'turn_in_flight'; readonly sessionId: SessionId; readonly turnId: TurnId }
-  | { readonly code: 'workspace_busy'; readonly holder: { readonly cwd: ResolvedPath; readonly owner: OperatorId } }
-  | { readonly code: 'no_such_item'; readonly itemId: ChecklistItemId }
-  | { readonly code: 'bad_request'; readonly field: string; readonly detail: string }
-  | { readonly code: 'jail'; readonly cause: JailError }
-  | { readonly code: 'adapter'; readonly cause: AdapterError }
-  | { readonly code: 'checkpoint'; readonly cause: CheckpointError }
-  | { readonly code: 'storage'; readonly cause: StoreError }
-  | { readonly code: 'records'; readonly cause: RecordsError }
-  | { readonly code: 'payroll_unavailable'; readonly cause: StoreError };
-```
 
 | Variant | Raised when | Retryable | Caller does |
 |---|---|---|---|
 | `ConfigError.insecure_bind` | A routable bind that no `trustProxy` allow-list covers, **under `proxy-header` or `open-webui` only** (D154) — those are the modes that trust a header the client could otherwise set. Under `shared-secret` the same bind is legitimate and this is never raised: a credential the caller must present is not a claim about who the peer is. **Not** a missing auth mode either: D93 makes one mandatory in every configuration, so that case is `missing_field` at parse time and never reaches here | No | Refuse to start, naming the fix |
 | `ConfigError.missing_field` / `invalid_field` | Validation of the environment | No | Refuse to start |
 | `StartupError.storage_unwritable` | The storage root cannot be written at boot | No | Refuse to start |
-| `StartupError.storage_locked` | Another server process holds this storage root, and its lock is live under D23's liveness test | No | Refuse to start, naming the holding pid, host and start time |
+| `StartupError.storage_locked` | Another server process holds this storage root, and its lock is live under D23's liveness test — or names another host, where the test cannot run at all | No | Refuse to start with a non-zero exit, naming the holding `pid`, `hostname` and `startedAt`. **Nothing server-wide has been written**, because the claim precedes the reap step |
 | `IdentityError.no_identity` | No header, no cookie, or an empty one | No | `401 unauthenticated` |
 | `IdentityError.untrusted_proxy` | The identity header arrived from an address not in `trustProxy` | No | `401 unauthenticated`; log the address |
 | `IdentityError.bad_secret` | The shared-secret cookie does not match | No | `401 unauthenticated` |
 | `JailError.outside_workspace_root` | The resolved real path is inside no root | No | `409 outside_workspace_root`, naming the roots |
 | `JailError.unresolvable` | The candidate cannot be resolved to a real path | No | `409 outside_workspace_root`. The jail admits only paths *proven* inside a root |
-| `StoreError.io` | Any write or read failure | Sometimes | On a spill append: end the session (`storage_failure`). On an audit append: deny the permission. On a blob read: `404 no_such_output`. On a record-log append: `500 record_write_failed`, registry unchanged |
-| `StoreError.not_found` | A blob or session directory is absent | No | `404 no_such_output` |
-| `StoreError.corrupt` | `meta.json` fails to parse, or a trailing line does | No | Skip that session at boot, or drop that line and serve the rest. Never abort boot |
-| `StoreError.unsupported_schema_version` | `meta.json` carries an unknown `schemaVersion` | No | Skip that session at boot; leave its files untouched |
+| `StoreError.io` | Any write or read failure | Sometimes | On a spill append: end the session (`storage_failure`). On an audit append: deny the permission. On a blob read: `404`. On a record-log append: `500 record_write_failed`, registry unchanged |
+| `StoreError.not_found` | A blob or session directory is absent | No | `404 no_such_output` / `404 no_such_attachment` |
+| `StoreError.corrupt` | `meta.json` fails to parse, or a trailing line does | No | Skip that session at boot, or drop that line and serve the rest. **Never abort boot** |
+| `StoreError.unsupported_schema_version` | `meta.json` carries an unknown `schemaVersion` | No | Skip that session at boot; leave its files untouched. Never a migration attempt, never a partial read |
 | `CheckpointError.git_unavailable` / `init_failed` | `ckpt.git` cannot be created | No | `session.notice / warn` (`checkpoints_unavailable`); the session proceeds without checkpoints |
 | `CheckpointError.locked` | `ckpt.git/index.lock` exists | Yes, after the lock clears | Pre-turn: `session.notice / warn` (`checkpoint_skipped`); the turn proceeds with no restore point |
 | `CheckpointError.commit_failed` | A commit fails for any other reason | Sometimes | As above |
 | `CheckpointError.no_such_checkpoint` | Restore names an unknown `sha` | No | `404 no_such_checkpoint`; the workspace is untouched |
 | `CheckpointError.restore_incomplete` | `read-tree` or `clean` fails, **or the verification pass comes back dirty** — `diff --quiet <sha>` for tracked content, `ls-files --others --exclude-standard` for what was left behind. Never an exit code alone: `read-tree` exits 0 with a warning on the embedded-repository case (D112) | No | `error / checkpoint_restore_failed`, non-fatal, plus `500 checkpoint_failed`. **The workspace is partially restored**; the safety checkpoint is the way back |
-| `AdapterError.agent_unavailable` | `spawn` returns `ENOENT` | Yes, once installed | `503 agent_unavailable`; `error / agent_unavailable`, fatal to the turn; clear the turn. The session stays live |
+| `AdapterError.agent_unavailable` | `spawn` returns `ENOENT`, or no supported transport is available | Yes, once installed | `503 agent_unavailable`; `error / agent_unavailable`, fatal to the turn; clear the turn. The session stays live |
 | `AdapterError.unsupported_vendor` | An unknown vendor string | No | `422 bad_request` |
 | `AdapterError.unsupported_sandbox` | A sandbox the vendor does not offer | No | `422 bad_request` |
 | `AdapterError.no_child` | `send` or `respond` with no live child | No | Treat as a turn that has already ended; emit nothing new |
-| `AdapterError.schema_mismatch` | The stream does not match the expected shape | No | `error / adapter_schema_mismatch`, **fatal**. Fail loudly; never degrade quietly |
+| `AdapterError.schema_mismatch` | The stream does not match the expected shape for the transport actually selected | No | `error / adapter_schema_mismatch`, **fatal**. Fail loudly; never degrade quietly |
 | `AdapterError.write_failed` | A write to the child's stdin fails | No | Resolve pending permissions `cancelled_process_exit`; end the turn `process_exit` |
 | `RecordsError.no_such_requisition` | Unknown id, on a decision or a claim | No | `404 no_such_requisition`; during `create`, no claim was taken |
 | `RecordsError.already_decided` | A second decision on one requisition | No | `409 already_decided`, naming the decider and the state |
 | `RecordsError.requisition_not_approved` | A claim against `open` or `rejected` | Yes, once approved | `409 requisition_not_approved`; nothing is claimed |
 | `RecordsError.requisition_consumed` | A claim against one already spent | No | `409 requisition_consumed`; raise another (D80, D81) |
-| `RecordsError.no_such_review` | Unknown id, or a draft that is not the caller's | No | `404 no_such_review`. Never distinguishes the two |
+| `RecordsError.no_such_review` | Unknown id, or a draft that is not the caller's | No | `404 no_such_review`. **Never distinguishes the two** |
 | `RecordsError.review_final` | An append or a second finalise on a final review, **or on one whose own append is still in flight** — D120's exclusivity lock, refusing the second writer before either write lands, exactly as `already_decided` does for a requisition | No | `409 review_final`. Terminal in the first case and retryable in the second; a caller that cannot tell them apart retries and either succeeds or is refused again |
-| `RecordsError.bad_request` | A text field over its cap, or a malformed field | No | `422 bad_request`, naming the field |
+| `RecordsError.bad_request` | A text field over its cap, a malformed field, or a `subject` disagreeing with the supplied snapshot | No | `422 bad_request`, naming the field |
 | `RecordsError.storage` | The record-log append failed | Sometimes | `500 record_write_failed`. **The registry is not mutated**; the edit is still in the operator's form |
 | `SessionError.no_such_session` | Unknown id, or the caller is not the owner | No | `404 no_such_session` |
 | `SessionError.session_ended` | A message, a checklist tick, or a **restore** against a session in state `ended`. Restore is refused because an ended session keeps its `cwd` while the busy check excludes only *live* sessions (D30), so a new session may already hold that workspace — restoring through the ended one would run git against a work-tree it no longer owns. `POST /:id/end` is the exception and is deliberately inert on a repeat call | No | `409 session_ended` |
@@ -1717,6 +1473,7 @@ type SessionError =
 | `SessionError.workspace_busy` | The resolved path overlaps a live session's `cwd` | Yes, once that session ends | `409 workspace_busy`, naming the holding path and operator |
 | `SessionError.no_such_item` | A tick for an `itemId` absent from the configured template | No | `404 no_such_item` |
 | `SessionError.bad_request` | A malformed or missing field. On `answerPermission` this is four distinct cases, each naming the offending field: `scope: 'always'` with no `rule` (`rule`); a `rule` `parseStandingRule` refuses (`rule`); `scope: 'always'` with `decision: 'deny'` (`decision`); `scope: 'always'` against a request whose `matchTarget` is `null` (`scope`) | No | `422 bad_request`, naming the field |
+| `SessionError.payroll_unavailable` | The fold could not read the spill | Sometimes | `500 payroll_unavailable`. The session is unaffected — it is a read of a file the session is still writing |
 | `SessionError.jail` / `adapter` / `checkpoint` / `storage` / `records` | A dependency's error, wrapped | Per the cause | Map the cause, per the rows above |
 
 Three error paths are decisions rather than mappings, and are stated so they are not
@@ -1725,21 +1482,26 @@ re-derived:
 - **An audit append that fails denies the permission.** The manager sends
   `control_response { behavior: 'deny' }` with the storage failure as the reason, emits
   `permission.resolved { decision: 'deny', reason: 'audit_unavailable' }` and a
-  `session.notice / error`. The turn continues. Denial is the only decision safe to make
-  without being able to record it.
+  `session.notice / error`. The turn continues, the agent can respond to the denial, and nothing
+  unaudited executes. **Denial is the only decision safe to make without being able to record
+  it** — the alternatives are running a tool with no record, or wedging a turn whose child is
+  blocked forever.
 - **A spill append that fails ends the session.** The live turn is interrupted with
-  `stopReason: 'storage_failure'` and the session moves to `ended`. Continuing to stream
-  would leave the ring holding events the spill never will.
-- **A record-log append that fails changes nothing.** No registry mutation, no partial state,
-  and the operator retypes nothing they cannot see. This is the reverse of the audit path's
-  ordering, deliberately: a review or a decision is not irreversible and nothing downstream
-  acts on it. The precise ordering of the registry claim against the append is contested in
-  the design and is not settled here — see `## Unresolved` 7.
+  `stopReason: 'storage_failure'` and the session moves to `ended`. Continuing to stream would
+  leave the ring holding events the spill never will — the invariant I2 protects, broken by our
+  own error handling and with none of `replay_gap`'s reporting.
+- **A record-log append that fails changes nothing.** No registry mutation, no partial state, and
+  the operator retypes nothing they cannot see. This is the reverse of the audit path's ordering,
+  deliberately: a review or a decision is not irreversible and nothing downstream acts on it,
+  where a registry claiming a `state` the disk does not have would silently revert at the next
+  boot (D120).
 
 ## Invariants
 
-Written so each could become an assertion. The named module is responsible for maintaining
-it; where two are named, the second is where a violation would first be observable.
+Written so each could become an assertion. The named module is responsible for maintaining it;
+where two are named, the second is where a violation would first be observable. **This section
+is never a pointer**: an invariant is the thing a declaration cannot state, and it is the
+highest-value section in this document.
 
 | # | Invariant | Owner |
 |---|---|---|
@@ -1760,7 +1522,7 @@ it; where two are named, the second is where a violation would first be observab
 | I15 | The `checkpoint.created` for turn N precedes `turn.started` for turn N, where a checkpoint was taken at all | `session-manager` |
 | I16 | `meta.json` is written only by temp-file-then-atomic-rename, and only on create, a `state` transition, or a `cliSessionId` change | `store` |
 | I17 | `lastSeq` used at boot is derived from the spill's tail, never read from `meta.json` | `session-manager`, `store` |
-| I18 | No connection is accepted until reaping, rehydration, open-turn closure, and record-log loading have all completed | `session-manager`, `records` |
+| I18 | No connection is accepted until the storage lock, reaping, rehydration, open-turn closure, and record-log loading have all completed | `session-manager`, `records` |
 | I19 | A `ProcessRecord` is reaped only when it has no `exitedAt`, its `startedAt` is later than the host's last boot, and the live process's image matches. Reaping kills the tree, never the bare pid | `session-manager` |
 | I20 | No module above `adapters/*` branches on a vendor string. `vendor` is carried as data on `SessionRecord`, `SessionSummary`, `SessionStarted`, `AuditRecord`, `SessionSnapshot` and `Requisition`, and is display or evidence in every one of them | all |
 | I21 | `CliSessionId`, `CallId`, and `RequestId` are only ever compared for equality above the adapter layer | `session-manager` |
@@ -1769,7 +1531,7 @@ it; where two are named, the second is where a violation would first be observab
 | I24 | The origin allow-list is applied to every mutating route and to the WebSocket handshake, before identity is resolved | `edge/sse`, `edge/ws` |
 | I25 | A `preauthorised` session emits zero `permission.request` events | `adapters/*` |
 | I26 | No string this codebase did not write is ever assigned to `innerHTML` or parsed as markup — agent output, tool results, and stored operator text alike | `client` |
-| I27 | There is no mutex, lock, or semaphore in the server. `emit`'s synchronous prefix — `seq`, ring push, fan-out — is the serialisation point. The per-session append chain that follows it orders I/O and excludes nothing (D89) | all |
+| I27 | There is no mutex, lock, or semaphore in the server. `emit`'s synchronous prefix — `seq`, ring push, fan-out — is the serialisation point. The per-session append chain that follows it orders I/O and excludes nothing (D89). `server.lock` is not a counter-example: it excludes a second *process*, not a second caller, and nothing in the running server acquires it (D161) | all |
 | I28 | `Usage` on an emitted `usage` event is incremental and summable; no module above `adapters/*` performs arithmetic on a vendor's own token numbers | `adapters/*` |
 | I29 | *(tier two)* A review's `state` moves `draft → final` and never back. A `final` review accepts no further append for that `reviewId` | `records` |
 | I30 | *(tier two)* A review's `snapshot` is copied at authorship and never refreshed; no read of a review resolves its `subject` | `records` |
@@ -1789,6 +1551,7 @@ it; where two are named, the second is where a violation would first be observab
 | I47 | `updatedPermissions` is never written to a child's stdin, under any decision or scope | `adapters/*`, `session-manager` |
 | I48 | `ToolCall.summary` is display-only: above `adapters/*` it is rendered as a text node and nothing else. No module parses it, matches against it, or derives anything persisted or security-relevant from it; its shape is not contractual. Testing it for empty, to decide whether to show the line at all, is display and is permitted | `adapters/*`, `session-manager`, `client` |
 | I49 | An attachment's bytes never enter `events.ndjson`, and an operator's `filename` never reaches a filesystem path — the server-minted `AttachmentId` is the only path segment. The blob is written and fsync'd before the `message` envelope naming it is constructed | `store`, `session-manager` |
+| I50 | A storage root is held by at most one server process. `<storage>/server.lock` is claimed **before boot's reap step**, not merely before `listen`, and a lock naming a `hostname` other than this host is never reclaimed whatever its `pid` says. A boot that refuses on a held lock has written nothing server-wide (D161) | `store`, `session-manager` |
 
 **I40, I41 and I42 were never allocated, and the gap is left open rather than closed.** The
 numbering jumps from I39 to I43 and nothing is missing. Ids here are cited by number in
@@ -1798,7 +1561,7 @@ work` compares drift on ids and never on position.
 
 ## Vendor mapping — Claude
 
-Verified against `Forks-Claude-Code-Chat@ab6e307`.
+Verified against `Forks-Claude-Code-Chat@ab6e307`, and against the installed CLI where noted.
 
 | CLI stdout | Normalised |
 |---|---|
@@ -1818,34 +1581,32 @@ Verified against `Forks-Claude-Code-Chat@ab6e307`.
 
 Launched with `-p --output-format stream-json --input-format stream-json --verbose
 --permission-prompt-tool stdio`, plus `--model <model>` when the session names one and
-`--resume <cliSessionId>` when the manager supplies one. **`-p` is not optional**: without it
-the CLI does not run non-interactively and the stream-json transport never starts. Outbound
-user messages and `control_response` are single JSON lines written to stdin, which stays open
-for the whole turn.
+`--resume <cliSessionId>` when the manager supplies one. **`-p` is not optional**: without it the
+CLI does not run non-interactively and the stream-json transport never starts. Outbound user
+messages and `control_response` are single JSON lines written to stdin, **which stays open for
+the whole turn**.
 
-**The twelve rows are not the CLI's whole vocabulary, and the mapper must not treat them as
-one** (D92). The live stream carries records that are ordinary, harmless, and no part of this
+**The twelve rows are not the CLI's whole vocabulary, and the mapper must not treat them as one**
+(D92). The live stream carries records that are ordinary, harmless, and no part of this
 vocabulary; raising `error / adapter_unknown_record` for each would put a diagnostic line in
 front of the operator on every routine turn. The adapter therefore holds a named ignore list —
 top-level `rate_limit_event` and `control_response`, and the `system` subtypes `hook_started`,
 `hook_response`, `thinking_tokens` and `post_turn_summary` — and returns silently for those.
 Anything outside both the twelve rows and that list still raises `adapter_unknown_record`,
-non-fatally, with the record preserved in `raw`. The list is a vendor fact and lives with the
-vendor's adapter; adding to it is an adapter change, never a change to `ErrorEventKind`.
+non-fatally, with the record preserved in `raw`. **The list is a vendor fact and lives with the
+vendor's adapter; adding to it is an adapter change, never a change to `ErrorEventKind`.**
 
 `updatedPermissions` is never sent (I47). Standing approvals are held by this server and matched
-here, so that every match still produces a `permission.request` / `permission.resolved` pair
-and an audit record.
+here, so that every match still produces a `permission.request` / `permission.resolved` pair and
+an audit record.
 
-**`permission_suggestions` stays forwarded unmapped, now permanently rather than pending a
-decision** (D104, D108). The grammar is decided and is deliberately not the vendor's: `#16`'s
-finding established that this field is not merely un-mapped but **unobservable** — the
-`control_request` that would carry it has never appeared on this transport across two
-independent probes three days apart, and the upstream defect was stale-closed without a fix.
-A mapping cannot be written against a shape nobody has seen, so the adapter passes the array
-through as `readonly unknown[]` and nothing narrows it (I44). The fixture sends an empty array.
-Deleting the field was considered and rejected: forwarding costs nothing and keeps the payload
-from being dropped silently if the channel ever starts firing.
+**`permission_suggestions` stays forwarded unmapped, permanently rather than pending a decision**
+(D104, D108). The field is not merely un-mapped but **unobservable**: the `control_request` that
+would carry it has never appeared on this transport across two independent probes three days
+apart, and the upstream defect was stale-closed without a fix. A mapping cannot be written
+against a shape nobody has seen, so the adapter passes the array through as `readonly unknown[]`
+and nothing narrows it (I44). Deleting the field was considered and rejected: forwarding costs
+nothing and keeps the payload from being dropped silently if the channel ever starts firing.
 
 **`matchTarget` is this adapter's projection table**, and it is the only place tool-shape
 knowledge is permitted to live (I46). It is emitted verbatim — no case folding, no separator
@@ -1858,10 +1619,10 @@ rewriting, no trimming:
 | anything else, including every `mcp__*` | `null` |
 
 **Four rows, because four are what the finding names.** Every other tool in the CLI's vocabulary
-projects `null` — not because a projection would be wrong, but because none has been observed
-and this table is not the place to guess one. Adding a row is an adapter change carrying the
-same obligation as any other row here: an observed request showing the field. It never changes
-`StandingRuleExpression`.
+projects `null` — not because a projection would be wrong, but because none has been observed and
+this table is not the place to guess one. Adding a row is an adapter change carrying the same
+obligation as any other row here: an observed request showing the field. **It never changes
+`StandingRuleExpression`.**
 
 A tool in the table whose named field is absent or is not a string projects `null` rather than a
 coerced string. `null` is not a failure and raises nothing: it means a standing rule cannot be
@@ -1870,20 +1631,27 @@ created against that request, which the route refuses with `422 bad_request` on 
 Policy for every Claude session: `{ mode: 'interactive', sandbox: null, banner: null }`.
 
 **Claude's usage is per-message, not cumulative, and the arithmetic the adapter owes is
-de-duplication rather than subtraction** (open question 14, answered for Claude by S1).
-Each `assistant` record reports that API call's own marginal usage, so nothing is subtracted.
-But one logical message arrives as several `assistant` records that share a `message.id` and
-repeat byte-identical usage, so the adapter emits `usage` **once per `message.id`** and drops
-the repeats. The `result` record's usage is a different and larger basis and has no row in
-this table; mixing it in would misreport burn. Probes and fixtures:
-`design/findings/S1-claude-adapter.md`. The obligation stays the adapter's; no caller
-compensates for it.
+de-duplication rather than subtraction** (open question 14, answered for Claude by S1). Each
+`assistant` record reports that API call's own marginal usage, so nothing is subtracted. But **one
+logical message arrives as several `assistant` records that share a `message.id` and repeat
+byte-identical usage**, so the adapter emits `usage` **once per `message.id`** and drops the
+repeats. The `result` record's usage is a different and larger basis and has no row in this table;
+mixing it in would misreport burn. Probes and fixtures:
+`design/findings/S1-claude-adapter.md`. **The obligation stays the adapter's; no caller
+compensates for it.**
+
+**Claude's runtime approval is the one not observed on a live wire** (D88). Its handshake was read
+out of the prior art and is documented by the vendor; run against the installed CLI at 2.1.226,
+`--permission-prompt-tool stdio` emits no `can_use_tool` of any subtype and the tool simply
+executes. That is an open upstream defect, tracked since 2.1.6, with three probes recorded in
+`design/findings/S1-claude-adapter.md`. It does not reopen D5: **a vendor defect in a documented
+mechanism is behaviour to be restored, not a capability that was never there** (D96).
 
 ## Vendor mapping — Codex
 
-**Observed against `codex-cli 0.146.0`, not hypothesised** (`design/findings/S8-codex-adapter.md`,
-S8.1). What stood here before is **falsified**: neither live interface emits `session_meta`,
-`payload.info` or `token_count`. That schema describes `~/.codex/sessions/**/rollout-*.jsonl` on
+**Observed against `codex-cli 0.146.0`, not hypothesised**
+(`design/findings/S8-codex-adapter.md`, S8.1). Neither live interface emits `session_meta`,
+`payload.info` or `token_count`: that schema describes `~/.codex/sessions/**/rollout-*.jsonl` on
 disk, which S8's *Out of scope* forbids scraping, and it is not what the CLI puts on a wire.
 
 The CLI exposes **two** live interfaces, not one, and their guarantees differ in ways this
@@ -1892,8 +1660,8 @@ Both are mapped. **`app-server` is primary; `exec --json` is the fallback** (D10
 
 **Transport selection is the adapter's and it ends there.** `createAdapter` takes no transport
 parameter and none is added: a transport is a vendor fact, and I20 forbids one above
-`adapters/*`. The adapter selects `app-server` where the installed CLI offers it and `exec --json`
-otherwise, once, at `create`. Where neither is available the result is
+`adapters/*`. The adapter selects `app-server` where the installed CLI offers it and
+`exec --json` otherwise, once, at `create`. Where neither is available the result is
 `AdapterError.agent_unavailable`, exactly as for a missing binary.
 
 ### `codex app-server` — primary
@@ -1936,36 +1704,32 @@ Newline-delimited JSON on stdout. **No deltas of any kind**: text arrives whole,
 
 Both model a command execution as **one** item with two lifecycle states — `started` with null
 result fields, then `completed` on the same id carrying `aggregated_output`, `exit_code` and
-`status`. There is no discrete result record to normalise. The adapter therefore **synthesises**
-the contract's pair from one item's two states. This is what the falsified table's three
-`(unknown)` rows could not describe, and it is why filling them was a contract amendment rather
-than an adapter detail.
+`status`. There is no discrete result record to normalise. **The adapter therefore synthesises
+the contract's pair from one item's two states.**
 
 The ordering guarantee holds by construction: `completed` for an item cannot precede its
 `started`, so *"`tool.result` follows its `tool.call`"* is satisfied with no buffering.
 
 ### Policy, and the approval prompt now known to be reachable
 
-Policy for every Codex session is unchanged:
+Policy for every Codex session:
 `{ mode: 'preauthorised', sandbox: <the mode chosen at launch>, banner: <naming that mode> }`,
 and I25 holds — a Codex session emits **zero** `permission.request` events.
 
 **What changed is that the fallback's premise no longer holds, and this says so rather than
-quietly keeping the conclusion.** `10-design.md § The hard problem` recorded Codex's runtime
-approval as unverified and open question 4 asked for the experiment. S8.1 ran it: under
-`app-server` with `approvalPolicy: 'on-request'`, the server sends a genuine JSON-RPC **request**
-— `item/commandExecution/requestApproval`, carrying `reason`, `command` and an `availableDecisions`
-enum — which a client can answer. `exec --json` sends nothing of the kind and cannot; it is
-non-interactive by construction and represents a sandbox denial only as the model reporting its
-own failure in prose.
+quietly keeping the conclusion.** Under `app-server` with `approvalPolicy: 'on-request'`, the
+server sends a genuine JSON-RPC **request** — `item/commandExecution/requestApproval`, carrying
+`reason`, `command` and an `availableDecisions` enum — which a client can answer. `exec --json`
+sends nothing of the kind and structurally cannot; it is non-interactive by construction and
+represents a sandbox denial only as the model reporting its own failure in prose.
 
-The asymmetry D5 accepted is therefore measurably narrower than when it was accepted. **This
-section does not act on that**: S8's *Out of scope* says a reachable `on-request` prompt is
-reported, not acted on, and D5 is `/design`'s. The row is marked unreachable under the shipped
+The asymmetry D5 accepted is therefore **measurably narrower than when it was accepted**. This
+section does not act on that: S8's *Out of scope* says a reachable `on-request` prompt is
+reported, not acted on, and D5 is `/design`'s. **The row is marked unreachable under the shipped
 policy rather than deleted, because the mapping it would need is one decision away, not one
-experiment away.
+experiment away.**
 
-This adapter therefore has **no `matchTarget` projection table**, and needs none: it constructs
+This adapter therefore has **no `matchTarget` projection table, and needs none**: it constructs
 no `PermissionRequest` at all. Should the `on-request` row ever be mapped, a projection table is
 part of that work — `item/commandExecution/requestApproval` carries `command`, so the row exists
 in evidence already — and it is that adapter's, never `session-manager`'s (I46).
@@ -1975,72 +1739,71 @@ in evidence already — and it is that adapter's, never `session-manager`'s (I46
 **`app-server` needs no arithmetic, and it reads exactly one of the two records that offer it.**
 `turn/completed` and `thread/tokenUsage/updated` both carry explicit `total` and `last`
 sub-objects. The adapter reads `thread/tokenUsage/updated`'s `last`, which is that turn's own
-marginal figure, so D75's summability requirement is met by reading rather than by subtracting —
-the same shape of answer S1 reached for Claude. **`turn/completed`'s `last` is deliberately not
-mapped**, and the table above says so: it is the *same* marginal figure by a second route, so
-emitting `usage` from both would put two envelopes carrying one turn's burn into the fold that
-sums them — double-counting on the one screen headed *payroll*, which is the failure I28 exists
-to prevent. Which of the two is read is arbitrary; reading only one is not.
+marginal figure, so D75's summability requirement is met **by reading rather than by
+subtracting** — the same shape of answer S1 reached for Claude. **`turn/completed`'s `last` is
+deliberately not mapped**: it is the *same* marginal figure by a second route, so emitting
+`usage` from both would put two envelopes carrying one turn's burn into the fold that sums them —
+double-counting on the one screen headed *payroll*, which is the failure I28 exists to prevent.
+**Which of the two is read is arbitrary; reading only one is not.**
 
 **`exec --json`'s basis is undetermined, so its usage is not mapped at all.** Its
-`turn.completed.usage` was observed almost exactly doubling across two sequential resumed turns of
-one thread — `input_tokens` 46276 → 93393, `cached_input_tokens` 33280 → 66560 — which is
-consistent with a running total and equally consistent with each call resending a growing context.
-S8.1 did not settle which, and I28 forbids guessing: a cumulative figure summed as a delta
-double-counts burn on the one screen headed *payroll*. A session on this transport therefore emits
-no `usage` events.
+`turn.completed.usage` was observed almost exactly doubling across two sequential resumed turns
+of one thread — `input_tokens` 46276 → 93393, `cached_input_tokens` 33280 → 66560 — which is
+consistent with a running total and equally consistent with each call resending a growing
+context. S8.1 did not settle which, and **I28 forbids guessing**: a cumulative figure summed as a
+delta double-counts burn. A session on this transport therefore emits no `usage` events.
 
 **That silence is surfaced, and surfacing it is not optional** (D146). An adapter selecting a
-transport that cannot report usage appends `session.notice / usage_unavailable` at `level: 'warn'`
-**once, at session start, before the first `turn.started`** — not per turn, which would say the
-same thing repeatedly and bury it. The notice is the discriminator between a burn of zero because
-the session was idle and a burn of zero because nothing was ever counted, and without it
-`PayrollView.burn` reports the two identically. This is *fail loudly, never degrade quietly*
-applied to the one screen where a silent zero reads as good news.
+transport that cannot report usage appends `session.notice / usage_unavailable` at
+`level: 'warn'` **once, at session start, before the first `turn.started`** — not per turn, which
+would say the same thing repeatedly and bury it. The notice is the discriminator between a burn
+of zero because the session was idle and a burn of zero because nothing was ever counted, and
+without it `PayrollView.burn` reports the two identically. This is *fail loudly, never degrade
+quietly* applied to the one screen where a silent zero reads as good news.
 
-A notice envelope is the right carrier here, and the `sandbox` member above is not the precedent
+A notice envelope is the right carrier, and the `sandbox` notice member is not the precedent
 against it: `sandbox` needed to be visible to a client joining at an arbitrary point, which an
 envelope cannot promise and a session field can, whereas `PayrollView` is a fold that walks the
-spill from the beginning (*Types § Payroll view*). `session.notice / server_restart` is already
-folded that way (D130), so this consumes an existing path rather than adding one.
+spill from the beginning. `session.notice / server_restart` is already folded that way (D130), so
+this consumes an existing path rather than adding one.
 
 **What the fold does with it is not settled here.** `PayrollView` has no field distinguishing
-unknown from zero, and giving it one is a second public-surface change; `## Unresolved` 12 carries
-it.
+unknown from zero, and giving it one is a second public-surface change; `## Unresolved` 12
+carries it.
 
 ### Item ids, and where the fallback breaks correlation
 
-`CallId` is session-unique **by assumption** (`10-design.md § Data model — Identity spaces`). That
-assumption is now measured for Codex, and it holds on only one of the two transports.
+`CallId` is session-unique **by assumption** (`10-design.md § Data model — Identity spaces`).
+That assumption is now measured for Codex, and it holds on only one of the two transports.
 
 - **`app-server`: UUID-based** (`exec-a2215fa5-…`), distinct across two sequential turns of one
-  thread. That is evidence of the scheme, not proof it never collides — two turns were probed, and
-  only for `commandExecution` items. It is treated exactly as Claude's is: assumed, and stated as
-  an assumption.
+  thread. That is evidence of the scheme, not proof it never collides — two turns were probed,
+  and only for `commandExecution` items. It is treated exactly as Claude's is: assumed, and
+  stated as an assumption.
 - **`exec --json`: a per-turn counter** — `item_0`, `item_1`, `item_2` — that **restarts on every
   turn of the same thread**, reproduced across two independent `codex exec resume --last` runs.
   This is not an assumption that might fail; it is a known collision.
 
-S8.7 stops the slice before implementing tool correlation where this is found, and it is found. The
-fallback's `tool.call` / `tool.result` correlation is therefore **not specified here** and no alias
-is invented; `## Unresolved` 13 carries it. What must not happen is the obvious patch: composing a
-session-unique `CallId` from `(turnId, itemId)` inside the adapter is cheap and invisible above the
-boundary, and may well be the answer — but S8.7 reserves it, and a contract that quietly took it
-would be deciding open question 7's correlation half by writing a table.
+S8.7 stops the slice before implementing tool correlation where this is found, and it is found.
+**The fallback's `tool.call` / `tool.result` correlation is therefore not specified here and no
+alias is invented**; `## Unresolved` 13 carries it. What must not happen is the obvious patch:
+composing a session-unique `CallId` from `(turnId, itemId)` inside the adapter is cheap and
+invisible above the boundary, and may well be the answer — but S8.7 reserves it, and a contract
+that quietly took it would be deciding open question 7's correlation half by writing a table.
 
 Storage is unaffected either way: D22 already puts `turnId` in the blob path, so a turn-scoped
-`callId` cannot overwrite an earlier turn's output (I22). Correlation is the half no path scheme
-closes.
+`callId` cannot overwrite an earlier turn's output (I22). **Correlation is the half no path
+scheme closes.**
 
 ### Schema mismatch
 
-Unchanged, with two surfaces to check rather than one. A stream not matching the table for the
-transport **actually selected** returns `AdapterError.schema_mismatch` and emits
+Two surfaces to check rather than one. A stream not matching the table for the transport
+**actually selected** returns `AdapterError.schema_mismatch` and emits
 `error / adapter_schema_mismatch` with `fatal: true`; the session refuses to start. **The adapter
 must fail loudly, not degrade quietly** — a Codex adapter that silently renders nothing is worse
 than one that refuses to start, because the operator will believe the agent is thinking.
 
-An `app-server` probe that finds no such subcommand is **not** a mismatch: that is the fallback's
+**An `app-server` probe that finds no such subcommand is not a mismatch**: that is the fallback's
 trigger, and it is the one case where falling back rather than failing is correct.
 
 Records outside a transport's table but harmless may be held on a named ignore list, exactly as
@@ -2048,8 +1811,9 @@ D92 gives Claude one. Adding to it is an adapter change, never a change to `Erro
 
 ## Unresolved
 
-Signatures the design does not determine. Nothing downstream may invent them. Items 5 to 11
-are new in this pass and each names the issue that carries it.
+Signatures the design does not determine. Nothing downstream may invent them. Each item names
+the issue that carries it. **This list only ever shrinks**: an entry a previous pass resolved
+never reappears.
 
 1. **Resolved by D160.** The field is restored, against types that now exist. Each gap D47 named
    is answered: the **transport** is the Anthropic content-block array the adapter already writes,
