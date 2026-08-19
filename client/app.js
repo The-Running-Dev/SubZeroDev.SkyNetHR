@@ -502,18 +502,25 @@ function handleEnvelope(sessionId, envelope) {
   // in-progress bubble for its `turnId` rather than appending a new node per delta; the
   // `message` that follows is picked up by the block below, which suppresses it once that
   // bubble already exists.
-  if (envelope.kind === 'message.delta' && envelope.sessionId === state.sessionId) {
-    const turnId = envelope.data.turnId;
-    const existing = state.streamedMessages.get(turnId);
-    if (existing) {
-      appendMessageDeltaText(existing, envelope.data.text);
-    } else {
-      const node = renderEvent(document, envelope, handlers);
-      if (node !== null) {
-        state.streamedMessages.set(turnId, node);
-        const transcript = $('transcript');
-        transcript.appendChild(node);
+  // A `message.delta` is never handled by the generic path below, session match or not —
+  // a stale-session delta (the in-flight-during-a-switch race documented above) must be
+  // dropped outright, not fall through to render as an orphan bubble in whatever
+  // transcript is currently on screen.
+  if (envelope.kind === 'message.delta') {
+    if (envelope.sessionId === state.sessionId) {
+      const turnId = envelope.data.turnId;
+      const existing = state.streamedMessages.get(turnId);
+      const transcript = $('transcript');
+      if (existing) {
+        appendMessageDeltaText(existing, envelope.data.text);
         transcript.scrollTop = transcript.scrollHeight;
+      } else {
+        const node = renderEvent(document, envelope, handlers);
+        if (node !== null) {
+          state.streamedMessages.set(turnId, node);
+          transcript.appendChild(node);
+          transcript.scrollTop = transcript.scrollHeight;
+        }
       }
     }
     return;
@@ -523,11 +530,11 @@ function handleEnvelope(sessionId, envelope) {
   // has the text, delta by delta, from the block above.
   if (envelope.kind === 'message' && envelope.data && envelope.data.role === 'assistant' && state.streamedMessages.has(envelope.data.turnId)) {
     state.streamedMessages.delete(envelope.data.turnId);
-    if ('seq' in envelope) state.lastSeq = envelope.seq;
+    state.lastSeq = envelope.seq;
     return;
   }
 
-  if ('seq' in envelope) state.lastSeq = envelope.seq;
+  state.lastSeq = envelope.seq;
   const node = renderEvent(document, envelope, handlers);
   if (node === null) return;
   const transcript = $('transcript');
@@ -550,7 +557,15 @@ function openSseStream(sessionId) {
   // An ended session still streams — its whole transcript replays from the spill (D40) —
   // so "connected" is true and is not the thing the operator needs told. Saying it anyway
   // would overwrite the one message explaining why they cannot type.
-  stream.onopen = () => (sessionIsEnded() ? applySessionAvailability() : status('connected', 'ok'));
+  stream.onopen = () => {
+    // A browser-level auto-reconnect fires this too, not just the first connect — and a
+    // reconnect never replays a delta (I51), so any entry left over from a turn that was
+    // mid-stream when the connection dropped must not survive it either, or the `message`
+    // that follows on replay gets suppressed with nothing left to show for it.
+    state.streamedMessages = new Map();
+    if (sessionIsEnded()) applySessionAvailability();
+    else status('connected', 'ok');
+  };
   stream.onerror = () => status('reconnecting…', 'warn');
 
   for (const kind of [
@@ -593,6 +608,11 @@ function openWsStream(sessionId) {
   let lastError = null;
 
   stream.onopen = () => {
+    // Same reasoning as the SSE path's onopen: this fires on a reconnect too (the
+    // `onclose` handler below calls `openWsStream` directly, not `openStream`), and a
+    // reconnect never replays a delta (I51), so a stale entry from an interrupted turn
+    // must not survive it either.
+    state.streamedMessages = new Map();
     stream.send(JSON.stringify({ after: state.lastSeq }));
     if (sessionIsEnded()) applySessionAvailability();
     else status('connected', 'ok');

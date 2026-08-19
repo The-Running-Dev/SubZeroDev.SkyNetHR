@@ -253,8 +253,8 @@ which *Rules the renderer may rely on* already permits.
 
 A frame is an envelope minus `seq` — the manager assigns `sessionId`, `ts` and the payload's
 `turnId` as it always has, and assigns no `seq`, because a frame has no position in the
-replayable stream. `raw` is present only when `config.includeRaw`. It exists for debugging and
-**must never be rendered**.
+replayable stream. `raw` (`src/contract/index.ts`) exists for debugging and **must never be
+rendered**.
 
 `Config.streamDeltas` (`src/config/index.ts`) is what makes the Claude CLI emit them at all —
 defaulting off, threaded to the adapter as `AdapterOptions.streamDeltas` — and is the only new

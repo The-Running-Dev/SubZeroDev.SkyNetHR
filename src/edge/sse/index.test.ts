@@ -938,6 +938,20 @@ describe('S3.3 — a replay_gap never moves the client\'s resume point', () => {
   });
 });
 
+describe('S25.3 — message.delta over the real SSE wire', () => {
+  it('a frame is dispatched under its own event name, with no id: line', async () => {
+    const h = await makeEdge(undefined, { streamDeltas: true }, 'streamed');
+    const id = await newSession(h, 's25-sse');
+    const events = await get(h, `/api/sessions/${id}/events`);
+    await post(h, `/api/sessions/${id}/message`, { text: 'go' });
+
+    const { frames } = await readFrames(events, (f) => f.some((x) => x.includes('"kind":"message.delta"')), 15000);
+    const deltaFrame = frames.find((f) => f.includes('"kind":"message.delta"'))!;
+    assert.match(deltaFrame, /^event: message\.delta$/m, 'dispatched under its own event name');
+    assert.doesNotMatch(deltaFrame, /^id:/m, 'a frame carries no seq and is written with no id: line');
+  });
+});
+
 /** `delete` is a keyword; a plain named function reads oddly as `deleteSession`. */
 function del(h: Harness, url: string, operator = 'ben') {
   return fetch(`${h.base}${url}`, {

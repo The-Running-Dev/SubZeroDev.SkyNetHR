@@ -75,6 +75,7 @@ function messageNode(doc, data, handlers) {
   // new node. A plain property, not part of the DOM API: harmless on a real element and
   // supported by the test stub's proxy the same way any other assignment is.
   wrapper.__messageTextNode = textNode;
+  wrapper.__messageText = data.text;
   return wrapper;
 }
 
@@ -84,7 +85,12 @@ function messageNode(doc, data, handlers) {
 export function appendMessageDeltaText(node, text) {
   const textNode = node.__messageTextNode;
   if (!textNode) return;
-  textNode.textContent = (textNode.textContent || '') + text;
+  // Grown from a plain field kept on `node`, not from reading `textNode.textContent`
+  // back — a DOM `textContent` getter re-copies everything accumulated so far, which
+  // would otherwise make every delta's cost proportional to the text seen up to that
+  // point instead of to the delta itself.
+  node.__messageText = (node.__messageText ?? '') + text;
+  textNode.textContent = node.__messageText;
 }
 
 function thinkingNode(doc, data) {

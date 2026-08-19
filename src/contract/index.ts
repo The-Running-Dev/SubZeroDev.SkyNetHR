@@ -796,9 +796,15 @@ export interface PermissionAnswer {
 
 export interface SubscriberSink {
   // (D168, I51) A frame carries no `seq`; a sink distinguishes the two by that absence
-  // rather than a wrapper of its own.
+  // rather than a wrapper of its own — `isFrame` below is the one place that check lives.
   deliver(envelope: Envelope | Frame): void;
   close(): void;
+}
+
+// (D168, I51) The one place `'seq' in envelope` is written — every caller that needs to
+// tell a `Frame` apart from an `Envelope` imports this instead of repeating the check.
+export function isFrame(envelope: Envelope | Frame): envelope is Frame {
+  return !('seq' in envelope);
 }
 
 export interface Subscription {

@@ -352,6 +352,33 @@ describe('S11.1 — the WebSocket edge delivers the same envelope sequence as SS
   });
 });
 
+describe('S25.3 — message.delta over the real WS wire', () => {
+  it('a frame arrives as an ordinary text frame carrying no seq', async () => {
+    const h = await makeSharedEdges(undefined, { streamDeltas: true }, 'streamed');
+    const id = await newSession(h, 'w25-ws');
+
+    const { status, client } = await handshake(h.wsBase, `/api/sessions/${id}/events`, {
+      origin: ALLOWED_ORIGIN,
+      'x-forwarded-user': 'ben',
+    });
+    assert.equal(status, 101);
+    client!.send({ after: 0 });
+
+    await post(h.sseBase, `/api/sessions/${id}/message`, { text: 'go' });
+
+    let deltaEnvelope: { kind?: string; seq?: number } | null = null;
+    const deadline = Date.now() + 15000;
+    while (deltaEnvelope === null) {
+      if (Date.now() > deadline) throw new Error('timed out waiting for a message.delta frame');
+      const [envelope] = (await client!.collectEnvelopes(1, 15000)) as [{ kind?: string; seq?: number }];
+      if (envelope.kind === 'message.delta') deltaEnvelope = envelope;
+    }
+    client!.close();
+
+    assert.equal('seq' in deltaEnvelope, false, 'a frame carries no seq on the wire either');
+  });
+});
+
 describe('S11.2 — the origin allow-list is applied at the handshake, before any frame is read', () => {
   it('refuses a disallowed Origin and never completes the upgrade', async () => {
     const h = await makeSharedEdges();

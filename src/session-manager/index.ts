@@ -59,6 +59,7 @@ import type {
   TurnId,
   Usage,
 } from '../contract/index.js';
+import { isFrame } from '../contract/index.js';
 
 const isWindows = platform === 'win32';
 const isDarwin = platform === 'darwin';
@@ -240,6 +241,17 @@ export function createSessionManager(deps: {
     return { destroyed, deleted };
   }
 
+  // `raw` is attached under the one rule both `emit` and `emitFrame` share: only when
+  // `config.includeRaw` is on and the caller actually passed one.
+  function optionalRaw(raw: unknown): { raw: unknown } | Record<string, never> {
+    return config.includeRaw && raw !== undefined ? { raw } : {};
+  }
+
+  // The one-line fan-out `deliverDirect`, `emit` and `emitFrame` all share.
+  function deliverToAll(entry: SessionEntry, envelope: Envelope | Frame): void {
+    for (const sub of entry.subscribers) sub.deliver(envelope);
+  }
+
   // S9.8: delivers a completion envelope live-only, bypassing the ring and the spill —
   // both belong to `emit`, and by the time this is called the spill has already failed
   // to hold the envelope that triggered the failure. Pushing these to the ring anyway
@@ -254,7 +266,7 @@ export function createSessionManager(deps: {
     // otherwise a client that saw this envelope live gets told it is past the end of
     // history it already has.
     entry.record.lastSeq = envelope.seq;
-    for (const sub of entry.subscribers) sub.deliver(envelope);
+    deliverToAll(entry, envelope);
   }
 
   // Returns the envelope it built (so a caller like `tickChecklistItem` can read back the
@@ -272,7 +284,7 @@ export function createSessionManager(deps: {
       ts: nowIso(),
       kind,
       data,
-      ...(config.includeRaw && raw !== undefined ? { raw } : {}),
+      ...optionalRaw(raw),
     } as Envelope<K>;
     entry.record.lastSeq = envelope.seq;
 
@@ -280,7 +292,7 @@ export function createSessionManager(deps: {
     // never after an `await`, which is what keeps two envelopes from ever being
     // delivered out of the order their `seq` was assigned in.
     store.pushRing(entry.record.id, envelope as Envelope);
-    for (const sub of entry.subscribers) sub.deliver(envelope as Envelope);
+    deliverToAll(entry, envelope as Envelope);
 
     // The durable spill write is I/O and does not resolve in call order on its own;
     // chaining it onto the session's write queue is what keeps `events.ndjson` written
@@ -391,9 +403,9 @@ export function createSessionManager(deps: {
       ts: nowIso(),
       kind,
       data,
-      ...(config.includeRaw && raw !== undefined ? { raw } : {}),
+      ...optionalRaw(raw),
     } as Frame<K>;
-    for (const sub of entry.subscribers) sub.deliver(frame);
+    deliverToAll(entry, frame);
   }
 
   // S7.10: proves the storage root is actually writable right now, not merely that it
@@ -1373,7 +1385,7 @@ export function createSessionManager(deps: {
           // it here (or counting it against `highWater`, which exists to bound how much
           // *replayable* history a slow catch-up can pile up) would hold onto something
           // this subscriber's live pass-through below can never legitimately flush.
-          if (!('seq' in envelope)) return;
+          if (isFrame(envelope)) return;
           if (buffered.length >= highWater) {
             dropped = true;
             entry.subscribers.delete(proxy);

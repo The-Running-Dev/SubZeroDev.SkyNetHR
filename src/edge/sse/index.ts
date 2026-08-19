@@ -1,5 +1,6 @@
 import type { IncomingMessage, RequestListener, ServerResponse } from 'node:http';
 import type { AttachmentId, CallId, ChecklistItemId, Envelope, Frame, OperatorId, RequisitionId, ReviewId, Seq, SessionId, Subscription, TurnId } from '../../contract/index.js';
+import { isFrame } from '../../contract/index.js';
 import { sendError } from '../error-envelope/index.js';
 import {
   type EdgeDeps,
@@ -144,7 +145,7 @@ export function createSseEdge(deps: EdgeDeps): RequestListener {
         // (D168, I51) A frame carries no `seq` and is written with no `id:` line — a
         // client's resume point must be unchanged by receiving one, since no store holds
         // it to resume from.
-        if (!('seq' in envelope)) {
+        if (isFrame(envelope)) {
           res.write(`event: ${envelope.kind}\ndata: ${JSON.stringify(envelope)}\n\n`);
           return;
         }
