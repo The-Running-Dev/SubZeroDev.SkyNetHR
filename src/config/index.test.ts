@@ -145,3 +145,64 @@ describe('config — the onboarding checklist (S14)', () => {
     assert.equal(r.ok === false && r.error.code === 'invalid_field' && r.error.field, 'CHECKLIST_JSON');
   });
 });
+
+describe('config — the payroll cost tile\'s rates and currency (D158)', () => {
+  it('defaults tokenRates and currency to null, so the tile is disabled', () => {
+    const r = loadConfig(env());
+    assert.equal(r.ok && r.value.tokenRates, null);
+    assert.equal(r.ok && r.value.currency, null);
+  });
+
+  it('parses a valid TOKEN_RATES_JSON and CURRENCY', () => {
+    const r = loadConfig(
+      env({ TOKEN_RATES_JSON: '{"inputTokens":0.01,"outputTokens":0.02,"cacheRead":0.005,"cacheCreate":0.02}', CURRENCY: 'USD' }),
+    );
+    assert.deepEqual(r.ok && r.value.tokenRates, { inputTokens: 0.01, outputTokens: 0.02, cacheRead: 0.005, cacheCreate: 0.02 });
+    assert.equal(r.ok && r.value.currency, 'USD');
+  });
+
+  it('refuses invalid JSON, naming the field', () => {
+    const r = loadConfig(env({ TOKEN_RATES_JSON: 'not json' }));
+    assert.equal(r.ok === false && r.error.code === 'invalid_field' && r.error.field, 'TOKEN_RATES_JSON');
+  });
+
+  it('refuses a non-object, naming the field', () => {
+    for (const bad of ['42', '"a string"', 'null']) {
+      const r = loadConfig(env({ TOKEN_RATES_JSON: bad }));
+      assert.equal(r.ok === false && r.error.code === 'invalid_field' && r.error.field, 'TOKEN_RATES_JSON', bad);
+    }
+  });
+
+  it('refuses a JSON array, distinctly from an object missing fields', () => {
+    const r = loadConfig(env({ TOKEN_RATES_JSON: '[1,2,3,4]' }));
+    assert.equal(r.ok === false && r.error.code === 'invalid_field' && r.error.field, 'TOKEN_RATES_JSON');
+    assert.equal(r.ok === false && r.error.code === 'invalid_field' && r.error.detail, 'must be an object');
+  });
+
+  it('refuses a rate object missing a required field', () => {
+    const r = loadConfig(env({ TOKEN_RATES_JSON: '{"inputTokens":0.01,"outputTokens":0.02,"cacheRead":0.005}' }));
+    assert.equal(r.ok === false && r.error.code === 'invalid_field' && r.error.field, 'TOKEN_RATES_JSON');
+  });
+
+  it('refuses a negative rate', () => {
+    const r = loadConfig(
+      env({ TOKEN_RATES_JSON: '{"inputTokens":-0.01,"outputTokens":0.02,"cacheRead":0.005,"cacheCreate":0.02}' }),
+    );
+    assert.equal(r.ok === false && r.error.code === 'invalid_field' && r.error.field, 'TOKEN_RATES_JSON');
+  });
+
+  it('treats an empty TOKEN_RATES_JSON as unset, taking null', () => {
+    const r = loadConfig(env({ TOKEN_RATES_JSON: '' }));
+    assert.equal(r.ok && r.value.tokenRates, null);
+  });
+
+  it('trims whitespace around CURRENCY before storing it', () => {
+    const r = loadConfig(env({ CURRENCY: ' USD \n' }));
+    assert.equal(r.ok && r.value.currency, 'USD');
+  });
+
+  it('treats a whitespace-only CURRENCY as unset, taking null', () => {
+    const r = loadConfig(env({ CURRENCY: '   ' }));
+    assert.equal(r.ok && r.value.currency, null);
+  });
+});

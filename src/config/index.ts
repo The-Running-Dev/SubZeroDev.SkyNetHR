@@ -141,7 +141,7 @@ function parseTokenRates(env: Readonly<Record<string, string | undefined>>): Res
   } catch (err) {
     return invalid('TOKEN_RATES_JSON', `not valid JSON: ${(err as Error).message}`);
   }
-  if (typeof parsed !== 'object' || parsed === null) return invalid('TOKEN_RATES_JSON', 'must be an object');
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return invalid('TOKEN_RATES_JSON', 'must be an object');
   const fields = ['inputTokens', 'outputTokens', 'cacheRead', 'cacheCreate'] as const;
   const rates: { -readonly [K in (typeof fields)[number]]?: number } = {};
   for (const field of fields) {
@@ -245,7 +245,7 @@ export function loadConfig(env: Readonly<Record<string, string | undefined>>): R
   const tokenRates = parseTokenRates(env);
   if (!tokenRates.ok) return tokenRates;
   const currencyRaw = env['CURRENCY'];
-  const currency = currencyRaw === undefined || currencyRaw.trim() === '' ? null : currencyRaw;
+  const currency = currencyRaw === undefined || currencyRaw.trim() === '' ? null : currencyRaw.trim();
 
   // D10/D117: standalone deployments stream over SSE; a deployment sitting behind a proxy
   // that buffers or does not pass through `text/event-stream` sets `EDGE=ws` instead.
