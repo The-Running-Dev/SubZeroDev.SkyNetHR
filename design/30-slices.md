@@ -945,7 +945,9 @@ Acceptance:
   - S16.9 The route carries the ownership check: another operator gets `404 no_such_session`
     (I23).
 
-Out of scope: cost in currency, and cost per shipped PR — neither has a source (#27); a
+Out of scope: cost per shipped PR, which has no source inside this server — D158 cuts it and
+substitutes a priced-burn tile, built in **S20** because this slice had already landed when that
+decision was taken (#27); a
 per-deployment or per-operator budget until #29 says otherwise, and a per-operator one needs the
 operator record D3 refuses; pricing lookups (D61 declines to pre-decide them); storing any of
 this — every number here is a fold over what the session already wrote.
@@ -1118,6 +1120,48 @@ CLI in CI: the suite drives `fake-claude-cli.mjs` through the `SKYNET_CLAUDE_EXE
 (D91), so the criteria that say a **real** child — S1.1, S4.2 — stay proven locally, and this
 gate must not be reported as having reproven them. Caching, artifact upload and test reporters.
 
+## S20 — What the session cost, in money
+
+**Tier two**, brief item 8's fourth clause. It is a slice of its own rather than two criteria
+appended to S16 because **S16 had already landed** when D158 was taken: adding acceptance criteria
+to a closed slice rewrites what its issue meant by done. S1.11 and S4.15 are not a precedent for
+doing so here — both named behaviour the design had always specified and no slice had owned, where
+this is new scope from a new decision.
+
+Delivers: An operator sees what a session cost in money, not only in tokens — the same burn the
+payroll screen already shows, priced against rates the deployment sets. Where the price cannot
+honestly be computed, the figure is absent rather than zero, so nobody reads a free session and an
+unmeasurable one as the same thing.
+
+Touches: `session-manager` (the payroll fold), `contract` (`PayrollView`, `TokenRates`, `Config`),
+`config`, `client` (the tile).
+
+Depends on: S16.
+
+Acceptance:
+  - S20.1 `costCurrency` is `burn`'s four components each priced at `config.tokenRates` and
+    summed, with `currency` echoed from configuration and never interpreted — no conversion, no
+    lookup, no network call. Asserted against a fixture with known component counts and known
+    rates, the expected figure stated in the slice report (D158).
+  - S20.2 `costCurrency` and `currency` are both `null`, never `0`, in each of the two cases that
+    produce no priced figure: `config.tokenRates` unset, and a session whose transport reports no
+    usage.
+  - S20.3 The unavailable case is derived from the same signal as
+    `session.notice / usage_unavailable` and **never** from testing `burn` for zero — asserted by
+    a search of the payroll fold finding no zero-comparison against `burn`, and by a session that
+    genuinely burned nothing still reporting a priced `0` rather than `null`
+    (`20-contract.md § Unresolved` 12, D146).
+  - S20.4 The client renders an absent figure as absent — no tile, or an explicit "not available"
+    — and never as a currency-formatted zero. Asserted on both null cases from S20.2.
+  - S20.5 The slice report states plainly that the figure is an estimate against operator-set
+    rates and not a vendor's billed amount, and the client says so where the tile is shown.
+
+Out of scope: per-model rates — `Usage` carries no model identifier and `UsageEvent` is
+`{ turnId, usage }`, so keying rates per model needs a new field on a public event payload and a
+change in every adapter; D158 records the resulting imprecision as known and retained. Currency
+conversion, any pricing lookup against a vendor, and any figure presented as a bill. Making
+`PayrollView.burn` nullable, which is #30 and #91's and which D158 adds weight to without settling.
+
 ---
 
 ## What no slice covers
@@ -1146,7 +1190,9 @@ worse of the two irregularities. See S19 for why the verticality rule's purpose 
 - **What a dragged ticket does**, and whether operator-driven assignment needs a
   definition-of-done item (#26). D52 keeps the gesture; no tier-two item is a backlog, so
   nothing here provides for it.
-- **Cost per shipped PR** (#27) — a prototype payroll tile with no source. S16 excludes it.
+- **Cost per shipped PR** (#27) — **resolved by D158 and no longer uncovered.** The figure had no
+  source inside this server; it is replaced by a priced-burn tile, which S20 builds. Reinstating
+  the original would need a forge integration and a brief amendment.
 
 **Untracked, found while writing this set:**
 
