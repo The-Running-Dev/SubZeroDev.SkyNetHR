@@ -644,8 +644,26 @@ interface PayrollView {
                                              // null when budgetTokens is null (D129)
   readonly idleMs: number;                  // live-with-no-turn wall clock
   readonly droppedIntervals: number;        // idle intervals discarded for spanning a restart
+  readonly costCurrency: number | null;     // burn priced at Config.tokenRates (D158); null when
+                                             // rates are unset, and null on a session whose
+                                             // transport reports no usage — never 0.00
+  readonly currency: string | null;          // Config.currency, echoed; null whenever cost is
 }
 ```
+
+**The cost figure is an estimate against operator-set rates, never a vendor's billed amount**
+(D158). It is `burn`'s four components each multiplied by their rate in `Config.tokenRates` and
+summed. Rates are flat per deployment: `Usage` carries no model identifier and `UsageEvent` is
+`{ turnId, usage }`, so a session that switched models is priced approximately, and that
+imprecision is recorded rather than hidden. `currency` is a label the server stores and echoes and
+never interprets — no conversion, no lookup, no network call.
+
+**`costCurrency` is null on exactly the sessions that cannot report burn, and the test is not
+`burn === 0`.** `## Unresolved` 12 rules that nothing may infer the zero-versus-unknown distinction
+by testing `burn`, and a fabricated `0.00` misreads harder than `0 tokens` does. The signal is the
+same one behind `session.notice / usage_unavailable` (D146). Null also covers an unpriced
+deployment: `Config.tokenRates` null means the operator set no rates, and the tile is absent rather
+than zero.
 
 **`session.notice / server_restart` is the fold's only restart marker, and `turn.ended`'s
 `server_restart` stop reason carries no fold meaning** (D130). The fold walks the spill and
@@ -687,6 +705,15 @@ interface Caps {
   readonly requisitionTextBytes: number;     // (tier two) per field: title, justification
 }
 
+// (tier two, D158) One rate per `Usage` component, in `currency` units per token. Flat per
+// deployment: nothing records which model produced a session's burn, so nothing can key on one.
+interface TokenRates {
+  readonly inputTokens: number;
+  readonly outputTokens: number;
+  readonly cacheRead: number;
+  readonly cacheCreate: number;
+}
+
 interface Config {
   readonly bind: { readonly host: string; readonly port: number };
   readonly auth: AuthConfig;
@@ -704,6 +731,8 @@ interface Config {
   readonly sessionCookieMaxAgeSeconds: number;
   readonly includeRaw: boolean;
   readonly sessionTokenBudget: number | null;              // (tier two) per session; null disables the view's budget
+  readonly tokenRates: TokenRates | null;                  // (tier two) null disables the cost tile (D158)
+  readonly currency: string | null;                        // (tier two) label only; never interpreted (D158)
   readonly checklist: readonly ChecklistItemTemplate[];    // (tier two) empty disables the checklist
   // D10/D117: which transport edge this deployment binds. `server.ts` constructs
   // `createSseEdge` or `createWsEdge` accordingly; exactly one binds (S11.5).

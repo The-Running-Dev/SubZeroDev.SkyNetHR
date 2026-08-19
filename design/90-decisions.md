@@ -3252,6 +3252,47 @@ in `src/` changed to produce them, and none of `design/00-brief.md`, `design/20-
 `design/30-slices.md` needed a word altered — the "Hosting the model" non-goal already drew the
 boundary this artifact stays inside of.
 
+### 2026-08-19 — D158 Payroll's fourth tile is session cost in currency, at flat deployment rates
+Context: the prototype's payroll screen draws four tiles. D53 kept the screen whole by the owner's
+ruling but recorded the asymmetry plainly — three tiles need no credential, while the fourth, cost
+per shipped PR, has "no source and is left open". Nothing in this server knows what a shipped PR is:
+that fact lives in a forge, and reaching it means a forge credential, an outbound-network assumption
+`00-brief.md § Constraints` does not make, and a session-to-repository-to-PR mapping nothing records.
+Brief item 8 names three tiles, so cutting the fourth needed no brief change and keeping it did.
+Chosen: replace the tile rather than cut it. The fourth tile becomes **session cost in currency** —
+`burn` priced against four operator-set rates, one per `Usage` component, with a currency label the
+server never interprets. This is the reading of item 8's own headline sentence, "see what a session
+has cost", that the three sub-clauses under-serve, and it stays what the other three tiles are: a
+fold over data already written plus a `config` value, needing no credential and no network call.
+D61 is not reversed by this and was never in tension with it — D61 explicitly *rejected* narrowing
+the model-hosting non-goal to forbid pricing lookups, on the grounds that doing so would pre-decide
+this very item. This decision is the one D61 held the door open for.
+Rates are **flat per deployment**, not per model. `Usage` carries four token components and no model
+identifier, and `UsageEvent` is `{ turnId, usage }`, so pricing per model would mean a new field on a
+public event payload and a corresponding change in every adapter. The known cost of flat rates is
+stated rather than hidden: a session that switched models is priced approximately, and the figure is
+an estimate against operator-set rates, never a vendor's billed amount.
+Rejected: dropping the tile. It was the recommendation and the owner ruled against it, consistent
+with D53's ruling on the same screen; recorded here as known-and-retained rather than dropped
+silently.
+Rejected: a forge integration to source the original figure. A new credential class, a new network
+assumption, and a brief amendment, for one tile.
+Rejected: per-model rates. Materially more correct and materially larger — it changes a public event
+payload and every adapter, and turns a fold into a plumbing change. The imprecision it would fix is
+recorded above and is tracked, not accepted silently.
+Reversibility: cheap in code — the tile is a fold and a `config` read, and nothing persists it.
+The brief edit adding a fourth clause to item 8 is the expensive half to reverse, because the
+definition of done is what everything downstream is checked against.
+
+**One coupling this creates, and it is not closed here.** `20-contract.md § Unresolved` 12 records
+that `PayrollView.burn`'s all-zero value already carries two meanings — a genuinely free session,
+and `codex exec --json` reporting nothing — and rules that nothing may infer the distinction by
+testing `burn` for zero. A currency figure inherits that and sharpens it: a fabricated `0.00` reads
+as authoritative in a way `0 tokens` does not. `costCurrency` is therefore `null` on exactly the
+sessions that emit `session.notice / usage_unavailable` (D146), derived from the same signal and
+never from testing `burn`. Whether `burn` itself should become nullable stays open on #30 and #91;
+this decision adds weight to it and does not settle it.
+
 ### 2026-08-19 — D159 `ToolCall.summary` is the adapter's, and D109 already governed it
 Context: `20-contract.md § Unresolved` 4 carried the owner of `ToolCall.summary` as open, calling
 the adapter's authorship "the one place that reading is uncomfortable" — vendor code producing a
