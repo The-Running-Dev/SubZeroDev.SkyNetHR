@@ -742,6 +742,7 @@ interface SessionMetaFile {
 | `tool-output/<turnId>/<callId>` | `(sessionId, turnId, callId)` | — | Written once, never appended. `turnId` is in the path because `callId` is vendor-minted and only *assumed* session-unique |
 | `audit.ndjson` | append order | append order, read newest first | Server-wide. fsync'd before the decision it records reaches the child. Never truncated, never deleted with a session. Every read is a bounded window resumed by `AuditCursor` |
 | `pids.ndjson` | append order; `pid` is not unique over time | append order | Server-wide. Two line shapes: a `ProcessRecord` at spawn, a `ProcessTombstone` at exit (D95). The latest line for a `pid` decides liveness; the spawn line carries everything else |
+| `server.lock` | — | — | Server-wide, one `ServerLock` object, written before boot's first step and removed at clean shutdown (D161). Not append-only. Reclaimed on a stale holder by D23's three-part test; never reclaimed when `hostname` is another host |
 | `reviews.ndjson` *(tier two)* | `reviewId` | append order; the latest line for an id wins | Server-wide. Never rewritten. Survives deletion of the session it names (D67). A `final` line is terminal — no later line for that id is written |
 | `requisitions.ndjson` *(tier two)* | `requisitionId` | append order; the latest line for an id wins | Server-wide. Never rewritten. Written before the session it opens exists |
 | `ckpt.git/` | git object ids | git history | Git is the store. `add -A` honours the workspace's own `.gitignore` |
@@ -1507,7 +1508,19 @@ type ConfigError =
 
 type StartupError =
   | { readonly code: 'storage_unwritable'; readonly path: string; readonly detail: string }
+  // (D161) Another server holds this storage root. The holder is named because a refusal that
+  // does not say who is holding it leaves an operator with nothing to act on.
+  | { readonly code: 'storage_locked'; readonly path: string; readonly holder: ServerLock }
   | ConfigError;
+
+// (D161) `<storage>/server.lock`. Read at boot and reclaimed only when its holder fails the same
+// three-part liveness test D23 built for `pids.ndjson`, and never when `hostname` is another host.
+interface ServerLock {
+  readonly pid: number;
+  readonly hostname: string;
+  readonly startedAt: IsoTimestamp;   // load-bearing, exactly as ProcessRecord.startedAt is
+  readonly image: string;
+}
 
 type IdentityError =
   | { readonly code: 'no_identity' }
@@ -1571,6 +1584,7 @@ type SessionError =
 | `ConfigError.insecure_bind` | A routable bind that no `trustProxy` allow-list covers, **under `proxy-header` or `open-webui` only** (D154) — those are the modes that trust a header the client could otherwise set. Under `shared-secret` the same bind is legitimate and this is never raised: a credential the caller must present is not a claim about who the peer is. **Not** a missing auth mode either: D93 makes one mandatory in every configuration, so that case is `missing_field` at parse time and never reaches here | No | Refuse to start, naming the fix |
 | `ConfigError.missing_field` / `invalid_field` | Validation of the environment | No | Refuse to start |
 | `StartupError.storage_unwritable` | The storage root cannot be written at boot | No | Refuse to start |
+| `StartupError.storage_locked` | Another server process holds this storage root, and its lock is live under D23's liveness test | No | Refuse to start, naming the holding pid, host and start time |
 | `IdentityError.no_identity` | No header, no cookie, or an empty one | No | `401 unauthenticated` |
 | `IdentityError.untrusted_proxy` | The identity header arrived from an address not in `trustProxy` | No | `401 unauthenticated`; log the address |
 | `IdentityError.bad_secret` | The shared-secret cookie does not match | No | `401 unauthenticated` |

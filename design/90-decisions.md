@@ -3252,6 +3252,44 @@ in `src/` changed to produce them, and none of `design/00-brief.md`, `design/20-
 `design/30-slices.md` needed a word altered — the "Hosting the model" non-goal already drew the
 boundary this artifact stays inside of.
 
+### 2026-08-19 — D161 One server per storage root, enforced by a lock reusing D23's liveness test
+Context: `10-design.md` open question 3. Nothing prevents two server processes over one storage
+root, and the no-lock argument in *Concurrency* — one append stream per file, one single-threaded
+process, so appends cannot interleave — holds for one process and stops holding for two **without
+saying so**. Three things break, and they are not equally bad: appends to the four server-wide
+files interleave, which corrupts `audit.ndjson`, the artifact the threat model leans on; two
+registries disagree about which workspace is busy (D19), and in tier two both consume one approved
+requisition; and boot **reaps a live sibling's children**, because S7.5's reaper cannot tell
+another server's agents from its own orphans. The design already called a lock "the obvious answer"
+and left it open on the grounds that whether an accidental double-start is worth a startup failure
+mode is a deployment judgement rather than an architectural one.
+Chosen: take the lock. `<storage>/server.lock` is written at boot, before step 1 of *Boot ordering*,
+carrying `pid`, `hostname` and `startedAt`. A boot that finds a live lock refuses with
+`StartupError.storage_locked` naming the holder and exits non-zero.
+**Staleness is answered with machinery that already exists, which is what makes this cheap.** The
+objection to any lock is the crash that leaves one behind, and it sharpened when the container
+artifact landed — a restarted container is exactly where a stale lock bites. D23 already built the
+test: a `ProcessRecord` is live only if it has no `exitedAt`, a `startedAt` later than the host's
+last boot, and a matching process image. A lock is reclaimed automatically on exactly the same
+three-part test against its own `pid`, `startedAt` and this server's image, and reclaiming is
+logged. So the guard is not new code and not a new dependency; it is the reuse guard pointed at a
+second file. A lock whose `hostname` is not this host is **never** reclaimed automatically — the
+liveness test cannot see another machine's process table, and guessing there is how two servers on
+one network share come to run anyway.
+Rejected: **refusing on any lock file at all, cleared by hand.** Simpler, with no liveness test to
+get wrong, and rejected because every unclean shutdown then needs manual intervention before the
+service returns — including an ordinary container restart, which is not an incident and must not
+become one.
+Rejected: **no lock, recorded as accepted risk.** Cheapest, and it leaves the failure silent. A
+corrupted audit log and a reaped sibling's children are not failures an operator diagnoses from
+symptoms.
+Rejected: **an OS advisory lock** (`flock`, `LockFileEx`) instead of a file with contents. It is
+self-releasing, which removes the staleness problem entirely — and it is rejected because the two
+platforms differ here in exactly the way `10-design.md § Platform divergence` catalogues, it adds a
+native dependency or a fragile shim, and it can tell you the root is held without telling you
+*by what*. Naming the holder is most of the value when an operator is looking at a refusal.
+Reversibility: cheap. One file, one boot step, one `StartupError` variant.
+
 ## Open
 
 Staging only. Once an item becomes an issue it leaves this list.
