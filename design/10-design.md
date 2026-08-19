@@ -430,13 +430,21 @@ either without the client being able to tell. S3.3 tests that a gap is reported 
 the spill cannot serve one**, rather than for any too-old `Last-Event-ID`; that slice change
 is made.
 
-**How the spill is read is stated rather than assumed, and its cost is stated with it.** A
-replay streams the file from the start, skipping until `after`, and serves from there. That
-is O(file) per replay request, and the first cut accepts it: a session in the expected range
-— tens of thousands of envelopes — is a single sequential read of a few megabytes. It does
-not stay true for a session two orders of magnitude larger, where opening it becomes a
-multi-second scan that grows with its own history. An offset index is the fix and it is not
-designed here; it is tracked as issue #19 rather than left as a surprise.
+**How the spill is read is stated rather than assumed, and its cost is stated with it** (D163).
+A replay locates `after + 1` by reading **backwards from the tail**, then emits forward from there.
+That is O(envelopes since the disconnect) rather than O(file), and it matches the access pattern
+instead of fighting it: a reconnect's `Last-Event-ID` is recent almost by definition, because the
+client just dropped. A forward scan from byte 0 was the earlier reading and it is what made a
+session two orders of magnitude larger open in multi-second time.
+
+**No offset index, and the reason is worth keeping** (D163). The sidecar that would have fixed the
+forward scan turns out to have no beneficiary left. It buys a seek, and the read that scans most
+often is not a seek: D147's payroll view folds every `usage` event in the spill, which reads
+everything by definition and which an index cannot help. Against that it costs a second file to
+keep consistent, a torn-index-against-torn-spill story on top of the torn tail already accepted
+(#33), and byte offsets as a quasi-public interface — the thing D86 refused when it rejected a byte
+offset as the audit cursor. `audit.ndjson` needed no index either, for the same reason and already:
+S12's read walks backwards under a scan budget, and I39 bounds the read rather than the result.
 
 ### Identity spaces
 
@@ -727,6 +735,20 @@ per-operator budget needs the operator record D3 refuses.
   unmeasured zero from a real one. What stays open is the consumer, not the signal — this
   screen still shows a zero it cannot distinguish from an idle session, because `PayrollView`
   carries no field separating unknown from zero and nothing may infer one by testing `burn`.
+- **Cost in money is burn priced at rates the deployment sets, and it is an estimate rather
+  than a bill** (D158). It is the fourth clause of brief item 8 and it replaced a prototype tile,
+  cost per shipped PR, that had no source inside this server at all — what a shipped PR is lives
+  in a forge, and reaching one means a credential class this design has never held and an
+  outbound-network assumption the brief's constraints do not make. Pricing burn needs neither: it
+  is the same fold plus four `config` rates, one per `Usage` component. **The rates are flat per
+  deployment because nothing records which model produced a session's burn** — `Usage` carries no
+  model identifier — so a session that switched models is priced approximately, and that is
+  written down rather than smoothed over. **The figure is absent, not zero, wherever it cannot be
+  computed honestly**: no rates configured, or a session whose transport reports no usage. The
+  second reuses D146's notice as its signal and never a test of `burn` against zero, for the
+  reason the bullet above gives — and a currency-formatted `0.00` misreads as authoritative in a
+  way `0 tokens` does not, which is why this tile sharpens the open consumer question rather than
+  inheriting it quietly.
 - **Idle** is wall-clock time the session was `live` with no turn: the gaps between
   `turn.ended` and the next `turn.started`, plus creation-to-first-turn and last-turn-to-end.
 - **Idle excludes any interval containing a restart, and boot writes the marker that makes
@@ -783,9 +805,11 @@ encodes is `store`'s business.
   meta.json           schemaVersion + Session, minus turn/buffer/subscribers   (D49)
   events.ndjson       envelopes, append-only
   tool-output/<turnId>/<callId>   untruncated tool output, one file per call  (D22)
+  attachments/<turnId>/<attachmentId>   operator uploads, one file each      (D160)
   ckpt.git/           shadow git dir, work-tree = the session's workspace
 <storage>/audit.ndjson
 <storage>/pids.ndjson                                                (D23)
+<storage>/server.lock        one ServerLock; claimed before boot step 1   (D161)
 <storage>/reviews.ndjson             (tier two) latest line per reviewId wins       (D65)
 <storage>/requisitions.ndjson        (tier two) latest line per requisitionId wins  (D65)
 ```
@@ -1110,6 +1134,8 @@ spend and a second approval to ask for. Both claims release on any later failure
 POST /api/sessions/:id/message {text}
   edge     → origin allow-list check                → 403 bad_origin        (D29)
   edge     → identity, then manager.get(id, owner)  → 404 if not owner
+  edge     : attachments? adapter.acceptsAttachments, count and size caps
+                                     any failing → 422 bad_request, nothing written (D160)
   manager  : state == 'live'?  else → 409 session_ended
   manager  : turn == null?     else → 409 turn_in_flight
   manager  : turn = {turnId, phase:'starting'}         SYNCHRONOUS          (D32)
@@ -1118,7 +1144,9 @@ POST /api/sessions/:id/message {text}
                                      on failure    → session.notice/warn; turn proceeds
                                                      with no restore point   (D42)
   manager  : turn.phase = 'running'                → turn.started
-  manager  → adapter.send(text)
+  manager  → store.writeAttachment(...) per upload    fsync'd BEFORE the envelope   (I49, D160)
+                                                     bytes never enter the spill
+  manager  → adapter.send(text, attachments)
   adapter  → spawn(claude, --stream-json --permission-prompt-tool stdio [--resume id])
                        resume id is the LATEST init reported, or absent      (D34)
                     → notify{spawned: pid, pgid, image}                      (D46)
@@ -1318,6 +1346,7 @@ operator, because that would need a container per session and is explicitly out 
 | **An operator writing a review about another's session** | **No — deliberately** | None. `author` is recorded; a review is an attributable claim, not a privileged one |
 | **Operator-authored text reaching another operator's browser** | Yes | The no-`innerHTML` rule, widened past agent-derived content to cover everything stored (D74) |
 | A confused agent, or prompt injection reaching one | Partly | Permission prompts, sandbox mode, checkpoints to undo |
+| **Operator-supplied content entering the agent's context** | Partly, and it is the row above with a known author | None beyond the row above, **deliberately** (D160). An attachment adds no filesystem reach — the agent already runs with the server user's full access — so this is not a jail question. It puts bytes the operator chose in front of the agent, at the same trust level as the message text beside them. What the design does add is a record: the `message` envelope names every attachment, ordered and replayable |
 | A determined operator | **No** | Out of scope — needs per-session containers |
 | A compromised server | No | Out of scope |
 
@@ -1737,7 +1766,9 @@ Genuinely simultaneous:
   appends through one stream in one single-threaded process cannot interleave a partial line.
   Tier two added two files to this set and no new argument, which is the point of choosing
   append-only files for it (D65). Two server processes over one storage root would break it
-  for all four, and nothing currently prevents that — see *Open questions*.
+  for all four, **and that is now prevented rather than noted** (D161): `<storage>/server.lock`
+  is claimed before boot's first step, so the single-process premise this whole argument rests on
+  is enforced instead of assumed.
 - **The two record registries** *(tier two)*, which are shared mutable state in *memory* and
   therefore governed by the same rule as the turn slot: every state test that decides
   something is claimed in the synchronous block that tests it. There are exactly two such
@@ -1987,6 +2018,10 @@ one place D19 and D20 touch, and it is why they are stated together.
 Five steps, and the order is the point:
 
 ```
+0. lock    claim <storage>/server.lock, or refuse to start                    (D161)
+           a live holder → StartupError.storage_locked, naming it
+           a stale holder → reclaimed, logged; staleness is D23's own test
+           another hostname → never reclaimed; the test cannot see that host
 1. reap    pids.ndjson entries with no exitedAt, subject to the reuse guard   (D23)
            kill the process TREE, not the recorded pid                        (D38)
 2. rehydrate  meta.json → registry, every session marked ended                (D20)
@@ -1998,6 +2033,12 @@ Five steps, and the order is the point:
 4. load    the two record logs → registries, latest line per id     (tier two, D65)
 5. listen  only now are connections accepted
 ```
+
+**The lock precedes reaping, and that order is the whole point of it** (D161). Step 1 kills process
+trees it believes are orphans, and it cannot tell another server's live agents from its own dead
+ones. A second server that got as far as reaping would take down the first server's running work
+before anything else went wrong, so the claim has to come before the first destructive act rather
+than merely before `listen`.
 
 Reaping precedes rehydration so that no rehydrated session can be adopted by an orphan
 still holding its workspace. Listening comes last so that no client can observe a registry
@@ -2398,21 +2439,27 @@ these are cited by number elsewhere in this document and in the slices.
    under a ring-only read path, DoD #5 fails mid-turn, which is the case DoD #5 is about.
    S3.3's assertion changed from "a gap is reported" to "a gap is reported only when the
    spill cannot serve"; that slice change is carried in `30-slices.md`.
-2. **Tool-output blobs have no retention rule** (D22). They are the only storage that grows
-   with tool volume rather than with session count, and a single `find`-heavy turn can
-   outweigh a month of transcripts. Options are a per-session byte budget, an age-based
-   sweep at boot, or deleting them with their session and otherwise never — the last is what
-   the design does today by omission, which is a decision made by not making one.
-3. **Nothing prevents two server processes over one storage root.** The no-lock argument in
-   *Concurrency* holds for one process and silently stops holding for two — interleaved
-   appends to all four server-wide files, two registries disagreeing about which workspace is
-   busy (D19), and boot reaping a live sibling's children. Tier two widens it rather than
-   changing it: two processes would also both consume one approved requisition, since each
-   holds its own registry and the synchronous claim that makes D68 safe is per-process. A lock
-   file at the storage root is the obvious answer and it is small; it is listed here rather
-   than decided because the failure it prevents is an operator running the server twice by
-   accident, and whether that is worth a startup failure mode is a judgement about deployment,
-   not about architecture.
+2. **Resolved by D162: a per-session byte budget, refused at write.** `Caps.sessionToolOutputBytes`
+   bounds a session's total blob bytes; past it the blob is not written, the envelope still carries
+   `truncated: true` and the true size, and the fetch answers `404 no_such_output`. What made the
+   choice cheap is that **blob absence was already a designed state** — S9.5 specified that 404 and
+   an unaffected envelope from the start — so a retention rule reaches an existing path rather than
+   inventing one. The age-based sweep was rejected for never running on a server that stays up, and
+   for bounding no single burst; eviction of already-written blobs was rejected for making a live
+   link go dead invisibly. **The rule does not extend to `attachments/`** (D160): a tool blob is a
+   re-runnable command's output, an attachment is the operator's only copy, and those are bounded
+   at upload instead.
+3. **Resolved by D161: the lock is taken.** The three failures this named — interleaved appends
+   to all four server-wide files, two registries disagreeing about which workspace is busy (D19),
+   and boot reaping a live sibling's children — are prevented by `<storage>/server.lock`, claimed
+   before boot's first step and refusing with `StartupError.storage_locked` naming the holder. The
+   deployment judgement this item deferred was whether an accidental double-start justifies a
+   startup failure mode, and the answer turned on cost rather than principle: **the staleness
+   objection is answered by machinery that already exists.** D23's three-part liveness test —
+   no `exitedAt`, `startedAt` after the host's last boot, matching image — is reused verbatim
+   against the lock's own holder, so a crashed server's lock is reclaimed automatically and a
+   container restart is not an incident. A lock naming another `hostname` is never reclaimed,
+   because that test cannot see another machine's process table.
 
 **Needing an experiment:**
 
@@ -2462,8 +2509,10 @@ these are cited by number elsewhere in this document and in the slices.
    that document, at commit `0535303`. Three needed decisions of their own and carry them:
    D45 for `session.exit` and where `state` lives, D47 for the undefined `Attachment`, and
    D50 for the vendor authorisation the contract asserted and nothing could hold. Two gaps
-   the derivation exposed are open rather than closed and are now issues: attachment
-   handling (#22), and who owns `ToolCall.summary` (#23).
+   the derivation exposed are open rather than closed and were issues: attachment
+   handling (#22 — **closed by D160**, which restores the field against types that now exist),
+   and who owns `ToolCall.summary` (#23 — **closed by D159**: the adapter, on D109's argument,
+   with I48 bounding it to display only).
    **The round this pass opened is closed too.** D65 to D86, D73's audit read route and the
    whole tier-two surface reached `20-contract.md` — the types, the routes, `RecordsError`
    and invariants I29 to I39 — and reached `30-slices.md` as S12 to S18. `90-decisions.md
@@ -2479,16 +2528,21 @@ these are cited by number elsewhere in this document and in the slices.
     called the script's subject "supervising agent sessions", which reads as the product's session
     supervision and means the developer's — two senses of the phrase, and this question inherited
     the wrong one. (#17)
-11. **No append-only file here has an index, and every read scans.** For the spill this is
-    acceptable at the expected volume and not at 100× it, where opening an old session becomes
-    a multi-second scan that grows with the session's own history. **`audit.ndjson` is the
-    worse case and it is new to this item**: the spill's scan is bounded by one session's
-    history, but the audit log is never truncated and outlives every session it names (D25),
-    so its scan grows with the deployment's whole lifetime. D73's bounded window with a cursor
-    is what makes the audit read tolerable without an index, not a substitute for one. The two
-    record logs are not a concern — human-paced, kilobytes. An offset sidecar is the fix for
-    both files that need it; it is listed rather than designed because the bound has not been
-    hit and the file format is what it would constrain. Tracked as issue #19.
+11. **Resolved by D163: no index, and the read direction is the fix.** This item held that both
+    the spill and `audit.ndjson` needed an offset sidecar, with the audit log "the worse case".
+    Half of that is now stale — S12 landed a read that walks backwards from the file's end under a
+    scan budget, and I39 bounds *the read* rather than only the result, so a filtered query returns
+    a short page with a non-null cursor instead of walking to byte 0. The spill takes the same
+    technique: `readEventsAfter` finds `after + 1` backwards from the tail and then emits forward,
+    which is O(envelopes since the disconnect) and matches the access pattern, since a reconnect's
+    `Last-Event-ID` is recent almost by definition. **What settled it was separating seek from
+    aggregation**, which this item did not do: D147's payroll fold reads every `usage` event in the
+    spill and an index would give a fold nothing, so the sidecar's only beneficiary was deep
+    replay — which the backwards read already answers. The sidecar's costs stand unpaid for:
+    a second file to keep consistent, a torn-index-against-torn-spill crash story on top of the
+    accepted torn tail (#33), and byte offsets becoming a quasi-public interface, which D86 refused
+    for the audit cursor in these words. The two record logs were never a concern — human-paced,
+    kilobytes.
 
 **Needing a decision from the owner (tier two):**
 
