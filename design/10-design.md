@@ -430,13 +430,21 @@ either without the client being able to tell. S3.3 tests that a gap is reported 
 the spill cannot serve one**, rather than for any too-old `Last-Event-ID`; that slice change
 is made.
 
-**How the spill is read is stated rather than assumed, and its cost is stated with it.** A
-replay streams the file from the start, skipping until `after`, and serves from there. That
-is O(file) per replay request, and the first cut accepts it: a session in the expected range
-— tens of thousands of envelopes — is a single sequential read of a few megabytes. It does
-not stay true for a session two orders of magnitude larger, where opening it becomes a
-multi-second scan that grows with its own history. An offset index is the fix and it is not
-designed here; it is tracked as issue #19 rather than left as a surprise.
+**How the spill is read is stated rather than assumed, and its cost is stated with it** (D163).
+A replay locates `after + 1` by reading **backwards from the tail**, then emits forward from there.
+That is O(envelopes since the disconnect) rather than O(file), and it matches the access pattern
+instead of fighting it: a reconnect's `Last-Event-ID` is recent almost by definition, because the
+client just dropped. A forward scan from byte 0 was the earlier reading and it is what made a
+session two orders of magnitude larger open in multi-second time.
+
+**No offset index, and the reason is worth keeping** (D163). The sidecar that would have fixed the
+forward scan turns out to have no beneficiary left. It buys a seek, and the read that scans most
+often is not a seek: D147's payroll view folds every `usage` event in the spill, which reads
+everything by definition and which an index cannot help. Against that it costs a second file to
+keep consistent, a torn-index-against-torn-spill story on top of the torn tail already accepted
+(#33), and byte offsets as a quasi-public interface — the thing D86 refused when it rejected a byte
+offset as the audit cursor. `audit.ndjson` needed no index either, for the same reason and already:
+S12's read walks backwards under a scan budget, and I39 bounds the read rather than the result.
 
 ### Identity spaces
 
@@ -2473,16 +2481,21 @@ these are cited by number elsewhere in this document and in the slices.
    open with a stop rather than with code.
 10. `Start-AgentSession.ps1` (D14) is unreconciled against this architecture. Tracked as issue
     #17; not restated here.
-11. **No append-only file here has an index, and every read scans.** For the spill this is
-    acceptable at the expected volume and not at 100× it, where opening an old session becomes
-    a multi-second scan that grows with the session's own history. **`audit.ndjson` is the
-    worse case and it is new to this item**: the spill's scan is bounded by one session's
-    history, but the audit log is never truncated and outlives every session it names (D25),
-    so its scan grows with the deployment's whole lifetime. D73's bounded window with a cursor
-    is what makes the audit read tolerable without an index, not a substitute for one. The two
-    record logs are not a concern — human-paced, kilobytes. An offset sidecar is the fix for
-    both files that need it; it is listed rather than designed because the bound has not been
-    hit and the file format is what it would constrain. Tracked as issue #19.
+11. **Resolved by D163: no index, and the read direction is the fix.** This item held that both
+    the spill and `audit.ndjson` needed an offset sidecar, with the audit log "the worse case".
+    Half of that is now stale — S12 landed a read that walks backwards from the file's end under a
+    scan budget, and I39 bounds *the read* rather than only the result, so a filtered query returns
+    a short page with a non-null cursor instead of walking to byte 0. The spill takes the same
+    technique: `readEventsAfter` finds `after + 1` backwards from the tail and then emits forward,
+    which is O(envelopes since the disconnect) and matches the access pattern, since a reconnect's
+    `Last-Event-ID` is recent almost by definition. **What settled it was separating seek from
+    aggregation**, which this item did not do: D147's payroll fold reads every `usage` event in the
+    spill and an index would give a fold nothing, so the sidecar's only beneficiary was deep
+    replay — which the backwards read already answers. The sidecar's costs stand unpaid for:
+    a second file to keep consistent, a torn-index-against-torn-spill crash story on top of the
+    accepted torn tail (#33), and byte offsets becoming a quasi-public interface, which D86 refused
+    for the audit cursor in these words. The two record logs were never a concern — human-paced,
+    kilobytes.
 
 **Needing a decision from the owner (tier two):**
 
