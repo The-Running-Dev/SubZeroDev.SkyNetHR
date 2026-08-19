@@ -43,6 +43,7 @@ import type {
   SessionError,
   SessionId,
   SessionManager,
+  ServerLock,
   SessionRecord,
   SessionSnapshot,
   SessionSummary,
@@ -478,6 +479,18 @@ export function createSessionManager(deps: {
     await store.tombstonePid(record.pid, nowIso());
   }
 
+  // D161/D23: one implementation of the three-part liveness test, called from two places —
+  // `reapOne` above (against `pids.ndjson`) and `claimLock`'s `LivenessProbe` (against
+  // `server.lock`) — so `store` acquires no dependency on process enumeration. The first
+  // limb (no `exitedAt`) is satisfied structurally for a lock: `releaseLock` removes the
+  // file, so the file's absence is that limb, and only the other two are read here.
+  async function isLiveHolder(holder: ServerLock, hostBootAt: number): Promise<boolean> {
+    const startedAfterBoot = new Date(holder.startedAt).getTime() > hostBootAt;
+    if (!startedAfterBoot) return false;
+    const actualImage = await getProcessImage(holder.pid);
+    return actualImage !== null && imagesMatch(holder.image, actualImage);
+  }
+
   // S16: burn, idle time and the budget subtraction are folds over the session's own
   // spill — never a running counter — so a live read and a post-restart read walk the
   // identical path and cannot disagree (S16.5). `usage` events are the only source of
@@ -679,9 +692,23 @@ export function createSessionManager(deps: {
       const writable = await probeStorageWritable(config.storageRoot);
       if (!writable.ok) return writable;
 
+      const hostBootAt = Date.now() - os.uptime() * 1000;
+
+      // Step 0 (D161): claim `<storage>/server.lock` before the reap step below, not
+      // merely before `listen` — reaping kills process trees it believes are orphans and
+      // cannot tell another server's live agents from its own dead ones, so a second server
+      // must be refused before that first destructive act rather than after it.
+      const self: ServerLock = {
+        pid: process.pid,
+        hostname: os.hostname(),
+        startedAt: nowIso(),
+        image: (await getProcessImage(process.pid)) ?? 'unknown',
+      };
+      const claimed = await store.claimLock(self, (holder) => isLiveHolder(holder, hostBootAt));
+      if (!claimed.ok) return claimed;
+
       // Step 1 (D23, D38): reap orphaned children before anything is rehydrated, so no
       // rehydrated session can be adopted by an orphan still holding its workspace.
-      const hostBootAt = Date.now() - os.uptime() * 1000;
       const openPids = await store.readOpenPids();
       for (const record of openPids) {
         await reapOne(record, hostBootAt);

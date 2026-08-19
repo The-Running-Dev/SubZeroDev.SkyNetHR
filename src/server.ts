@@ -104,7 +104,12 @@ async function main(): Promise<void> {
     if (stopping) process.exit(1);
     stopping = true;
     console.log(`${signal} received — closing the listener.`);
-    server.close(() => process.exit(0));
+    server.close(() => {
+      // D161: removes `server.lock` so the next boot on this storage root takes it
+      // without invoking the staleness path at all. Not fatal if it fails — the next
+      // boot's reclaim is what recovers from a lock nobody removed.
+      void store.value.releaseLock().then(() => process.exit(0));
+    });
   };
   process.on('SIGTERM', () => stop('SIGTERM'));
   process.on('SIGINT', () => stop('SIGINT'));

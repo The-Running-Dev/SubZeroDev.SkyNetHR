@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { existsSync, realpathSync } from 'node:fs';
 import { mkdtemp, mkdir, chmod, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { execFile, spawn } from 'node:child_process';
-import { tmpdir } from 'node:os';
+import { hostname, tmpdir } from 'node:os';
 import path from 'node:path';
 import { after, test } from 'node:test';
 import { promisify } from 'node:util';
@@ -1794,7 +1794,12 @@ test('S7.1 — boot runs reap, then rehydrate, in that order, and does not resol
   const { manager } = await makeManager('full', {}, wrapStore);
 
   const bootPromise = manager.boot();
-  await new Promise((r) => setTimeout(r, 30));
+  const deadline = Date.now() + 5000;
+  while (order.length === 0 && Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 5));
+  }
+  // Once `readOpenPids:start` lands, `wrapStore.readOpenPids` blocks on `gate` — nothing else
+  // pushes to `order` until `release()` below, so this is stable, not a race won by luck.
   assert.deepEqual(order, ['readOpenPids:start'], 'rehydration has not started while reap is still in flight');
 
   release();
@@ -2067,6 +2072,89 @@ test('S7.10 — a storage root that cannot be written at boot refuses to start w
   const booted = await manager.boot();
   assert.equal(booted.ok, false);
   if (!booted.ok) assert.equal(booted.error.code, 'storage_unwritable');
+});
+
+// S22.6: a storage root that cannot be written still fails as `storage_unwritable` and not
+// as a lock error — the writability probe runs ahead of the claim, so a lock error never
+// masks it.
+test('S22.6 — an unwritable storage root still refuses storage_unwritable, never a lock error', async () => {
+  const { manager, storageRoot } = await makeManager('full');
+  await rm(storageRoot, { recursive: true, force: true });
+
+  const booted = await manager.boot();
+  assert.equal(booted.ok, false);
+  if (!booted.ok) assert.equal(booted.error.code, 'storage_unwritable');
+});
+
+test('S22.1/S22.2/S22.7 — a second boot against a held storage root refuses before reaping, names the holder, and leaves the first server\'s children and every server-wide file untouched', async () => {
+  const { manager: manager1, store, config, checkpoints, storageRoot } = await makeManager('full');
+  assert.equal((await manager1.boot()).ok, true, 'the first server claims the lock as part of its own boot');
+
+  // A live child the first server is responsible for, recorded exactly as a real turn
+  // would (S7.5's fixture) — this is what a refused second boot must not touch.
+  const { pid, pgid, grandchildPid } = await spawnTrackedTree();
+  strayPids.push(pid, grandchildPid);
+  const record: ProcessRecord = {
+    pid,
+    pgid,
+    sessionId: 'sess-s22' as SessionId,
+    turnId: 'turn-s22' as TurnId,
+    startedAt: new Date().toISOString() as IsoTimestamp,
+    image: path.basename(process.execPath).replace(/\.exe$/i, ''),
+    exitedAt: null,
+  };
+  assert.equal((await store.appendPid(record)).ok, true);
+
+  // Snapshot every server-wide file this refusal must leave byte-identical (S22.7).
+  const snapshot = async (name: string) => {
+    try {
+      return await readFile(path.join(storageRoot, name), 'utf8');
+    } catch {
+      return null;
+    }
+  };
+  const before = {
+    audit: await snapshot('audit.ndjson'),
+    pids: await snapshot('pids.ndjson'),
+    reviews: await snapshot('reviews.ndjson'),
+    requisitions: await snapshot('requisitions.ndjson'),
+  };
+  const sessionsDirBefore = await readdir(path.join(storageRoot, 'sessions')).catch(() => []);
+  const metaBefore = new Map<string, string>();
+  for (const sessionId of sessionsDirBefore) {
+    metaBefore.set(sessionId, await readFile(path.join(storageRoot, 'sessions', sessionId, 'meta.json'), 'utf8'));
+  }
+
+  // A genuinely live holder on this host: manager1's own boot claimed the lock naming
+  // this test process, which is alive with a matching image for the whole test.
+  const manager2 = createSessionManager({ config, store, checkpoints, records: notImplementedProxy<Records>('records') });
+  const booted2 = await manager2.boot();
+  assert.equal(booted2.ok, false, 'a second boot against a held root refuses');
+  if (!booted2.ok) {
+    assert.equal(booted2.error.code, 'storage_locked');
+    if (booted2.error.code === 'storage_locked') {
+      assert.equal(booted2.error.holder.pid, process.pid, 'names the holder\'s pid');
+      assert.equal(booted2.error.holder.hostname, hostname(), 'names the holder\'s hostname');
+      assert.notEqual(booted2.error.holder.startedAt, undefined, 'names the holder\'s startedAt');
+    }
+  }
+
+  // S22.2: the claim precedes the reap step, so the first server's children are still
+  // running and its pids.ndjson entry is still open, well past any reap would have taken.
+  await new Promise((r) => setTimeout(r, 300));
+  assert.equal(isAlive(pid), true, 'the parent is still running: refusal happened before reap');
+  assert.equal(isAlive(grandchildPid), true, 'the grandchild is still running');
+  const open = await store.readOpenPids();
+  assert.equal(open.some((r) => r.pid === pid), true, 'pids.ndjson entry is untouched by the refused boot');
+
+  // S22.7: every server-wide file is byte-identical, and no session's meta.json changed.
+  assert.equal(await snapshot('audit.ndjson'), before.audit);
+  assert.equal(await snapshot('pids.ndjson'), before.pids);
+  assert.equal(await snapshot('reviews.ndjson'), before.reviews);
+  assert.equal(await snapshot('requisitions.ndjson'), before.requisitions);
+  for (const [sessionId, raw] of metaBefore) {
+    assert.equal(await readFile(path.join(storageRoot, 'sessions', sessionId, 'meta.json'), 'utf8'), raw);
+  }
 });
 
 // D41/D100 — the spill-failure row's first half: the invariants (I8, I16) that hold
@@ -2901,7 +2989,10 @@ test('D130 — boot marks every session live at shutdown with one session.notice
   assert.equal((await notices('sess-d130-ended')).length, 0, 'a session already ended gets no marker on every later restart');
 
   // Idempotent across restarts for the same reason: the first boot wrote `state: 'ended'`,
-  // so a second boot sees an already-ended session and adds nothing.
+  // so a second boot sees an already-ended session and adds nothing. A real second restart
+  // follows a clean shutdown of the process that held S22's lock (D161) — simulated here the
+  // same way `server.ts` does it, rather than manager3 finding manager2's still-live claim.
+  assert.equal((await store.releaseLock()).ok, true);
   const manager3 = createSessionManager({ config, store, checkpoints, records: notImplementedProxy<Records>('records') });
   assert.equal((await manager3.boot()).ok, true);
   const afterSecondBoot: Envelope[] = [];

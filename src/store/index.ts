@@ -13,15 +13,18 @@ import type {
   Config,
   Envelope,
   IsoTimestamp,
+  LivenessProbe,
   LoadedMeta,
   ProcessRecord,
   ProcessTombstone,
   Requisition,
   Review,
   Seq,
+  ServerLock,
   SessionId,
   SessionMetaFile,
   SessionRecord,
+  StartupError,
   Store,
   StoreError,
   TurnId,
@@ -42,6 +45,10 @@ function metaPath(storageRoot: string, sessionId: SessionId): string {
 
 function eventsPath(storageRoot: string, sessionId: SessionId): string {
   return path.join(sessionDir(storageRoot, sessionId), 'events.ndjson');
+}
+
+function lockPath(storageRoot: string): string {
+  return path.join(storageRoot, 'server.lock');
 }
 
 // Tool-output blob paths are built from a `turnId` the manager minted and a `callId`
@@ -652,6 +659,69 @@ export async function createStore(config: Config): Promise<Result<Store, StoreEr
 
     async readAllRequisitions(): Promise<readonly Requisition[]> {
       return foldLatestById<Requisition>(path.join(storageRoot, 'requisitions.ndjson'), 'requisitionId', false);
+    },
+
+    // D161: the decision table this implements is `20-contract.md § store, claimLock's
+    // decision table` — absent → write `self`; another host's holder → always refuse; this
+    // host's live holder → refuse; this host's stale or unparseable holder → reclaim, logged.
+    // The claim precedes `session-manager.boot`'s reap step, so a failed claim must not have
+    // touched any server-wide file — this method only ever reads and (on success) rewrites
+    // `server.lock` itself.
+    async claimLock(self: ServerLock, isLive: LivenessProbe): Promise<Result<void, StartupError>> {
+      const filePath = lockPath(storageRoot);
+      let existingRaw: string | null;
+      try {
+        existingRaw = await readFile(filePath, 'utf8');
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+          existingRaw = null;
+        } else {
+          return { ok: false, error: { code: 'storage_unwritable', path: filePath, detail: (err as Error).message } };
+        }
+      }
+
+      if (existingRaw !== null) {
+        let holder: ServerLock | null = null;
+        try {
+          holder = JSON.parse(existingRaw) as ServerLock;
+        } catch {
+          holder = null;
+        }
+        if (holder !== null) {
+          // I50: the liveness test cannot see another machine's process table, so a lock
+          // naming a different host is never reclaimed, whatever its pid says.
+          if (holder.hostname !== self.hostname) {
+            return { ok: false, error: { code: 'storage_locked', path: filePath, holder } };
+          }
+          if (await isLive(holder)) {
+            return { ok: false, error: { code: 'storage_locked', path: filePath, holder } };
+          }
+          console.warn(
+            `[store] reclaiming stale server.lock: pid ${holder.pid} on ${holder.hostname}, started ${holder.startedAt}, image ${holder.image}`,
+          );
+        } else {
+          // D161: a file nothing can read names no holder — refusing on it would make every
+          // unclean shutdown need manual intervention.
+          console.warn(`[store] server.lock at ${filePath} is unparseable; reclaiming it as a stale holder`);
+        }
+      }
+
+      try {
+        await atomicWrite(filePath, JSON.stringify(self));
+      } catch (err) {
+        return { ok: false, error: { code: 'storage_unwritable', path: filePath, detail: (err as Error).message } };
+      }
+      return { ok: true, value: undefined };
+    },
+
+    async releaseLock(): Promise<Result<void, StoreError>> {
+      const filePath = lockPath(storageRoot);
+      try {
+        await rm(filePath, { force: true });
+      } catch (err) {
+        return ioError(filePath, (err as Error).message);
+      }
+      return { ok: true, value: undefined };
     },
   };
 
