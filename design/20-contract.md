@@ -719,6 +719,9 @@ type AuthConfig =
 interface Caps {
   readonly ringCapacity: number;             // envelopes retained in memory per session
   readonly toolResultBytes: number;          // truncation threshold for tool.result
+  readonly sessionToolOutputBytes: number;   // (D162) total blob bytes one session may store;
+                                             // past it the blob is not written and the fetch
+                                             // route answers 404, per S9.5's existing path
   readonly subscriberQueueHighWater: number; // envelopes queued per subscriber before it is dropped
   readonly keepaliveMs: number;              // SSE comment interval
   readonly auditPageMax: number;             // largest window `GET /api/audit` will serve
@@ -793,7 +796,7 @@ interface SessionMetaFile {
 |---|---|---|---|
 | `meta.json` | `sessionId` from the directory name | — | Written by temp-file-then-atomic-rename, never in place, on exactly three occasions: create, a `state` transition, a `cliSessionId` change. Never per event |
 | `events.ndjson` | `(sessionId, seq)` | `seq` ascending, contiguous from 1 | Append-only, written in `seq` order through the session's own append chain (D89). Not fsync'd per line. Read from the start and skipped to `after`; no offset index exists |
-| `tool-output/<turnId>/<callId>` | `(sessionId, turnId, callId)` | — | Written once, never appended. `turnId` is in the path because `callId` is vendor-minted and only *assumed* session-unique |
+| `tool-output/<turnId>/<callId>` | `(sessionId, turnId, callId)` | — | Written once, never appended. `turnId` is in the path because `callId` is vendor-minted and only *assumed* session-unique. Bounded per session by `Caps.sessionToolOutputBytes`: past the budget the blob is **not written**, and the fetch answers `404 no_such_output` exactly as S9.5 already specifies (D162). Nothing already written is ever evicted |
 | `attachments/<turnId>/<attachmentId>` | `(sessionId, turnId, attachmentId)` | — | Written once, never appended, fsync'd before the envelope naming it exists (I49). `attachmentId` is server-minted, so the operator's `filename` never reaches a path. Removed with the session (D25, D160) |
 | `audit.ndjson` | append order | append order, read newest first | Server-wide. fsync'd before the decision it records reaches the child. Never truncated, never deleted with a session. Every read is a bounded window resumed by `AuditCursor` |
 | `pids.ndjson` | append order; `pid` is not unique over time | append order | Server-wide. Two line shapes: a `ProcessRecord` at spawn, a `ProcessTombstone` at exit (D95). The latest line for a `pid` decides liveness; the spawn line carries everything else |

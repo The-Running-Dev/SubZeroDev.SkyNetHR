@@ -2431,11 +2431,16 @@ these are cited by number elsewhere in this document and in the slices.
    under a ring-only read path, DoD #5 fails mid-turn, which is the case DoD #5 is about.
    S3.3's assertion changed from "a gap is reported" to "a gap is reported only when the
    spill cannot serve"; that slice change is carried in `30-slices.md`.
-2. **Tool-output blobs have no retention rule** (D22). They are the only storage that grows
-   with tool volume rather than with session count, and a single `find`-heavy turn can
-   outweigh a month of transcripts. Options are a per-session byte budget, an age-based
-   sweep at boot, or deleting them with their session and otherwise never — the last is what
-   the design does today by omission, which is a decision made by not making one.
+2. **Resolved by D162: a per-session byte budget, refused at write.** `Caps.sessionToolOutputBytes`
+   bounds a session's total blob bytes; past it the blob is not written, the envelope still carries
+   `truncated: true` and the true size, and the fetch answers `404 no_such_output`. What made the
+   choice cheap is that **blob absence was already a designed state** — S9.5 specified that 404 and
+   an unaffected envelope from the start — so a retention rule reaches an existing path rather than
+   inventing one. The age-based sweep was rejected for never running on a server that stays up, and
+   for bounding no single burst; eviction of already-written blobs was rejected for making a live
+   link go dead invisibly. **The rule does not extend to `attachments/`** (D160): a tool blob is a
+   re-runnable command's output, an attachment is the operator's only copy, and those are bounded
+   at upload instead.
 3. **Resolved by D161: the lock is taken.** The three failures this named — interleaved appends
    to all four server-wide files, two registries disagreeing about which workspace is busy (D19),
    and boot reaping a live sibling's children — are prevented by `<storage>/server.lock`, claimed
