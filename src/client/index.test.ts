@@ -578,6 +578,7 @@ async function runConsole(sessions: ReadonlyArray<Record<string, unknown>>) {
     'review-pip', 'review-body', 'review-save', 'review-publish',
     'status-badge', 'theme-select', 'terminate-open', 'terminate', 'terminate-close',
     'terminate-summary', 'terminate-ended', 'terminate-confirm',
+    'interrupt', 'end-session', 'turn-elapsed',
   ]) {
     byId.set(id, fakeEl('div'));
   }
@@ -1095,6 +1096,100 @@ describe('S18.9 — the termination screen is presentation over DELETE /api/sess
 
       assert.equal(byId.get('terminate-confirm')!.hidden, true);
       assert.equal(byId.get('terminate-ended')!.hidden, false);
+    } finally {
+      await restore();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// #146 — Interrupt, End, and the elapsed-since-last-envelope indicator: the three
+// operator controls the design promises against S5's already-tested server routes.
+// ---------------------------------------------------------------------------
+
+describe('#146 — interrupt, end and the hang indicator', () => {
+  it('offers neither Interrupt nor the elapsed indicator while no turn is running, and offers End on a live session', async () => {
+    const { byId, restore } = await runConsole([{ id: 's1', owner: 'ben', cwd: '/w', vendor: 'claude', state: 'live' }]);
+    try {
+      const button = byId.get('sessions')!.children[0]!.children[0]!;
+      for (const fn of button.listeners.get('click') ?? []) fn({});
+
+      assert.equal(byId.get('interrupt')!.hidden, true, 'nothing is running yet');
+      assert.equal(byId.get('turn-elapsed')!.hidden, true, 'no envelope has arrived to measure silence from');
+      assert.equal(byId.get('end-session')!.hidden, false, 'a live session can be ended');
+    } finally {
+      await restore();
+    }
+  });
+
+  it('turn.started reveals Interrupt and the elapsed indicator; turn.ended withdraws both', async () => {
+    const { byId, streams, restore } = await runConsole([{ id: 's1', owner: 'ben', cwd: '/w', vendor: 'claude', state: 'live' }]);
+    try {
+      const button = byId.get('sessions')!.children[0]!.children[0]!;
+      for (const fn of button.listeners.get('click') ?? []) fn({});
+
+      deliver(streams[0]!, { seq: 1, sessionId: 's1', ts: '2026-08-09T00:00:00.000Z', kind: 'turn.started', data: { turnId: 't-1' } });
+      assert.equal(byId.get('interrupt')!.hidden, false, 'a running turn offers Interrupt');
+      assert.equal(byId.get('turn-elapsed')!.hidden, false, 'and the silence indicator');
+      assert.match(byId.get('turn-elapsed')!.textContent ?? '', /no output for \d+ min/);
+
+      deliver(streams[0]!, { seq: 2, sessionId: 's1', ts: '2026-08-09T00:00:01.000Z', kind: 'turn.ended', data: { turnId: 't-1' } });
+      assert.equal(byId.get('interrupt')!.hidden, true, 'the turn ended — nothing left to interrupt');
+      assert.equal(byId.get('turn-elapsed')!.hidden, true, 'and nothing left to measure silence on');
+    } finally {
+      await restore();
+    }
+  });
+
+  it('Interrupt posts the running turn\'s id to the interrupt route', async () => {
+    const { byId, streams, restore, fetchCalls, fetchMethods } = await runConsole([
+      { id: 's1', owner: 'ben', cwd: '/w', vendor: 'claude', state: 'live' },
+    ]);
+    try {
+      const button = byId.get('sessions')!.children[0]!.children[0]!;
+      for (const fn of button.listeners.get('click') ?? []) fn({});
+      deliver(streams[0]!, { seq: 1, sessionId: 's1', ts: '2026-08-09T00:00:00.000Z', kind: 'turn.started', data: { turnId: 't-1' } });
+
+      for (const fn of byId.get('interrupt')!.listeners.get('click') ?? []) fn({});
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      const call = fetchCalls
+        .map((u, i) => ({ u, m: fetchMethods[i] }))
+        .find((c) => c.u === '/api/sessions/s1/interrupt' && c.m === 'POST');
+      assert.ok(call, 'exactly the interrupt route was posted to');
+    } finally {
+      await restore();
+    }
+  });
+
+  it('End posts to the end route and refreshes the session list', async () => {
+    const { byId, restore, fetchCalls, fetchMethods } = await runConsole([{ id: 's1', owner: 'ben', cwd: '/w', vendor: 'claude', state: 'live' }]);
+    try {
+      const button = byId.get('sessions')!.children[0]!.children[0]!;
+      for (const fn of button.listeners.get('click') ?? []) fn({});
+      const before = fetchCalls.filter((u) => u === '/api/sessions').length;
+
+      for (const fn of byId.get('end-session')!.listeners.get('click') ?? []) fn({});
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      const call = fetchCalls
+        .map((u, i) => ({ u, m: fetchMethods[i] }))
+        .find((c) => c.u === '/api/sessions/s1/end' && c.m === 'POST');
+      assert.ok(call, 'the end route was posted to');
+      assert.ok(fetchCalls.filter((u) => u === '/api/sessions').length > before, 'the session list is refreshed after ending');
+    } finally {
+      await restore();
+    }
+  });
+
+  it('an already-ended session offers no End control', async () => {
+    const { byId, restore } = await runConsole([{ id: 's1', owner: 'ben', cwd: '/w', vendor: 'claude', state: 'ended' }]);
+    try {
+      const button = byId.get('sessions')!.children[0]!.children[0]!;
+      for (const fn of button.listeners.get('click') ?? []) fn({});
+
+      assert.equal(byId.get('end-session')!.hidden, true);
     } finally {
       await restore();
     }

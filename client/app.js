@@ -46,6 +46,13 @@ const state = {
   // the only place this client can observe it. Reset on every `openStream` so a reconnect
   // rebuilds it from the replay rather than carrying a stale guess forward.
   turnLive: false,
+  // The running turn's id, carried by `turn.started` — `interrupt` needs it on the request
+  // body (S5). `null` whenever `turnLive` is false; reset alongside it on every `openStream`.
+  currentTurnId: null,
+  // Wall-clock time the last envelope for the selected session was received. Feeds the
+  // "no output for N min" indicator (D21: no server-side timer, the client watches its own
+  // silence). `null` until the first envelope after a stream (re)opens.
+  lastEnvelopeAt: null,
 };
 
 function currentSession() {
@@ -133,6 +140,29 @@ function applyStatusBadge() {
   badge.textContent = next.label;
 }
 
+// Interrupt is only offered while a turn is actually running and its id is known; End is
+// offered whenever a session is selected and not already ended (S5's `end` route itself
+// refuses `409 turn_in_flight` while one runs — this just steers the operator to Interrupt
+// first rather than surfacing that refusal after the click).
+function applyTurnControls() {
+  $('interrupt').hidden = !state.turnLive || state.currentTurnId === null;
+  $('end-session').hidden = state.sessionId === null || sessionIsEnded();
+}
+
+// D21: elapsed-since-last-envelope, computed here rather than carried on any envelope —
+// the server keeps no idle timer, so "how long has it been quiet" is this client's own
+// clock against `state.lastEnvelopeAt`, and only means anything while a turn is live.
+function updateElapsedIndicator() {
+  const el = $('turn-elapsed');
+  if (!state.turnLive || state.lastEnvelopeAt === null) {
+    el.hidden = true;
+    return;
+  }
+  const minutes = Math.floor((Date.now() - state.lastEnvelopeAt) / 60000);
+  el.hidden = false;
+  el.textContent = `no output for ${minutes} min`;
+}
+
 function text(tag, className, value) {
   const node = document.createElement(tag);
   if (className) node.className = className;
@@ -215,6 +245,7 @@ async function refreshSessions() {
   applySessionAvailability();
   applyPolicyBanner();
   applyStatusBadge();
+  applyTurnControls();
   $('terminate-open').hidden = state.sessionId === null;
 }
 
@@ -394,6 +425,10 @@ function handleEnvelope(sessionId, envelope) {
   if (envelope.kind === 'error' && envelope.data?.kind === 'replay_gap') {
     if (handleReplayGap()) return;
   }
+  // Every envelope for the session on screen resets the silence clock, not only the ones
+  // that render — D21's "no output for N min" measures since the last *envelope*, which
+  // includes `usage`, `checkpoint.created` and the rest, not just transcript content.
+  if (envelope.sessionId === state.sessionId) state.lastEnvelopeAt = Date.now();
   if (envelope.kind === 'session.started' && envelope.sessionId === state.sessionId && envelope.data && envelope.data.policy) {
     // Replayed from the spill on every reconnect, including after a gap refetch —
     // the banner must survive that the same way the rest of the transcript does,
@@ -409,14 +444,21 @@ function handleEnvelope(sessionId, envelope) {
     if (session !== null) state.sessionsById.set(state.sessionId, { ...session, state: 'ended' });
     applySessionAvailability();
     applyStatusBadge();
+    applyTurnControls();
   }
   if (envelope.kind === 'turn.started' && envelope.sessionId === state.sessionId) {
     state.turnLive = true;
+    state.currentTurnId = envelope.data.turnId;
     applyStatusBadge();
+    applyTurnControls();
+    updateElapsedIndicator();
   }
   if (envelope.kind === 'turn.ended' && envelope.sessionId === state.sessionId) {
     state.turnLive = false;
+    state.currentTurnId = null;
     applyStatusBadge();
+    applyTurnControls();
+    updateElapsedIndicator();
   }
   if (envelope.kind === 'checkpoint.created') {
     // A new checkpoint invalidates the list this session already fetched, whether it
@@ -551,8 +593,12 @@ function openStream(sessionId) {
   state.lastSeq = 0;
   state.pendingPermissions = new Map();
   state.turnLive = false;
+  state.currentTurnId = null;
+  state.lastEnvelopeAt = null;
   clear($('transcript'));
   applyStatusBadge();
+  applyTurnControls();
+  updateElapsedIndicator();
 
   if (activeEdge() === 'ws') openWsStream(sessionId);
   else openSseStream(sessionId);
@@ -606,6 +652,29 @@ async function answerPermission(requestId, decision) {
     return false;
   }
   return Boolean(result.payload && result.payload.accepted);
+}
+
+// S5: stops the running turn without ending the session. Needs the turn's own id, which
+// only `applyTurnControls` offers the button for having — a stale click after the turn
+// already ended (id gone) is a no-op rather than a request with a fabricated turnId.
+async function doInterrupt() {
+  if (state.sessionId === null || state.currentTurnId === null) return;
+  const result = await api('POST', `/api/sessions/${encodeURIComponent(state.sessionId)}/interrupt`, { turnId: state.currentTurnId });
+  if (result.status === 401) return;
+  if (result.status !== 200) return status(describe(result), 'error');
+  status('interrupted', 'ok');
+}
+
+// S5/D36: frees the workspace and keeps the record — distinct from Terminate, which
+// destroys it. Refused `409 turn_in_flight` while a turn runs; `describe(result)` surfaces
+// that refusal the same way every other write on this session does.
+async function doEnd() {
+  if (state.sessionId === null) return;
+  const result = await api('POST', `/api/sessions/${encodeURIComponent(state.sessionId)}/end`, {});
+  if (result.status === 401) return;
+  if (result.status !== 200) return status(describe(result), 'error');
+  status('session ended', 'ok');
+  await refreshSessions();
 }
 
 async function sendMessage(event) {
@@ -964,6 +1033,8 @@ async function confirmTerminate() {
   state.lastSeq = 0;
   state.pendingPermissions = new Map();
   state.turnLive = false;
+  state.currentTurnId = null;
+  state.lastEnvelopeAt = null;
   clear($('transcript'));
   resetReviewForm();
   $('compose').hidden = true;
@@ -971,6 +1042,8 @@ async function confirmTerminate() {
   $('checklist').hidden = true;
   $('payroll').hidden = true;
   $('reviews').hidden = true;
+  applyTurnControls();
+  updateElapsedIndicator();
   await refreshSessions();
 }
 
@@ -1015,6 +1088,15 @@ function start() {
   $('terminate-open').addEventListener('click', openTerminate);
   $('terminate-close').addEventListener('click', closeTerminate);
   $('terminate-confirm').addEventListener('click', () => void confirmTerminate());
+  $('interrupt').addEventListener('click', () => void doInterrupt());
+  $('end-session').addEventListener('click', () => void doEnd());
+  // No server-side timer ticks this (D21) — the client re-reads its own clock against
+  // `state.lastEnvelopeAt` on an interval short enough that "N min" feels live. `unref`
+  // (absent in a real browser, where this call is a no-op) keeps a host process — a test
+  // runner that `import()`s this module, not a page — from being held open by this timer
+  // forever; the check is defensive rather than environment-sniffing.
+  const elapsedTicker = setInterval(updateElapsedIndicator, 15000);
+  if (typeof elapsedTicker.unref === 'function') elapsedTicker.unref();
   initTheme();
   void refreshSessions();
   void refreshRequisitionOptions();
