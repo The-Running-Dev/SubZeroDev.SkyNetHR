@@ -1,5 +1,5 @@
 import type { IncomingMessage, RequestListener, ServerResponse } from 'node:http';
-import type { AttachmentId, CallId, ChecklistItemId, Envelope, OperatorId, RequisitionId, ReviewId, Seq, SessionId, Subscription, TurnId } from '../../contract/index.js';
+import type { AttachmentId, CallId, ChecklistItemId, Envelope, Frame, OperatorId, RequisitionId, ReviewId, Seq, SessionId, Subscription, TurnId } from '../../contract/index.js';
 import { sendError } from '../error-envelope/index.js';
 import {
   type EdgeDeps,
@@ -135,11 +135,19 @@ export function createSseEdge(deps: EdgeDeps): RequestListener {
     // reconnect would start past the history this one failed to serve.
     let lastIdWritten = after as number;
     const sink = {
-      deliver(envelope: Envelope): void {
+      deliver(envelope: Envelope | Frame): void {
         if (!open) return;
         // `event:` is the kind and `id:` is the seq, so a browser `EventSource` can
         // dispatch by kind and resume by seq with no body parsing. `data:` is one line:
         // `JSON.stringify` never emits a raw newline, so no continuation is possible.
+        //
+        // (D168, I51) A frame carries no `seq` and is written with no `id:` line — a
+        // client's resume point must be unchanged by receiving one, since no store holds
+        // it to resume from.
+        if (!('seq' in envelope)) {
+          res.write(`event: ${envelope.kind}\ndata: ${JSON.stringify(envelope)}\n\n`);
+          return;
+        }
         const advances = envelope.seq > lastIdWritten;
         if (advances) lastIdWritten = envelope.seq;
         const id = advances ? `id: ${envelope.seq}\n` : '';

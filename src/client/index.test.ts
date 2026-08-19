@@ -851,6 +851,67 @@ describe('S3.3 — a reported replay_gap makes the client refetch the transcript
   });
 });
 
+describe('S25.5 — the client renders deltas or the final message and never both, picking by turnId', () => {
+  it('grows one bubble across several deltas and suppresses the message that follows it', async () => {
+    const { byId, streams, restore } = await runConsole([{ id: 's1', cwd: '/w/p', vendor: 'claude', state: 'live' }]);
+    try {
+      const button = byId.get('sessions')!.children[0]!.children[0]!;
+      for (const fn of button.listeners.get('click') ?? []) fn({});
+      const transcript = byId.get('transcript')!;
+
+      deliver(streams[0]!, { sessionId: 's1', ts: 't1', kind: 'message.delta', data: { turnId: 'turn-1', role: 'assistant', text: 'Hello, ' } });
+      assert.equal(transcript.children.length, 1, 'the first delta renders one bubble');
+      deliver(streams[0]!, { sessionId: 's1', ts: 't2', kind: 'message.delta', data: { turnId: 'turn-1', role: 'assistant', text: 'world!' } });
+      assert.equal(transcript.children.length, 1, 'a second delta for the same turnId grows the same bubble rather than adding one');
+      assert.equal(JSON.stringify(transcript.children[0]).includes('Hello, world!'), true);
+
+      deliver(streams[0]!, { seq: 5, sessionId: 's1', ts: 't3', kind: 'message', data: { turnId: 'turn-1', role: 'assistant', text: 'Hello, world!' } });
+      assert.equal(transcript.children.length, 1, 'the message that follows the deltas renders nothing new — picked by turnId');
+    } finally {
+      await restore();
+    }
+  });
+
+  it('a message with no prior delta for its turnId still renders normally', async () => {
+    const { byId, streams, restore } = await runConsole([{ id: 's1', cwd: '/w/p', vendor: 'claude', state: 'live' }]);
+    try {
+      const button = byId.get('sessions')!.children[0]!.children[0]!;
+      for (const fn of button.listeners.get('click') ?? []) fn({});
+      const transcript = byId.get('transcript')!;
+
+      deliver(streams[0]!, { seq: 1, sessionId: 's1', ts: 't1', kind: 'message', data: { turnId: 'turn-1', role: 'assistant', text: 'no deltas preceded this' } });
+      assert.equal(transcript.children.length, 1);
+      assert.equal(JSON.stringify(transcript.children[0]).includes('no deltas preceded this'), true);
+    } finally {
+      await restore();
+    }
+  });
+
+  it('a delta never advances the resume point (no seq to record), and a reconnect mid-message renders exactly once', async () => {
+    const { byId, streams, restore } = await runConsole([{ id: 's1', cwd: '/w/p', vendor: 'claude', state: 'live' }]);
+    try {
+      const button = byId.get('sessions')!.children[0]!.children[0]!;
+      for (const fn of button.listeners.get('click') ?? []) fn({});
+      const transcript = byId.get('transcript')!;
+
+      deliver(streams[0]!, { seq: 3, sessionId: 's1', ts: 't0', kind: 'usage', data: { usage: { inputTokens: 1, outputTokens: 1, cacheRead: 0, cacheCreate: 0 } } });
+      deliver(streams[0]!, { sessionId: 's1', ts: 't1', kind: 'message.delta', data: { turnId: 'turn-1', role: 'assistant', text: 'starting' } });
+
+      // Disconnect between two deltas — a reconnect never replays one (D168, I51), so the
+      // fresh stream carries no memory of the partial bubble above.
+      for (const fn of button.listeners.get('click') ?? []) fn({});
+      assert.equal(streams.length, 2, 'reselecting opens a fresh stream');
+      assert.equal(transcript.children.length, 0, 'the reconnect drops the transcript, including the in-progress bubble');
+
+      deliver(streams[1]!, { seq: 4, sessionId: 's1', ts: 't2', kind: 'message', data: { turnId: 'turn-1', role: 'assistant', text: 'starting over, uninterrupted' } });
+      assert.equal(transcript.children.length, 1, 'the message renders exactly once on the reconnected stream');
+      assert.equal(JSON.stringify(transcript.children[0]).includes('starting over, uninterrupted'), true);
+    } finally {
+      await restore();
+    }
+  });
+});
+
 describe('S7.2 — an ended session offers no compose box', () => {
   it('a session listed as ended is selected read-only, and says why', async () => {
     const { byId, restore } = await runConsole([{ id: 's1', cwd: '/w/p', vendor: 'claude', state: 'ended' }]);

@@ -15,6 +15,7 @@ function makeAdapter(sandbox: 'read-only' | 'workspace-write' | 'unrestricted' =
     model: null,
     sandbox,
     notify: (n) => notifications.push(n),
+    streamDeltas: false,
   });
   return { result, notifications };
 }
@@ -228,6 +229,7 @@ test('createCodexAdapter refuses when neither transport responds', () => {
     model: null,
     sandbox: 'workspace-write',
     notify: (n) => notifications.push(n),
+    streamDeltas: false,
   });
   assert.equal(result.ok, false);
   if (result.ok) return;
@@ -242,6 +244,7 @@ test('createAdapter refuses a Codex session with sandbox: null', () => {
     model: null,
     sandbox: null,
     notify: () => {},
+    streamDeltas: false,
   });
   assert.equal(result.ok, false);
   if (result.ok) return;

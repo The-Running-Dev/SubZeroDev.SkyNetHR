@@ -1,7 +1,7 @@
 import type { IncomingMessage, RequestListener, ServerResponse } from 'node:http';
 import type { Socket } from 'node:net';
 import { createHash } from 'node:crypto';
-import type { AttachmentId, CallId, ChecklistItemId, Envelope, SessionId, Seq, Subscription, TurnId } from '../../contract/index.js';
+import type { AttachmentId, CallId, ChecklistItemId, Envelope, Frame, SessionId, Seq, Subscription, TurnId } from '../../contract/index.js';
 import { sendError } from '../error-envelope/index.js';
 import {
   type EdgeDeps,
@@ -242,7 +242,10 @@ export function createWsEdge(deps: EdgeDeps): WsRequestListener {
     // implicit resume header, so the client's `after` is the only source of the resume
     // point on any given connection (S11.4).
     const sink = {
-      deliver(envelope: Envelope): void {
+      // (D168, I51) A frame carries no `seq`, so it is distinguishable on the wire by
+      // that field's absence rather than a wrapper of its own — the same JSON.stringify
+      // as any envelope.
+      deliver(envelope: Envelope | Frame): void {
         if (!open) return;
         writeTextFrame(socket, JSON.stringify(envelope));
       },

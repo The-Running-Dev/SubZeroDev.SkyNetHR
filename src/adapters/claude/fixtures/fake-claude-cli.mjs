@@ -33,8 +33,18 @@ import { spawn } from 'node:child_process';
 //                   assertions.
 //   mcp-permission — one control_request for an mcp__* tool, outside matchTarget's
 //                   projection table, so its matchTarget is always null (S10.6).
+//   streamed      — twenty assistant text messages in one turn; with
+//                   --include-partial-messages on stdin's argv, each is preceded by its
+//                   stream_event/content_block_delta chunks (S25.4). One message's text
+//                   contains a multi-byte UTF-8 character, split so one delta ends right
+//                   before it and the next begins with it. With the flag absent, behaves
+//                   exactly like `many` truncated to twenty (S25.6: off changes nothing).
 
 const scenario = process.env.SKYNET_TEST_SCENARIO ?? 'full';
+// (S25.6) The real CLI only emits stream_event records when this flag is present
+// (design/findings/S25-token-streaming-probe.md) — this fixture mirrors that gate rather
+// than emitting deltas unconditionally, so a flag-off run proves nothing changed.
+const streamDeltasFlag = process.argv.includes('--include-partial-messages');
 const sessionId = 'fake-cli-session-' + Math.random().toString(36).slice(2);
 
 function line(obj) {
@@ -74,6 +84,27 @@ function assistantText(text, msgId) {
       usage: { input_tokens: 5, output_tokens: 7, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 },
     },
   });
+}
+
+// (S25.4) `parts` is the exact split the deltas are sent in — arrival order is what a
+// consumer concatenates by (D168), so the caller controls it directly rather than this
+// function inventing a chunking of its own.
+function streamDeltas(parts, msgId) {
+  line({ type: 'stream_event', event: { type: 'message_start', message: { id: msgId, usage: { input_tokens: 1, output_tokens: 1 } } } });
+  line({ type: 'stream_event', event: { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } } });
+  for (const part of parts) {
+    line({ type: 'stream_event', event: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: part } } });
+  }
+  line({ type: 'stream_event', event: { type: 'content_block_stop', index: 0 } });
+  line({ type: 'stream_event', event: { type: 'message_delta', delta: { stop_reason: 'end_turn' }, usage: { output_tokens: parts.join('').length } } });
+  line({ type: 'stream_event', event: { type: 'message_stop' } });
+}
+
+// (S25.4) `parts.join('')` is what `assistantText` then sends as the final `message` —
+// deltas and the message they precede always agree, byte for byte, by construction.
+function assistantTextStreamed(parts, msgId) {
+  if (streamDeltasFlag) streamDeltas(parts, msgId);
+  assistantText(parts.join(''), msgId);
 }
 
 if (scenario !== 'no-init') line({ type: 'system', subtype: 'init', session_id: sessionId });
@@ -198,6 +229,20 @@ function runScenario() {
       return;
     case 'many': {
       for (let i = 0; i < 200; i++) assistantText('message ' + i, 'msg-many-' + i);
+      line({ type: 'result', subtype: 'success' });
+      return;
+    }
+    case 'streamed': {
+      for (let i = 0; i < 20; i++) {
+        if (i === 10) {
+          // The multi-byte character (a four-byte UTF-8 emoji) starts exactly where the
+          // second delta begins — the split S25.4 asks for, at a new granularity than
+          // S1.2's whole-record one.
+          assistantTextStreamed(['message ten, done ', '🎉 — the tenth message'], 'msg-streamed-10');
+        } else {
+          assistantTextStreamed(['message ' + i, ', streamed'], 'msg-streamed-' + i);
+        }
+      }
       line({ type: 'result', subtype: 'success' });
       return;
     }

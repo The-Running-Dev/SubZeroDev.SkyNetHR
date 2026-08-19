@@ -62,13 +62,29 @@ function attachmentNode(doc, ref, sessionId, turnId) {
 
 function messageNode(doc, data, handlers) {
   const body = el(doc, 'div', 'message');
-  body.appendChild(el(doc, 'div', 'message__text', data.text));
+  const textNode = el(doc, 'div', 'message__text', data.text);
+  body.appendChild(textNode);
   if (Array.isArray(data.attachments) && data.attachments.length > 0 && handlers && handlers.sessionId) {
     const attachments = el(doc, 'div', 'message__attachments');
     for (const ref of data.attachments) attachments.appendChild(attachmentNode(doc, ref, handlers.sessionId, data.turnId));
     body.appendChild(attachments);
   }
-  return row(doc, data.role === 'user' ? 'user' : 'assistant', data.role === 'user' ? 'you' : 'agent', body);
+  const wrapper = row(doc, data.role === 'user' ? 'user' : 'assistant', data.role === 'user' ? 'you' : 'agent', body);
+  // (D168, S25.5) Read back by `appendMessageDeltaText` below, so a bubble started from
+  // one `message.delta` can grow as its later deltas arrive rather than each rendering a
+  // new node. A plain property, not part of the DOM API: harmless on a real element and
+  // supported by the test stub's proxy the same way any other assignment is.
+  wrapper.__messageTextNode = textNode;
+  return wrapper;
+}
+
+// (D168, S25.5) Grows the bubble a `message.delta` started, in arrival order — the only
+// order a frame carries (I51) — rather than replacing its text. `node` is whatever
+// `renderEvent` returned for that `turnId`'s first delta.
+export function appendMessageDeltaText(node, text) {
+  const textNode = node.__messageTextNode;
+  if (!textNode) return;
+  textNode.textContent = (textNode.textContent || '') + text;
 }
 
 function thinkingNode(doc, data) {
@@ -269,6 +285,9 @@ const RENDERERS = {
   'turn.started': turnStartedNode,
   'turn.ended': turnEndedNode,
   message: messageNode,
+  // (D168, S25.5) The first delta of a `turnId` renders through this same node shape —
+  // `appendMessageDeltaText` grows it for every delta after that.
+  'message.delta': messageNode,
   thinking: thinkingNode,
   'tool.call': toolCallNode,
   'tool.result': toolResultNode,

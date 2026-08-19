@@ -9,7 +9,7 @@ import type { AdapterNotification } from '../../contract/index.js';
 
 const FIXTURE = path.join(process.cwd(), 'src', 'adapters', 'claude', 'fixtures', 'fake-claude-cli.mjs');
 
-function makeAdapter(scenario: string) {
+function makeAdapter(scenario: string, opts: { readonly streamDeltas?: boolean } = {}) {
   const notifications: AdapterNotification[] = [];
   const adapter = createClaudeAdapter({
     executable: FIXTURE,
@@ -17,6 +17,7 @@ function makeAdapter(scenario: string) {
     model: null,
     sandbox: null,
     notify: (n) => notifications.push(n),
+    streamDeltas: opts.streamDeltas ?? false,
   });
   return { adapter, notifications, scenario };
 }
@@ -186,6 +187,66 @@ test('S1.11 — usage events emitted from a real captured run sum to the indepen
 
   assert.equal(seen.size, 3); // three distinct assistant message ids in this fixture
   assert.equal(emittedTotal, independentTotal);
+});
+
+// S25.3/S25.4 — with `streamDeltas: true` (`--include-partial-messages` on argv, per the
+// fixture's own gate), twenty assistant text messages in one turn each arrive as a run of
+// `message.delta` notifications followed by the `message` it precedes. Deltas for one
+// message concatenate, in arrival order, to that message's text byte for byte — including
+// message 10, whose text carries a multi-byte UTF-8 character (an emoji) split exactly at
+// a delta boundary (S1.2's hazard, at this new granularity). S1.3's other eleven mapped
+// rows are unaffected: nothing here changes what `assistant`/`control_request`/`result`
+// map to.
+test('S25.3/S25.4 — deltas for one turnId concatenate, in arrival order, to the message that follows, over twenty messages including one split mid multi-byte character', async () => {
+  process.env['SKYNET_TEST_SCENARIO'] = 'streamed';
+  const { adapter, notifications } = makeAdapter('streamed', { streamDeltas: true });
+  await adapter.send('go', [], null, 'turn-streamed' as never);
+  await waitUntil(() => eventsOf(notifications, 'turn.ended').length > 0);
+
+  const deltas = eventsOf(notifications, 'message.delta') as Array<{ event: { data: { text: string } } }>;
+  const messages = eventsOf(notifications, 'message') as Array<{ event: { data: { text: string } } }>;
+  assert.equal(messages.length, 20);
+  // Every delta arrived, in order, before the message it precedes — `handleRecord`
+  // processes one NDJSON line at a time, so notification order is emission order.
+  assert.ok(deltas.length >= 40, 'at least two deltas per message over twenty messages');
+
+  // Reconstruct "one run of deltas per message" from arrival order alone, the same way a
+  // consumer with no `seq` to group by would (D168, I51): each message's deltas are
+  // exactly the ones since the previous message.
+  let cursor = 0;
+  const allNotifications = notifications.filter(
+    (n): n is Extract<AdapterNotification, { kind: 'event' }> => n.kind === 'event' && (n.event.kind === 'message.delta' || n.event.kind === 'message'),
+  );
+  for (const m of messages) {
+    let concatenated = '';
+    while (cursor < allNotifications.length && allNotifications[cursor]!.event.kind === 'message.delta') {
+      concatenated += (allNotifications[cursor]!.event.data as { text: string }).text;
+      cursor++;
+    }
+    assert.equal(allNotifications[cursor]!.event.kind, 'message');
+    assert.equal(concatenated, m.event.data.text, 'deltas for this message concatenate to it byte for byte');
+    cursor++;
+  }
+
+  const tenth = messages[10]!;
+  assert.match(tenth.event.data.text, /🎉/, 'the multi-byte character survives the split intact');
+  void deltas;
+});
+
+// S25.6 — the flag defaults off and this fixture only emits stream_event records when
+// `--include-partial-messages` is on argv (mirroring the real CLI, S25.1's finding): the
+// same scenario with the flag off produces zero `message.delta` notifications and the
+// twenty ordinary `message` records unaffected, element for element.
+test('S25.6 — the same scenario with streamDeltas: false emits no message.delta and the twenty messages unaffected', async () => {
+  process.env['SKYNET_TEST_SCENARIO'] = 'streamed';
+  const { adapter, notifications } = makeAdapter('streamed', { streamDeltas: false });
+  await adapter.send('go', [], null, 'turn-streamed-off' as never);
+  await waitUntil(() => eventsOf(notifications, 'turn.ended').length > 0);
+
+  assert.equal(eventsOf(notifications, 'message.delta').length, 0);
+  const messages = eventsOf(notifications, 'message') as Array<{ event: { data: { text: string } } }>;
+  assert.equal(messages.length, 20);
+  assert.match(messages[10]!.event.data.text, /🎉/);
 });
 
 // S1.4 — an unrecognised record kind is non-fatal and the stream continues; a
