@@ -43,7 +43,9 @@ than by assertion. See Constraints.
 
 ### Tier two — the operator's working surfaces
 
-8. See what a session has cost: token burn to date, budget remaining, and paid idle time.
+8. See what a session has cost: token burn to date, budget remaining, paid idle time, and that
+   burn priced in currency against rates the operator sets. The price is an estimate, not a bill —
+   see D158.
 9. Record a performance review against a session, with an author and a draft state, and see
    whether a session is under a performance plan.
 10. Open a session through a requisition someone approved, and work a first-run checklist
