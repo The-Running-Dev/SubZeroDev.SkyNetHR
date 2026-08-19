@@ -12,7 +12,6 @@ import type {
   AdapterNotification,
   AttachmentId,
   AttachmentPayload,
-  AttachmentRef,
   AttachmentUpload,
   AuditRecord,
   CallId,
@@ -932,22 +931,23 @@ export function createSessionManager(deps: {
 
       // (D160, I49) Written and fsync'd — `store.writeAttachment`'s contract — before the
       // `message` envelope naming them is constructed below. `attachmentId` is minted here,
-      // never the operator's `filename`, which never reaches a path.
-      const attachmentRefs: AttachmentRef[] = [];
-      const attachmentPayloads: AttachmentPayload[] = [];
-      for (const { upload, bytes } of decodedAttachments) {
-        const attachmentId = randomUUID() as AttachmentId;
-        const written = await store.writeAttachment(sessionId, turnId, attachmentId, bytes, upload.mediaType);
-        if (!written.ok) {
-          // No `turn.started` was ever emitted for this attempt, so there is nothing to
-          // close — releasing the slot outright is what lets a retry proceed rather than
-          // leaving a phantom claim behind.
-          entry.turn = null;
-          return { ok: false, error: { code: 'storage', cause: written.error } };
-        }
-        const ref: AttachmentRef = { attachmentId, filename: upload.filename, mediaType: upload.mediaType, bytes: bytes.length };
-        attachmentRefs.push(ref);
-        attachmentPayloads.push({ ref, data: bytes });
+      // never the operator's `filename`, which never reaches a path. Each attachment writes
+      // a distinct file with no dependency on the others, so the writes run concurrently
+      // rather than paying N sequential fsync round trips on the message-send hot path.
+      const attachmentPayloads: AttachmentPayload[] = decodedAttachments.map(({ upload, bytes }) => ({
+        ref: { attachmentId: randomUUID() as AttachmentId, filename: upload.filename, mediaType: upload.mediaType, bytes: bytes.length },
+        data: bytes,
+      }));
+      const writes = await Promise.all(
+        attachmentPayloads.map((p) => store.writeAttachment(sessionId, turnId, p.ref.attachmentId, Buffer.from(p.data), p.ref.mediaType)),
+      );
+      const failedWrite = writes.find((w) => !w.ok);
+      if (failedWrite && !failedWrite.ok) {
+        // No `turn.started` was ever emitted for this attempt, so there is nothing to
+        // close — releasing the slot outright is what lets a retry proceed rather than
+        // leaving a phantom claim behind.
+        entry.turn = null;
+        return { ok: false, error: { code: 'storage', cause: failedWrite.error } };
       }
 
       // S6.2/D42: committed while the slot is claimed but before turn.started fires, so
@@ -979,7 +979,7 @@ export function createSessionManager(deps: {
 
       // The operator's own message, refs only (D160) — this is the durable record S21.2
       // requires: no envelope in `events.ndjson` ever carries attachment bytes.
-      await emit(entry, 'message', { turnId, role: 'user', text, attachments: attachmentRefs });
+      await emit(entry, 'message', { turnId, role: 'user', text, attachments: attachmentPayloads.map((p) => p.ref) });
       if (entry.turn === null) return { ok: false, error: { code: 'session_ended', sessionId } };
 
       // S4.15/D34: a turn that spawns with no `--resume` on a session that has already

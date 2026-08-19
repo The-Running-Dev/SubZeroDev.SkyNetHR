@@ -9,6 +9,7 @@ import type {
   AuditCursor,
   AuditQuery,
   CallId,
+  Caps,
   ChecklistItemId,
   EdgeDeps,
   IdentityResolver,
@@ -180,6 +181,16 @@ export async function readBody(req: IncomingMessage, limitBytes = 1024 * 1024): 
   return Buffer.concat(chunks).toString('utf8');
 }
 
+// (S21 fix) `/message`'s body carries every attachment's bytes base64-encoded inline
+// (~4/3 inflation) alongside the JSON envelope around them — `readBody`'s flat 1 MiB
+// default rejects a body this route's own `Caps.attachmentBytes`/`attachmentCount` are
+// meant to allow, well before the attachment-specific check in `session-manager` ever
+// runs. This is what the body limit for that route must actually be sized against.
+export function messageBodyLimitBytes(caps: Caps): number {
+  const perAttachment = Math.ceil((caps.attachmentBytes * 4) / 3) + 1024; // + JSON/base64 padding overhead
+  return caps.attachmentCount * perAttachment + 64 * 1024; // + room for `text` and the envelope itself
+}
+
 export function headerValue(req: IncomingMessage, name: string): string | undefined {
   const raw = req.headers[name];
   if (raw === undefined) return undefined;
@@ -341,7 +352,7 @@ export function createHttpHandlers(deps: EdgeDeps) {
   }
 
   async function handleMessage(req: IncomingMessage, res: ServerResponse, owner: OperatorId, sessionId: SessionId): Promise<void> {
-    const raw = await readBody(req);
+    const raw = await readBody(req, messageBodyLimitBytes(config.caps));
     if (raw === null) return sendError(res, 'bad_request', 'request body too large', { field: 'body' });
     let parsed: unknown;
     try {
@@ -448,6 +459,26 @@ export function createHttpHandlers(deps: EdgeDeps) {
     sendJson(res, 200, { ok: true });
   }
 
+  // `.pipe()` alone only unpipes on an early `res` close, it does not destroy `stream`
+  // — without this, a client that aborts mid-download leaks the open file handle.
+  // `Store.open*` is typed to the minimal `NodeJS.ReadableStream`, but every
+  // implementation hands back a real `Readable` (an `fs.ReadStream`), which is what
+  // actually owns the file descriptor. Shared by every route that streams a stored blob
+  // back to the client (`handleToolOutput`, `handleAttachment`).
+  function pipeBlobResponse(
+    req: IncomingMessage,
+    res: ServerResponse,
+    stream: NodeJS.ReadableStream,
+    headers: Record<string, string>,
+  ): void {
+    if (stream instanceof Readable) req.on('close', () => stream.destroy());
+    res.writeHead(200, headers);
+    stream.on('error', () => {
+      if (!res.writableEnded) res.end();
+    });
+    stream.pipe(res);
+  }
+
   // S9.3: the ownership check is `openToolOutput`'s (`no_such_session`, indistinguishable
   // from a session that never existed); every other failure — a missing or unreadable
   // blob — is `no_such_output` (S9.5), which the generic `storage` mapping in
@@ -466,22 +497,11 @@ export function createHttpHandlers(deps: EdgeDeps) {
       if (opened.error.code === 'no_such_session') return failWith(res, opened.error);
       return sendError(res, 'no_such_output', 'the tool-output blob is missing or unreadable');
     }
-    const stream = opened.value;
-    // `.pipe()` alone only unpipes on an early `res` close, it does not destroy `stream`
-    // — without this, a client that aborts mid-download (the large-blob case this route
-    // exists for) leaks the open file handle. `Store.openToolOutput` is typed to the
-    // minimal `NodeJS.ReadableStream`, but every implementation hands back a real
-    // `Readable` (an `fs.ReadStream`), which is what actually owns the file descriptor.
-    if (stream instanceof Readable) req.on('close', () => stream.destroy());
-    res.writeHead(200, {
+    pipeBlobResponse(req, res, opened.value, {
       'content-type': 'text/plain; charset=utf-8',
       'x-content-type-options': 'nosniff',
       'content-disposition': 'attachment',
     });
-    stream.on('error', () => {
-      if (!res.writableEnded) res.end();
-    });
-    stream.pipe(res);
   }
 
   // (D160) An allow-list of image types the response may echo as `Content-Type` — every
@@ -508,16 +528,17 @@ export function createHttpHandlers(deps: EdgeDeps) {
       return sendError(res, 'no_such_attachment', 'the attachment is missing or unreadable');
     }
     const { stream, mediaType } = opened.value;
-    if (stream instanceof Readable) req.on('close', () => stream.destroy());
-    res.writeHead(200, {
-      'content-type': ATTACHMENT_CONTENT_TYPE_ALLOWLIST.has(mediaType) ? mediaType : 'application/octet-stream',
+    // An allow-listed image is served `inline` so the client's own `<img src>` (`S21.10`)
+    // actually paints it — Chrome/Firefox mostly ignore `Content-Disposition` on an
+    // `<img>` subresource fetch, but Safari/WebKit honors it even there and would show a
+    // broken-image icon under `attachment`. `nosniff` plus the allow-list (not this
+    // header) is what keeps a non-image type from ever being rendered as markup.
+    const isAllowedImage = ATTACHMENT_CONTENT_TYPE_ALLOWLIST.has(mediaType);
+    pipeBlobResponse(req, res, stream, {
+      'content-type': isAllowedImage ? mediaType : 'application/octet-stream',
       'x-content-type-options': 'nosniff',
-      'content-disposition': 'attachment',
+      'content-disposition': isAllowedImage ? 'inline' : 'attachment',
     });
-    stream.on('error', () => {
-      if (!res.writableEnded) res.end();
-    });
-    stream.pipe(res);
   }
 
   // `GET /api/audit` (D73, D119): not session-scoped, open to every authenticated

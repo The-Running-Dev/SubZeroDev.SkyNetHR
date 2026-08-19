@@ -1387,13 +1387,18 @@ The tool-output route serves `X-Content-Type-Options: nosniff` and
 `Content-Disposition: attachment` alongside `text/plain`.
 
 **The attachment route never echoes an upload's declared media type unguarded** (D160). It serves
-`X-Content-Type-Options: nosniff` and `Content-Disposition: attachment` on every response, and
-sets `Content-Type` to the stored `mediaType` only when that value is in a server-side allow-list
-of image types — `image/png`, `image/jpeg`, `image/gif`, `image/webp` — and to
-`application/octet-stream` otherwise. An operator-uploaded `text/html` served under its own type
-on the console's origin is stored XSS holding the console's credentials, which is D74's population
-arriving as bytes rather than as text. The allow-list is what lets the client render a screenshot
-with `<img src>` under the document's existing `img-src 'self'` while everything else downloads.
+`X-Content-Type-Options: nosniff` on every response, and sets `Content-Type` to the stored
+`mediaType` only when that value is in a server-side allow-list of image types — `image/png`,
+`image/jpeg`, `image/gif`, `image/webp` — and to `application/octet-stream` otherwise. An
+operator-uploaded `text/html` served under its own type on the console's origin is stored XSS
+holding the console's credentials, which is D74's population arriving as bytes rather than as
+text. `Content-Disposition` follows the same allow-list check — `inline` for an allow-listed
+image, `attachment` otherwise — because Safari/WebKit honors `Content-Disposition: attachment`
+even on an `<img>` subresource fetch and would show a broken-image icon instead of painting it;
+`nosniff` plus the `Content-Type` allow-list (not `Content-Disposition`) is what stops a
+non-image type from ever being rendered as markup. This is what lets the client render a
+screenshot with `<img src>` under the document's existing `img-src 'self'` while everything else
+downloads.
 
 `POST /message` refuses, with `422 bad_request` naming the field and nothing written: an
 attachment whose decoded size exceeds `Caps.attachmentBytes`; a message carrying more than

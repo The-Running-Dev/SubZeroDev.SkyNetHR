@@ -92,6 +92,19 @@ async function appendLine(filePath: string, line: string, fsync: boolean): Promi
   }
 }
 
+// Open-write-fsync-close-in-`finally`, the same durability discipline `appendLine`'s
+// `fsync: true` branch uses for an append — shared here because `writeAttachment` needs it
+// twice (the blob, then its `.meta` sidecar) for an overwrite rather than an append.
+async function writeSyncedFile(filePath: string, data: Buffer | string, encoding?: BufferEncoding): Promise<void> {
+  const handle = await open(filePath, 'w');
+  try {
+    await handle.writeFile(data, encoding);
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+}
+
 async function readAllLines(filePath: string): Promise<Result<readonly string[], StoreError>> {
   let raw: string;
   try {
@@ -558,22 +571,19 @@ export async function createStore(config: Config): Promise<Result<Store, StoreEr
       }
       try {
         await mkdir(dir, { recursive: true });
-        const handle = await open(filePath, 'w');
-        try {
-          await handle.writeFile(bytes);
-          await handle.sync();
-        } finally {
-          await handle.close();
-        }
-        const metaHandle = await open(metaPathAttachment, 'w');
-        try {
-          await metaHandle.writeFile(mediaType, 'utf8');
-          await metaHandle.sync();
-        } finally {
-          await metaHandle.close();
-        }
+        await writeSyncedFile(filePath, bytes);
       } catch (err) {
         return ioError(filePath, (err as Error).message);
+      }
+      try {
+        await writeSyncedFile(metaPathAttachment, mediaType, 'utf8');
+      } catch (err) {
+        // (S21 fix) The blob above is already durable; if its `.meta` sidecar fails to
+        // write, don't leave the blob behind as an orphan — no `AttachmentRef` will ever
+        // be constructed to name it (the caller treats this whole call as a no-op), and
+        // `openAttachment` can never serve it back without the sidecar anyway.
+        await rm(filePath, { force: true }).catch(() => {});
+        return ioError(metaPathAttachment, (err as Error).message);
       }
       return { ok: true, value: undefined };
     },

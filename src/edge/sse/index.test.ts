@@ -1336,7 +1336,7 @@ describe('S21 — attachments', () => {
     assert.equal(existsSync(path.join(h.storageRoot, 'sessions', id, 'attachments')), false);
   });
 
-  it('S21.6 — GET .../attachments/:turnId/:attachmentId serves nosniff + attachment always, echoing the stored mediaType only for an image allow-list', async () => {
+  it('S21.6 — GET .../attachments/:turnId/:attachmentId serves nosniff always, inline for an allow-listed image and attachment otherwise, echoing the stored mediaType only for the allow-list', async () => {
     const h = await makeEdge(undefined, undefined, 'error-result');
     const id = await newSession(h, 'att3');
     const { sent, events } = await sendWithAttachment(h, id, [
@@ -1356,7 +1356,10 @@ describe('S21 — attachments', () => {
     const pngRes = await get(h, `/api/sessions/${id}/attachments/${turnId}/${png!.attachmentId}`);
     assert.equal(pngRes.status, 200);
     assert.equal(pngRes.headers.get('x-content-type-options'), 'nosniff');
-    assert.equal(pngRes.headers.get('content-disposition'), 'attachment');
+    // S21 fix: an allow-listed image is served `inline` so the client's own `<img src>`
+    // actually paints it in every browser (Safari/WebKit honors `Content-Disposition` even
+    // on an `<img>` subresource fetch, unlike Chrome/Firefox).
+    assert.equal(pngRes.headers.get('content-disposition'), 'inline');
     assert.match(pngRes.headers.get('content-type') ?? '', /^image\/png/);
     assert.equal(await pngRes.text(), PNG_BYTES);
 

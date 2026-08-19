@@ -1209,11 +1209,14 @@ Acceptance:
     written to disk and nothing shortened (D84, D160). Asserted by confirming the attachments
     directory is unchanged after each refusal.
   - S21.6 `GET /api/sessions/:id/attachments/:turnId/:attachmentId` serves the bytes with
-    `X-Content-Type-Options: nosniff` and `Content-Disposition: attachment` on **every** response,
-    and echoes the stored `mediaType` only for the image allow-list — `image/png`, `image/jpeg`,
-    `image/gif`, `image/webp` — serving `application/octet-stream` otherwise. Asserted with an
-    upload declaring `text/html` whose body is a script: the response carries
-    `application/octet-stream`, and navigating to the URL directly executes nothing.
+    `X-Content-Type-Options: nosniff` on **every** response, and echoes the stored `mediaType`
+    only for the image allow-list — `image/png`, `image/jpeg`, `image/gif`, `image/webp` —
+    serving `application/octet-stream` otherwise. `Content-Disposition` follows the same
+    allow-list: `inline` for an allow-listed image (so the client's `<img src>` paints it in
+    every browser, including Safari/WebKit, which honors the header even on a subresource
+    fetch), `attachment` otherwise. Asserted with an upload declaring `text/html` whose body is
+    a script: the response carries `application/octet-stream` and `Content-Disposition:
+    attachment`, and navigating to the URL directly executes nothing.
   - S21.7 The route carries the ownership check — another operator gets `404 no_such_session`,
     never `403` (I23) — and a missing or unreadable blob is `404 no_such_attachment` with the
     envelope unaffected. A replay served from the spill after a reconnect renders the same refs,

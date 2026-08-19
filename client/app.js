@@ -699,10 +699,11 @@ async function sendMessage(event) {
   if (value === '' || state.sessionId === null) return;
   const attachmentsField = $('attachments');
   const files = attachmentsField ? Array.from(attachmentsField.files || []) : [];
-  const attachments = [];
-  for (const file of files) {
-    attachments.push({ filename: file.name, mediaType: file.type || 'application/octet-stream', dataBase64: await fileToBase64(file) });
-  }
+  // Each file's conversion is independent CPU + I/O work — run them concurrently rather
+  // than blocking the main thread for the sum of every file's encode time in turn.
+  const attachments = await Promise.all(
+    files.map(async (file) => ({ filename: file.name, mediaType: file.type || 'application/octet-stream', dataBase64: await fileToBase64(file) })),
+  );
   field.value = '';
 
   const result = await api('POST', `/api/sessions/${encodeURIComponent(state.sessionId)}/message`, { text: value, attachments });
