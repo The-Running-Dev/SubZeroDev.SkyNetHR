@@ -215,6 +215,10 @@ export function loadConfig(env: Readonly<Record<string, string | undefined>>): R
   if (!attachmentBytes.ok) return attachmentBytes;
   const attachmentCount = parseIntEnv(env, 'CAPS_ATTACHMENT_COUNT', 5);
   if (!attachmentCount.ok) return attachmentCount;
+  // (D162) Total tool-output blob bytes one session may store. 256 MiB comfortably covers a
+  // heavy `find`/`grep` session without letting one session's tool volume fill the disk.
+  const sessionToolOutputBytes = parseIntEnv(env, 'CAPS_SESSION_TOOL_OUTPUT_BYTES', 256 * 1024 * 1024);
+  if (!sessionToolOutputBytes.ok) return sessionToolOutputBytes;
 
   const caps: Caps = {
     ringCapacity: ringCapacity.value,
@@ -227,6 +231,7 @@ export function loadConfig(env: Readonly<Record<string, string | undefined>>): R
     standingRuleBytes: standingRuleBytes.value,
     attachmentBytes: attachmentBytes.value,
     attachmentCount: attachmentCount.value,
+    sessionToolOutputBytes: sessionToolOutputBytes.value,
   };
 
   const includeRaw = env['INCLUDE_RAW'] === 'true';

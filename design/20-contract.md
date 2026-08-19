@@ -29,11 +29,7 @@ a pointer in the same commit**. That replacement is descriptive drift corrected 
 found (`AGENTS.md` *Hard rules*), not a contract amendment, and it needs no approval. It is
 one-way: a later pass never turns a pointer back into a scaffold.
 
-One slice owes a scaffold, and it is listed here:
-
-| Scaffold | Owed by |
-|---|---|
-| `Caps.sessionToolOutputBytes` | S23 |
+No slice currently owes a scaffold.
 
 **A comment in the tree is not the canonical statement of a rule.** The declarations in
 `src/contract/index.ts` carry explanatory comments, many of them copied from earlier
@@ -592,17 +588,8 @@ constructs `createSseEdge` or `createWsEdge` accordingly; exactly one binds.
 deployment (D158). `null` disables the cost tile. `checklist` empty disables the checklist.
 `sessionTokenBudget` null disables the view's budget.
 
-**Scaffold — S23 owes this member** (D162). `Caps` is otherwise materialised; this field is
-not:
-
-```ts
-// Total blob bytes one session may store. Past it the blob is not written, the envelope
-// still carries `truncated: true` and the true pre-truncation size, and the fetch route
-// answers `404 no_such_output` exactly as S9.5 already specifies. Nothing already written
-// is ever evicted, and the rule does not reach `attachments/` (D160): a tool blob is a
-// re-runnable command's output, an attachment is the operator's only copy.
-readonly sessionToolOutputBytes: number;
-```
+`Caps.sessionToolOutputBytes` is declared in `src/contract/index.ts` (D162, S23): total blob
+bytes one session may store, enforced at the `writeToolOutput` call site.
 
 ## Persisted schemas
 
