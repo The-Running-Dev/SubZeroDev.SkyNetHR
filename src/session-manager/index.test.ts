@@ -1794,7 +1794,12 @@ test('S7.1 — boot runs reap, then rehydrate, in that order, and does not resol
   const { manager } = await makeManager('full', {}, wrapStore);
 
   const bootPromise = manager.boot();
-  await new Promise((r) => setTimeout(r, 30));
+  const deadline = Date.now() + 5000;
+  while (order.length === 0 && Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 5));
+  }
+  // Once `readOpenPids:start` lands, `wrapStore.readOpenPids` blocks on `gate` — nothing else
+  // pushes to `order` until `release()` below, so this is stable, not a race won by luck.
   assert.deepEqual(order, ['readOpenPids:start'], 'rehydration has not started while reap is still in flight');
 
   release();
