@@ -381,6 +381,19 @@ to change.
 
 Shape is owned by `20-contract.md § Event envelope`; it is not restated here.
 
+**Not everything the client receives is an envelope** (D168). A `message.delta` is a *frame*:
+it is delivered to live subscribers and to nobody else, it takes no `seq`, it never enters the
+ring buffer and it is never appended to the spill. That is the one deliberate exception to the
+key above, and it is deliberate rather than an omission because deltas concatenate **exactly**
+to the `message` that follows them — the text is already durable, in that envelope, and spilling
+the deltas as well would store it twice while multiplying the spill, the ring and D147's payroll
+fold by the delta rate. The split holds for **both** vendors: Codex's `item/agentMessage/delta`
+is a frame on the same terms, so persistence does not become vendor-dependent for one kind.
+What a client gives up is partial text across a reconnect — a reconnect mid-message replays no
+deltas and renders the `message` when it lands, which *Rules the renderer may rely on* already
+permits. The alternative was measured rather than assumed; see D168 and
+`findings/S25-token-streaming-probe.md`.
+
 Two storage tiers, and they are not the same data:
 
 - **Ring buffer**, in memory, bounded by `Caps.ringCapacity` — a deployment's value, not a
@@ -1935,6 +1948,9 @@ Guaranteed by the design, not by convention:
 
 - `seq` is strictly increasing by one, per session, from 1. A gap is a bug, never a dropped
   event. Only the ring buffer may lose events, and only by reporting `replay_gap`.
+- **A `message.delta` carries no `seq` and never replays** (D168). It is a live frame, not an
+  envelope, so the contiguity above is not weakened by the delta rate and a reconnect never
+  re-delivers one. See *Event envelope*.
 - `turn.started` precedes every event of that turn, and `turn.ended` follows all of them.
 - `tool.result` follows its `tool.call`. Absent one by `turn.ended`, the call was abandoned.
 - `permission.request` is answered by exactly one `permission.resolved`, including when the
@@ -1962,8 +1978,10 @@ operator's click to the agent.
 Not guaranteed, and the client must not assume it:
 
 - That `usage` arrives once per turn. Claude emits it per assistant record.
-- That `message.delta` and `message` do not both appear for one turn. The client renders
-  one or the other and must pick by `turnId`.
+- That `message.delta` and `message` do not both appear for one turn **on an uninterrupted
+  connection**. The client renders one or the other and must pick by `turnId`. Across a
+  reconnect the question does not arise: only the `message` arrives, because deltas do not
+  replay (D168).
 - **That raw vendor `usage` numbers are summable.** They are not summed anywhere above the
   adapter without the adapter having normalised them first — see D75, and open question 14,
   which is the unverified half of it.
@@ -2471,15 +2489,23 @@ these are cited by number elsewhere in this document and in the slices.
    prompt rather than acting on one, and D5 is `/design`'s. What the answer changes today is
    the honesty of *The hard problem*, not the shipped policy: Codex sessions stay
    `preauthorised` and still emit zero `permission.request` events.
-5. **Sliced by D165 as S25, which opens with this probe.** Still unanswered — it is an experiment
-   and no slice owned the run, which is why it stayed open. What D165 adds is that the probe must
-   answer more than "does the flag work": whether it disturbs the permission round trip S1.1 and
-   S4.2 rest on, whether it disturbs the per-`message.id` usage normalisation of D75 and S1.11,
-   and what it does to **envelope volume** — every envelope takes a `seq`, enters the ring and is
-   appended to the spill, so deltas multiply all three, and D163's backwards replay and D147's
-   payroll fold both pay for it. Whether a delta is persisted at all is a second, separate stop:
-   *Rules the renderer may rely on* already permits rendering either the deltas or the message,
-   which live-only would satisfy, and S1.5's contiguous `seq` is what it collides with. (#13)
+5. **Answered by S25.1, and its second half resolved by D168: a delta is a live-only frame.**
+   The experiment ran against the installed CLI and is written up in
+   `findings/S25-token-streaming-probe.md`. `--include-partial-messages` does emit usable
+   incremental text, it concatenates byte for byte to the final `message`, and it disturbs
+   **neither** the `control_request` round trip S1.1 and S4.2 rest on **nor** the
+   per-`message.id` usage normalisation of D75 and S1.11 — the two answers that would have
+   stopped the slice outright. The granularity is coarse, not per-token: roughly eighteen words
+   per delta, which is transport-level batching rather than the CLI passing every model token
+   through. **Envelope volume is the half that needed a ruling and got one.** A 163-word reply
+   produced nine deltas and fourteen `stream_event` records against the one `assistant` record
+   today, so persisting deltas would have multiplied the spill, the ring and D147's fold by
+   about an order of magnitude on text turns — to store, a second time, text the `message`
+   envelope already carries. D168 rules that a `message.delta` takes no `seq`, is never spilled
+   and never replays, for both vendors, which removes the collision with S1.5's contiguity by
+   construction instead of weakening it. What this now owes elsewhere: `20-contract.md` states
+   the concatenation rule in `seq` order and lists `message.delta` among the envelope kinds,
+   and both are amendments `/contract` owns, not this document. (#13)
 6. **Answered by S8.1: two live interfaces, and neither matches the rollout schema.**
    `codex app-server` is JSON-RPC 2.0 over stdio, marked `[experimental]` by the CLI itself
    and schema-generated rather than hand-transcribed; `codex exec --json` is newline-delimited

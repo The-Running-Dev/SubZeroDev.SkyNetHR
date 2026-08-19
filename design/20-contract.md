@@ -29,7 +29,10 @@ a pointer in the same commit**. That replacement is descriptive drift corrected 
 found (`AGENTS.md` *Hard rules*), not a contract amendment, and it needs no approval. It is
 one-way: a later pass never turns a pointer back into a scaffold.
 
-No slice currently owes a scaffold.
+**S25 owes one scaffold: `FrameKind` and `Frame`**, under *Types § Event envelope*. Nothing in
+the tree declares a frame today, because `message.delta` is currently constructed as an ordinary
+envelope; D168 rules that it is not one, and the slice that materialises these two declarations
+replaces that block with a pointer in the same commit.
 
 **A comment in the tree is not the canonical statement of a rule.** The declarations in
 `src/contract/index.ts` carry explanatory comments, many of them copied from earlier
@@ -231,6 +234,44 @@ at the edge. `checklist.item.completed` is the one kind tier two adds, and it is
 session-scoped: it carries no `turnId` and may land between a `turn.started` and its
 `turn.ended`.
 
+**Not everything a client receives is an envelope, and `message.delta` is the one exception**
+(D168). A delta is a **frame**: delivered to live subscribers and to nobody else, carrying no
+`seq`, never entering the ring buffer, never appended to the spill, and never replayed. The kind
+stays in `EventPayloadMap` — it is one of the vocabulary's members and a client dispatches on it
+exactly as before — but no `Envelope` is ever constructed for it (I51).
+
+The exception is deliberate rather than an omission, and the reason is what makes it safe: deltas
+concatenate **exactly** to the `message` that follows them, so the text is already durable in that
+envelope, and spilling the deltas as well would store it a second time while multiplying the
+spill, the ring and `PayrollView`'s fold by the delta rate — measured at roughly an order of
+magnitude on text turns (`design/findings/S25-token-streaming-probe.md`). Giving a delta no `seq`
+at all
+removes the collision with I1's contiguity **by construction** rather than weakening the
+invariant to accommodate a rendering nicety. What a client gives up is partial text across a
+reconnect: a reconnect mid-message replays no deltas and renders the `message` when it lands,
+which *Rules the renderer may rely on* already permits.
+
+**It holds for both vendors**, so persistence never becomes vendor-dependent for one kind: Codex's
+`item/agentMessage/delta` is a frame on the same terms as Claude's.
+
+Where the code does not yet declare this shape it is scaffolded here. A frame is an envelope minus
+`seq` — the manager assigns `sessionId`, `ts` and the payload's `turnId` as it always has, and
+assigns no `seq`, because a frame has no position in the replayable stream:
+
+```ts
+export type FrameKind = 'message.delta';
+
+export type Frame<K extends FrameKind = FrameKind> = K extends FrameKind
+  ? {
+      readonly sessionId: SessionId;
+      readonly ts: IsoTimestamp;
+      readonly kind: K;
+      readonly data: EventPayloadMap[K];
+      readonly raw?: unknown;
+    }
+  : never;
+```
+
 `raw` is present only when `config.includeRaw`. It exists for debugging and **must never be
 rendered**.
 
@@ -311,6 +352,13 @@ because an attachment originates with an operator. Bytes are fetched from
 echoed unguarded on the way out; the read route's allow-list is in *HTTP routes*.
 `Caps.attachmentBytes` bounds the **decoded** size.
 
+**`MessageDelta` is the payload of a frame, never of an envelope** (D168, I51). `text` is
+append-only: each delta carries the increment, never the accumulation, and the increments for one
+`turnId` concatenate to the `message` that follows. **The concatenation is in arrival order and
+cannot be in `seq` order, because a frame has no `seq`** — an ordering a consumer therefore takes
+from the live stream it received them on, which is the only stream they exist in. A delta is never
+re-delivered, so there is no second arrival for that order to disagree with.
+
 **`ToolResult.output` is truncated before the envelope is constructed** (I3, D22), and
 `bytes` is the pre-truncation size. The envelope in the ring and the line in the spill are the
 same bytes; a design where the spill held the full output and the wire the truncated one would
@@ -360,8 +408,14 @@ are not.
 
 ### Rules the renderer may rely on
 
-- `message.delta` events for one `turnId` concatenate, in `seq` order, to the `message` that
-  follows. A client may render either and must not render both, and picks by `turnId`.
+- **`message.delta` frames for one `turnId` concatenate, in arrival order, to the `message` that
+  follows** (D168). Not in `seq` order: a delta is a frame and carries no `seq` (I51). A client
+  may render either and must not render both, and picks by `turnId`.
+- **A delta never survives a reconnect, and that is what makes the rule above decidable.** Deltas
+  are live-only: they are never replayed, so a client that reconnects mid-message receives no
+  deltas for that message and renders the `message` when it lands. The "must not render both"
+  choice therefore only ever arises on an uninterrupted connection; across a reconnect the
+  question does not arise at all.
 - `tool.result` always follows its `tool.call`. A `tool.call` with no result by `turn.ended`
   was abandoned.
 - `permission.request` is always answered by exactly one `permission.resolved`, including
@@ -615,7 +669,7 @@ though it were new is silent wrong state rather than a parse error.
 | File | Key | Ordering / index | Constraints |
 |---|---|---|---|
 | `meta.json` | `sessionId` from the directory name | — | Written by temp-file-then-atomic-rename, never in place, on exactly three occasions: create, a `state` transition, a `cliSessionId` change. Never per event (I16) |
-| `events.ndjson` | `(sessionId, seq)` | `seq` ascending, contiguous from 1 | Append-only, written in `seq` order through the session's own append chain (D89). Not fsync'd per line. **Read backwards from the tail to locate `after + 1`, then emitted forward** — O(envelopes since the disconnect), not O(file). No offset index exists and none is planned (D163) |
+| `events.ndjson` | `(sessionId, seq)` | `seq` ascending, contiguous from 1 | Append-only, written in `seq` order through the session's own append chain (D89). Not fsync'd per line. **Read backwards from the tail to locate `after + 1`, then emitted forward** — O(envelopes since the disconnect), not O(file). No offset index exists and none is planned (D163). **A `message.delta` is never appended**: it is a frame, not an envelope, so this file holds no line for one and a replay never produces one (D168, I51) |
 | `tool-output/<turnId>/<callId>` | `(sessionId, turnId, callId)` | — | Written once, never appended. `turnId` is in the path because `callId` is vendor-minted and only *assumed* session-unique (I22). Bounded per session by `Caps.sessionToolOutputBytes`: past the budget the blob is **not written**, and the fetch answers `404 no_such_output` exactly as S9.5 already specifies (D162). Nothing already written is ever evicted |
 | `attachments/<turnId>/<attachmentId>` | `(sessionId, turnId, attachmentId)` | — | Written once, never appended, fsync'd before the envelope naming it exists (I49). `attachmentId` is server-minted, so the operator's `filename` never reaches a path. A sidecar `attachments/<turnId>/<attachmentId>.meta` holds the stored `mediaType` as UTF-8 text, written the same way, so the read route can echo it for an allow-listed image type without scanning the spill for the `AttachmentRef` that named this id. Removed with the session (D25, D160) |
 | `audit.ndjson` | append order | append order, read newest first | Server-wide. fsync'd before the decision it records reaches the child (I10). Never truncated, never deleted with a session (I13). Every read is a bounded window resumed by `AuditCursor` (I39) |
@@ -1031,6 +1085,13 @@ What the declarations cannot say:
   action.
 - **`subscribe` replays from the ring, else from the spill, else delivers one
   `error / replay_gap`, then joins the live stream** — for live and ended sessions alike (D40).
+  **A replay never yields a `message.delta`**, because neither store holds one (I51); a subscriber
+  receives deltas only for the part of the stream it was attached for.
+- **`emit` assigns no `seq` to a `message.delta` and neither spills nor rings it** (D168, I51). A
+  frame goes to the current subscribers and nowhere else. That is the whole of the exception —
+  `sessionId`, `ts` and the payload's `turnId` are assigned exactly as for any other kind, and
+  every other kind still takes a `seq` from the same synchronous prefix, so I1's contiguity is
+  untouched rather than relaxed.
 - **`tickChecklistItem` is idempotent**: a second tick for an item already complete emits no
   second envelope and still succeeds (I36).
 - **`readAudit` and `getSnapshotForReview` take no owner and apply no ownership check**, unlike
@@ -1091,9 +1152,13 @@ function as `.handleUpgrade`, Node's own `'upgrade'` listener signature, and `se
 extension of the returned value, not a widened contract**: the function is still exactly a
 `RequestListener` to every caller that only calls it as one.
 
-**The WebSocket stream is the same `Envelope` stream `edge/sse` writes**, one JSON-encoded
-`Envelope` per text frame, in `seq` order, with **nothing else multiplexed onto the same
-socket**. The first client frame is JSON `{ after?: Seq }`, read exactly as `Last-Event-ID` is on
+**The WebSocket stream is the same stream `edge/sse` writes**, one JSON-encoded `Envelope` per
+text frame, in `seq` order, with **nothing else multiplexed onto the same socket** — save the one
+thing the SSE edge also carries, a `message.delta`, which is written as a `Frame` and is therefore
+distinguishable by the **absence of `seq`** rather than by a wrapper of its own (D168, I51). That
+absence is the signal: `seq` is a client's only resume position on this edge, so a body without
+one is a frame it must render and must not treat as a resume point. A delta interleaves with the
+`seq`-ordered envelopes and does not interrupt their order. The first client frame is JSON `{ after?: Seq }`, read exactly as `Last-Event-ID` is on
 the SSE edge: omitted or `0` replays from the start, otherwise from `after + 1`, including the
 spill-served case and the gap case, where `error / replay_gap` is sent as a frame carrying no
 resumable position exactly as SSE's gap frame carries no `id:`.
@@ -1307,6 +1372,14 @@ the transcript from `seq` 1. If *that* gaps too, the spill cannot be read at all
 again is a reconnect loop rather than a recovery — so the client stops and says the history is
 unavailable and it is showing live events only.
 
+**A `message.delta` is written with no `id:` line, because it has no `seq` to put there** (D168,
+I51). It is delivered to whoever is attached at the moment it is produced and to nobody else, so a
+client's resume point is unchanged by receiving one — which is the property that matters: an
+`EventSource` reconnecting after a delta asks for the same `Last-Event-ID` it would have asked for
+without it, and the `message` that follows the deltas is the envelope that carries the text
+forward. This is the same framing device `replay_gap` already uses for a different reason, and the
+two must not be conflated: a gap frame restates a watermark, a delta frame has none.
+
 **A `replay_gap` envelope restates the watermark its subscriber is complete through; it does not
 consume a `seq`** (D156). It is the one envelope `emit` never produces: no `seq` is assigned,
 nothing is appended to the spill, nothing reaches the ring, and it goes to a single subscriber
@@ -1470,7 +1543,7 @@ highest-value section in this document.
 
 | # | Invariant | Owner |
 |---|---|---|
-| I1 | `seq` is strictly increasing by exactly one, per session, from 1. A gap is a bug, never a dropped event. It governs what `emit` assigns; the `replay_gap` envelope is not one of those and restates a watermark instead of consuming a `seq` (D156, *Streaming*) | `session-manager` |
+| I1 | `seq` is strictly increasing by exactly one, per session, from 1. A gap is a bug, never a dropped event. It governs what `emit` assigns, and two things are outside that: the `replay_gap` envelope restates a watermark instead of consuming a `seq` (D156, *Streaming*), and a `message.delta` is assigned none at all (I51). Neither weakens the contiguity — the first consumes no number and the second never enters the sequence (D168) | `session-manager` |
 | I2 | The ring buffer's contents are a strict suffix of the spill's, envelope for envelope, byte for byte | `store` |
 | I3 | A `tool.result` is truncated before its envelope is constructed; the envelope in the ring and the line in the spill are identical | `session-manager` |
 | I4 | At most one `Turn` per session is non-null at any time | `session-manager` |
@@ -1517,6 +1590,7 @@ highest-value section in this document.
 | I48 | `ToolCall.summary` is display-only: above `adapters/*` it is rendered as a text node and nothing else. No module parses it, matches against it, or derives anything persisted or security-relevant from it; its shape is not contractual. Testing it for empty, to decide whether to show the line at all, is display and is permitted | `adapters/*`, `session-manager`, `client` |
 | I49 | An attachment's bytes never enter `events.ndjson`, and an operator's `filename` never reaches a filesystem path — the server-minted `AttachmentId` is the only path segment. The blob is written and fsync'd before the `message` envelope naming it is constructed | `store`, `session-manager` |
 | I50 | A storage root is held by at most one server process. `<storage>/server.lock` is claimed **before boot's reap step**, not merely before `listen`, and a lock naming a `hostname` other than this host is never reclaimed whatever its `pid` says. A boot that refuses on a held lock has written nothing server-wide (D161) | `store`, `session-manager` |
+| I51 | A `message.delta` is a live-only frame, for **both** vendors: it is assigned no `seq`, no `Envelope` is ever constructed for it, it never enters the ring buffer, it is never appended to `events.ndjson`, and it is never replayed. It is delivered to the subscribers attached when it is produced and to no others. Deltas for one `turnId` concatenate in arrival order to the `message` that follows (D168) | `session-manager`, `adapters/*` |
 
 **I40, I41 and I42 were never allocated, and the gap is left open rather than closed.** The
 numbering jumps from I39 to I43 and nothing is missing. Ids here are cited by number in
@@ -1560,6 +1634,18 @@ top-level `rate_limit_event` and `control_response`, and the `system` subtypes `
 Anything outside both the twelve rows and that list still raises `adapter_unknown_record`,
 non-fatally, with the record preserved in `raw`. **The list is a vendor fact and lives with the
 vendor's adapter; adding to it is an adapter change, never a change to `ErrorEventKind`.**
+
+**This table has no `message.delta` row and the absence is S25's to close, from observation** (D165,
+D168). `--include-partial-messages` is proven to emit usable incremental text that concatenates
+byte for byte to the final `message`, and to disturb neither the `control_request` round trip nor
+the per-`message.id` usage normalisation — that is S25.1's finding
+(`design/findings/S25-token-streaming-probe.md`), not a mapping. The `stream_event` records it
+observed are in neither the rows above nor the ignore list below, so an adapter that has not yet
+mapped them raises `adapter_unknown_record` for each, non-fatally, which is the correct behaviour
+for an unmapped record and not a defect to work around. **No row is written here in advance of the
+adapter that observes it**, exactly as the Codex tables were filled by S8.1 rather than
+hypothesised. What D168 fixes ahead of that work is only what a delta *is* once mapped: a frame,
+on the same terms as Codex's (I51).
 
 `updatedPermissions` is never sent (I47). Standing approvals are held by this server and matched
 here, so that every match still produces a `permission.request` / `permission.resolved` pair and
@@ -1641,7 +1727,7 @@ schema-generated (`codex app-server generate-json-schema`, `v2/`), not hand-tran
 | `item/started`, type `reasoning` | *nothing*; text accumulates in the adapter |
 | `item/reasoning/summaryTextDelta` | *nothing*; accumulated |
 | `item/completed`, type `reasoning` | `thinking`, with the accumulated text |
-| `item/agentMessage/delta` | `message.delta`, role assistant |
+| `item/agentMessage/delta` | `message.delta`, role assistant — a **frame**, not an envelope (D168, I51) |
 | `item/completed`, type `agentMessage` | `message`, role assistant |
 | `item/started`, type `commandExecution` | `tool.call`; `callId` is the item's `id` |
 | `item/commandExecution/outputDelta` | *nothing*; accumulated |
@@ -1664,6 +1750,11 @@ Newline-delimited JSON on stdout. **No deltas of any kind**: text arrives whole,
 | `item.started` / `item.completed`, `item.type == 'command_execution'` | *not mapped* — recognised and dropped, deliberately. The item's `aggregated_output`, `exit_code` and `status` are all there; what is missing is a session-unique `CallId` to correlate on. See *Item ids* below and `## Unresolved` 13 |
 | `turn.completed` | `turn.ended`, `stopReason: 'completed'`. Its `usage` is **not** mapped — see *Usage* |
 | `close` with no `turn.completed` seen | `turn.ended`, `stopReason: 'process_exit'` |
+
+**That row is live-only, and D168 changed it rather than leaving Codex where it shipped.** A delta
+on this transport was previously spilled like any other envelope; it no longer is. The ruling is
+cross-vendor deliberately — closing Claude's rendering asymmetry by opening a persistence
+asymmetry, on the same surface, is the trade D165 declined in the other direction.
 
 ### Neither interface emits a `tool.call` / `tool.result` pair
 

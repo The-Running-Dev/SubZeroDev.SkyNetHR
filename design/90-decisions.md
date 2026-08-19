@@ -3626,6 +3626,67 @@ a wiring choice rather than an architectural one, and it would block S22 on a qu
 settles.
 Reversibility: cheap. One parameter, one boot step; nothing is built yet.
 
+### 2026-08-19 — D168 A `message.delta` is a live-only frame and takes no `seq`, for both vendors
+Context: `10-design.md` open question 5, and S25.2, which stopped the slice for this and named
+`/design` as its owner. S25.1's probe (`design/findings/S25-token-streaming-probe.md`) cleared all
+four of its gates against the installed CLI — `--include-partial-messages` emits usable incremental
+text, it concatenates byte for byte to the final `message`, and it disturbs neither the
+`control_request` round trip S1.1 and S4.2 rest on nor the per-`message.id` usage normalisation of
+D75 and S1.11 — and left the volume question open by design. Measured: a 163-word reply produced
+nine `content_block_delta` and fourteen `stream_event` records against one `assistant` record
+today; a nine-word reply produced two and seven. Every envelope today takes a `seq`, enters the
+ring and is appended to the spill, so persisting deltas multiplies all three by roughly an order of
+magnitude on text turns. Codex already emits `message.delta` through that same path, so this was
+never a Claude-only question.
+Chosen: a `message.delta` is delivered to live subscribers and to nobody else. It carries no `seq`,
+never enters the ring buffer, is never appended to the spill and never replays. It is therefore the
+first thing a client receives that is **not** an envelope, and that frame-versus-envelope split is
+now stated in `10-design.md § Event envelope` rather than left to whichever module noticed it
+first. It applies to **both** vendors: Codex's `item/agentMessage/delta` mapping stops being
+spilled.
+**Why the cost is not payable.** Deltas concatenate exactly to the `message`, and the `message` is
+spilled regardless. Persisting the deltas stores the same text a second time and buys nothing on
+replay of a completed turn, because that envelope is already complete and authoritative. The one
+thing it buys is mid-message reconnect fidelity — partial text a few seconds before the `message`
+would have arrived anyway — and the price is about 10x spill bytes on text turns, 10x the lines
+D147's payroll fold walks, 10x the distance D163's backwards replay reads per second of
+disconnection, and a `ringCapacity` of 2000 (D99) covering roughly a tenth of the wall-clock it
+covers today. S25.6's flag defaulting off would have mitigated the Claude half and done nothing
+about the Codex half.
+**Why `seq` is the deciding constraint rather than a casualty of it.** S1.5 asserts `seq` is
+contiguous from 1 with no gaps, and replay depends on it. A delta that took a `seq` and was not
+spilled would put a hole in the spill; a delta that took a `seq` and was spilled is the costly
+option above. Giving deltas no `seq` at all removes the collision by construction rather than
+weakening the invariant to accommodate a rendering nicety, and `(sessionId, seq)` stays the primary
+key of everything replayable — the property `10-design.md § Event envelope` opens by calling
+expensive to change.
+**Why both vendors rather than Claude alone.** D165 sliced S25 to close a cross-vendor asymmetry on
+the console's main surface. Ruling live-only for Claude while Codex's deltas stayed replayable
+would close a rendering asymmetry by opening a persistence one, on the same surface — the trade
+D165 declined in the other direction.
+**What this owes elsewhere, and to whom.** `20-contract.md` states the delta concatenation rule in
+`seq` order and carries `message.delta` in the envelope-kind union; both are amendments, and both
+are `/contract`'s rather than this document's. S25.2 is answered and S25.3 to S25.7 are unblocked;
+S25.4's byte-for-byte concatenation assertion loses its `seq` ordering and asserts arrival order
+instead, and S25.6's flag-off comparison now holds trivially for persistence, which is a
+strengthening of that criterion rather than a loss.
+Rejected: **spilling deltas with a `seq`, uniform with every other kind.** The conservative
+reading — no new frame class, no contract addition, mid-message-faithful on replay. Rejected on the
+measured cost above, paid permanently, against a benefit the `message` envelope already delivers.
+Rejected: **live-only for Claude, Codex left exactly as it ships.** Touches nothing already built
+and needs no re-run of the Codex criteria. Rejected because it makes persistence vendor-dependent
+for a single envelope kind, which is a worse inconsistency than the one S25 exists to remove, and
+because it is the reading that gets chosen by nobody deciding.
+Rejected: **dropping the delta kind entirely and rendering only whole messages.** The cheapest
+thing in the tree, and it would delete `MessageDelta` and one Codex mapping row. Rejected because
+it regresses Codex's shipped behaviour to settle a question about Claude's, and because *Rules the
+renderer may rely on* was written for two granularities deliberately.
+Reversibility: expensive in one direction only, and the direction chosen is the recoverable one.
+Making a live-only delta persisted later is additive — it gains a `seq` and an append, and nothing
+already written becomes wrong. Going the other way once deltas are in the spill means either a
+spill with gaps or rewriting existing sessions' `events.ndjson`, and the ring-is-a-strict-suffix-
+of-the-spill invariant makes the intermediate state unrepresentable.
+
 ## Open
 
 Staging only. Once an item becomes an issue it leaves this list.
