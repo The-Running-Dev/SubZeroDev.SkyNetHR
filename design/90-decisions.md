@@ -3252,6 +3252,277 @@ in `src/` changed to produce them, and none of `design/00-brief.md`, `design/20-
 `design/30-slices.md` needed a word altered — the "Hosting the model" non-goal already drew the
 boundary this artifact stays inside of.
 
+### 2026-08-19 — D158 Payroll's fourth tile is session cost in currency, at flat deployment rates
+Context: the prototype's payroll screen draws four tiles. D53 kept the screen whole by the owner's
+ruling but recorded the asymmetry plainly — three tiles need no credential, while the fourth, cost
+per shipped PR, has "no source and is left open". Nothing in this server knows what a shipped PR is:
+that fact lives in a forge, and reaching it means a forge credential, an outbound-network assumption
+`00-brief.md § Constraints` does not make, and a session-to-repository-to-PR mapping nothing records.
+Brief item 8 names three tiles, so cutting the fourth needed no brief change and keeping it did.
+Chosen: replace the tile rather than cut it. The fourth tile becomes **session cost in currency** —
+`burn` priced against four operator-set rates, one per `Usage` component, with a currency label the
+server never interprets. This is the reading of item 8's own headline sentence, "see what a session
+has cost", that the three sub-clauses under-serve, and it stays what the other three tiles are: a
+fold over data already written plus a `config` value, needing no credential and no network call.
+D61 is not reversed by this and was never in tension with it — D61 explicitly *rejected* narrowing
+the model-hosting non-goal to forbid pricing lookups, on the grounds that doing so would pre-decide
+this very item. This decision is the one D61 held the door open for.
+Rates are **flat per deployment**, not per model. `Usage` carries four token components and no model
+identifier, and `UsageEvent` is `{ turnId, usage }`, so pricing per model would mean a new field on a
+public event payload and a corresponding change in every adapter. The known cost of flat rates is
+stated rather than hidden: a session that switched models is priced approximately, and the figure is
+an estimate against operator-set rates, never a vendor's billed amount.
+Rejected: dropping the tile. It was the recommendation and the owner ruled against it, consistent
+with D53's ruling on the same screen; recorded here as known-and-retained rather than dropped
+silently.
+Rejected: a forge integration to source the original figure. A new credential class, a new network
+assumption, and a brief amendment, for one tile.
+Rejected: per-model rates. Materially more correct and materially larger — it changes a public event
+payload and every adapter, and turns a fold into a plumbing change. The imprecision it would fix is
+recorded above and is tracked, not accepted silently.
+Reversibility: cheap in code — the tile is a fold and a `config` read, and nothing persists it.
+The brief edit adding a fourth clause to item 8 is the expensive half to reverse, because the
+definition of done is what everything downstream is checked against.
+
+**One coupling this creates, and it is not closed here.** `20-contract.md § Unresolved` 12 records
+that `PayrollView.burn`'s all-zero value already carries two meanings — a genuinely free session,
+and `codex exec --json` reporting nothing — and rules that nothing may infer the distinction by
+testing `burn` for zero. A currency figure inherits that and sharpens it: a fabricated `0.00` reads
+as authoritative in a way `0 tokens` does not. `costCurrency` is therefore `null` on exactly the
+sessions that emit `session.notice / usage_unavailable` (D146), derived from the same signal and
+never from testing `burn`. Whether `burn` itself should become nullable stays open on #30 and #91;
+this decision adds weight to it and does not settle it.
+
+### 2026-08-19 — D159 `ToolCall.summary` is the adapter's, and D109 already governed it
+Context: `20-contract.md § Unresolved` 4 carried the owner of `ToolCall.summary` as open, calling
+the adapter's authorship "the one place that reading is uncomfortable" — vendor code producing a
+display string. It has sat open since the contract was first derived. What the item does not say is
+that the identical question was answered three days later for a sibling field: D109 asked whether
+the tool-to-string projection behind `matchTarget` belongs to the adapter or to `session-manager`,
+and ruled for the adapter, because a projection table is tool-shape knowledge and
+`Bash`/`Read`/`Edit`/`Write` are one vendor's vocabulary — "a table there hard-codes Claude's
+vocabulary into vendor-neutral code and is wrong the moment another adapter ships".
+Chosen: the adapter owns `summary`, and this is recorded as decided rather than tolerated. D109's
+argument transfers without modification: summarising a tool call in one line requires knowing which
+field of that tool's input is the interesting one, which is the same table by a different name. The
+tree already reflects it and reflects the kinship — `summariseToolCall` sits in its own module
+beside the Claude adapter, `summariseCommand` beside the Codex one, and `projectMatchTarget` shares
+`BASH_COMMAND_FIELD` with the summariser precisely "so the two can't silently disagree about it".
+**A constraint is added rather than left implied: `summary` is display-only.** Above `adapters/*`
+it is rendered as a text node and nothing else — no parsing, no matching, nothing persisted or
+security-relevant derived from it (I48). That is what bounds the cost of vendor code producing a
+display string: it makes the string's shape non-contractual, so an adapter may change how it reads
+without breaking a consumer. The invariant was checked against the tree before it was written, not
+asserted: `client/render.js` renders it with `el(doc, 'div', 'tool__summary', data.summary)` and
+tests only whether it is empty, which is a display decision and is why I48 permits that one case
+explicitly rather than leaving a true statement looking like a violation.
+Rejected: **moving it to `session-manager`**. It reopens D109 with no new evidence and reintroduces
+the exact boundary violation D109 refused.
+Rejected: **removing `summary` from the wire and letting the client compose one from `name` and
+`input`.** It relocates tool-shape knowledge into the client, which S2.11 forbids outright — a
+search of client sources for `claude` and `codex` must return nothing, and a per-tool field table is
+that vocabulary in all but spelling.
+Rejected: **deriving `summary` above the adapter from `name` + `matchTarget`.** Superficially
+attractive, since it would delete a field and reuse a projection that already exists. It fails
+twice: `matchTarget` is `null` for every tool outside Claude's four mapped rows while a summary must
+exist for all of them, and it couples a display string to a security primitive that I43 and I46
+require be matched anchored and untruncated. A change to how a summary looks would then bear on the
+field the standing-rule grammar matches against.
+Reversibility: cheap. `summary` stays where it already is; the change is a settled owner, a stated
+constraint and one invariant.
+
+### 2026-08-19 — D160 Attachments ride inline with the message, and their bytes never enter the spill
+Context: D47 removed `attachments?: Attachment[]` from `POST /message` because the type was never
+defined and nothing described handling — "it is a feature, not a type, and inventing one at the
+contract stage commits the implementer to a transport nobody chose". `20-contract.md § Unresolved`
+1 has carried the gap since. No definition-of-done item needs attachments, so the owner was asked
+whether to drop them or design them, and ruled: design them.
+Chosen, in five parts.
+
+**1. Inline with the message, not a separate upload.** `POST /message` takes
+`attachments?: AttachmentUpload[]`, each carrying `filename`, `mediaType` and base64 bytes, and the
+whole thing is one request. Rejected: a two-step `POST /attachments` minting an id that `/message`
+then references. It enforces a byte cap on a stream rather than after a parse, which is the one
+thing it is better at — and it buys that by creating uploaded bytes that belong to no message,
+which is a half-wired state the slice rule forbids and a sweeper nothing else here needs. An
+attachment has no meaning apart from the message it arrives with, so it is atomic with it.
+
+**2. The bytes never enter `events.ndjson`.** They are written to
+`<storage>/sessions/<id>/attachments/<turnId>/<attachmentId>` before the envelope is constructed,
+and `MessageEvent` carries `AttachmentRef[]` — id, filename, media type, byte count — and never the
+data. This is D22's tool-output rule run in the other direction, and for the same reason: the spill
+is the transcript and a base64 screenshot in it makes every replay pay for the image. The path
+carries `turnId` for D22's reason too, so an id cannot collide across turns.
+
+**3. No audit record, and the transcript is the record.** `audit.ndjson` holds tool approvals.
+S14.10 already refused to dilute it with provisioning clicks — "diluting it with provisioning
+clicks makes the artifact the threat model leans on harder to read" — and an attachment is not an
+approval. What records it is the `message` envelope itself: ordered by `seq`, durable, replayable,
+attributed to the session's owner. Brief item 7 asks who let the agent *run* what, which this does
+not change.
+
+**4. It is not a jail question, and saying why is the point.** The obvious objection is that an
+attachment walks bytes past `workspaceRoot`. It does not, because the jail never contained them:
+*Threat model* already states that `workspaceRoot` is not a sandbox and that the agent runs with
+the server user's full filesystem access, so an attachment adds no reach the child did not have.
+What it does add is **operator-chosen content entering the agent's context**, which is the *confused
+agent* row with the operator as the source rather than a README. The control is unchanged — the
+operator chose it, at the same trust level as the message text beside it — and that is stated
+rather than left to be inferred.
+
+**5. Vendor support is declared, never assumed.** `Adapter` gains `acceptsAttachments`, and a
+message carrying attachments to an adapter declaring `false` is `422 bad_request` naming
+`attachments`. The edge tests a capability, not a vendor, so I20 is intact. Whether the Claude CLI
+accepts image content blocks over `--input-format stream-json` is **unprobed**: the adapter already
+writes the Anthropic content-block shape, `content: [{ type: 'text', text }]`, so the transport has
+structural room, but room is not acceptance. S21.1 is a committed finding that stops the slice if
+the answer is no — the shape S8.1 and S10.1 already use for unverified vendor behaviour.
+
+Rejected: **dropping attachments**. It was the recommendation — no DoD item needs them and the
+agent already reaches the whole workspace — and the owner ruled against it. Recorded as
+known-and-retained rather than dropped silently.
+Rejected: **serving an upload back under its own declared media type.** An operator-uploaded
+`text/html` served inline on the console's origin is stored XSS holding the console's cookies. The
+read route serves `nosniff` and `Content-Disposition: attachment` always, and echoes the stored
+media type only for an allow-list of image types, `application/octet-stream` otherwise. D74 widened
+the no-`innerHTML` rule to everything stored; this is that population arriving as bytes.
+Rejected: **truncating an oversized attachment**, the way `tool.result` is truncated. D84's rule
+governs authored content instead: over `caps.attachmentBytes` or `caps.attachmentCount` is
+`422 bad_request` naming the field, with nothing written and nothing shortened. A silently
+truncated file is a corrupt file.
+Reversibility: expensive. It adds a persisted store, a public route, a request field and an
+`Adapter` method signature. The probe in S21.1 is what keeps the expensive half from being built
+against an assumption.
+
+### 2026-08-19 — D161 One server per storage root, enforced by a lock reusing D23's liveness test
+Context: `10-design.md` open question 3. Nothing prevents two server processes over one storage
+root, and the no-lock argument in *Concurrency* — one append stream per file, one single-threaded
+process, so appends cannot interleave — holds for one process and stops holding for two **without
+saying so**. Three things break, and they are not equally bad: appends to the four server-wide
+files interleave, which corrupts `audit.ndjson`, the artifact the threat model leans on; two
+registries disagree about which workspace is busy (D19), and in tier two both consume one approved
+requisition; and boot **reaps a live sibling's children**, because S7.5's reaper cannot tell
+another server's agents from its own orphans. The design already called a lock "the obvious answer"
+and left it open on the grounds that whether an accidental double-start is worth a startup failure
+mode is a deployment judgement rather than an architectural one.
+Chosen: take the lock. `<storage>/server.lock` is written at boot, before step 1 of *Boot ordering*,
+carrying `pid`, `hostname` and `startedAt`. A boot that finds a live lock refuses with
+`StartupError.storage_locked` naming the holder and exits non-zero.
+**Staleness is answered with machinery that already exists, which is what makes this cheap.** The
+objection to any lock is the crash that leaves one behind, and it sharpened when the container
+artifact landed — a restarted container is exactly where a stale lock bites. D23 already built the
+test: a `ProcessRecord` is live only if it has no `exitedAt`, a `startedAt` later than the host's
+last boot, and a matching process image. A lock is reclaimed automatically on exactly the same
+three-part test against its own `pid`, `startedAt` and this server's image, and reclaiming is
+logged. So the guard is not new code and not a new dependency; it is the reuse guard pointed at a
+second file. A lock whose `hostname` is not this host is **never** reclaimed automatically — the
+liveness test cannot see another machine's process table, and guessing there is how two servers on
+one network share come to run anyway.
+Rejected: **refusing on any lock file at all, cleared by hand.** Simpler, with no liveness test to
+get wrong, and rejected because every unclean shutdown then needs manual intervention before the
+service returns — including an ordinary container restart, which is not an incident and must not
+become one.
+Rejected: **no lock, recorded as accepted risk.** Cheapest, and it leaves the failure silent. A
+corrupted audit log and a reaped sibling's children are not failures an operator diagnoses from
+symptoms.
+Rejected: **an OS advisory lock** (`flock`, `LockFileEx`) instead of a file with contents. It is
+self-releasing, which removes the staleness problem entirely — and it is rejected because the two
+platforms differ here in exactly the way `10-design.md § Platform divergence` catalogues, it adds a
+native dependency or a fragile shim, and it can tell you the root is held without telling you
+*by what*. Naming the holder is most of the value when an operator is looking at a refusal.
+Reversibility: cheap. One file, one boot step, one `StartupError` variant.
+### 2026-08-19 — D162 Tool-output blobs get a per-session byte budget, refused at write
+Context: `10-design.md` open question 2. Tool-output blobs (D22) are the only storage that grows
+with tool volume rather than with session count, and one `find`-heavy turn can outweigh a month of
+transcripts. Today they are deleted with their session and otherwise never — the option list called
+that "a decision made by not making one".
+Chosen: `Caps.sessionToolOutputBytes` bounds the **total** blob bytes one session may store. Past
+it, the blob is not written and the tool result is unaffected in every other way: the envelope
+still carries `truncated: true` and the true pre-truncation `bytes`, and the fetch route answers
+`404 no_such_output`. Deletion with the session (D25) is unchanged and remains the other half of
+the rule.
+**What makes this cheap is that blob absence is already a designed state.** S9.5 specifies that a
+missing or unreadable blob is `404 no_such_output` with the truncated envelope unaffected, so this
+introduces no error path — it reaches an existing one deliberately. Enforcement is at write and
+therefore synchronous, which keeps it inside the guard rule D32 already governs and avoids a
+sweeper, a timer, and a second thing that can disagree with the directory.
+**The rule stops at tool output and does not reach `attachments/`** (D160). The two directories
+look alike and are not: a tool-output blob is the output of a command that can be run again, and an
+attachment is operator-supplied and unreconstructible. Dropping the first costs a convenience;
+dropping the second destroys the only copy. An attachment is bounded at upload by
+`Caps.attachmentBytes` and `Caps.attachmentCount` instead, which refuse the write rather than
+discard a stored file.
+Rejected: **an age-based sweep at boot.** Predictable, and it never runs on a server that stays up
+— which is this deployment. It also bounds nothing about a single burst, which is the case the
+question was asked about.
+Rejected: **evicting the oldest blobs within a session** rather than refusing new ones. It keeps
+the budget while preserving recency, and it is rejected because it makes a completed, fetchable
+link go dead later for reasons the operator never sees, and because scanning and deleting inside a
+live session's directory is exactly the sweeper this decision avoids.
+Rejected: **leaving it deleted-with-session and saying so.** Zero mechanism and consistent with
+`audit.ndjson`'s accepted unbounded growth, and rejected because the objection here is *rate*
+rather than growth: the audit log grows with approvals, which are human-paced, while a blob
+directory grows with whatever a single command printed.
+Reversibility: cheap. One cap, one test at one call site, and the absent-blob path already exists.
+### 2026-08-19 — D163 No offset index; the spill is read backwards from the tail, as the audit log already is
+Context: `10-design.md` open question 11 held that no append-only file here has an index and every
+read scans, naming two files that needed one — the spill, and `audit.ndjson` as "the worse case",
+since the audit log is never truncated and its scan would grow with the deployment's whole
+lifetime.
+**Half of that is now stale, and checking it is what changed the answer.** S12 landed a bounded
+read: `readAuditPageImpl` walks backwards from the file's end under a scan budget, and I39 bounds
+*the read* rather than merely the result — a filtered query returns a short page with a non-null
+cursor instead of walking to byte 0. The audit log is therefore not the worse case and is not
+unindexed-and-scanning; it is solved, by a technique rather than by a sidecar.
+Chosen: no offset index, for the spill either, and the same technique instead. `readEventsAfter`
+finds `after + 1` by reading **backwards from the tail** and then emits forward, which costs
+O(envelopes since the disconnect) rather than O(file). This matches the access pattern rather than
+fighting it: a reconnect's `Last-Event-ID` is recent almost by definition, because the client just
+dropped.
+**The case that scans most often is not the one an index would fix.** D147 makes the payroll view a
+fold over every `usage` event in the spill, O(spill) per read, and a fold reads everything by
+definition — an index gives it nothing at all. So the index's only beneficiary was deep replay, and
+that is the case the backwards read already answers. Open question 11 named the index as the fix
+for "both files that need it" without separating seek from aggregation, and separating them is what
+leaves nothing for a sidecar to do.
+Rejected: **an offset sidecar.** It buys O(1) seek and costs a second file that must stay
+consistent with the spill, a crash story for a torn index against a torn spill — the spill's own
+torn tail is already an accepted hazard (#33) and a second file doubles that surface — and byte
+offsets becoming a quasi-public interface. D86 already refused exactly that for the audit cursor:
+"a byte offset makes the file's physical layout a public interface, which is exactly what open
+question 11's index would move."
+Rejected: **deferring again with a stated threshold.** Honest, and it leaves a question open that
+turns out to be answerable now, on evidence already in the tree.
+Reversibility: cheap. Nothing is built that an index would later have to be retrofitted around; a
+sidecar remains addable if a fold, not a seek, ever becomes the bound.
+### 2026-08-19 — D164 `Start-AgentSession.ps1` is development tooling and is not reconciled against the product
+Context: `10-design.md` open question 10 and issue #17 held that `tools/Start-AgentSession.ps1`
+(D14) is "unreconciled against this architecture" — that it assumes a local interactive terminal
+rather than the server/SSE/adapter shape D1 to D12 settled on — and that reconciling it should
+wait until a slice first needs a CLI launcher.
+Chosen: **there is nothing to reconcile, because the script is not part of the product.** Its own
+header states its three jobs: routing an agent-kit slash command to the model family
+`AGENTS.md § Command routing` prescribes, refusing to carry a session across a boundary
+`§ Session boundaries` forbids, and launching it in the project directory. It is a developer's
+tool for driving *this repository's own development*, sitting in `tools/` beside
+`Test-DesignDrift.ps1` and `Measure-Session.ps1`, and gated with them by S19.11's Pester job.
+Nothing about the server, the SSE edge or the adapter boundary bears on it, and a CLI launcher for
+the product remains unbuilt and unasked-for.
+**The confusion has a traceable source and it is worth naming, because it is what will cause the
+question to be asked again.** D14 justified relocating the script here on the grounds that "its
+subject — supervising agent sessions — is this repo's concern, not the kit's". That sentence reads
+as the *product's* session supervision, which is exactly what this repository is about. It is not
+what the script does: those are the *developer's* agent sessions. Two senses of "agent session",
+and open question 10 inherited the wrong one.
+Rejected: **reconciling it against the server/SSE/adapter architecture.** It would build a product
+CLI launcher no definition-of-done item asks for, out of a script that does something else.
+Rejected: **moving it back to `SubZeroDev.AgentKit`.** There is a real argument for it — if the
+script's subject is routing `AGENTS.md`'s own commands, that is the kit's subject, and D14's stated
+reason rests on the same conflation this decision identifies. It is declined because a re-reading
+of an unchanged file is not new evidence, and *Budget discipline* forbids relitigating a signed-off
+decision without some. Recorded here so the argument is retained rather than rediscovered.
+Reversibility: cheap. Nothing is built or moved; a later decision to relocate the script is a pure
+move, exactly as D14 was.
 ### 2026-08-19 — D165 Token-level streaming is sliced as S25, opening with the probe it needs
 Context: `10-design.md` open question 5 and issue #13 ask whether
 `claude --include-partial-messages` yields usable token-level deltas and whether `message.delta`
