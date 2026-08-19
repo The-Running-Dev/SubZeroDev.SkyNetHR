@@ -1398,9 +1398,10 @@ Acceptance:
   - S25.3 With the flag on, every existing Claude criterion still passes unchanged, re-run rather
     than assumed: S1.3's twelve mappings, S1.5's contiguous `seq`, S1.11's per-`message.id` usage,
     S4.2's allow-and-deny round trip against a real child, and S4.3's one-resolution-per-request.
-  - S25.4 Deltas for one `turnId` concatenate in `seq` order to the `message` that follows, byte
-    for byte, over a fixture of at least twenty messages including one containing multi-byte UTF-8
-    split across a chunk boundary (S1.2's hazard, at a new granularity).
+  - S25.4 Deltas for one `turnId` concatenate in **arrival order** to the `message` that follows,
+    byte for byte, over a fixture of at least twenty messages including one containing multi-byte
+    UTF-8 split across a chunk boundary (S1.2's hazard, at a new granularity). Arrival order, not
+    `seq` order: D168 rules a `message.delta` a live-only frame that carries no `seq`.
   - S25.5 The client renders deltas or the final message and never both, picking by `turnId`, and a
     reconnect mid-message renders exactly once — asserted by disconnecting between two deltas and
     comparing the rendered text against an uninterrupted run.
