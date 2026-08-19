@@ -958,8 +958,8 @@ flowchart TD
 | `store` | meta, spill, tool-output blobs, audit, process records, **the two record logs**, ring buffer | `config`, `contract` | Read/append primitives |
 | `checkpoints` | Shadow git lifecycle | `config`, `contract` | create / list / restore |
 | `adapters/*` | **The only vendor knowledge** | `contract` | `send`, `respond`, `kill`, and one inbound `notify` (D46) |
-| `records` *(tier two)* | Review and requisition lifecycle, their registries, the incident read | `config`, `store`, `contract` | Raise / decide / claim, author / finalise, read |
-| `session-manager` | Ownership, turn state, `seq`, fan-out, reaping, the payroll fold | `config`, `jail`, `store`, `checkpoints`, `adapters`, `records`, `contract` | Session CRUD, subscribe |
+| `records` *(tier two)* | Review and requisition lifecycle, and their registries | `config`, `store`, `contract` | Raise / decide / claim, author / finalise, read |
+| `session-manager` | Ownership, turn state, `seq`, fan-out, reaping, the payroll fold, **the audit read and the incident view over it** | `config`, `jail`, `store`, `checkpoints`, `adapters`, `records`, `contract` | Session CRUD, subscribe, `readAudit` |
 | `edge/error-envelope` | The one `ApiErrorCode` → HTTP status mapping | `contract` | `statusForCode`, `sendError` |
 | `edge/http-common` | Everything about a request that is not framing: **the origin check**, identity resolution, login, body reading, the `AuditQuery` parse, and the handlers both edges share | `config`, `session-manager`, `records`, `identity`, `adapters`, `contract`, `edge/error-envelope` | Handlers and helpers, to the two edges only |
 | `edge/sse` | SSE framing and `Last-Event-ID` reconnect; its own routing table | `config`, `session-manager`, `records`, `contract`, `edge/http-common`, `edge/error-envelope` | HTTP routes |
@@ -1030,6 +1030,13 @@ session registry exists. The direction that *is* drawn — `session-manager → 
 for exactly one protocol, the once-only requisition claim during session creation (`claim`,
 `attachSession` and `release`, the three steps control flow 1 draws), and it is the right way
 round: consuming a requisition is part of creating a session, not the reverse.
+
+**The audit read is `session-manager`'s and not `records`', which this table said and the tree
+never did** (D157). The incident view is that read with filters, so both land in the same place,
+and the place cannot be `records`: `GET /api/audit` is tier one (control flow 4's list says so,
+and D73 says why), and tier one must work in a build where tier two's module does not exist. The
+reasoning is D119's and `20-contract.md § Unresolved` 5 carries it; what is recorded here is only
+which module owns the surface.
 
 `checkpoints` depending only on `config` and `contract` — never on adapters — is what let
 D6 survive the move to two backends unchanged. Keep it that way.
@@ -1302,7 +1309,7 @@ operator, because that would need a container per session and is explicitly out 
 
 | Adversary | In scope | Control |
 |---|---|---|
-| The internet | Yes | An auth mode is required in every configuration (D93), and a routable bind is refused unless a `trustProxy` allow-list covers it |
+| The internet | Yes | An auth mode is required in every configuration (D93), and **under the header-trust modes** a routable bind is refused unless a `trustProxy` allow-list covers it (D154) |
 | **A malicious page in an operator's browser** | Yes | Origin allow-list on every mutating route and the WS handshake (D29). **Not** the bind check, and **not** the auth check |
 | A curious operator starting a session outside their workspace | Yes | Path jail, resolved after symlinks — see below for what this does *not* cover |
 | An agent reaching outside the workspace once running | Partly | Permission prompt (Claude) or vendor sandbox (Codex). **Not the jail** |
@@ -1498,9 +1505,17 @@ check trusts.
 **Fail closed on startup.** An auth mode is required in every configuration, so the
 configuration this rule was originally written against — a bind with no auth at all — cannot
 be loaded (D93). What remains, and what `insecure_bind` now names, is a routable bind that no
-`trustProxy` allow-list covers: a trusted header nothing constrains the source of is a header
-any client can set. The server refuses to start. Not a warning. A misconfigured console is a
-remote shell, and the failure mode of a warning is that nobody reads it.
+`trustProxy` allow-list covers **under one of the two header-trust modes**: a trusted header
+nothing constrains the source of is a header any client can set. The server refuses to start.
+Not a warning. A misconfigured console is a remote shell, and the failure mode of a warning is
+that nobody reads it.
+
+**The refusal does not reach `shared-secret`, and the qualifier is the whole of why** (D154).
+That mode authenticates by a credential the client must present, not by a claim about who the
+peer is, so there is no header for a routable bind to make forgeable — and *Threat model* calls
+the mode "for a bare LAN box", which binds routably by definition. Refusing there would make the
+one deployment shape the mode exists for unconfigurable without naming an upstream proxy that
+does not exist in it.
 
 **Workspace jail.** Configuration declares one or more `workspaceRoot` paths. A requested
 working directory is accepted only if its **fully resolved real path** — symlinks followed,
@@ -1683,7 +1698,8 @@ used to describe and is not the same as being ungated.
 | `meta.json` carries an unknown `schemaVersion` | Version check at boot (D49) | **Identical to a parse failure**: skip, log, continue. Never a migration attempt, never a partial read | One session missing, the log saying it is a newer format | Its files untouched. This is the whole reason the field exists |
 | A record log is unreadable at boot *(tier two)* | Open error | Log it; start with that registry empty; **boot continues** | Reviews or requisitions missing | File untouched. Tier two failing must not deny an operator tier one |
 | One corrupt line in a record log *(tier two)* | Parse failure on that line | Drop the line, log it, keep reading | The record at its previous state, or absent | See *Persistence summary* for why a drop here reverts rather than shortens |
-| Routable bind with no `trustProxy` allow-list | Startup check | **Refuse to start**, say why | Startup error naming the fix | — |
+| Routable bind with no `trustProxy` allow-list, **under a header-trust mode** | Startup check | **Refuse to start**, say why | Startup error naming the fix | — |
+| The same bind under `shared-secret` | Startup check | **Nothing** — it is a legitimate configuration (D154) | The console, listening | — |
 | No auth mode in the configuration | Config parse (D93) | **Refuse to start** — `missing_field`, before any bind decision | Startup error naming the field | — |
 
 ## Concurrency and ordering

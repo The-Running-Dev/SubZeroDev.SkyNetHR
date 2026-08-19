@@ -3122,6 +3122,86 @@ module, not the public surface; a reader of `20-contract.md` would find `createA
 its vocabulary not.
 Reversibility: cheap. Prose plus one declared const; nothing persisted and no signature moves.
 
+### 2026-08-19 — D154 `insecure_bind` is a header-trust-mode refusal, and three documents said otherwise
+Context: `src/config/index.ts` gates the routable-bind refusal on `auth.mode` being `proxy-header`
+or `open-webui`, so `shared-secret` on `0.0.0.0` with an empty `TRUST_PROXY` starts. Four statements
+described the condition and they did not agree: `20-contract.md`'s error table, `10-design.md`'s
+threat-model *internet* row and its *Failure modes — Server lifecycle* row all stated it
+unconditionally, while `10-design.md § Security controls` scoped it to "those modes". The code
+follows the scoped one, and `src/identity/index.ts`'s `peerIsTrusted` and `src/server.ts`'s refusal
+text are both written against that reading, so the tree is internally consistent and three sentences
+are not.
+Chosen: the documents change. All three unconditional statements are qualified to the header-trust
+modes, *Failure modes* gains a row saying the same bind under `shared-secret` is refused by nothing,
+and the contract's error row states when the variant is *not* raised as well as when it is. A shared
+secret is a credential the caller must present, not a claim about who the peer is, so there is no
+header a routable bind makes forgeable — and *Threat model* already calls the mode "for a bare LAN
+box", which binds routably by definition.
+Rejected: extending the refusal to `shared-secret` so all four sentences become true as written. It
+makes the one deployment shape that mode exists for unconfigurable without naming an upstream proxy
+that does not exist in it — an enforcement claim with nothing behind it, which is the shape D69
+rejected for self-approval and D140 rejected for per-operator identity under the same mode.
+Rejected: recording the divergence and changing neither side. The alternative D142, D144, D148 and
+D149 each rejected, and here it costs more than rediscovery: the unqualified rows read as a security
+control the server does not have.
+Reversibility: cheap. Four prose edits, no code and no persisted shape.
+
+### 2026-08-19 — D155 One refetch, then a reported state: the second `replay_gap` is declared
+Context: `20-contract.md § Streaming` said only "after which the client refetches".
+`client/app.js`'s `handleReplayGap` refetches once and, on a second gap, reports `history
+unavailable — showing live events only` rather than reopening. Issue #66 adjudicated this at S3's
+code review and routed it to "the one reconciliation pass that runs when tier one is code-complete";
+tier one has been code-complete since S19 and five passes (D138–D153) have run since without landing
+it, because a reconciliation derives its findings from the tree and `design/` and reads nothing from
+the tracker.
+Chosen: the contract changes, transcribing #66 rather than deciding it. *Streaming* now states that
+a refetch is a fresh stream carrying no `Last-Event-ID`, that a gap on *that* stream means the spill
+cannot be read at all, and that the client terminates in a reported live-only state rather than
+reopening again. The same paragraph names the past-the-end resume point as one of the ranges the
+spill cannot serve, which `session-manager.subscribe` already reports as a gap.
+Rejected: making the client reopen on every gap so the bare sentence becomes literally true. That is
+the reconnect loop S3's review closed, and it relitigates a recorded adjudication with no new
+evidence (`AGENTS.md § Budget discipline`).
+Rejected: leaving #66 for a later pass. Nothing structural would surface it next time either — which
+is the lesson, not the decision.
+Reversibility: cheap. One paragraph; no signature and no behaviour moves.
+
+### 2026-08-19 — D156 A `replay_gap` restates a watermark and consumes no `seq`
+Context: `session-manager.subscribe` stamps a gap envelope with the `seq` its subscriber is complete
+*through*, and `edge/sse` suppresses the `id:` line for any envelope that does not advance. The SSE
+half was stated — the WebSocket section says a gap frame carries "no resumable position, exactly as
+SSE's gap frame carries no `id:`" — but the envelope's own `seq` field was not, and I1 declared `seq`
+strictly increasing with no carve-out. On the WebSocket edge the body's `seq` is the only resume
+signal a client has (`client/app.js` sends `{after: state.lastSeq}` and assigns `state.lastSeq` from
+`envelope.seq`), so the rule is not a framing detail.
+Chosen: the contract states it, in *Streaming* and as a clause on I1. A `replay_gap` is the one
+envelope `emit` never produces: no `seq` assigned, nothing appended to the spill, nothing pushed to
+the ring, and one subscriber rather than fan-out. I1 governs what `emit` assigns and is not weakened.
+Rejected: having a gap consume a fresh `seq` so I1 needs no clause. It makes the gap frame itself the
+next resume point — past the very history it failed to serve — turning one reported gap into
+permanent silent loss, which is the failure the gap exists to announce.
+Rejected: leaving the rule in the code comment that already explains it. A rule a WebSocket client
+must follow, discoverable only by reading `session-manager`, is one the second client implementation
+gets wrong; and I1 as it stood read as forbidding what the tree does.
+Reversibility: cheap. Prose plus one invariant clause; the behaviour is unchanged.
+
+### 2026-08-19 — D157 The audit read is `session-manager`'s, and the design's module table is corrected
+Context: `10-design.md § Module boundaries` credited `records` with "the incident read". `records`
+has no such method, in the tree or in `20-contract.md`'s `Records` interface; the read is
+`session-manager.readAudit`, and the incident view is that read with `incidentsOnly: true`. D119 made
+that choice and `20-contract.md § Unresolved` 5 records it — only the design's table was left behind,
+and its `session-manager` row was stale the other way, listing the payroll fold and not the audit
+read.
+Chosen: the design changes, transcribing D119. "the incident read" leaves the `records` row, the
+`session-manager` row gains the audit read and the incident view over it, and a short paragraph under
+the table names why the module cannot be `records` — `GET /api/audit` is tier one, and tier one must
+work in a build where tier two's module does not exist.
+Rejected: moving the read onto `records` so the table becomes true. It reopens D119 with no new
+evidence and puts a tier-one route behind a tier-two module, which is exactly what D119 refused.
+Rejected: recording the staleness without editing. A table that names the wrong owner for a route is
+the class of error that misleads whoever reads the architecture before the code.
+Reversibility: cheap. One table row pair and one paragraph.
+
 ## Open
 
 Staging only. Once an item becomes an issue it leaves this list.

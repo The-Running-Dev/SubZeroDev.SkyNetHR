@@ -1393,7 +1393,29 @@ data: {"seq":42,"sessionId":"...","ts":"...","kind":"tool.call","data":{...}}
 On reconnect the browser's `EventSource` sends `Last-Event-ID`. The server replays from
 `seq + 1` — from the ring buffer where it can, otherwise from the spill, for live and ended
 sessions alike. Only where the spill cannot serve the range does the server send a single
-`error` with `kind: 'replay_gap'`, after which the client refetches.
+`error` with `kind: 'replay_gap'`, after which the client refetches. A resume point past the
+session's own `lastSeq` is one such range: no store holds it and waiting for `seq` to climb to
+it would stream nothing forever, so it is reported as a gap rather than served as a complete
+replay of nothing.
+
+**The refetch happens once, and what follows a second gap is a reported state rather than a
+third attempt** (D155). A refetch is a fresh stream carrying no `Last-Event-ID`, so it asks for
+the transcript from `seq` 1. If *that* gaps too, the spill cannot be read at all, and reopening
+again is a reconnect loop rather than a recovery — so the client stops and says the history is
+unavailable and it is showing live events only. Stated because "the client refetches" alone
+reads as a loop with no exit, and because the state it terminates in is one an operator sees.
+
+**A `replay_gap` envelope restates the watermark its subscriber is complete through; it does
+not consume a `seq`** (D156). It is the one envelope `emit` never produces: no `seq` is
+assigned, nothing is appended to the spill, nothing reaches the ring, and it goes to a single
+subscriber rather than to fan-out. Its `seq` field therefore repeats a value that subscriber
+already holds, which is the one place a reader of the delivered stream sees `seq` not advance —
+I1 governs what `emit` assigns and is not weakened by it. The alternative is what makes this
+worth declaring rather than leaving to a code comment: stamping a gap with a *fresh* `seq` makes
+the gap frame itself the next resume point, past the very history it just failed to serve, which
+converts one reported gap into permanent silent loss. The SSE edge expresses this by writing no
+`id:` line for a frame that does not advance; on the WebSocket edge the body's `seq` is the only
+resume signal a client has, so the rule is the contract's rather than a framing detail.
 
 A comment line (`: keepalive`) every `Caps.keepaliveMs` keeps intermediaries from closing an
 idle stream, and is what lets a client tell a silent agent from a dead connection.
@@ -1546,7 +1568,7 @@ type SessionError =
 
 | Variant | Raised when | Retryable | Caller does |
 |---|---|---|---|
-| `ConfigError.insecure_bind` | A routable bind that no `trustProxy` allow-list covers. **Not** a missing auth mode: D93 makes one mandatory in every configuration, so that case is `missing_field` at parse time and never reaches here | No | Refuse to start, naming the fix |
+| `ConfigError.insecure_bind` | A routable bind that no `trustProxy` allow-list covers, **under `proxy-header` or `open-webui` only** (D154) — those are the modes that trust a header the client could otherwise set. Under `shared-secret` the same bind is legitimate and this is never raised: a credential the caller must present is not a claim about who the peer is. **Not** a missing auth mode either: D93 makes one mandatory in every configuration, so that case is `missing_field` at parse time and never reaches here | No | Refuse to start, naming the fix |
 | `ConfigError.missing_field` / `invalid_field` | Validation of the environment | No | Refuse to start |
 | `StartupError.storage_unwritable` | The storage root cannot be written at boot | No | Refuse to start |
 | `IdentityError.no_identity` | No header, no cookie, or an empty one | No | `401 unauthenticated` |
@@ -1609,7 +1631,7 @@ it; where two are named, the second is where a violation would first be observab
 
 | # | Invariant | Owner |
 |---|---|---|
-| I1 | `seq` is strictly increasing by exactly one, per session, from 1. A gap is a bug, never a dropped event | `session-manager` |
+| I1 | `seq` is strictly increasing by exactly one, per session, from 1. A gap is a bug, never a dropped event. It governs what `emit` assigns; the `replay_gap` envelope is not one of those and restates a watermark instead of consuming a `seq` (D156, *Streaming*) | `session-manager` |
 | I2 | The ring buffer's contents are a strict suffix of the spill's, envelope for envelope, byte for byte | `store` |
 | I3 | A `tool.result` is truncated before its envelope is constructed; the envelope in the ring and the line in the spill are identical | `session-manager` |
 | I4 | At most one `Turn` per session is non-null at any time | `session-manager` |
