@@ -93,6 +93,22 @@ async function main(): Promise<void> {
     server.on('request', createSseEdge(edgeDeps));
   }
 
+  // A container stop is a signal, not a crash. `tini` is pid 1 in the deployment image
+  // (see the Dockerfile) and forwards SIGTERM here; without a handler the process would
+  // take the default terminate at whatever point the event loop happened to be, and
+  // `docker stop` would wait out its grace period first. Closing the listener stops new
+  // connections while in-flight ones drain; a second signal is the operator saying they
+  // are done waiting.
+  let stopping = false;
+  const stop = (signal: NodeJS.Signals): void => {
+    if (stopping) process.exit(1);
+    stopping = true;
+    console.log(`${signal} received — closing the listener.`);
+    server.close(() => process.exit(0));
+  };
+  process.on('SIGTERM', () => stop('SIGTERM'));
+  process.on('SIGINT', () => stop('SIGINT'));
+
   server.listen(config.value.bind.port, config.value.bind.host, () => {
     console.log(`SkyNet HR listening on http://${config.value.bind.host}:${config.value.bind.port}`);
     console.log(`auth mode: ${config.value.auth.mode}`);

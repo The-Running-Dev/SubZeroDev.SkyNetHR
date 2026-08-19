@@ -3,8 +3,9 @@
 A browser console for driving a coding agent CLI that runs on the machine holding the code.
 Self-hosted, for a small group of trusted operators.
 
-**Status: design + spike.** Nothing here is the implementation. The spike is throwaway
-proof that the risky parts are not risky.
+**Status: under implementation.** `src/` is the real server, built slice by slice against
+`design/30-slices.md`; `spike/` is throwaway proof kept for reference, not the shipped
+thing.
 
 ## Read in this order
 
@@ -51,3 +52,26 @@ deployment needs the WebSocket edge. See `90-decisions.md` D10.
 ```bash
 cd spike && WORKSPACE_ROOTS=/path/to/a/repo node server.mjs
 ```
+
+## Running it
+
+The real server ships as a Docker image that installs the `claude` CLI but holds no
+credential of its own (`design/00-brief.md`'s "Hosting the model" non-goal) — every
+deployment bind-mounts an already-authenticated `claude` CLI credential directory
+(typically `~/.claude`) in from the host.
+
+Locally, building from source:
+
+```bash
+WORKSPACE_ROOTS_HOST_DIR=/path/to/a/repo \
+CLAUDE_CREDENTIALS_DIR=~/.claude \
+AUTH_SECRET=dev-secret \
+docker compose -f docker-compose.dev.yml up -d --build
+```
+
+The console listens on `http://localhost:3000`.
+
+The repository root's `docker-compose.yml` is the deployment counterpart: it pulls the
+image `.github/workflows/publish.yml` publishes to `ghcr.io/the-running-dev/skynet-hr`
+rather than building, joins the pre-existing `proxy-net` and publishes no port — see that
+file's header for the full set of environment variables a deployment needs to set.

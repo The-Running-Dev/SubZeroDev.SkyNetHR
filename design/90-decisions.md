@@ -3202,6 +3202,56 @@ Rejected: recording the staleness without editing. A table that names the wrong 
 the class of error that misleads whoever reads the architecture before the code.
 Reversibility: cheap. One table row pair and one paragraph.
 
+### 2026-08-19 — The deployment artifact borrows the host's authenticated Claude CLI
+Context: `design/00-brief.md`'s "Hosting the model" non-goal states plainly that no inference happens
+here and no vendor credential is held — the server drives an agent CLI that is "already installed and
+already authenticated" wherever it runs. `README.md` still read "Status: design + spike" with no
+container artifact of any kind, and nothing in `design/30-slices.md` builds one; deployment was an
+omission, not a decision, the same gap `SubZeroDev.com`, `SubZeroDev.Blog` and `SubZeroDev.Adventures`
+had each already closed for their own services, all three landing on the same shape: a Dockerfile, a
+local build-from-source Compose file, a GHCR publish workflow, and a deployment Compose file that pulls
+the published tag onto the shared `proxy-net`.
+Chosen: the image installs the `claude` CLI itself (`npm install -g @anthropic-ai/claude-code`) but
+holds no credential for it — both Compose files bind-mount the operator's own already-authenticated
+credential directory (typically `~/.claude`) over the container's `$HOME/.claude`, run as the base
+image's existing non-root `node` user so that mount is writable without a root container. `client/` is
+copied into the runtime image as a sibling of `dist/`, not inside it, because
+`src/edge/http-common/index.ts` resolves it at runtime relative to the compiled file's own location
+(`new URL('../../../client/', import.meta.url)`) rather than through `tsconfig.json`, which compiles
+`src/**/*.ts` only. The local Compose file (`docker-compose.dev.yml`) builds from source with
+`shared-secret` auth, needing no reverse proxy to exercise; the deployment file
+(`docker-compose.yml`, following the majority convention of `SubZeroDev.Blog` and
+`SubZeroDev.Adventures`, both of which keep the pull-based file at the repository root and the
+build-based one nested) pulls `ghcr.io/the-running-dev/skynet-hr:latest` with `pull_policy: always`,
+joins `proxy-net` and publishes no port, and every variable it needs is `${VAR:?...}`/`${VAR:-...}`
+interpolation with no `env_file:` — Portainer's stack "Environment variables" only feed `${...}`
+interpolation, never write a `.env` file, the same reasoning `SubZeroDev.Adventures/docker-compose.yml`
+and `SubZeroDev.Blog/docker-compose.yml` each record for themselves. `.github/workflows/publish.yml`
+mirrors `SubZeroDev.com/.github/workflows/ci.yml`'s `image-gate` → `publish-release` shape: the image
+is built and smoke-tested once, saved as an artifact, and the job that pushes to GHCR loads that same
+tarball and asserts its digest unchanged rather than rebuilding — but carries none of that repository's
+human-approval environment or redeploy webhook, since neither exists here and this task did not ask for
+either.
+Rejected: baking a credential into the image — directly contradicts the "no vendor credential is held"
+sentence the non-goal states outright, and would make every rebuild a place a secret could leak into a
+layer. Rejected running the container as `root` so the credential mount needs no ownership
+reconciliation — trades a real, low-cost mount-permissions problem (documented in the compose files'
+own comments) for running an internet-facing-adjacent process as root, for no offsetting benefit.
+Rejected nesting `docker-compose.dev.yml` under a subdirectory the way `SubZeroDev.Adventures/server/`
+and `SubZeroDev.Blog/tools/blog-mcp/` do — both of those are self-contained build contexts inside a
+larger repository; this repository's Dockerfile already builds from the repository root, so there is
+no equivalent subtree to nest a second file under, and inventing one would separate the file from the
+`Dockerfile` it exists to exercise. Rejected a redeploy-webhook step in `publish.yml` mirroring
+`SubZeroDev.com`'s `publish-release` or `SubZeroDev.Adventures`' `deploy-api.yml` — both need a
+Portainer stack and a stored webhook secret that do not exist for this deployment yet, and
+`docker-compose.yml`'s `pull_policy: always` already picks up a new `:latest` on the next
+`docker compose up` without one; adding a webhook this repository cannot fire yet is speculative
+infrastructure, the AGENTS.md "Definitely avoidable" case for scope this task did not ask for.
+Reversibility: cheap. The three new files and the workflow are additive and self-contained; nothing
+in `src/` changed to produce them, and none of `design/00-brief.md`, `design/20-contract.md` or
+`design/30-slices.md` needed a word altered — the "Hosting the model" non-goal already drew the
+boundary this artifact stays inside of.
+
 ## Open
 
 Staging only. Once an item becomes an issue it leaves this list.

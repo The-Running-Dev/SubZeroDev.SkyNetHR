@@ -1,0 +1,157 @@
+name: publish
+
+# Builds and gates the deployment image (design/90-decisions.md, 2026-08-19 — "The
+# deployment artifact borrows the host's authenticated Claude CLI") once `verify.yml`'s own
+# test suite has passed on `main`, then pushes it to GHCR. Mirrors SubZeroDev.com's
+# `image-gate` → `publish-release` shape (.github/workflows/ci.yml there): the image is
+# built and smoke-tested once, saved as an artifact, and the job that pushes loads that same
+# tarball rather than rebuilding — so what gets pushed is provably what got gated. Triggered
+# by `verify`'s completion rather than running its own `npm test` step, so the two workflows
+# never gate the same push against two independently-pinned Node versions. This repository
+# has no human-approval environment and no redeploy webhook yet (unlike that repo's
+# `attestation` job), so the gate here is `verify.yml`'s own test suite plus the container
+# answering on its bound port; nothing here triggers a redeploy — `docker-compose.yml`'s
+# `pull_policy: always` is what picks the new tag up on the next `docker compose up`.
+
+on:
+  workflow_run:
+    workflows: [verify]
+    branches: [main]
+    types: [completed]
+  workflow_dispatch:
+
+# Serialised, never cancelled: two merges landing in quick succession would otherwise race
+# to push `:latest`, and the slower run pushing second leaves `:latest` resolving to the
+# older commit. Cancelling instead would drop the immutable `:<sha>` tag for a commit that
+# passed `verify`, so the queue waits rather than discards.
+concurrency:
+  group: publish
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  # The commit to build: the SHA `verify` just tested when triggered by its completion,
+  # otherwise the SHA `workflow_dispatch` was run against.
+  IMAGE_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+
+jobs:
+  image-gate:
+    name: Image gate
+    runs-on: ubuntu-latest
+    if: >-
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
+      (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success')
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.IMAGE_SHA }}
+
+      - run: docker build -t "skynet-hr:${{ env.IMAGE_SHA }}" .
+
+      # Minimal config to clear src/config/index.ts's fail-closed startup checks (S2.8):
+      # shared-secret needs no reverse proxy, and a loopback-only bind needs no
+      # TRUST_PROXY entry. No claude CLI credential is mounted — this smoke test only
+      # proves the server starts and binds; it never drives a real turn.
+      # `/data` is a Docker-managed volume, never a host bind mount: a bind mount keeps the
+      # host directory's ownership, and the runner user is uid 1001 while the image runs as
+      # uid 1000 (`node`), so the Dockerfile's `chown node:node /data` would be masked and
+      # `createStore` (src/store/index.ts) would fail EACCES on `mkdir /data/sessions`
+      # before the server ever binds. A fresh named volume inherits the image's ownership.
+      # `/workspaces` stays a bind mount — it is only ever read.
+      - name: Start the container
+        run: |
+          mkdir -p /tmp/skynet-hr-workspace
+          docker volume create skynet-hr-smoke-storage
+          docker run -d --name skynet-hr \
+            -p 3000:3000 \
+            -e BIND_HOST=0.0.0.0 \
+            -e AUTH_MODE=shared-secret \
+            -e AUTH_COOKIE_NAME=skynet_hr_session \
+            -e AUTH_SECRET=image-gate-smoke-test \
+            -e WORKSPACE_ROOTS=/workspaces \
+            -e STORAGE_ROOT=/data \
+            -v /tmp/skynet-hr-workspace:/workspaces \
+            -v skynet-hr-smoke-storage:/data \
+            "skynet-hr:${{ env.IMAGE_SHA }}"
+
+      - name: Wait for the container to answer
+        run: |
+          for i in $(seq 1 30); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:3000/ || echo 000)
+            if [ "$code" != "000" ]; then exit 0; fi
+            sleep 1
+          done
+          echo "the container never answered on :3000" >&2
+          docker logs skynet-hr >&2
+          exit 1
+
+      - name: Stop the container
+        if: always()
+        run: |
+          docker rm -f skynet-hr
+          docker volume rm -f skynet-hr-smoke-storage
+
+      - name: Save the gated image
+        run: |
+          docker inspect -f '{{.Id}}' "skynet-hr:${{ env.IMAGE_SHA }}" > image-digest.txt
+          docker save "skynet-hr:${{ env.IMAGE_SHA }}" -o image.tar
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gated-image
+          path: |
+            image.tar
+            image-digest.txt
+          retention-days: 1
+
+  publish:
+    name: Publish
+    runs-on: ubuntu-latest
+    needs: image-gate
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: gated-image
+
+      # The gated image is carried, never rebuilt: its digest is asserted equal on both
+      # sides of the job boundary before anything is pushed, the same check
+      # SubZeroDev.com's `publish-release` job makes against `image-gate`'s artifact.
+      - name: Load the gated image
+        run: |
+          docker load -i image.tar
+          LOADED=$(docker inspect -f '{{.Id}}' "skynet-hr:${{ env.IMAGE_SHA }}")
+          GATED=$(cat image-digest.txt)
+          if [ "$LOADED" != "$GATED" ]; then
+            echo "the loaded image's digest ($LOADED) does not match the gated image's digest ($GATED)" >&2
+            exit 1
+          fi
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push the gated image to GHCR
+        run: |
+          REPO_OWNER_LC=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          IMAGE="ghcr.io/$REPO_OWNER_LC/skynet-hr"
+          docker tag "skynet-hr:${{ env.IMAGE_SHA }}" "$IMAGE:${{ env.IMAGE_SHA }}"
+          docker tag "skynet-hr:${{ env.IMAGE_SHA }}" "$IMAGE:latest"
+          docker push "$IMAGE:${{ env.IMAGE_SHA }}"
+          docker push "$IMAGE:latest"
+          # No tag is announced until the push has succeeded and the tag resolves in the
+          # registry, the same read-back SubZeroDev.com's `publish-release` job makes.
+          docker manifest inspect "$IMAGE:${{ env.IMAGE_SHA }}" > /dev/null
+          {
+            echo "### Image pushed";
+            echo "\`$IMAGE:${{ env.IMAGE_SHA }}\`";
+          } >> "$GITHUB_STEP_SUMMARY"

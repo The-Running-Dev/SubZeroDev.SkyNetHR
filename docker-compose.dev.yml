@@ -1,0 +1,61 @@
+# Local-development Compose file: builds from source. The repository root's
+# docker-compose.yml is the deployment counterpart; it pulls the published GHCR image and
+# builds nothing (see that file's header, and SubZeroDev.Blog's tools/blog-mcp/docker-
+# compose.yml + SubZeroDev.Adventures' server/docker-compose.yml for the same build-vs-
+# pull split — this repo keeps both files at the root, rather than nesting this one under a
+# subdirectory, because the Dockerfile's build context is already the whole repository and
+# there is no self-contained subtree to nest it under, unlike those two).
+#
+#   docker compose -f docker-compose.dev.yml up -d --build
+#
+# Two bind mounts an operator must point at real host paths before starting:
+#   WORKSPACE_ROOTS_HOST_DIR   a throwaway project directory the console is allowed to
+#                              open sessions against (design/00-brief.md's jail, D4)
+#   CLAUDE_CREDENTIALS_DIR     the host's already-authenticated `claude` CLI state
+#                              (typically ~/.claude) — this container holds no vendor
+#                              credential of its own (design/00-brief.md's "Hosting the
+#                              model" non-goal); it borrows the operator's own instead of
+#                              baking one in.
+#
+# Session transcripts, checkpoints and the audit log persist in a Docker-managed volume
+# unless STORAGE_ROOT_HOST_DIR names a host path — see the note on that mount below.
+#
+# The container runs as the image's non-root `node` user (uid 1000), not root. A bind
+# mount's ownership always comes from the host side regardless of the image, so if
+# CLAUDE_CREDENTIALS_DIR — or a STORAGE_ROOT_HOST_DIR you do set — is owned by a different
+# host user, `chown -R 1000:1000` it first, or the container will fail to write session
+# data or read/refresh the CLI's credentials.
+#
+# AUTH_MODE defaults to shared-secret here only because it needs no reverse proxy to test
+# locally — src/config/index.ts still refuses to start with none configured (S2.8).
+
+services:
+  skynet-hr:
+    build:
+      context: .
+    image: skynet-hr:dev
+    container_name: skynet-hr-dev
+    environment:
+      BIND_HOST: 0.0.0.0
+      BIND_PORT: "3000"
+      AUTH_MODE: "${AUTH_MODE:-shared-secret}"
+      AUTH_COOKIE_NAME: "${AUTH_COOKIE_NAME:-skynet_hr_session}"
+      AUTH_SECRET: "${AUTH_SECRET:?Set AUTH_SECRET to a throwaway local dev value}"
+      WORKSPACE_ROOTS: /workspaces
+      STORAGE_ROOT: /data
+      ALLOWED_ORIGINS: "${ALLOWED_ORIGINS:-http://localhost:3000}"
+      EDGE: "${EDGE:-sse}"
+    ports:
+      - "${SKYNET_HR_PORT:-3000}:3000"
+    volumes:
+      - "${WORKSPACE_ROOTS_HOST_DIR:?Set WORKSPACE_ROOTS_HOST_DIR to a test project directory}:/workspaces"
+      # A Docker-managed volume unless the operator names a host path. A bind mount is the
+      # wrong default here: the daemon creates a missing bind source as root:root, and this
+      # container runs as uid 1000, so a first `up` would fail EACCES in `createStore`
+      # before the operator has anything to `chown`. A named volume inherits `/data`'s
+      # ownership from the image instead (Dockerfile), the same as docker-compose.yml.
+      - "${STORAGE_ROOT_HOST_DIR:-skynet-hr-dev-storage}:/data"
+      - "${CLAUDE_CREDENTIALS_DIR:?Set CLAUDE_CREDENTIALS_DIR to your host claude CLI's credential directory, e.g. ~/.claude}:/home/node/.claude"
+
+volumes:
+  skynet-hr-dev-storage:
