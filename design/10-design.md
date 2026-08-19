@@ -727,6 +727,20 @@ per-operator budget needs the operator record D3 refuses.
   unmeasured zero from a real one. What stays open is the consumer, not the signal — this
   screen still shows a zero it cannot distinguish from an idle session, because `PayrollView`
   carries no field separating unknown from zero and nothing may infer one by testing `burn`.
+- **Cost in money is burn priced at rates the deployment sets, and it is an estimate rather
+  than a bill** (D158). It is the fourth clause of brief item 8 and it replaced a prototype tile,
+  cost per shipped PR, that had no source inside this server at all — what a shipped PR is lives
+  in a forge, and reaching one means a credential class this design has never held and an
+  outbound-network assumption the brief's constraints do not make. Pricing burn needs neither: it
+  is the same fold plus four `config` rates, one per `Usage` component. **The rates are flat per
+  deployment because nothing records which model produced a session's burn** — `Usage` carries no
+  model identifier — so a session that switched models is priced approximately, and that is
+  written down rather than smoothed over. **The figure is absent, not zero, wherever it cannot be
+  computed honestly**: no rates configured, or a session whose transport reports no usage. The
+  second reuses D146's notice as its signal and never a test of `burn` against zero, for the
+  reason the bullet above gives — and a currency-formatted `0.00` misreads as authoritative in a
+  way `0 tokens` does not, which is why this tile sharpens the open consumer question rather than
+  inheriting it quietly.
 - **Idle** is wall-clock time the session was `live` with no turn: the gaps between
   `turn.ended` and the next `turn.started`, plus creation-to-first-turn and last-turn-to-end.
 - **Idle excludes any interval containing a restart, and boot writes the marker that makes
@@ -783,9 +797,11 @@ encodes is `store`'s business.
   meta.json           schemaVersion + Session, minus turn/buffer/subscribers   (D49)
   events.ndjson       envelopes, append-only
   tool-output/<turnId>/<callId>   untruncated tool output, one file per call  (D22)
+  attachments/<turnId>/<attachmentId>   operator uploads, one file each      (D160)
   ckpt.git/           shadow git dir, work-tree = the session's workspace
 <storage>/audit.ndjson
 <storage>/pids.ndjson                                                (D23)
+<storage>/server.lock        one ServerLock; claimed before boot step 1   (D161)
 <storage>/reviews.ndjson             (tier two) latest line per reviewId wins       (D65)
 <storage>/requisitions.ndjson        (tier two) latest line per requisitionId wins  (D65)
 ```
@@ -1110,6 +1126,8 @@ spend and a second approval to ask for. Both claims release on any later failure
 POST /api/sessions/:id/message {text}
   edge     → origin allow-list check                → 403 bad_origin        (D29)
   edge     → identity, then manager.get(id, owner)  → 404 if not owner
+  edge     : attachments? adapter.acceptsAttachments, count and size caps
+                                     any failing → 422 bad_request, nothing written (D160)
   manager  : state == 'live'?  else → 409 session_ended
   manager  : turn == null?     else → 409 turn_in_flight
   manager  : turn = {turnId, phase:'starting'}         SYNCHRONOUS          (D32)
@@ -1118,7 +1136,9 @@ POST /api/sessions/:id/message {text}
                                      on failure    → session.notice/warn; turn proceeds
                                                      with no restore point   (D42)
   manager  : turn.phase = 'running'                → turn.started
-  manager  → adapter.send(text)
+  manager  → store.writeAttachment(...) per upload    fsync'd BEFORE the envelope   (I49, D160)
+                                                     bytes never enter the spill
+  manager  → adapter.send(text, attachments)
   adapter  → spawn(claude, --stream-json --permission-prompt-tool stdio [--resume id])
                        resume id is the LATEST init reported, or absent      (D34)
                     → notify{spawned: pid, pgid, image}                      (D46)
@@ -1318,6 +1338,7 @@ operator, because that would need a container per session and is explicitly out 
 | **An operator writing a review about another's session** | **No — deliberately** | None. `author` is recorded; a review is an attributable claim, not a privileged one |
 | **Operator-authored text reaching another operator's browser** | Yes | The no-`innerHTML` rule, widened past agent-derived content to cover everything stored (D74) |
 | A confused agent, or prompt injection reaching one | Partly | Permission prompts, sandbox mode, checkpoints to undo |
+| **Operator-supplied content entering the agent's context** | Partly, and it is the row above with a known author | None beyond the row above, **deliberately** (D160). An attachment adds no filesystem reach — the agent already runs with the server user's full access — so this is not a jail question. It puts bytes the operator chose in front of the agent, at the same trust level as the message text beside them. What the design does add is a record: the `message` envelope names every attachment, ordered and replayable |
 | A determined operator | **No** | Out of scope — needs per-session containers |
 | A compromised server | No | Out of scope |
 
@@ -1737,7 +1758,9 @@ Genuinely simultaneous:
   appends through one stream in one single-threaded process cannot interleave a partial line.
   Tier two added two files to this set and no new argument, which is the point of choosing
   append-only files for it (D65). Two server processes over one storage root would break it
-  for all four, and nothing currently prevents that — see *Open questions*.
+  for all four, **and that is now prevented rather than noted** (D161): `<storage>/server.lock`
+  is claimed before boot's first step, so the single-process premise this whole argument rests on
+  is enforced instead of assumed.
 - **The two record registries** *(tier two)*, which are shared mutable state in *memory* and
   therefore governed by the same rule as the turn slot: every state test that decides
   something is claimed in the synchronous block that tests it. There are exactly two such
@@ -1987,6 +2010,10 @@ one place D19 and D20 touch, and it is why they are stated together.
 Five steps, and the order is the point:
 
 ```
+0. lock    claim <storage>/server.lock, or refuse to start                    (D161)
+           a live holder → StartupError.storage_locked, naming it
+           a stale holder → reclaimed, logged; staleness is D23's own test
+           another hostname → never reclaimed; the test cannot see that host
 1. reap    pids.ndjson entries with no exitedAt, subject to the reuse guard   (D23)
            kill the process TREE, not the recorded pid                        (D38)
 2. rehydrate  meta.json → registry, every session marked ended                (D20)
@@ -1998,6 +2025,12 @@ Five steps, and the order is the point:
 4. load    the two record logs → registries, latest line per id     (tier two, D65)
 5. listen  only now are connections accepted
 ```
+
+**The lock precedes reaping, and that order is the whole point of it** (D161). Step 1 kills process
+trees it believes are orphans, and it cannot tell another server's live agents from its own dead
+ones. A second server that got as far as reaping would take down the first server's running work
+before anything else went wrong, so the claim has to come before the first destructive act rather
+than merely before `listen`.
 
 Reaping precedes rehydration so that no rehydrated session can be adopted by an orphan
 still holding its workspace. Listening comes last so that no client can observe a registry
@@ -2408,16 +2441,17 @@ these are cited by number elsewhere in this document and in the slices.
    link go dead invisibly. **The rule does not extend to `attachments/`** (D160): a tool blob is a
    re-runnable command's output, an attachment is the operator's only copy, and those are bounded
    at upload instead.
-3. **Nothing prevents two server processes over one storage root.** The no-lock argument in
-   *Concurrency* holds for one process and silently stops holding for two — interleaved
-   appends to all four server-wide files, two registries disagreeing about which workspace is
-   busy (D19), and boot reaping a live sibling's children. Tier two widens it rather than
-   changing it: two processes would also both consume one approved requisition, since each
-   holds its own registry and the synchronous claim that makes D68 safe is per-process. A lock
-   file at the storage root is the obvious answer and it is small; it is listed here rather
-   than decided because the failure it prevents is an operator running the server twice by
-   accident, and whether that is worth a startup failure mode is a judgement about deployment,
-   not about architecture.
+3. **Resolved by D161: the lock is taken.** The three failures this named — interleaved appends
+   to all four server-wide files, two registries disagreeing about which workspace is busy (D19),
+   and boot reaping a live sibling's children — are prevented by `<storage>/server.lock`, claimed
+   before boot's first step and refusing with `StartupError.storage_locked` naming the holder. The
+   deployment judgement this item deferred was whether an accidental double-start justifies a
+   startup failure mode, and the answer turned on cost rather than principle: **the staleness
+   objection is answered by machinery that already exists.** D23's three-part liveness test —
+   no `exitedAt`, `startedAt` after the host's last boot, matching image — is reused verbatim
+   against the lock's own holder, so a crashed server's lock is reclaimed automatically and a
+   container restart is not an incident. A lock naming another `hostname` is never reclaimed,
+   because that test cannot see another machine's process table.
 
 **Needing an experiment:**
 
@@ -2467,8 +2501,10 @@ these are cited by number elsewhere in this document and in the slices.
    that document, at commit `0535303`. Three needed decisions of their own and carry them:
    D45 for `session.exit` and where `state` lives, D47 for the undefined `Attachment`, and
    D50 for the vendor authorisation the contract asserted and nothing could hold. Two gaps
-   the derivation exposed are open rather than closed and are now issues: attachment
-   handling (#22), and who owns `ToolCall.summary` (#23).
+   the derivation exposed are open rather than closed and were issues: attachment
+   handling (#22 — **closed by D160**, which restores the field against types that now exist),
+   and who owns `ToolCall.summary` (#23 — **closed by D159**: the adapter, on D109's argument,
+   with I48 bounding it to display only).
    **The round this pass opened is closed too.** D65 to D86, D73's audit read route and the
    whole tier-two surface reached `20-contract.md` — the types, the routes, `RecordsError`
    and invariants I29 to I39 — and reached `30-slices.md` as S12 to S18. `90-decisions.md
