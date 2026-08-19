@@ -74,6 +74,8 @@ services:
       ALLOWED_ORIGINS: "${ALLOWED_ORIGINS:?Set ALLOWED_ORIGINS to the console's own origin(s), comma-separated}"
       SESSION_COOKIE_MAX_AGE_SECONDS: "${SESSION_COOKIE_MAX_AGE_SECONDS:-}"
       SESSION_TOKEN_BUDGET: "${SESSION_TOKEN_BUDGET:-}"
+      TOKEN_RATES_JSON: "${TOKEN_RATES_JSON:-}"
+      CURRENCY: "${CURRENCY:-}"
       # D99: the ring's bound (and the other caps below) are overridable at deploy time on
       # purpose. Unset stays the compiled-in default — src/config/index.ts's parseIntEnv
       # treats an empty value the same as absent.

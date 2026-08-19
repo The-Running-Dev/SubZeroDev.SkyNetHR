@@ -189,6 +189,14 @@ export function formatTokenCount(n) {
   return n.toLocaleString('en-US');
 }
 
+// `currency` is a label the server never interprets (D158), so this formats by
+// concatenation rather than handing it to `Intl.NumberFormat`, which would reject or
+// mis-render anything that is not a real ISO currency code.
+export function formatCost(costCurrency, currency) {
+  const amount = costCurrency.toFixed(2);
+  return currency === null ? amount : `${currency} ${amount}`;
+}
+
 // Shared by `renderPayrollSummary` below and `openTerminate` in app.js — both are a `<dl>` of
 // label/value rows over the same `payroll-summary__*` classes, so both build a row here rather
 // than each hand-rolling its own copy of the same three-element wrapper.
@@ -211,6 +219,11 @@ export function renderPayrollSummary(doc, view) {
   if (view.droppedIntervals > 0) {
     const plural = view.droppedIntervals === 1 ? 'interval' : 'intervals';
     renderSummaryRow(doc, dl, 'Unaccounted idle', `${view.droppedIntervals} ${plural} dropped — the server was down for part of it`);
+  }
+  // S20.4: an unpriceable session (no rates configured, or a transport that cannot report
+  // usage) omits this row entirely rather than showing a currency-formatted zero.
+  if (view.costCurrency !== null) {
+    renderSummaryRow(doc, dl, 'Estimated cost', `${formatCost(view.costCurrency, view.currency)} — an estimate against configured rates, not a vendor bill`);
   }
   return dl;
 }

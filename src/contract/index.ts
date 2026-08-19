@@ -226,7 +226,10 @@ export type SessionNoticeCode =
   | 'sandbox'
   | 'audit_unavailable' // a permission was denied because the audit append failed
   | 'storage_failure' // a spill write failed; the session is ending
-  | 'server_restart'; // boot found this session live at shutdown (D130)
+  | 'server_restart' // boot found this session live at shutdown (D130)
+  | 'usage_unavailable'; // this session's transport reports no token usage, so its burn is
+  // unknown rather than zero (D146). Emitted once, at session start, before the first
+  // `turn.started`, by an adapter whose selected transport cannot report usage.
 
 export interface SessionNotice {
   readonly level: 'info' | 'warn' | 'error';
@@ -500,6 +503,18 @@ export interface PayrollView {
   readonly remainingTokens: number | null; // null when budgetTokens is null
   readonly idleMs: number; // live-with-no-turn wall clock
   readonly droppedIntervals: number; // idle intervals discarded for spanning a restart
+  readonly costCurrency: number | null; // burn priced at Config.tokenRates (D158); null when
+  // rates are unset, and null on a session whose transport reports no usage — never 0.00
+  readonly currency: string | null; // Config.currency, echoed; null whenever cost is null
+}
+
+// (tier two, D158) One rate per `Usage` component, in `currency` units per token. Flat per
+// deployment: nothing records which model produced a session's burn, so nothing can key on one.
+export interface TokenRates {
+  readonly inputTokens: number;
+  readonly outputTokens: number;
+  readonly cacheRead: number;
+  readonly cacheCreate: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -544,6 +559,8 @@ export interface Config {
   readonly sessionCookieMaxAgeSeconds: number;
   readonly includeRaw: boolean;
   readonly sessionTokenBudget: number | null; // (tier two) per session; null disables the view's budget
+  readonly tokenRates: TokenRates | null; // (tier two) null disables the cost tile (D158)
+  readonly currency: string | null; // (tier two) label only; never interpreted (D158)
   readonly checklist: readonly ChecklistItemTemplate[]; // (tier two) empty disables the checklist
   // D10/D117: which transport edge this deployment binds. Exactly one binds (S11.5).
   readonly edge: 'sse' | 'ws';

@@ -490,6 +490,10 @@ export function createSessionManager(deps: {
     // `ended` and never runs another turn (D20), so anything after that notice is boot's
     // own bookkeeping, appended at the boot clock rather than at anything the operator did.
     let restarted = false;
+    // S20.3: the discriminator for `costCurrency` is this notice, never a comparison against
+    // `burn` — a session that genuinely burned nothing still prices a real `0.00`, and only a
+    // transport that cannot report usage at all prices `null` (D146, `## Unresolved` 12).
+    let usageUnavailable = false;
     // The wall-clock boundary the *next* idle interval starts from: `null` while a turn
     // is open (busy, not idle), the last `turn.ended`'s own `ts` otherwise. Idle time is
     // billed session-creation-to-first-turn (D76/`10-design.md § Derived views`), so it
@@ -515,6 +519,10 @@ export function createSessionManager(deps: {
         }
         case 'session.notice': {
           const data = envelope.data as EventPayloadMap['session.notice'];
+          if (data.code === 'usage_unavailable') {
+            usageUnavailable = true;
+            break;
+          }
           if (data.code !== 'server_restart') break;
           // D130's one rule, covering both cases: drop the interval this notice closes if
           // one was open (the server went down between turns), and count it. Mid-turn
@@ -550,6 +558,17 @@ export function createSessionManager(deps: {
 
     const budgetTokens = config.sessionTokenBudget;
     const totalBurn = burn.inputTokens + burn.outputTokens + burn.cacheRead + burn.cacheCreate;
+    // D158/S20: priced against `Config.tokenRates`, never against a vendor's billed amount.
+    // `null` covers exactly the two cases S20.2 names — no rates configured, and this
+    // session's transport cannot report usage — and neither is inferred from `totalBurn`.
+    const rates = config.tokenRates;
+    const costCurrency =
+      rates === null || usageUnavailable
+        ? null
+        : burn.inputTokens * rates.inputTokens +
+          burn.outputTokens * rates.outputTokens +
+          burn.cacheRead * rates.cacheRead +
+          burn.cacheCreate * rates.cacheCreate;
     return {
       ok: true,
       value: {
@@ -559,6 +578,8 @@ export function createSessionManager(deps: {
         remainingTokens: budgetTokens === null ? null : budgetTokens - totalBurn, // D129
         idleMs,
         droppedIntervals,
+        costCurrency,
+        currency: costCurrency === null ? null : config.currency,
       },
     };
   }

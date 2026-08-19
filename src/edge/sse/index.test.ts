@@ -101,6 +101,8 @@ async function makeEdge(
     sessionCookieMaxAgeSeconds: 2592000,
     includeRaw: false,
     sessionTokenBudget: null,
+    tokenRates: null,
+    currency: null,
     checklist: [],
     edge: 'sse',
     ...over,

@@ -9,6 +9,7 @@ import type {
   ConfigError,
   ResolvedPath,
   Result,
+  TokenRates,
 } from '../contract/index.js';
 
 // Env var names are this module's own choice; the contract fixes only the shape of
@@ -129,6 +130,30 @@ function parseChecklist(env: Readonly<Record<string, string | undefined>>): Resu
   return { ok: true, value: items };
 }
 
+// (tier two, D158) `Config.tokenRates`: flat, per-deployment rates for the cost tile. Absent
+// means the tile is disabled — `PayrollView.costCurrency` reads `null` rather than `0.00`.
+function parseTokenRates(env: Readonly<Record<string, string | undefined>>): Result<TokenRates | null, ConfigError> {
+  const raw = env['TOKEN_RATES_JSON'];
+  if (raw === undefined || raw.trim() === '') return { ok: true, value: null };
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (err) {
+    return invalid('TOKEN_RATES_JSON', `not valid JSON: ${(err as Error).message}`);
+  }
+  if (typeof parsed !== 'object' || parsed === null) return invalid('TOKEN_RATES_JSON', 'must be an object');
+  const fields = ['inputTokens', 'outputTokens', 'cacheRead', 'cacheCreate'] as const;
+  const rates: { -readonly [K in (typeof fields)[number]]?: number } = {};
+  for (const field of fields) {
+    const value = (parsed as Record<string, unknown>)[field];
+    if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) {
+      return invalid('TOKEN_RATES_JSON', `field '${field}' must be a non-negative number`);
+    }
+    rates[field] = value;
+  }
+  return { ok: true, value: rates as TokenRates };
+}
+
 // Loopback is where a header-trust mode is safe with no allow-list: nothing off-box can
 // reach the port to set the header in the first place. Everything else, `0.0.0.0`
 // included, is routable. The whole 127.0.0.0/8 block is loopback, not just 127.0.0.1 — a
@@ -217,6 +242,11 @@ export function loadConfig(env: Readonly<Record<string, string | undefined>>): R
   const checklist = parseChecklist(env);
   if (!checklist.ok) return checklist;
 
+  const tokenRates = parseTokenRates(env);
+  if (!tokenRates.ok) return tokenRates;
+  const currencyRaw = env['CURRENCY'];
+  const currency = currencyRaw === undefined || currencyRaw.trim() === '' ? null : currencyRaw;
+
   // D10/D117: standalone deployments stream over SSE; a deployment sitting behind a proxy
   // that buffers or does not pass through `text/event-stream` sets `EDGE=ws` instead.
   const edgeEnv = env['EDGE'];
@@ -249,6 +279,8 @@ export function loadConfig(env: Readonly<Record<string, string | undefined>>): R
       sessionCookieMaxAgeSeconds: sessionCookieMaxAgeSeconds.value,
       includeRaw,
       sessionTokenBudget,
+      tokenRates: tokenRates.value,
+      currency,
       checklist: checklist.value,
       edge,
     },
