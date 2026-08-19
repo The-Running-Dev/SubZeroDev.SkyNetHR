@@ -3331,6 +3331,69 @@ field the standing-rule grammar matches against.
 Reversibility: cheap. `summary` stays where it already is; the change is a settled owner, a stated
 constraint and one invariant.
 
+### 2026-08-19 — D160 Attachments ride inline with the message, and their bytes never enter the spill
+Context: D47 removed `attachments?: Attachment[]` from `POST /message` because the type was never
+defined and nothing described handling — "it is a feature, not a type, and inventing one at the
+contract stage commits the implementer to a transport nobody chose". `20-contract.md § Unresolved`
+1 has carried the gap since. No definition-of-done item needs attachments, so the owner was asked
+whether to drop them or design them, and ruled: design them.
+Chosen, in five parts.
+
+**1. Inline with the message, not a separate upload.** `POST /message` takes
+`attachments?: AttachmentUpload[]`, each carrying `filename`, `mediaType` and base64 bytes, and the
+whole thing is one request. Rejected: a two-step `POST /attachments` minting an id that `/message`
+then references. It enforces a byte cap on a stream rather than after a parse, which is the one
+thing it is better at — and it buys that by creating uploaded bytes that belong to no message,
+which is a half-wired state the slice rule forbids and a sweeper nothing else here needs. An
+attachment has no meaning apart from the message it arrives with, so it is atomic with it.
+
+**2. The bytes never enter `events.ndjson`.** They are written to
+`<storage>/sessions/<id>/attachments/<turnId>/<attachmentId>` before the envelope is constructed,
+and `MessageEvent` carries `AttachmentRef[]` — id, filename, media type, byte count — and never the
+data. This is D22's tool-output rule run in the other direction, and for the same reason: the spill
+is the transcript and a base64 screenshot in it makes every replay pay for the image. The path
+carries `turnId` for D22's reason too, so an id cannot collide across turns.
+
+**3. No audit record, and the transcript is the record.** `audit.ndjson` holds tool approvals.
+S14.10 already refused to dilute it with provisioning clicks — "diluting it with provisioning
+clicks makes the artifact the threat model leans on harder to read" — and an attachment is not an
+approval. What records it is the `message` envelope itself: ordered by `seq`, durable, replayable,
+attributed to the session's owner. Brief item 7 asks who let the agent *run* what, which this does
+not change.
+
+**4. It is not a jail question, and saying why is the point.** The obvious objection is that an
+attachment walks bytes past `workspaceRoot`. It does not, because the jail never contained them:
+*Threat model* already states that `workspaceRoot` is not a sandbox and that the agent runs with
+the server user's full filesystem access, so an attachment adds no reach the child did not have.
+What it does add is **operator-chosen content entering the agent's context**, which is the *confused
+agent* row with the operator as the source rather than a README. The control is unchanged — the
+operator chose it, at the same trust level as the message text beside it — and that is stated
+rather than left to be inferred.
+
+**5. Vendor support is declared, never assumed.** `Adapter` gains `acceptsAttachments`, and a
+message carrying attachments to an adapter declaring `false` is `422 bad_request` naming
+`attachments`. The edge tests a capability, not a vendor, so I20 is intact. Whether the Claude CLI
+accepts image content blocks over `--input-format stream-json` is **unprobed**: the adapter already
+writes the Anthropic content-block shape, `content: [{ type: 'text', text }]`, so the transport has
+structural room, but room is not acceptance. S21.1 is a committed finding that stops the slice if
+the answer is no — the shape S8.1 and S10.1 already use for unverified vendor behaviour.
+
+Rejected: **dropping attachments**. It was the recommendation — no DoD item needs them and the
+agent already reaches the whole workspace — and the owner ruled against it. Recorded as
+known-and-retained rather than dropped silently.
+Rejected: **serving an upload back under its own declared media type.** An operator-uploaded
+`text/html` served inline on the console's origin is stored XSS holding the console's cookies. The
+read route serves `nosniff` and `Content-Disposition: attachment` always, and echoes the stored
+media type only for an allow-list of image types, `application/octet-stream` otherwise. D74 widened
+the no-`innerHTML` rule to everything stored; this is that population arriving as bytes.
+Rejected: **truncating an oversized attachment**, the way `tool.result` is truncated. D84's rule
+governs authored content instead: over `caps.attachmentBytes` or `caps.attachmentCount` is
+`422 bad_request` naming the field, with nothing written and nothing shortened. A silently
+truncated file is a corrupt file.
+Reversibility: expensive. It adds a persisted store, a public route, a request field and an
+`Adapter` method signature. The probe in S21.1 is what keeps the expensive half from being built
+against an assumption.
+
 ## Open
 
 Staging only. Once an item becomes an issue it leaves this list.
