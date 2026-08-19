@@ -3255,24 +3255,3 @@ boundary this artifact stays inside of.
 ## Open
 
 Staging only. Once an item becomes an issue it leaves this list.
-
-- **Three operator controls `10-design.md § Failure modes` promises are absent from the client,
-  and the routes they need are all built.** `POST /api/sessions/:id/interrupt` is referenced
-  nowhere in `client/`; there is no elapsed-since-last-envelope indicator, which is the detection
-  the *Child hangs with no output* row names and the control D21 traded every server-side timer
-  for; and `POST /api/sessions/:id/end` is unreachable, so the console's only session exit is the
-  `DELETE` behind "Terminate", which destroys the transcript, the checkpoints and the blobs —
-  the pair D36 exists to separate. Adjudicated in this pass: **the code is the wrong side in all
-  three**, and the fix is `client/app.js` and `client/index.html` only, since every route, its
-  refusals and its tests landed with S5. Wants one bug issue for `/fix` to carry, not a slice.
-  The reason none of the three was caught earlier is itself worth carrying into `agent.md`: every
-  slice's acceptance criteria were written against the server route, so the "Operator sees" column
-  is a promise nothing in the gate set exercises.
-
-- **`session.notice / usage_unavailable` is specified by D146 and emitted nowhere.** The member is
-  absent from `src/contract/index.ts` and the `exec` transport in `src/adapters/codex/index.ts`
-  appends no notice, so a Codex session on the fallback reports a burn of zero that no reader can
-  tell from an idle session — which is the whole thing D146 exists to prevent. Adjudicated in this
-  pass as D149: **the code is the wrong side.** Wants one bug issue for `/fix` to carry, not a
-  slice, and that issue needs a `Done when` naming the *adapter*, because #91's two boxes are both
-  about documents and are both already ticked.
