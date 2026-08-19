@@ -1203,12 +1203,34 @@ describe('S9.2/S9.3/S9.5 — GET .../tool-output/:turnId/:callId', () => {
     return { turnId: envelope.data.turnId, callId: envelope.data.callId, bytes: envelope.data.bytes };
   }
 
+  /**
+   * The blob write behind a truncated envelope is fire-and-forget by design
+   * (session-manager's comment at the `writeToolOutput` call site, I1/I27: awaiting disk
+   * I/O before `emit` would let a later notification claim a lower `seq`). So a GET issued
+   * the instant the truncated envelope is observed can legitimately still see `404
+   * no_such_output` while the write is in flight — S9.5 names that outcome, not a bug — and
+   * on a loaded or slow-disk runner (windows-latest under the full matrix) the gap is wide
+   * enough to hit routinely. This is a test synchronization gap, the same category #110
+   * was (src/session-manager/index.test.ts): poll until the write has actually landed
+   * rather than asserting against a single, unsynchronized read.
+   */
+  async function getBlobWhenReady(h: Harness, url: string, operator = 'ben'): Promise<Response> {
+    const deadline = Date.now() + 5000;
+    for (;;) {
+      const res = await get(h, url, operator);
+      if (res.status !== 404) return res;
+      const body = (await res.json()) as { error?: { code?: string } };
+      if (body.error?.code !== 'no_such_output' || Date.now() >= deadline) return res;
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+  }
+
   it('serves 200 text/plain with nosniff and attachment, and the full pre-truncation byte count', async () => {
     const h = await makeEdge(undefined, { caps: S9_CAPS }, 'big-tool-result');
     const id = await newSession(h, 't1');
     const { turnId, callId, bytes } = await runTruncatedTurn(h, id, 5000);
 
-    const res = await get(h, `/api/sessions/${id}/tool-output/${turnId}/${callId}`);
+    const res = await getBlobWhenReady(h, `/api/sessions/${id}/tool-output/${turnId}/${callId}`);
     assert.equal(res.status, 200);
     assert.match(res.headers.get('content-type') ?? '', /^text\/plain; charset=utf-8/);
     assert.equal(res.headers.get('x-content-type-options'), 'nosniff');
@@ -1249,8 +1271,8 @@ describe('S9.2/S9.3/S9.5 — GET .../tool-output/:turnId/:callId', () => {
     assert.equal(first.callId, second.callId, 'the fixture reuses call-1 on every turn (test setup)');
     assert.notEqual(first.turnId, second.turnId);
 
-    const firstBody = await (await get(h, `/api/sessions/${id}/tool-output/${first.turnId}/${first.callId}`)).text();
-    const secondBody = await (await get(h, `/api/sessions/${id}/tool-output/${second.turnId}/${second.callId}`)).text();
+    const firstBody = await (await getBlobWhenReady(h, `/api/sessions/${id}/tool-output/${first.turnId}/${first.callId}`)).text();
+    const secondBody = await (await getBlobWhenReady(h, `/api/sessions/${id}/tool-output/${second.turnId}/${second.callId}`)).text();
     assert.equal(firstBody.length, 5000);
     assert.equal(secondBody.length, 6000);
   });
