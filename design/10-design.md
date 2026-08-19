@@ -2471,8 +2471,15 @@ these are cited by number elsewhere in this document and in the slices.
    prompt rather than acting on one, and D5 is `/design`'s. What the answer changes today is
    the honesty of *The hard problem*, not the shipped policy: Codex sessions stay
    `preauthorised` and still emit zero `permission.request` events.
-5. Does `--include-partial-messages` give usable token-level deltas, and does it change the
-   event contract? Cheap to test, and the answer changes the renderer.
+5. **Sliced by D165 as S25, which opens with this probe.** Still unanswered — it is an experiment
+   and no slice owned the run, which is why it stayed open. What D165 adds is that the probe must
+   answer more than "does the flag work": whether it disturbs the permission round trip S1.1 and
+   S4.2 rest on, whether it disturbs the per-`message.id` usage normalisation of D75 and S1.11,
+   and what it does to **envelope volume** — every envelope takes a `seq`, enters the ring and is
+   appended to the spill, so deltas multiply all three, and D163's backwards replay and D147's
+   payroll fold both pay for it. Whether a delta is persisted at all is a second, separate stop:
+   *Rules the renderer may rely on* already permits rendering either the deltas or the message,
+   which live-only would satisfy, and S1.5's contiguous `seq` is what it collides with. (#13)
 6. **Answered by S8.1: two live interfaces, and neither matches the rollout schema.**
    `codex app-server` is JSON-RPC 2.0 over stdio, marked `[experimental]` by the CLI itself
    and schema-generated rather than hand-transcribed; `codex exec --json` is newline-delimited

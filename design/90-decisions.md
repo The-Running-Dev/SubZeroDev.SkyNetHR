@@ -3523,6 +3523,43 @@ of an unchanged file is not new evidence, and *Budget discipline* forbids reliti
 decision without some. Recorded here so the argument is retained rather than rediscovered.
 Reversibility: cheap. Nothing is built or moved; a later decision to relocate the script is a pure
 move, exactly as D14 was.
+### 2026-08-19 — D165 Token-level streaming is sliced as S25, opening with the probe it needs
+Context: `10-design.md` open question 5 and issue #13 ask whether
+`claude --include-partial-messages` yields usable token-level deltas and whether `message.delta`
+survives contact with it. It is an experiment, not a decision — nothing about it can be settled by
+reading — and it has stayed open because no slice owned the run.
+Chosen: slice it, opening with the finding, in the shape S8.1, S10.1 and S21.1 already use. The
+issue closes as designed-and-sliced rather than as answered, and the answer becomes a gate on the
+work instead of a note nothing depends on.
+**Why it is worth doing at all, given no definition-of-done item needs it.** Brief item 3 —
+"send a message and watch the agent's output stream in" — is satisfied by message-granular
+streaming, so this is not a gap. What it is, is an **asymmetry that already exists**:
+`message.delta` is a live envelope kind, `## Vendor mapping — Codex` maps
+`item/agentMessage/delta` onto it on the `app-server` transport, and the Claude mapping has no
+delta row. A Codex session streams token by token and a Claude session does not, on the console's
+main surface. The renderer contract for it is already written and already exercised.
+**The probe must answer more than "does the flag work", and the extra questions are the reason
+this is a slice rather than an afternoon.** Three things ride on it. Whether the flag disturbs the
+permission round trip, which S1.1 and S4.2 rest on and which is the one thing this project cannot
+trade. Whether it disturbs `usage`, which D75 and S1.11 normalise per `message.id` and which a
+second stream of records could duplicate. And **envelope volume**: every envelope today takes a
+`seq`, enters the ring and is appended to the spill, so token-level deltas multiply all three by a
+large factor — the spill grows, S9.7's ring bound means something different, D163's backwards
+replay reads further per second of disconnection, and D147's payroll fold walks more lines.
+**Whether deltas are persisted at all is therefore left open deliberately, as the slice's second
+stop.** The renderer rule already says a client "may render either and must not render both",
+which is what makes live-only deltas conceivable — and dropping them from the spill collides with
+`seq` contiguity, which S1.5 asserts and replay depends on. That is a design decision, not an
+adapter one, and S25.2 stops for it rather than letting the first implementation settle it by
+omission.
+Rejected: **running the probe inline and closing the issue with a finding.** It answers the cheap
+half and leaves the volume question to whoever later writes the mapping, which is where an
+unowned decision gets made by accident.
+Rejected: **dropping token-level streaming.** Defensible — no DoD item needs it — and it leaves a
+visible cross-vendor inconsistency on the main surface as a permanent choice rather than an
+unanswered question.
+Reversibility: cheap. Nothing is built; the slice may still stop at S25.1 and report the flag
+unusable, which is a real outcome rather than a failure.
 
 ## Open
 
