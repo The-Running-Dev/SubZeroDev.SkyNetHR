@@ -19,6 +19,13 @@
 #                              model" non-goal); it borrows the operator's own instead of
 #                              baking one in.
 #
+# The container runs as the image's non-root `node` user (uid 1000), not root. Unlike
+# docker-compose.yml's Docker-managed `skynet-hr-storage` volume, these are host bind
+# mounts, so ownership always comes from the host side regardless of the image: if
+# STORAGE_ROOT_HOST_DIR or CLAUDE_CREDENTIALS_DIR are owned by a different host user,
+# `chown -R 1000:1000` them first, or the container will fail to write session data or
+# read/refresh the CLI's credentials.
+#
 # AUTH_MODE defaults to shared-secret here only because it needs no reverse proxy to test
 # locally — src/config/index.ts still refuses to start with none configured (S2.8).
 

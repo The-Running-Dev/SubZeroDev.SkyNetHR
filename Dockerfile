@@ -19,12 +19,11 @@ RUN npm ci
 COPY tsconfig.json ./
 COPY src ./src
 RUN npm run build
+RUN find dist -name '*.test.js' -delete
 
-# ---- deps: production-only node_modules ----------------------------------------------
-FROM ${NODE_IMAGE} AS deps
-WORKDIR /app
-COPY package.json package-lock.json ./
-RUN npm ci --omit=dev
+# ---- deps: production-only node_modules, pruned from the build stage's own install ----
+FROM build AS deps
+RUN npm prune --omit=dev
 
 # ---- runtime ---------------------------------------------------------------------------
 FROM ${NODE_IMAGE} AS runtime
@@ -41,6 +40,12 @@ COPY client ./client
 COPY package.json ./package.json
 
 ENV NODE_ENV=production
+
+# Pre-create /data owned by `node`: a fresh Docker-managed volume mounted here (see
+# docker-compose.yml's `skynet-hr-storage`) inherits the mount point's ownership from the
+# image on first use, which is what makes STORAGE_ROOT writable by the non-root user below
+# instead of landing root-owned.
+RUN mkdir -p /data && chown node:node /data
 
 # The base image's existing uid-1000 `node` user, not root — the workspace roots this
 # process is jailed to (src/jail) are bind-mounted from the host, and the CLI credential

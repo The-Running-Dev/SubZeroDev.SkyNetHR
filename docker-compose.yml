@@ -40,7 +40,19 @@
 #     plus `AUTH_SESSION_HEADER`; `shared-secret` needs `AUTH_COOKIE_NAME` and
 #     `AUTH_SECRET`. `src/config/index.ts` refuses to start on a routable bind with a
 #     header-trusting mode and no `TRUST_PROXY` entry (S2.8) — that refusal is the
-#     deployment's own safety net, not something this file re-implements.
+#     deployment's own safety net, not something this file re-implements. `TRUST_PROXY` is
+#     matched by exact peer-IP equality (src/identity/index.ts): if the reverse proxy is
+#     itself a container on `proxy-net`, pin it a static IP on that network, or recreating
+#     it can hand it a new address and silently lock every operator out.
+#   - `CLAUDE_CREDENTIALS_DIR` is bind-mounted read-write over `/home/node/.claude` below,
+#     and this container runs as the image's non-root `node` user (uid 1000), not root — if
+#     the host directory is owned by a different uid, `chown -R 1000:1000` it (or match the
+#     container's uid to the host owner) before the CLI can read or refresh its credentials.
+#   - The published image is pushed with the workflow's own `GITHUB_TOKEN`
+#     (`.github/workflows/publish.yml`), so GHCR creates the `skynet-hr` package **private**
+#     on its first push. Either make it public in the repository's Packages settings, or
+#     `docker login ghcr.io` on this host with a PAT scoped `read:packages` before `docker
+#     compose pull`.
 
 services:
   skynet-hr:
@@ -62,6 +74,19 @@ services:
       ALLOWED_ORIGINS: "${ALLOWED_ORIGINS:?Set ALLOWED_ORIGINS to the console's own origin(s), comma-separated}"
       SESSION_COOKIE_MAX_AGE_SECONDS: "${SESSION_COOKIE_MAX_AGE_SECONDS:-}"
       SESSION_TOKEN_BUDGET: "${SESSION_TOKEN_BUDGET:-}"
+      # D99: the ring's bound (and the other caps below) are overridable at deploy time on
+      # purpose. Unset stays the compiled-in default — src/config/index.ts's parseIntEnv
+      # treats an empty value the same as absent.
+      CAPS_RING_CAPACITY: "${CAPS_RING_CAPACITY:-}"
+      CAPS_TOOL_RESULT_BYTES: "${CAPS_TOOL_RESULT_BYTES:-}"
+      CAPS_SUBSCRIBER_QUEUE_HIGH_WATER: "${CAPS_SUBSCRIBER_QUEUE_HIGH_WATER:-}"
+      CAPS_KEEPALIVE_MS: "${CAPS_KEEPALIVE_MS:-}"
+      CAPS_AUDIT_PAGE_MAX: "${CAPS_AUDIT_PAGE_MAX:-}"
+      CAPS_REVIEW_BODY_BYTES: "${CAPS_REVIEW_BODY_BYTES:-}"
+      CAPS_REQUISITION_TEXT_BYTES: "${CAPS_REQUISITION_TEXT_BYTES:-}"
+      CAPS_STANDING_RULE_BYTES: "${CAPS_STANDING_RULE_BYTES:-}"
+      CHECKLIST_JSON: "${CHECKLIST_JSON:-}"
+      INCLUDE_RAW: "${INCLUDE_RAW:-}"
       # D10: standalone deployment streams over SSE; behind a proxy that buffers or does
       # not pass through `text/event-stream`, set EDGE=ws instead.
       EDGE: "${EDGE:-sse}"
