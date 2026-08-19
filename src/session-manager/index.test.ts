@@ -2476,6 +2476,14 @@ test('S9.1/S9.2/S9.4 — a tool.result over the byte cap is truncated before its
     const answered = await manager.answerPermission(sessionId, owner, { requestId: requestId as never, decision: 'allow', scope: 'once', rule: null, reason: null });
     assert.equal(answered.ok, true);
     await waitUntil(() => received.slice(before).some((e) => e.kind === 'tool.result'));
+    // The `big-tool-result` scenario writes its `result` record immediately after the
+    // tool_result one, so `tool.result` and `turn.ended` arrive within a few
+    // milliseconds of each other. `waitUntil` polls at 10ms, which is wide enough on a
+    // loaded runner to land between them — and `entry.turn` is only cleared at
+    // `turn.ended`, so the caller's next `message()` would be refused `turn_in_flight`
+    // (ubuntu CI on #173). Waiting for the turn to actually close is what makes the
+    // next turn's start deterministic rather than a race against the poll interval.
+    await waitUntil(() => received.slice(before).some((e) => e.kind === 'turn.ended'));
     const result = received.slice(before).find((e) => e.kind === 'tool.result')!;
     if (messaged.ok) return { turnId: messaged.value.turnId as unknown as string, result };
     throw new Error('unreachable');
@@ -2604,6 +2612,14 @@ test('S23.1/S23.2 — past the session tool-output budget the envelope is unaffe
     const requestId = (received.find((e, i) => i >= before && e.kind === 'permission.request')!.data as { requestId: string }).requestId;
     await manager.answerPermission(sessionId, owner, { requestId: requestId as never, decision: 'allow', scope: 'once', rule: null, reason: null });
     await waitUntil(() => received.slice(before).some((e) => e.kind === 'tool.result'));
+    // The `big-tool-result` scenario writes its `result` record immediately after the
+    // tool_result one, so `tool.result` and `turn.ended` arrive within a few
+    // milliseconds of each other. `waitUntil` polls at 10ms, which is wide enough on a
+    // loaded runner to land between them — and `entry.turn` is only cleared at
+    // `turn.ended`, so the caller's next `message()` would be refused `turn_in_flight`
+    // (ubuntu CI on #173). Waiting for the turn to actually close is what makes the
+    // next turn's start deterministic rather than a race against the poll interval.
+    await waitUntil(() => received.slice(before).some((e) => e.kind === 'turn.ended'));
     const result = received.slice(before).find((e) => e.kind === 'tool.result')!;
     if (messaged.ok) return { turnId: messaged.value.turnId as unknown as string, result };
     throw new Error('unreachable');
