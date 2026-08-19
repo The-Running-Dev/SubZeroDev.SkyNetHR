@@ -160,7 +160,7 @@ Touches, across the four: `config` (bind, auth, `allowedOrigins`, `trustProxy`),
 Out of scope, for all four: the WebSocket edge (S11), the permission prompt (S4), reconnect
 and replay (S3), checkpoints, interrupt, mobile layout beyond not breaking, the other three
 palettes and the theme switcher (S18 — S2.14 ships the token layer and one palette),
-`--include-partial-messages` and `message.delta` (#13).
+`--include-partial-messages` and `message.delta`, which are S25's (#13).
 
 ## S2a — Refuse to start insecurely
 
@@ -1118,6 +1118,61 @@ CLI in CI: the suite drives `fake-claude-cli.mjs` through the `SKYNET_CLAUDE_EXE
 (D91), so the criteria that say a **real** child — S1.1, S4.2 — stay proven locally, and this
 gate must not be reported as having reproven them. Caching, artifact upload and test reporters.
 
+## S25 — Token-level streaming for Claude
+
+**Tier one's surface, but not a tier-one item** — brief item 3 is satisfied by message-granular
+streaming. What this closes is an asymmetry that already exists: `message.delta` is a live envelope
+kind, Codex's `app-server` transport maps `item/agentMessage/delta` onto it, and the Claude mapping
+has no delta row, so one vendor streams token by token on the console's main surface and the other
+does not. **It opens with a probe and carries a second stop after it** (D165).
+
+Delivers: A Claude session's replies appear as they are written rather than arriving whole, so the
+console reads the same way whichever vendor is behind it — or, if the CLI cannot do that without
+disturbing the permission round trip, a written answer saying so and nothing built on a guess.
+
+Touches: `adapters/claude` (the flag and the mapping), `contract` (only if S25.2 says deltas are
+not persisted), `session-manager`, `client` (the delta renderer), `config`.
+
+Depends on: S1, S2, S3, S4, S9.
+
+Acceptance:
+  - S25.1 A written finding, committed before any mapping code, citing the command run and its
+    observed output, answering four things: whether `--include-partial-messages` emits usable
+    incremental text records at all; whether those records concatenate **exactly** to the final
+    `message`, which is the rule `20-contract.md § Rules the renderer may rely on` already states;
+    whether the flag disturbs the `control_request` permission round trip that S1.1 and S4.2 rest
+    on; and whether it disturbs `usage`, which D75 and S1.11 normalise per `message.id`. **A
+    disturbance to either of the last two stops the slice outright** — neither is tradeable for
+    streaming polish — and the remaining criteria are recorded blocked rather than failed.
+  - S25.2 **The slice stops a second time, for a decision, before any delta is emitted**: whether a
+    `message.delta` takes a `seq` and is appended to the spill, or is live-only. Both readings are
+    live in the documents as they stand — the renderer rule says a client "may render either and
+    must not render both", which live-only satisfies, while S1.5 asserts `seq` is contiguous from 1
+    with no gaps and replay depends on it. The finding states the measured multiplier from S25.1
+    against the spill, the ring (S9.7), D163's backwards replay and D147's payroll fold, and the
+    ruling is `/design`'s at its own tier. This slice may not settle it by implementing one.
+  - S25.3 With the flag on, every existing Claude criterion still passes unchanged, re-run rather
+    than assumed: S1.3's twelve mappings, S1.5's contiguous `seq`, S1.11's per-`message.id` usage,
+    S4.2's allow-and-deny round trip against a real child, and S4.3's one-resolution-per-request.
+  - S25.4 Deltas for one `turnId` concatenate in `seq` order to the `message` that follows, byte
+    for byte, over a fixture of at least twenty messages including one containing multi-byte UTF-8
+    split across a chunk boundary (S1.2's hazard, at a new granularity).
+  - S25.5 The client renders deltas or the final message and never both, picking by `turnId`, and a
+    reconnect mid-message renders exactly once — asserted by disconnecting between two deltas and
+    comparing the rendered text against an uninterrupted run.
+  - S25.6 The flag is configuration, defaulting off, and a deployment with it off produces the
+    envelope sequence this repository ships today, element for element. Token-level streaming is
+    not made the only way the console works on the strength of one probe.
+  - S25.7 The measured cost is stated in the slice report, not estimated: envelopes per turn with
+    the flag on and off, spill bytes for the same turn both ways, and the longest browser
+    main-thread task under S9.6's method.
+
+Out of scope: token-level streaming for Codex `exec --json`, which emits no deltas of any kind
+(`20-contract.md § Vendor mapping — Codex`) and where the absence is the vendor's, not ours;
+`thinking` deltas, which are a second stream with the same volume question and no criterion here;
+changing `MessageDelta`'s shape, which already exists and is already exercised by Codex; and
+deciding S25.2 — this slice surfaces the measurement and stops.
+
 ---
 
 ## What no slice covers
@@ -1134,7 +1189,9 @@ worse of the two irregularities. See S19 for why the verticality rule's purpose 
 **Questions, each already an issue:**
 
 - **Token-level streaming** — whether `--include-partial-messages` yields usable deltas and
-  whether `message.delta` survives contact with it (#13).
+  whether `message.delta` survives contact with it (#13) — **resolved by D165 and no longer
+  uncovered.** Sliced as S25, which opens with that probe and stops a second time for whether a
+  delta is persisted at all.
 - **A retention rule for tool-output blobs** (#20).
 - **A lock file preventing two server processes over one storage root** (#21), which tier two
   widens: two processes would each consume the same approved requisition.
