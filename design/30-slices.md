@@ -501,9 +501,10 @@ Acceptance:
     `StartupError.storage_unwritable` and a non-zero exit.
 
 Out of scope: resuming a rehydrated session with `--resume` (D20 rejects it — it fails
-silently, which is the worst way to fail); a lock file preventing two servers over one
-storage root (carried in `90-decisions.md § Open`); closing the spawn-to-append window with
-a Windows Job Object (D23 rejects the dependency).
+silently, which is the worst way to fail); the lock preventing two servers over one
+storage root, which is S22's (D161 — it depends on this slice's liveness test rather than the
+reverse); closing the spawn-to-append window with a Windows Job Object (D23 rejects the
+dependency).
 
 ## S8 — Codex, honestly
 
@@ -1235,6 +1236,55 @@ retention rule beyond deletion with the session — attachments are a second sto
 operator behaviour rather than session count, which is #20's question and now covers this directory
 too.
 
+## S22 — One server per storage root
+
+**Tier one**, and small. D161 decided it; this builds it. It exists because the single-process
+premise the whole *Concurrency* argument rests on was assumed rather than enforced, and the way it
+fails is silent — a corrupted audit log and another server's agents killed, neither diagnosable
+from symptoms.
+
+Delivers: Starting a second server against a storage root another server is already using refuses,
+immediately and by name, instead of quietly corrupting the shared record and killing the first
+server's running agents. A server whose host crashed starts again by itself, without anyone
+clearing a file by hand.
+
+Touches: `store` (`claimLock`, `releaseLock`, reading a `ServerLock`), `session-manager` (`boot`'s
+new first step), `contract` (`ServerLock`, `StartupError.storage_locked`), `server.ts` (release on
+clean shutdown).
+
+Depends on: S7 — it reuses D23's liveness test, which S7.5 and S7.6 build.
+
+Acceptance:
+  - S22.1 A second server booting against a held storage root refuses with
+    `StartupError.storage_locked` and a non-zero exit, and its message names the holder's `pid`,
+    `hostname` and `startedAt`. The first server is unaffected: its sessions are still live and
+    its children are still running afterwards, asserted by process enumeration.
+  - S22.2 The claim happens **before boot's reap step**, not merely before `listen` — asserted by
+    a second boot against a root whose `pids.ndjson` names live children of the first server, and
+    confirming those children are still alive after the refusal (D161). This is the criterion the
+    slice exists for; a lock taken after step 1 prevents nothing that matters.
+  - S22.3 A lock whose holder fails D23's three-part test — an `exitedAt`, a `startedAt` earlier
+    than the host's last boot, or a mismatched image — is reclaimed automatically, the reclaim is
+    logged naming the stale holder, and boot proceeds. Asserted for each of the three
+    independently, so a single always-stale answer cannot pass this.
+  - S22.4 A lock naming a different `hostname` is **never** reclaimed, whatever its `pid` says:
+    the refusal stands and says the holder is on another host. The liveness test cannot see
+    another machine's process table, and reclaiming on one that it cannot see is how two servers
+    over one network share both start.
+  - S22.5 A clean shutdown removes the lock, and the next boot takes it without invoking the
+    staleness path at all — asserted by instrumenting the reclaim and finding it uncalled.
+  - S22.6 A storage root that cannot be written still fails as `StartupError.storage_unwritable`
+    and not as a lock error: S7.10's case is unchanged, asserted by re-running it.
+  - S22.7 The four server-wide append files and the two registries are untouched by a refused
+    boot: `audit.ndjson`, `pids.ndjson`, `reviews.ndjson` and `requisitions.ndjson` are each
+    byte-identical before and after, and no session's `meta.json` is rewritten.
+
+Out of scope: an OS advisory lock (D161 rejects it — platform divergence, a native dependency, and
+it cannot name the holder); a `--force` override, which is a way to do the corrupting thing on
+purpose and which nothing has asked for; coordinating two servers that genuinely want to share a
+root, which is a different architecture; any lock over an individual session or workspace, which
+is D19's registry claim and already exists.
+
 ---
 
 ## What no slice covers
@@ -1253,8 +1303,9 @@ worse of the two irregularities. See S19 for why the verticality rule's purpose 
 - **Token-level streaming** — whether `--include-partial-messages` yields usable deltas and
   whether `message.delta` survives contact with it (#13).
 - **A retention rule for tool-output blobs** (#20).
-- **A lock file preventing two server processes over one storage root** (#21), which tier two
-  widens: two processes would each consume the same approved requisition.
+- **A lock file preventing two server processes over one storage root** (#21) — **resolved by
+  D161 and no longer uncovered.** Taken, and built by S22; the staleness objection is answered by
+  reusing D23's own liveness test rather than by new machinery.
 - **An offset index** for the spill and now for `audit.ndjson` (#19).
 - **Attachments on `POST /message`** — **resolved by D160 and no longer uncovered.** Designed and
   sliced as S21, which opens with a probe of whether the Claude CLI accepts non-text content

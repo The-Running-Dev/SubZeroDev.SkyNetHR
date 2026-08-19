@@ -801,6 +801,7 @@ encodes is `store`'s business.
   ckpt.git/           shadow git dir, work-tree = the session's workspace
 <storage>/audit.ndjson
 <storage>/pids.ndjson                                                (D23)
+<storage>/server.lock        one ServerLock; claimed before boot step 1   (D161)
 <storage>/reviews.ndjson             (tier two) latest line per reviewId wins       (D65)
 <storage>/requisitions.ndjson        (tier two) latest line per requisitionId wins  (D65)
 ```
@@ -1757,7 +1758,9 @@ Genuinely simultaneous:
   appends through one stream in one single-threaded process cannot interleave a partial line.
   Tier two added two files to this set and no new argument, which is the point of choosing
   append-only files for it (D65). Two server processes over one storage root would break it
-  for all four, and nothing currently prevents that — see *Open questions*.
+  for all four, **and that is now prevented rather than noted** (D161): `<storage>/server.lock`
+  is claimed before boot's first step, so the single-process premise this whole argument rests on
+  is enforced instead of assumed.
 - **The two record registries** *(tier two)*, which are shared mutable state in *memory* and
   therefore governed by the same rule as the turn slot: every state test that decides
   something is claimed in the synchronous block that tests it. There are exactly two such
@@ -2007,6 +2010,10 @@ one place D19 and D20 touch, and it is why they are stated together.
 Five steps, and the order is the point:
 
 ```
+0. lock    claim <storage>/server.lock, or refuse to start                    (D161)
+           a live holder → StartupError.storage_locked, naming it
+           a stale holder → reclaimed, logged; staleness is D23's own test
+           another hostname → never reclaimed; the test cannot see that host
 1. reap    pids.ndjson entries with no exitedAt, subject to the reuse guard   (D23)
            kill the process TREE, not the recorded pid                        (D38)
 2. rehydrate  meta.json → registry, every session marked ended                (D20)
@@ -2018,6 +2025,12 @@ Five steps, and the order is the point:
 4. load    the two record logs → registries, latest line per id     (tier two, D65)
 5. listen  only now are connections accepted
 ```
+
+**The lock precedes reaping, and that order is the whole point of it** (D161). Step 1 kills process
+trees it believes are orphans, and it cannot tell another server's live agents from its own dead
+ones. A second server that got as far as reaping would take down the first server's running work
+before anything else went wrong, so the claim has to come before the first destructive act rather
+than merely before `listen`.
 
 Reaping precedes rehydration so that no rehydrated session can be adopted by an orphan
 still holding its workspace. Listening comes last so that no client can observe a registry
@@ -2423,16 +2436,17 @@ these are cited by number elsewhere in this document and in the slices.
    outweigh a month of transcripts. Options are a per-session byte budget, an age-based
    sweep at boot, or deleting them with their session and otherwise never — the last is what
    the design does today by omission, which is a decision made by not making one.
-3. **Nothing prevents two server processes over one storage root.** The no-lock argument in
-   *Concurrency* holds for one process and silently stops holding for two — interleaved
-   appends to all four server-wide files, two registries disagreeing about which workspace is
-   busy (D19), and boot reaping a live sibling's children. Tier two widens it rather than
-   changing it: two processes would also both consume one approved requisition, since each
-   holds its own registry and the synchronous claim that makes D68 safe is per-process. A lock
-   file at the storage root is the obvious answer and it is small; it is listed here rather
-   than decided because the failure it prevents is an operator running the server twice by
-   accident, and whether that is worth a startup failure mode is a judgement about deployment,
-   not about architecture.
+3. **Resolved by D161: the lock is taken.** The three failures this named — interleaved appends
+   to all four server-wide files, two registries disagreeing about which workspace is busy (D19),
+   and boot reaping a live sibling's children — are prevented by `<storage>/server.lock`, claimed
+   before boot's first step and refusing with `StartupError.storage_locked` naming the holder. The
+   deployment judgement this item deferred was whether an accidental double-start justifies a
+   startup failure mode, and the answer turned on cost rather than principle: **the staleness
+   objection is answered by machinery that already exists.** D23's three-part liveness test —
+   no `exitedAt`, `startedAt` after the host's last boot, matching image — is reused verbatim
+   against the lock's own holder, so a crashed server's lock is reclaimed automatically and a
+   container restart is not an incident. A lock naming another `hostname` is never reclaimed,
+   because that test cannot see another machine's process table.
 
 **Needing an experiment:**
 
