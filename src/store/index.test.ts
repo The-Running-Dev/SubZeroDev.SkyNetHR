@@ -327,6 +327,102 @@ test('S9.7 — over 50,000 envelopes the ring never exceeds caps.ringCapacity; p
   console.log(`[S9.7] ${N} envelopes at ringCapacity ${capped.caps.ringCapacity}: peak RSS ${(peakRss / (1024 * 1024)).toFixed(1)} MiB`);
 });
 
+// Bulk-written, not appended one envelope at a time — mirrors `writeAuditFixture`'s
+// rationale above: this tests `readEventsAfter`, not `appendEvent`, and a real deployment's
+// incremental appends produce byte-identical `events.ndjson` content to this at rest.
+async function writeEventsFixture(storageRoot: string, sessionId: string, count: number): Promise<void> {
+  const lines: string[] = [];
+  for (let seq = 1; seq <= count; seq++) lines.push(JSON.stringify(envelope(sessionId, seq)));
+  await writeFile(path.join(storageRoot, 'sessions', sessionId, 'events.ndjson'), lines.join('\n') + '\n', 'utf8');
+}
+
+test('S24.2 — bytes read to serve a last-100 replay grow with distance from the tail, not with the file (10,000 vs 100,000 envelopes)', async () => {
+  async function replayLast100BytesRead(n: number): Promise<{ bytes: number; ms: number; tail: Envelope[] }> {
+    const storageRoot = await mkdtemp(path.join(tmpdir(), 'skynet-store-'));
+    const storeResult = await createStore(baseConfig(storageRoot));
+    if (!storeResult.ok) throw new Error('createStore failed');
+    const store = storeResult.value;
+    const record = sessionRecord('sess-24-2');
+    await store.createSession(record);
+    await writeEventsFixture(storageRoot, 'sess-24-2', n);
+
+    const before = streamBytesReadTotal;
+    const start = Date.now();
+    const tail: Envelope[] = [];
+    for await (const result of store.readEventsAfter(record.id, (n - 100) as never)) {
+      assert.equal(result.ok, true);
+      if (result.ok) tail.push(result.value);
+    }
+    const ms = Date.now() - start;
+    return { bytes: streamBytesReadTotal - before, ms, tail };
+  }
+
+  // `readEventsAfter`'s forward pass is internal to `store` and not part of `Store`'s
+  // public contract, so its byte count cannot be read off a return value. `fs.ReadStream`
+  // is a shared, mutable class — unlike `node:fs`'s named exports, which are frozen ESM
+  // bindings a test cannot reassign across a module boundary — so patching its prototype
+  // tallies `.bytesRead` for every stream any module constructs, including the one inside
+  // `readEventsAfter`, without changing `store`'s own source.
+  const { ReadStream } = await import('node:fs');
+  let streamBytesReadTotal = 0;
+  const originalDestroy = ReadStream.prototype._destroy;
+  ReadStream.prototype._destroy = function (this: InstanceType<typeof ReadStream>, ...args: Parameters<typeof originalDestroy>) {
+    streamBytesReadTotal += this.bytesRead;
+    return originalDestroy.apply(this, args);
+  };
+
+  let small: { bytes: number; ms: number; tail: Envelope[] };
+  let large: { bytes: number; ms: number; tail: Envelope[] };
+  try {
+    small = await replayLast100BytesRead(10_000);
+    large = await replayLast100BytesRead(100_000);
+  } finally {
+    ReadStream.prototype._destroy = originalDestroy;
+  }
+
+  assert.equal(small.tail.length, 100);
+  assert.equal(large.tail.length, 100);
+  assert.deepEqual(small.tail.map((e) => e.seq - 9_900), large.tail.map((e) => e.seq - 99_900), 'both replays return the same shape — the last 100 envelopes relative to their own file');
+
+  // "Within noise of each other" (S24.2): the file is 10x larger but the replay asked for
+  // the same 100-envelope tail, so the byte count must not scale with the file. A generous
+  // 3x bound (not 1x) absorbs jitter from chunk-boundary alignment without hiding an O(file)
+  // regression, which would show up as roughly a 10x difference.
+  console.log(`[S24.2] 10,000 envelopes: ${small.bytes} bytes, ${small.ms}ms to replay last 100`);
+  console.log(`[S24.2] 100,000 envelopes: ${large.bytes} bytes, ${large.ms}ms to replay last 100`);
+  assert.ok(
+    large.bytes < small.bytes * 3,
+    `bytes read grew with file size: ${small.bytes} (10,000 envelopes) vs ${large.bytes} (100,000 envelopes)`,
+  );
+});
+
+test('S24.4 — in a large multi-chunk spill, a torn trailing line is dropped and the file is unmodified, with the tear at the point the backward read starts', async () => {
+  const storageRoot = await mkdtemp(path.join(tmpdir(), 'skynet-store-'));
+  const storeResult = await createStore(baseConfig(storageRoot));
+  if (!storeResult.ok) return;
+  const store = storeResult.value;
+  const record = sessionRecord('sess-24-4');
+  await store.createSession(record);
+
+  const N = 20_000; // large enough to span several of `locateForwardStart`'s 64 KiB chunks
+  await writeEventsFixture(storageRoot, 'sess-24-4', N);
+
+  const eventsPath = path.join(storageRoot, 'sessions', 'sess-24-4', 'events.ndjson');
+  const { appendFile } = await import('node:fs/promises');
+  await appendFile(eventsPath, `{"seq":${N + 1},"sessionId":"sess-24-4","torn`);
+  const beforeRead = await readFile(eventsPath, 'utf8');
+
+  const collected: Envelope[] = [];
+  for await (const result of store.readEventsAfter(record.id, (N - 5) as never)) {
+    assert.equal(result.ok, true);
+    if (result.ok) collected.push(result.value);
+  }
+  assert.deepEqual(collected.map((e) => e.seq), [N - 4, N - 3, N - 2, N - 1, N], 'the torn trailing line is dropped, the preceding lines are served');
+
+  const afterRead = await readFile(eventsPath, 'utf8');
+  assert.equal(afterRead, beforeRead, 'a read must not modify the spill file');
+});
+
 test('S3.5 — an empty ring cannot serve any range, including after: 0, so replay falls through to the spill', async () => {
   const storageRoot = await mkdtemp(path.join(tmpdir(), 'skynet-store-'));
   const config = baseConfig(storageRoot);

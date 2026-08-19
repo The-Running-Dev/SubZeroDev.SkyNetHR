@@ -407,6 +407,79 @@ async function readAuditPageImpl(
   }
 }
 
+// Backward-chunked scan to find the byte offset where a replay should resume — S24.1
+// (D163). `events.ndjson` is append-only NDJSON (`appendLine` always terminates a line
+// with `\n`), so any newline this finds is a real line boundary. Reading backward in
+// fixed-size chunks from the tail, parsing lines newest-first and stopping the moment a
+// `seq <= after` line is found, keeps the cost proportional to how far `after` sits from
+// the file's end (S24.2) rather than a scan from byte 0. The structure mirrors
+// `readAuditPageImpl`'s backward chunk walk above, adapted from cursor-paging to
+// locating one offset.
+const EVENTS_READ_CHUNK_BYTES = 64 * 1024;
+
+async function locateForwardStart(filePath: string, after: Seq | 0): Promise<number> {
+  if (after === 0) return 0; // S24.3: a whole-session replay is still a full forward scan
+  let handle;
+  try {
+    handle = await open(filePath, 'r');
+  } catch {
+    return 0; // missing/unreadable file: the forward stream reports the real error
+  }
+  try {
+    const fileSize = (await handle.stat()).size;
+    if (fileSize === 0) return 0;
+    let tailFragment: Buffer = Buffer.alloc(0);
+    let cursor = fileSize;
+    while (cursor > 0) {
+      const readLen = Math.min(EVENTS_READ_CHUNK_BYTES, cursor);
+      const readStart = cursor - readLen;
+      const raw = Buffer.alloc(readLen);
+      const { bytesRead } = await handle.read(raw, 0, readLen, readStart);
+      if (bytesRead !== readLen) return 0; // short read: fall back to a full forward scan
+      const buf = tailFragment.length > 0 ? Buffer.concat([raw, tailFragment]) : raw;
+      tailFragment = Buffer.alloc(0);
+      const isFileStart = readStart === 0;
+
+      const newlineIdx: number[] = [];
+      for (let searchFrom = 0; ; ) {
+        const nl = buf.indexOf(0x0a, searchFrom);
+        if (nl === -1) break;
+        newlineIdx.push(nl);
+        searchFrom = nl + 1;
+      }
+      const hasTrailingNewline = newlineIdx.length > 0 && newlineIdx[newlineIdx.length - 1] === buf.length - 1;
+      const lineStarts: number[] = [0, ...newlineIdx.map((nl) => nl + 1).filter((s) => s < buf.length)];
+
+      for (let i = lineStarts.length - 1; i >= 0; i--) {
+        const start = lineStarts[i]!;
+        if (i === 0 && !isFileStart) {
+          // This buffer's leading bytes are a line whose true start lies in the chunk
+          // before this one (in file order) — carry it forward to prepend once that
+          // earlier chunk is read, exactly as `readAuditPageImpl` does.
+          const fragmentEnd = lineStarts.length > 1 ? lineStarts[1]! - 1 : buf.length;
+          tailFragment = Buffer.from(buf.subarray(0, fragmentEnd));
+          break;
+        }
+        const end = i + 1 < lineStarts.length ? lineStarts[i + 1]! - 1 : hasTrailingNewline ? buf.length - 1 : buf.length;
+        if (end <= start) continue; // an empty line
+        const nextLineStart = readStart + (i + 1 < lineStarts.length ? lineStarts[i + 1]! : buf.length);
+        try {
+          const envelope = JSON.parse(buf.subarray(start, end).toString('utf8')) as Envelope;
+          if (envelope.seq <= after) return nextLineStart;
+        } catch {
+          // A torn trailing line, or mid-file corruption: not a match, keep scanning
+          // backward — the forward pass drops it the same way it always has (S24.4).
+        }
+      }
+      if (isFileStart) return 0;
+      cursor = readStart;
+    }
+    return 0;
+  } finally {
+    await handle.close();
+  }
+}
+
 export async function createStore(config: Config): Promise<Result<Store, StoreError>> {
   const storageRoot = config.storageRoot;
   try {
@@ -499,9 +572,10 @@ export async function createStore(config: Config): Promise<Result<Store, StoreEr
     readEventsAfter(sessionId: SessionId, after: Seq | 0): AsyncIterable<Result<Envelope, StoreError>> {
       const filePath = eventsPath(storageRoot, sessionId);
       async function* generator(): AsyncGenerator<Result<Envelope, StoreError>> {
+        const forwardStart = await locateForwardStart(filePath, after);
         let stream;
         try {
-          stream = createReadStream(filePath, { encoding: 'utf8' });
+          stream = createReadStream(filePath, { encoding: 'utf8', start: forwardStart });
         } catch (err) {
           yield ioError(filePath, (err as Error).message);
           return;
