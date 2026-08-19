@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { createServer, type Server } from 'node:http';
-import { realpathSync } from 'node:fs';
+import { existsSync, realpathSync } from 'node:fs';
 import { mkdtemp, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -96,7 +96,7 @@ async function makeEdge(
       auditPageMax: 200,
       reviewBodyBytes: 1024,
       requisitionTextBytes: 1024,
-      standingRuleBytes: 1024,
+      standingRuleBytes: 1024, attachmentBytes: 10485760, attachmentCount: 5,
     },
     sessionCookieMaxAgeSeconds: 2592000,
     includeRaw: false,
@@ -299,7 +299,7 @@ describe('S13 — POST/GET /api/requisitions, POST /api/requisitions/:id/decisio
           auditPageMax: 200,
           reviewBodyBytes: 1024,
           requisitionTextBytes: 8,
-          standingRuleBytes: 1024,
+          standingRuleBytes: 1024, attachmentBytes: 10485760, attachmentCount: 5,
         },
       },
       undefined,
@@ -399,7 +399,7 @@ describe('S15 — POST/GET /api/reviews, POST /api/reviews/:id, POST /api/review
           auditPageMax: 200,
           reviewBodyBytes: 8,
           requisitionTextBytes: 1024,
-          standingRuleBytes: 1024,
+          standingRuleBytes: 1024, attachmentBytes: 10485760, attachmentCount: 5,
         },
       },
       undefined,
@@ -588,7 +588,7 @@ describe('S2.10 — SSE retry hint', () => {
     const h = await makeEdge(undefined, {
       caps: {
         ringCapacity: 500, toolResultBytes: 65536, subscriberQueueHighWater: 1000,
-        keepaliveMs: 15000, auditPageMax: 200, reviewBodyBytes: 1024, requisitionTextBytes: 1024, standingRuleBytes: 1024,
+        keepaliveMs: 15000, auditPageMax: 200, reviewBodyBytes: 1024, requisitionTextBytes: 1024, standingRuleBytes: 1024, attachmentBytes: 10485760, attachmentCount: 5,
       },
     });
     const id = await newSession(h, 'r1');
@@ -605,7 +605,7 @@ describe('S2.10 — SSE keepalive', () => {
     const h = await makeEdge(undefined, {
       caps: {
         ringCapacity: 500, toolResultBytes: 65536, subscriberQueueHighWater: 1000,
-        keepaliveMs: 60, auditPageMax: 200, reviewBodyBytes: 1024, requisitionTextBytes: 1024, standingRuleBytes: 1024,
+        keepaliveMs: 60, auditPageMax: 200, reviewBodyBytes: 1024, requisitionTextBytes: 1024, standingRuleBytes: 1024, attachmentBytes: 10485760, attachmentCount: 5,
       },
     });
     const id = await newSession(h, 'k1');
@@ -1170,7 +1170,7 @@ const S9_CAPS: Config['caps'] = {
   auditPageMax: 200,
   reviewBodyBytes: 1024,
   requisitionTextBytes: 1024,
-  standingRuleBytes: 1024,
+  standingRuleBytes: 1024, attachmentBytes: 10485760, attachmentCount: 5,
 };
 
 describe('S9.2/S9.3/S9.5 — GET .../tool-output/:turnId/:callId', () => {
@@ -1277,6 +1277,156 @@ describe('S9.2/S9.3/S9.5 — GET .../tool-output/:turnId/:callId', () => {
     const secondBody = await (await getBlobWhenReady(h, `/api/sessions/${id}/tool-output/${second.turnId}/${second.callId}`)).text();
     assert.equal(firstBody.length, 5000);
     assert.equal(secondBody.length, 6000);
+  });
+});
+
+describe('S21 — attachments', () => {
+  const PNG_BYTES = 'not-really-a-png-just-test-bytes';
+  const attachmentUpload = (overrides: Record<string, unknown> = {}) => ({
+    filename: 'bug.png',
+    mediaType: 'image/png',
+    dataBase64: Buffer.from(PNG_BYTES, 'utf8').toString('base64'),
+    ...overrides,
+  });
+
+  async function sendWithAttachment(h: Harness, id: string, attachments: unknown[], operator = 'ben') {
+    const events = await get(h, `/api/sessions/${id}/events`, operator);
+    const sent = await post(h, `/api/sessions/${id}/message`, { text: 'see attached', attachments }, operator);
+    return { sent, events };
+  }
+
+  it('S21.2 — POST /message with an attachment returns 202 { turnId }, and the replayed message envelope carries one AttachmentRef with filename, mediaType and bytes', async () => {
+    const h = await makeEdge(undefined, undefined, 'error-result');
+    const id = await newSession(h, 'att1');
+    const { sent, events } = await sendWithAttachment(h, id, [attachmentUpload()]);
+    assert.equal(sent.status, 202, `message failed: ${await sent.clone().text()}`);
+    const { turnId } = (await sent.json()) as { turnId: string };
+
+    const { frames } = await readFrames(events, (f) => f.some((x) => x.includes('event: message') && x.includes('"role":"user"')));
+    const frame = frames.find((f) => f.includes('event: message') && f.includes('"role":"user"'))!;
+    const envelope = JSON.parse(frame.split('\n').find((l) => l.startsWith('data: '))!.slice('data: '.length)) as {
+      data: { turnId: string; role: string; text: string; attachments: Array<{ attachmentId: string; filename: string; mediaType: string; bytes: number }> };
+    };
+    assert.equal(envelope.data.turnId, turnId);
+    assert.equal(envelope.data.attachments.length, 1);
+    assert.equal(envelope.data.attachments[0]!.filename, 'bug.png');
+    assert.equal(envelope.data.attachments[0]!.mediaType, 'image/png');
+    assert.equal(envelope.data.attachments[0]!.bytes, Buffer.byteLength(PNG_BYTES, 'utf8'));
+  });
+
+  it('S21.5 — an oversized attachment, or too many attachments, is 422 bad_request naming attachments, and nothing is written', async () => {
+    const h = await makeEdge(undefined, { caps: { ...S9_CAPS, attachmentBytes: 8, attachmentCount: 1 } }, 'error-result');
+    const id = await newSession(h, 'att2');
+
+    const tooBig = await post(h, `/api/sessions/${id}/message`, { text: 'go', attachments: [attachmentUpload()] });
+    assert.equal(tooBig.status, 422);
+    const tooBigBody = (await tooBig.json()) as { error: { code: string; detail?: { field?: string } } };
+    assert.equal(tooBigBody.error.code, 'bad_request');
+    assert.equal(tooBigBody.error.detail?.field, 'attachments');
+
+    const tooMany = await post(h, `/api/sessions/${id}/message`, {
+      text: 'go',
+      attachments: [attachmentUpload({ dataBase64: Buffer.from('a').toString('base64') }), attachmentUpload({ dataBase64: Buffer.from('b').toString('base64') })],
+    });
+    assert.equal(tooMany.status, 422);
+    const tooManyBody = (await tooMany.json()) as { error: { code: string; detail?: { field?: string } } };
+    assert.equal(tooManyBody.error.code, 'bad_request');
+    assert.equal(tooManyBody.error.detail?.field, 'attachments');
+
+    assert.equal(existsSync(path.join(h.storageRoot, 'sessions', id, 'attachments')), false);
+  });
+
+  it('S21.6 — GET .../attachments/:turnId/:attachmentId serves nosniff + attachment always, echoing the stored mediaType only for an image allow-list', async () => {
+    const h = await makeEdge(undefined, undefined, 'error-result');
+    const id = await newSession(h, 'att3');
+    const { sent, events } = await sendWithAttachment(h, id, [
+      attachmentUpload({ filename: 'shot.png', mediaType: 'image/png' }),
+      attachmentUpload({ filename: 'evil.html', mediaType: 'text/html', dataBase64: Buffer.from('<script>alert(1)</script>').toString('base64') }),
+    ]);
+    assert.equal(sent.status, 202, `message failed: ${await sent.clone().text()}`);
+    const { turnId } = (await sent.json()) as { turnId: string };
+
+    const { frames } = await readFrames(events, (f) => f.some((x) => x.includes('event: message') && x.includes('"role":"user"')));
+    const frame = frames.find((f) => f.includes('event: message') && f.includes('"role":"user"'))!;
+    const envelope = JSON.parse(frame.split('\n').find((l) => l.startsWith('data: '))!.slice('data: '.length)) as {
+      data: { attachments: Array<{ attachmentId: string; mediaType: string }> };
+    };
+    const [png, html] = envelope.data.attachments;
+
+    const pngRes = await get(h, `/api/sessions/${id}/attachments/${turnId}/${png!.attachmentId}`);
+    assert.equal(pngRes.status, 200);
+    assert.equal(pngRes.headers.get('x-content-type-options'), 'nosniff');
+    assert.equal(pngRes.headers.get('content-disposition'), 'attachment');
+    assert.match(pngRes.headers.get('content-type') ?? '', /^image\/png/);
+    assert.equal(await pngRes.text(), PNG_BYTES);
+
+    const htmlRes = await get(h, `/api/sessions/${id}/attachments/${turnId}/${html!.attachmentId}`);
+    assert.equal(htmlRes.status, 200);
+    assert.equal(htmlRes.headers.get('x-content-type-options'), 'nosniff');
+    assert.equal(htmlRes.headers.get('content-disposition'), 'attachment');
+    // D160: an operator-declared text/html is never echoed unguarded — it is what would
+    // make this stored XSS holding the console's credentials.
+    assert.match(htmlRes.headers.get('content-type') ?? '', /^application\/octet-stream/);
+  });
+
+  it('S21.7 — another operator gets 404 no_such_session; a missing turn or attachment id is 404 no_such_attachment; a reconnect replays the same ref', async () => {
+    const h = await makeEdge(undefined, undefined, 'error-result');
+    const id = await newSession(h, 'att4');
+    const { sent, events } = await sendWithAttachment(h, id, [attachmentUpload()]);
+    const { turnId } = (await sent.json()) as { turnId: string };
+    const { frames } = await readFrames(events, (f) => f.some((x) => x.includes('event: message') && x.includes('"role":"user"')));
+    const frame = frames.find((f) => f.includes('event: message') && f.includes('"role":"user"'))!;
+    const envelope = JSON.parse(frame.split('\n').find((l) => l.startsWith('data: '))!.slice('data: '.length)) as {
+      data: { attachments: Array<{ attachmentId: string }> };
+    };
+    const attachmentId = envelope.data.attachments[0]!.attachmentId;
+
+    const mallory = await get(h, `/api/sessions/${id}/attachments/${turnId}/${attachmentId}`, 'mallory');
+    assert.equal(mallory.status, 404);
+    assert.equal(((await mallory.json()) as { error: { code: string } }).error.code, 'no_such_session');
+
+    const wrongAttachment = await get(h, `/api/sessions/${id}/attachments/${turnId}/does-not-exist`);
+    assert.equal(wrongAttachment.status, 404);
+    assert.equal(((await wrongAttachment.json()) as { error: { code: string } }).error.code, 'no_such_attachment');
+
+    const wrongTurn = await get(h, `/api/sessions/${id}/attachments/does-not-exist/${attachmentId}`);
+    assert.equal(wrongTurn.status, 404);
+    assert.equal(((await wrongTurn.json()) as { error: { code: string } }).error.code, 'no_such_attachment');
+
+    // A reconnect (a fresh /events subscription) renders the same ref from the spill.
+    const reconnected = await get(h, `/api/sessions/${id}/events`);
+    const { frames: replayed } = await readFrames(reconnected, (f) => f.some((x) => x.includes('event: message') && x.includes('"role":"user"')));
+    const replayedFrame = replayed.find((f) => f.includes('event: message') && f.includes('"role":"user"'))!;
+    const replayedEnvelope = JSON.parse(replayedFrame.split('\n').find((l) => l.startsWith('data: '))!.slice('data: '.length)) as {
+      data: { attachments: Array<{ attachmentId: string }> };
+    };
+    assert.deepEqual(replayedEnvelope.data.attachments, envelope.data.attachments);
+
+    const stillFetchable = await get(h, `/api/sessions/${id}/attachments/${turnId}/${attachmentId}`);
+    assert.equal(stillFetchable.status, 200);
+  });
+
+  it('S21.9 — DELETE removes attachments/ with the rest, and audit.ndjson stays byte-identical', async () => {
+    const h = await makeEdge(undefined, undefined, 'error-result');
+    const id = await newSession(h, 'att5');
+    await sendWithAttachment(h, id, [attachmentUpload()]);
+    await new Promise((resolve) => setTimeout(resolve, 200)); // let the write land
+
+    const attachmentsDir = path.join(h.storageRoot, 'sessions', id, 'attachments');
+    assert.equal(existsSync(attachmentsDir), true, 'the attachment was actually written before deletion');
+
+    const auditPath = path.join(h.storageRoot, 'audit.ndjson');
+    const auditBefore = existsSync(auditPath) ? await readFile(auditPath, 'utf8') : null;
+
+    const deleted = await fetch(`${h.base}/api/sessions/${id}`, {
+      method: 'DELETE',
+      headers: { 'sec-fetch-site': 'same-origin', 'x-forwarded-user': 'ben' },
+    });
+    assert.equal(deleted.status, 200);
+
+    assert.equal(existsSync(path.join(h.storageRoot, 'sessions', id)), false);
+    const auditAfter = existsSync(auditPath) ? await readFile(auditPath, 'utf8') : null;
+    assert.equal(auditAfter, auditBefore, 'audit.ndjson is byte-identical across the delete (D25)');
   });
 });
 

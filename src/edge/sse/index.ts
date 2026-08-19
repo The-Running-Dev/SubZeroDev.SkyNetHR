@@ -1,5 +1,5 @@
 import type { IncomingMessage, RequestListener, ServerResponse } from 'node:http';
-import type { CallId, ChecklistItemId, Envelope, OperatorId, RequisitionId, ReviewId, Seq, SessionId, Subscription, TurnId } from '../../contract/index.js';
+import type { AttachmentId, CallId, ChecklistItemId, Envelope, OperatorId, RequisitionId, ReviewId, Seq, SessionId, Subscription, TurnId } from '../../contract/index.js';
 import { sendError } from '../error-envelope/index.js';
 import {
   type EdgeDeps,
@@ -50,6 +50,7 @@ export function createSseEdge(deps: EdgeDeps): RequestListener {
     handleEnd,
     handleDelete,
     handleToolOutput,
+    handleAttachment,
     handleListCheckpoints,
     handleCheckpointRestore,
     handleAudit,
@@ -266,6 +267,14 @@ export function createSseEdge(deps: EdgeDeps): RequestListener {
             const decodedCallId = decodeSegment(res, toolOutputMatch[2]!, 'callId', 'callId');
             if (decodedCallId === null) return;
             return handleToolOutput(req, res, owner, sessionId, decodedTurnId as TurnId, decodedCallId as CallId);
+          }
+          const attachmentMatch = /^\/attachments\/([^/]+)\/([^/]+)$/.exec(rest);
+          if (method === 'GET' && attachmentMatch) {
+            const decodedTurnId = decodeSegment(res, attachmentMatch[1]!, 'turnId', 'turnId');
+            if (decodedTurnId === null) return;
+            const decodedAttachmentId = decodeSegment(res, attachmentMatch[2]!, 'attachmentId', 'attachmentId');
+            if (decodedAttachmentId === null) return;
+            return handleAttachment(req, res, owner, sessionId, decodedTurnId as TurnId, decodedAttachmentId as AttachmentId);
           }
           if (method === 'GET' && rest === '') {
             const got = manager.get(sessionId, owner);

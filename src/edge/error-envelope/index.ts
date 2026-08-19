@@ -9,6 +9,7 @@ const STATUS_FOR: Record<ApiErrorCode, number> = {
   bad_origin: 403,
   no_such_session: 404,
   no_such_output: 404,
+  no_such_attachment: 404,
   no_such_checkpoint: 404,
   turn_in_flight: 409,
   session_ended: 409,

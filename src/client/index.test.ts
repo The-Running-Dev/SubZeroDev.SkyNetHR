@@ -205,6 +205,73 @@ describe('S2.12 — untrusted content is text, never markup', () => {
   });
 });
 
+describe('S21.10 — attachments render inline for an allow-listed image, and as a download link otherwise', () => {
+  it('renders an allow-listed image with <img src> against the attachment route, alt set (never used as markup)', async () => {
+    const renderEvent = await loadRenderer();
+    const { doc } = makeDoc();
+    const node = renderEvent(
+      doc,
+      {
+        seq: 1, sessionId: 's', ts: 'x', kind: 'message',
+        data: { turnId: 't-1', role: 'user', text: 'see attached', attachments: [{ attachmentId: 'att-1', filename: 'bug.png', mediaType: 'image/png', bytes: 42 }] },
+      },
+      { sessionId: 'sess-abc' },
+    )!;
+    const images = findAll(node, 'img');
+    assert.equal(images.length, 1, 'the allow-listed image renders exactly one <img>');
+    assert.equal(images[0]!.attrs['src'], '/api/sessions/sess-abc/attachments/t-1/att-1');
+    assert.equal(images[0]!.attrs['alt'], 'bug.png');
+  });
+
+  it('renders a non-image attachment as a download link naming the file and its size, not an <img>', async () => {
+    const renderEvent = await loadRenderer();
+    const { doc } = makeDoc();
+    const node = renderEvent(
+      doc,
+      {
+        seq: 1, sessionId: 's', ts: 'x', kind: 'message',
+        data: { turnId: 't-1', role: 'user', text: 'see attached', attachments: [{ attachmentId: 'att-2', filename: 'log.txt', mediaType: 'text/plain', bytes: 2048 }] },
+      },
+      { sessionId: 'sess-abc' },
+    )!;
+    assert.equal(findAll(node, 'img').length, 0, 'a non-allow-listed type never renders an <img>');
+    const links = findAll(node, 'a');
+    assert.equal(links.length, 1);
+    assert.equal(links[0]!.attrs['href'], '/api/sessions/sess-abc/attachments/t-1/att-2');
+    assert.ok(allText(links[0]!).includes('log.txt'), 'the filename appears as text');
+  });
+
+  it('renders a hostile filename as literal characters on both the image and the link path, and executes nothing', async () => {
+    const renderEvent = await loadRenderer();
+
+    const { doc: doc1, created: created1 } = makeDoc();
+    const imageNode = renderEvent(
+      doc1,
+      {
+        seq: 1, sessionId: 's', ts: 'x', kind: 'message',
+        data: { turnId: 't-1', role: 'user', text: 'go', attachments: [{ attachmentId: 'att-3', filename: XSS, mediaType: 'image/png', bytes: 1 }] },
+      },
+      { sessionId: 'sess-abc' },
+    )!;
+    const images = findAll(imageNode, 'img');
+    assert.equal(images.length, 1);
+    assert.equal(images[0]!.attrs['alt'], XSS, 'the filename reaches only an attribute value, never markup');
+    assert.ok(!created1.some((n) => n.tag.toLowerCase() === 'script'), 'no script element was ever created');
+
+    const { doc: doc2, created: created2 } = makeDoc();
+    const linkNode = renderEvent(
+      doc2,
+      {
+        seq: 1, sessionId: 's', ts: 'x', kind: 'message',
+        data: { turnId: 't-1', role: 'user', text: 'go', attachments: [{ attachmentId: 'att-4', filename: XSS, mediaType: 'text/plain', bytes: 1 }] },
+      },
+      { sessionId: 'sess-abc' },
+    )!;
+    assert.ok(allText(linkNode).includes(XSS), 'the exact characters survive as a text node');
+    assert.ok(!created2.some((n) => n.tag.toLowerCase() === 'img'), 'no img element was ever created for the download link path');
+  });
+});
+
 describe('S12.10 — the audit screen renders every field as a text node', () => {
   it('renders operator, tool, input, decision and ts as literal text, including an XSS payload in input', async () => {
     const renderAuditRow = await loadAuditRowRenderer();

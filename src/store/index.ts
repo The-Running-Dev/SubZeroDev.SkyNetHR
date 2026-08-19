@@ -4,6 +4,7 @@ import { mkdir, open, readdir, readFile, rename, rm, writeFile } from 'node:fs/p
 import { createInterface } from 'node:readline';
 import path from 'node:path';
 import type {
+  AttachmentId,
   AuditCursor,
   AuditPage,
   AuditQuery,
@@ -537,6 +538,63 @@ export async function createStore(config: Config): Promise<Result<Store, StoreEr
       try {
         const handle = await open(filePath, 'r');
         return { ok: true, value: handle.createReadStream() };
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code === 'ENOENT') return { ok: false, error: { code: 'not_found', path: filePath } };
+        return ioError(filePath, (err as Error).message);
+      }
+    },
+
+    // (D160, I49) Fsync'd, mirroring `writeToolOutput`'s shape but reversed: the caller
+    // constructs the `message` envelope only after this resolves, so a written attachment
+    // is durable before anything names it. `mediaType` is written to a sidecar file (never
+    // appended, same as the blob) so the read route can echo it later without scanning the
+    // session's spill for the `AttachmentRef` that named this id (S21.6).
+    async writeAttachment(sessionId: SessionId, turnId: TurnId, attachmentId: AttachmentId, bytes: Buffer, mediaType: string) {
+      const dir = path.join(sessionDir(storageRoot, sessionId), 'attachments', turnId);
+      const filePath = path.join(dir, attachmentId);
+      const metaPathAttachment = path.join(dir, `${attachmentId}.meta`);
+      if (!isSafePathSegment(turnId) || !isSafePathSegment(attachmentId)) {
+        return ioError(filePath, 'id is not a single path segment');
+      }
+      try {
+        await mkdir(dir, { recursive: true });
+        const handle = await open(filePath, 'w');
+        try {
+          await handle.writeFile(bytes);
+          await handle.sync();
+        } finally {
+          await handle.close();
+        }
+        const metaHandle = await open(metaPathAttachment, 'w');
+        try {
+          await metaHandle.writeFile(mediaType, 'utf8');
+          await metaHandle.sync();
+        } finally {
+          await metaHandle.close();
+        }
+      } catch (err) {
+        return ioError(filePath, (err as Error).message);
+      }
+      return { ok: true, value: undefined };
+    },
+
+    async openAttachment(sessionId: SessionId, turnId: TurnId, attachmentId: AttachmentId) {
+      const dir = path.join(sessionDir(storageRoot, sessionId), 'attachments', turnId);
+      const filePath = path.join(dir, attachmentId);
+      const metaPathAttachment = path.join(dir, `${attachmentId}.meta`);
+      if (!isSafePathSegment(turnId) || !isSafePathSegment(attachmentId)) {
+        return { ok: false, error: { code: 'not_found', path: filePath } };
+      }
+      let mediaType: string;
+      try {
+        mediaType = await readFile(metaPathAttachment, 'utf8');
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code === 'ENOENT') return { ok: false, error: { code: 'not_found', path: filePath } };
+        return ioError(metaPathAttachment, (err as Error).message);
+      }
+      try {
+        const handle = await open(filePath, 'r');
+        return { ok: true, value: { stream: handle.createReadStream(), mediaType } };
       } catch (err) {
         if ((err as NodeJS.ErrnoException).code === 'ENOENT') return { ok: false, error: { code: 'not_found', path: filePath } };
         return ioError(filePath, (err as Error).message);

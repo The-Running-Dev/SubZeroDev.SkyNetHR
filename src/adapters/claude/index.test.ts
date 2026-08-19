@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
+import { mkdtemp, readFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
 import { createClaudeAdapter } from './index.js';
@@ -40,7 +42,7 @@ test('S1.1, S1.3, S1.9 — the twelve-row vendor mapping, and stdin stays writab
   process.env['SKYNET_TEST_SCENARIO'] = 'full';
   const { adapter, notifications } = makeAdapter('full');
 
-  const sendResult = await adapter.send('hello', null, 'turn-1' as never);
+  const sendResult = await adapter.send('hello', [], null, 'turn-1' as never);
   assert.equal(sendResult.ok, true);
 
   // Row 1: system/init -> AdapterNotification 'cli-session'.
@@ -100,7 +102,7 @@ test('S1.1, S1.3, S1.9 — the twelve-row vendor mapping, and stdin stays writab
 test('S1.3 — row 11: a non-success result subtype maps to turn.ended/error', async () => {
   process.env['SKYNET_TEST_SCENARIO'] = 'error-result';
   const { adapter, notifications } = makeAdapter('error-result');
-  await adapter.send('hello', null, 'turn-2' as never);
+  await adapter.send('hello', [], null, 'turn-2' as never);
   await waitUntil(() => eventsOf(notifications, 'turn.ended').length > 0);
   assert.equal((eventsOf(notifications, 'turn.ended')[0]!.event.data as { stopReason: string }).stopReason, 'error');
 });
@@ -109,9 +111,49 @@ test('S1.3 — row 11: a non-success result subtype maps to turn.ended/error', a
 test('S1.3 — row 12: the child closing with no result seen maps to turn.ended/process_exit', async () => {
   process.env['SKYNET_TEST_SCENARIO'] = 'no-result';
   const { adapter, notifications } = makeAdapter('no-result');
-  await adapter.send('hello', null, 'turn-3' as never);
+  await adapter.send('hello', [], null, 'turn-3' as never);
   await waitUntil(() => eventsOf(notifications, 'turn.ended').length > 0);
   assert.equal((eventsOf(notifications, 'turn.ended')[0]!.event.data as { stopReason: string }).stopReason, 'process_exit');
+});
+
+// S21.1/D160 — `AttachmentPayload` maps to one `image` content block per attachment, ahead
+// of the text block, in the same `content` array the finding
+// (design/findings/S21-attachment-probe.md) verified the CLI accepts.
+test('S21.1/D160 — attachments become image content blocks on the child\'s stdin, ahead of the text block', async () => {
+  const stdinLogDir = await mkdtemp(path.join(tmpdir(), 'skynet-claude-stdin-'));
+  const stdinLog = path.join(stdinLogDir, 'stdin.ndjson');
+  process.env['SKYNET_STDIN_LOG'] = stdinLog;
+  process.env['SKYNET_TEST_SCENARIO'] = 'error-result';
+  try {
+    const { adapter, notifications } = makeAdapter('error-result');
+    const bytes = Buffer.from('fake-png-bytes', 'utf8');
+    const sendResult = await adapter.send(
+      'see attached',
+      [{ ref: { attachmentId: 'att-1' as never, filename: 'bug.png', mediaType: 'image/png', bytes: bytes.length }, data: bytes }],
+      null,
+      'turn-attach' as never,
+    );
+    assert.equal(sendResult.ok, true);
+    await waitUntil(() => eventsOf(notifications, 'turn.ended').length > 0);
+
+    await new Promise((r) => setTimeout(r, 50)); // let the write actually land
+    const written = existsSync(stdinLog) ? (await readFile(stdinLog, 'utf8')).split('\n').filter((l) => l.trim().length > 0) : [];
+    assert.ok(written.length > 0, "expected at least one line written to the child's stdin");
+    const userLine = JSON.parse(written[0]!) as { message: { content: Array<Record<string, unknown>> } };
+    assert.equal(userLine.message.content.length, 2);
+    assert.deepEqual(userLine.message.content[0], {
+      type: 'image',
+      source: { type: 'base64', media_type: 'image/png', data: bytes.toString('base64') },
+    });
+    assert.deepEqual(userLine.message.content[1], { type: 'text', text: 'see attached' });
+  } finally {
+    delete process.env['SKYNET_STDIN_LOG'];
+  }
+});
+
+test('S21.1/D160 — the Claude adapter declares acceptsAttachments: true', () => {
+  const { adapter } = makeAdapter('error-result');
+  assert.equal(adapter.acceptsAttachments, true);
 });
 
 // S1.11 — usage, replayed from a real captured CLI run (design/findings/S1-claude-adapter.md),
@@ -122,7 +164,7 @@ test('S1.11 — usage events emitted from a real captured run sum to the indepen
   process.env['SKYNET_TEST_SCENARIO'] = 'usage-real';
   process.env['SKYNET_USAGE_FIXTURE'] = fixturePath;
   const { adapter, notifications } = makeAdapter('usage-real');
-  await adapter.send('hello', null, 'turn-usage' as never);
+  await adapter.send('hello', [], null, 'turn-usage' as never);
   await waitUntil(() => eventsOf(notifications, 'turn.ended').length > 0);
 
   const emittedTotal = eventsOf(notifications, 'usage').reduce(
@@ -152,7 +194,7 @@ test('S1.4 — an unrecognised record kind, and a malformed JSON line, are both 
   process.env['SKYNET_TEST_SCENARIO'] = 'unknown-kind';
   {
     const { adapter, notifications } = makeAdapter('unknown-kind');
-    await adapter.send('hello', null, 'turn-4' as never);
+    await adapter.send('hello', [], null, 'turn-4' as never);
     await waitUntil(() => eventsOf(notifications, 'turn.ended').length > 0);
     const errors = eventsOf(notifications, 'error');
     assert.ok(errors.some((e) => (e.event.data as { kind: string }).kind === 'adapter_unknown_record'));
@@ -162,7 +204,7 @@ test('S1.4 — an unrecognised record kind, and a malformed JSON line, are both 
   process.env['SKYNET_TEST_SCENARIO'] = 'bad-line';
   {
     const { adapter, notifications } = makeAdapter('bad-line');
-    await adapter.send('hello', null, 'turn-5' as never);
+    await adapter.send('hello', [], null, 'turn-5' as never);
     await waitUntil(() => eventsOf(notifications, 'turn.ended').length > 0);
     const errors = eventsOf(notifications, 'error');
     assert.ok(errors.some((e) => (e.event.data as { kind: string }).kind === 'adapter_bad_line'));

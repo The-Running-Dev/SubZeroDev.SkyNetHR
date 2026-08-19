@@ -10,6 +10,10 @@ import { pathsOverlap, resolveInsideRoot } from '../jail/index.js';
 import type {
   Adapter,
   AdapterNotification,
+  AttachmentId,
+  AttachmentPayload,
+  AttachmentRef,
+  AttachmentUpload,
   AuditRecord,
   CallId,
   Caps,
@@ -889,15 +893,62 @@ export function createSessionManager(deps: {
       return { ok: true, value: toSummary(entry.record) };
     },
 
-    async message(sessionId, owner, text) {
+    async message(sessionId, owner, text, attachments) {
       const entry = sessions.get(sessionId);
       if (!entry || entry.record.owner !== owner) return { ok: false, error: { code: 'no_such_session', sessionId } };
       if (entry.record.state === 'ended') return { ok: false, error: { code: 'session_ended', sessionId } };
       if (entry.turn) return { ok: false, error: { code: 'turn_in_flight', sessionId, turnId: entry.turn.turnId } };
 
+      // (D160) Attachment refusals precede claiming the turn slot: nothing is written and
+      // no turn starts on a refused message (S21.5, S21.8) — this is deliberately ahead of
+      // every `await` below, in the same unbroken block as the checks above (I5).
+      if (attachments.length > 0 && !entry.adapter!.acceptsAttachments) {
+        return { ok: false, error: { code: 'bad_request', field: 'attachments', detail: "this session's vendor does not accept attachments" } };
+      }
+      if (attachments.length > config.caps.attachmentCount) {
+        return {
+          ok: false,
+          error: { code: 'bad_request', field: 'attachments', detail: `at most ${config.caps.attachmentCount} attachments are allowed per message` },
+        };
+      }
+      const decodedAttachments: { readonly upload: AttachmentUpload; readonly bytes: Buffer }[] = [];
+      for (const upload of attachments) {
+        const bytes = Buffer.from(upload.dataBase64, 'base64');
+        if (bytes.length > config.caps.attachmentBytes) {
+          return {
+            ok: false,
+            error: { code: 'bad_request', field: 'attachments', detail: `an attachment exceeds the ${config.caps.attachmentBytes}-byte cap` },
+          };
+        }
+        decodedAttachments.push({ upload, bytes });
+      }
+
       const turnId = randomUUID() as TurnId;
       entry.turn = { turnId, phase: 'starting', startedAt: nowIso(), pending: new Map() };
-      // Every check above this line completed before the first `await` (I5).
+      // Every check above this line, and the claim on the line above, completed before the
+      // first `await` (I5) — the attachment writes below are async and must run only once
+      // the slot is already held, or two concurrent `message()` calls could both pass the
+      // `turn_in_flight` check above before either claims it.
+
+      // (D160, I49) Written and fsync'd — `store.writeAttachment`'s contract — before the
+      // `message` envelope naming them is constructed below. `attachmentId` is minted here,
+      // never the operator's `filename`, which never reaches a path.
+      const attachmentRefs: AttachmentRef[] = [];
+      const attachmentPayloads: AttachmentPayload[] = [];
+      for (const { upload, bytes } of decodedAttachments) {
+        const attachmentId = randomUUID() as AttachmentId;
+        const written = await store.writeAttachment(sessionId, turnId, attachmentId, bytes, upload.mediaType);
+        if (!written.ok) {
+          // No `turn.started` was ever emitted for this attempt, so there is nothing to
+          // close — releasing the slot outright is what lets a retry proceed rather than
+          // leaving a phantom claim behind.
+          entry.turn = null;
+          return { ok: false, error: { code: 'storage', cause: written.error } };
+        }
+        const ref: AttachmentRef = { attachmentId, filename: upload.filename, mediaType: upload.mediaType, bytes: bytes.length };
+        attachmentRefs.push(ref);
+        attachmentPayloads.push({ ref, data: bytes });
+      }
 
       // S6.2/D42: committed while the slot is claimed but before turn.started fires, so
       // checkpoint.created always precedes it in seq order.
@@ -926,6 +977,11 @@ export function createSessionManager(deps: {
       if (entry.turn === null) return { ok: false, error: { code: 'session_ended', sessionId } };
       entry.turn.phase = 'running';
 
+      // The operator's own message, refs only (D160) — this is the durable record S21.2
+      // requires: no envelope in `events.ndjson` ever carries attachment bytes.
+      await emit(entry, 'message', { turnId, role: 'user', text, attachments: attachmentRefs });
+      if (entry.turn === null) return { ok: false, error: { code: 'session_ended', sessionId } };
+
       // S4.15/D34: a turn that spawns with no `--resume` on a session that has already
       // run one — because the CLI died before ever reporting `system/init`, leaving
       // `cliSessionId` null — loses conversation context silently unless this says so.
@@ -939,7 +995,7 @@ export function createSessionManager(deps: {
 
       // `state === 'ended'` was refused above; only a live session's entry reaches here,
       // and only `create` sets `state: 'live'`, always alongside a real adapter.
-      const sendResult = await entry.adapter!.send(text, entry.record.cliSessionId, turnId);
+      const sendResult = await entry.adapter!.send(text, attachmentPayloads, entry.record.cliSessionId, turnId);
       if (!sendResult.ok) {
         // The `turn.started` above is already durable; pair it (I14, D39) before
         // freeing the slot, or the log carries an open turn no restart ever repairs.
@@ -1166,6 +1222,15 @@ export function createSessionManager(deps: {
       const entry = sessions.get(sessionId);
       if (!entry || entry.record.owner !== owner) return { ok: false, error: { code: 'no_such_session', sessionId } };
       const opened = await store.openToolOutput(sessionId, turnId, callId);
+      if (!opened.ok) return { ok: false, error: { code: 'storage', cause: opened.error } };
+      return { ok: true, value: opened.value };
+    },
+
+    async openAttachment(sessionId, owner, turnId, attachmentId) {
+      // (D160) Same ownership check as `openToolOutput` (S21.7).
+      const entry = sessions.get(sessionId);
+      if (!entry || entry.record.owner !== owner) return { ok: false, error: { code: 'no_such_session', sessionId } };
+      const opened = await store.openAttachment(sessionId, turnId, attachmentId);
       if (!opened.ok) return { ok: false, error: { code: 'storage', cause: opened.error } };
       return { ok: true, value: opened.value };
     },

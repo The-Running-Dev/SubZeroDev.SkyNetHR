@@ -93,7 +93,7 @@ async function makeSharedEdges(
       auditPageMax: 200,
       reviewBodyBytes: 1024,
       requisitionTextBytes: 1024,
-      standingRuleBytes: 1024,
+      standingRuleBytes: 1024, attachmentBytes: 10485760, attachmentCount: 5,
     },
     sessionCookieMaxAgeSeconds: 2592000,
     includeRaw: false,

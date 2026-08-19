@@ -677,14 +677,35 @@ async function doEnd() {
   await refreshSessions();
 }
 
+// (D160) `arrayBuffer()` + manual base64 rather than `FileReader.readAsDataURL`, which
+// would need its `data:<type>;base64,` prefix stripped back off before this reaches
+// `AttachmentUpload.dataBase64` — one conversion is simpler than one conversion plus a
+// string-slice undoing part of it. Chunked so `String.fromCharCode` never receives an
+// argument list long enough to blow the engine's call-stack argument limit.
+async function fileToBase64(file) {
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  let binary = '';
+  const chunkSize = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunkSize));
+  }
+  return btoa(binary);
+}
+
 async function sendMessage(event) {
   event.preventDefault();
   const field = $('text');
   const value = field.value.trim();
   if (value === '' || state.sessionId === null) return;
+  const attachmentsField = $('attachments');
+  const files = attachmentsField ? Array.from(attachmentsField.files || []) : [];
+  const attachments = [];
+  for (const file of files) {
+    attachments.push({ filename: file.name, mediaType: file.type || 'application/octet-stream', dataBase64: await fileToBase64(file) });
+  }
   field.value = '';
 
-  const result = await api('POST', `/api/sessions/${encodeURIComponent(state.sessionId)}/message`, { text: value });
+  const result = await api('POST', `/api/sessions/${encodeURIComponent(state.sessionId)}/message`, { text: value, attachments });
   if (result.status === 401) {
     field.value = value;
     return;
@@ -693,6 +714,7 @@ async function sendMessage(event) {
     field.value = value;
     return status(describe(result), 'error');
   }
+  if (attachmentsField) attachmentsField.value = '';
   status('working…', 'info');
 }
 

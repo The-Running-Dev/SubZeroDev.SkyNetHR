@@ -1,7 +1,7 @@
 import type { IncomingMessage, RequestListener, ServerResponse } from 'node:http';
 import type { Socket } from 'node:net';
 import { createHash } from 'node:crypto';
-import type { CallId, ChecklistItemId, Envelope, SessionId, Seq, Subscription, TurnId } from '../../contract/index.js';
+import type { AttachmentId, CallId, ChecklistItemId, Envelope, SessionId, Seq, Subscription, TurnId } from '../../contract/index.js';
 import { sendError } from '../error-envelope/index.js';
 import {
   type EdgeDeps,
@@ -162,6 +162,7 @@ export function createWsEdge(deps: EdgeDeps): WsRequestListener {
     handleEnd,
     handleDelete,
     handleToolOutput,
+    handleAttachment,
     handleListCheckpoints,
     handleCheckpointRestore,
     handleAudit,
@@ -437,6 +438,22 @@ export function createWsEdge(deps: EdgeDeps): WsRequestListener {
               return sendError(res, 'bad_request', 'callId is not a valid path segment', { field: 'callId' });
             }
             return handleToolOutput(req, res, owner, sessionId, decodedTurnId as TurnId, decodedCallId as CallId);
+          }
+          const attachmentMatch = /^\/attachments\/([^/]+)\/([^/]+)$/.exec(rest);
+          if (method === 'GET' && attachmentMatch) {
+            let decodedTurnId: string;
+            try {
+              decodedTurnId = decodeURIComponent(attachmentMatch[1]!);
+            } catch {
+              return sendError(res, 'bad_request', 'turnId is not a valid path segment', { field: 'turnId' });
+            }
+            let decodedAttachmentId: string;
+            try {
+              decodedAttachmentId = decodeURIComponent(attachmentMatch[2]!);
+            } catch {
+              return sendError(res, 'bad_request', 'attachmentId is not a valid path segment', { field: 'attachmentId' });
+            }
+            return handleAttachment(req, res, owner, sessionId, decodedTurnId as TurnId, decodedAttachmentId as AttachmentId);
           }
           if (method === 'GET' && rest === '') {
             const got = manager.get(sessionId, owner);

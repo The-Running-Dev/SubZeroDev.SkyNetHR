@@ -7,6 +7,9 @@ export type Brand<T, B extends string> = T & { readonly __brand: B };
 export type SessionId = Brand<string, 'SessionId'>;
 export type TurnId = Brand<string, 'TurnId'>;
 export type Seq = Brand<number, 'Seq'>;
+// (D160) Server-minted, and the only thing that ever names an attachment's file. The
+// operator's `filename` is display text and never reaches a path (I49).
+export type AttachmentId = Brand<string, 'AttachmentId'>;
 
 // Server-minted, tier two.
 export type ReviewId = Brand<string, 'ReviewId'>;
@@ -262,6 +265,25 @@ export interface MessageEvent {
   readonly turnId: TurnId;
   readonly role: 'user' | 'assistant';
   readonly text: string;
+  // (D160) Refs only, never bytes: the spill is the transcript. Empty on every `assistant`
+  // message — an attachment originates with an operator. Bytes are fetched from
+  // `GET /api/sessions/:id/attachments/:turnId/:attachmentId`.
+  readonly attachments: readonly AttachmentRef[];
+}
+
+// (D160) What the operator uploads, inline on `POST /message`.
+export interface AttachmentUpload {
+  readonly filename: string; // display only; never used to build a path (I49)
+  readonly mediaType: string; // the client's claim, stored verbatim, never trusted on the way out
+  readonly dataBase64: string; // decoded size is what `Caps.attachmentBytes` bounds
+}
+
+// (D160) What the envelope carries and the client renders.
+export interface AttachmentRef {
+  readonly attachmentId: AttachmentId;
+  readonly filename: string;
+  readonly mediaType: string;
+  readonly bytes: number; // decoded size
 }
 
 export interface MessageDelta {
@@ -543,6 +565,8 @@ export interface Caps {
   readonly reviewBodyBytes: number; // (tier two) rejection threshold for Review.body
   readonly requisitionTextBytes: number; // (tier two) per field: title, justification
   readonly standingRuleBytes: number; // rejection threshold for one StandingRuleExpression
+  readonly attachmentBytes: number; // (D160) rejection threshold, decoded, per attachment
+  readonly attachmentCount: number; // (D160) rejection threshold, attachments per message
 }
 
 export interface Config {
@@ -640,11 +664,27 @@ export interface AdapterOptions {
   readonly notify: (n: AdapterNotification) => void;
 }
 
+// (D160) An attachment as the adapter receives it: the ref the envelope carries, plus the bytes.
+// The manager reads them from `store` and hands them down, because an adapter depends on
+// `contract` and nothing else and may not be given a store handle.
+export interface AttachmentPayload {
+  readonly ref: AttachmentRef;
+  readonly data: Uint8Array;
+}
+
 export interface Adapter {
   readonly vendor: Vendor;
   readonly policy: PermissionPolicy; // the vendor's capability, fixed at create
+  // (D160) Whether this vendor's transport carries non-text content at all. Read by the edge
+  // to refuse `attachments` with `422 bad_request`; a capability, not a vendor test (I20).
+  readonly acceptsAttachments: boolean;
   // Spawns the turn's child, writes the message to stdin, and holds stdin open.
-  send(text: string, resume: CliSessionId | null, turnId: TurnId): Promise<Result<void, AdapterError>>;
+  send(
+    text: string,
+    attachments: readonly AttachmentPayload[],
+    resume: CliSessionId | null,
+    turnId: TurnId,
+  ): Promise<Result<void, AdapterError>>;
   respond(requestId: RequestId, decision: PermissionDecision): Result<void, AdapterError>;
   kill(): Promise<void>; // terminate-then-force, on the process tree
 }
@@ -717,7 +757,12 @@ export interface SessionManager {
   list(owner: OperatorId): readonly SessionSummary[];
   get(sessionId: SessionId, owner: OperatorId): Result<SessionSummary, SessionError>;
 
-  message(sessionId: SessionId, owner: OperatorId, text: string): Promise<Result<{ turnId: TurnId }, SessionError>>;
+  message(
+    sessionId: SessionId,
+    owner: OperatorId,
+    text: string,
+    attachments: readonly AttachmentUpload[],
+  ): Promise<Result<{ turnId: TurnId }, SessionError>>;
   answerPermission(
     sessionId: SessionId,
     owner: OperatorId,
@@ -735,6 +780,12 @@ export interface SessionManager {
     turnId: TurnId,
     callId: CallId,
   ): Promise<Result<NodeJS.ReadableStream, SessionError>>;
+  openAttachment(
+    sessionId: SessionId,
+    owner: OperatorId,
+    turnId: TurnId,
+    attachmentId: AttachmentId,
+  ): Promise<Result<{ readonly stream: NodeJS.ReadableStream; readonly mediaType: string }, SessionError>>;
 
   subscribe(
     sessionId: SessionId,
@@ -808,6 +859,24 @@ export interface Store {
     callId: CallId,
   ): Promise<Result<NodeJS.ReadableStream, StoreError>>;
 
+  // (D160) Written and fsync'd before the envelope naming it is constructed (I49).
+  // `attachmentId` is server-minted, so the operator's `filename` never reaches this path.
+  // `mediaType` is stored alongside the bytes so the read route can echo it for an
+  // allow-listed image type without scanning the session's spill for the `AttachmentRef`
+  // that named it (S21.6).
+  writeAttachment(
+    sessionId: SessionId,
+    turnId: TurnId,
+    attachmentId: AttachmentId,
+    bytes: Buffer,
+    mediaType: string,
+  ): Promise<Result<void, StoreError>>;
+  openAttachment(
+    sessionId: SessionId,
+    turnId: TurnId,
+    attachmentId: AttachmentId,
+  ): Promise<Result<{ readonly stream: NodeJS.ReadableStream; readonly mediaType: string }, StoreError>>;
+
   appendAudit(record: AuditRecord): Promise<Result<void, StoreError>>; // durable: fsync before it returns
   readAuditPage(query: AuditQuery): Promise<Result<AuditPage, StoreError>>; // bounded; never a whole-file scan
   appendPid(record: ProcessRecord): Promise<Result<void, StoreError>>;
@@ -860,6 +929,7 @@ export type ApiErrorCode =
   | 'bad_origin'
   | 'no_such_session'
   | 'no_such_output'
+  | 'no_such_attachment'
   | 'no_such_checkpoint'
   | 'turn_in_flight'
   | 'session_ended'

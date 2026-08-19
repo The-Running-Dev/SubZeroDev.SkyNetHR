@@ -5,6 +5,7 @@ import type {
   AdapterError,
   AdapterNotification,
   AdapterOptions,
+  AttachmentPayload,
   CallId,
   CliSessionId,
   PermissionDecision,
@@ -233,8 +234,12 @@ export function createClaudeAdapter(opts: AdapterOptions & { readonly executable
   const adapter: Adapter = {
     vendor: 'claude',
     policy: { mode: 'interactive', sandbox: null, banner: null },
+    // (D160/S21.1) Verified against the real CLI: a `user` message whose `content` array
+    // holds a non-text `image` block is accepted and forwarded (`design/findings/S21-
+    // attachment-probe.md`).
+    acceptsAttachments: true,
 
-    send(text: string, resume: CliSessionId | null, turnId: TurnId): Promise<Result<void, AdapterError>> {
+    send(text: string, attachments: readonly AttachmentPayload[], resume: CliSessionId | null, turnId: TurnId): Promise<Result<void, AdapterError>> {
       return new Promise((resolve) => {
         currentTurnId = turnId;
         resultSeen = false;
@@ -292,10 +297,17 @@ export function createClaudeAdapter(opts: AdapterOptions & { readonly executable
           if (settled) return;
           settled = true;
           notify({ kind: 'spawned', pid: proc.pid ?? -1, pgid: isWindows ? null : (proc.pid ?? null), image: executable });
+          // (D160/S21.1) One `image` content block per attachment, ahead of the text —
+          // the same `content` array shape the finding verified against a real CLI run.
+          const content: Record<string, unknown>[] = attachments.map((a) => ({
+            type: 'image',
+            source: { type: 'base64', media_type: a.ref.mediaType, data: Buffer.from(a.data).toString('base64') },
+          }));
+          content.push({ type: 'text', text });
           const wrote = writeLine({
             type: 'user',
             session_id: cliSessionId ?? '',
-            message: { role: 'user', content: [{ type: 'text', text }] },
+            message: { role: 'user', content },
             parent_tool_use_id: null,
           });
           resolve(wrote ? { ok: true, value: undefined } : { ok: false, error: { code: 'write_failed', detail: 'stdin not writable immediately after spawn' } });

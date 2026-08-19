@@ -473,6 +473,28 @@ body {
 
 .thinking__text { color: var(--ink-dim); }
 
+.message__attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin-top: var(--space-2);
+}
+
+.message__attachment-image {
+  max-width: 320px;
+  max-height: 320px;
+  border-radius: var(--radius-1);
+}
+
+.message__attachment-link {
+  display: inline-flex;
+  gap: var(--space-1);
+  color: var(--accent);
+  font-size: var(--text-sm);
+}
+
+.message__attachment-size { color: var(--ink-faint); }
+
 .tool__name,
 .permission__tool {
   font-family: var(--font-mono);

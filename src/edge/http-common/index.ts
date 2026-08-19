@@ -4,6 +4,8 @@ import { timingSafeEqual } from 'node:crypto';
 import { Readable } from 'node:stream';
 import type {
   ApiErrorCode,
+  AttachmentId,
+  AttachmentUpload,
   AuditCursor,
   AuditQuery,
   CallId,
@@ -351,7 +353,22 @@ export function createHttpHandlers(deps: EdgeDeps) {
     if (typeof text !== 'string' || text === '') {
       return sendError(res, 'bad_request', 'text is required', { field: 'text' });
     }
-    const sent = await manager.message(sessionId, owner, text);
+    const rawAttachments = (parsed as { attachments?: unknown } | null)?.attachments ?? [];
+    if (!Array.isArray(rawAttachments)) {
+      return sendError(res, 'bad_request', 'attachments must be an array', { field: 'attachments' });
+    }
+    const attachments: AttachmentUpload[] = [];
+    for (const item of rawAttachments) {
+      if (typeof item !== 'object' || item === null) {
+        return sendError(res, 'bad_request', 'each attachment must be an object', { field: 'attachments' });
+      }
+      const a = item as Record<string, unknown>;
+      if (typeof a['filename'] !== 'string' || typeof a['mediaType'] !== 'string' || typeof a['dataBase64'] !== 'string') {
+        return sendError(res, 'bad_request', 'each attachment requires filename, mediaType and dataBase64 as strings', { field: 'attachments' });
+      }
+      attachments.push({ filename: a['filename'], mediaType: a['mediaType'], dataBase64: a['dataBase64'] });
+    }
+    const sent = await manager.message(sessionId, owner, text, attachments);
     if (!sent.ok) return failWith(res, sent.error);
     sendJson(res, 202, { turnId: sent.value.turnId satisfies TurnId });
   }
@@ -458,6 +475,42 @@ export function createHttpHandlers(deps: EdgeDeps) {
     if (stream instanceof Readable) req.on('close', () => stream.destroy());
     res.writeHead(200, {
       'content-type': 'text/plain; charset=utf-8',
+      'x-content-type-options': 'nosniff',
+      'content-disposition': 'attachment',
+    });
+    stream.on('error', () => {
+      if (!res.writableEnded) res.end();
+    });
+    stream.pipe(res);
+  }
+
+  // (D160) An allow-list of image types the response may echo as `Content-Type` — every
+  // other stored `mediaType`, including one an operator declared as `text/html`, serves
+  // `application/octet-stream` instead. Serving an upload back under its own declared type
+  // unguarded is stored XSS holding the console's cookies (S21.6).
+  const ATTACHMENT_CONTENT_TYPE_ALLOWLIST = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
+
+  // Same shape as `handleToolOutput`: the ownership check is `openAttachment`'s
+  // (`no_such_session`); every other failure — a missing or unreadable blob — is
+  // `no_such_attachment` (S21.7), which the generic `storage` mapping in `apiErrorFor`
+  // does not produce, so this route maps it itself.
+  async function handleAttachment(
+    req: IncomingMessage,
+    res: ServerResponse,
+    owner: OperatorId,
+    sessionId: SessionId,
+    turnId: TurnId,
+    attachmentId: AttachmentId,
+  ): Promise<void> {
+    const opened = await manager.openAttachment(sessionId, owner, turnId, attachmentId);
+    if (!opened.ok) {
+      if (opened.error.code === 'no_such_session') return failWith(res, opened.error);
+      return sendError(res, 'no_such_attachment', 'the attachment is missing or unreadable');
+    }
+    const { stream, mediaType } = opened.value;
+    if (stream instanceof Readable) req.on('close', () => stream.destroy());
+    res.writeHead(200, {
+      'content-type': ATTACHMENT_CONTENT_TYPE_ALLOWLIST.has(mediaType) ? mediaType : 'application/octet-stream',
       'x-content-type-options': 'nosniff',
       'content-disposition': 'attachment',
     });
@@ -792,6 +845,7 @@ export function createHttpHandlers(deps: EdgeDeps) {
     handleEnd,
     handleDelete,
     handleToolOutput,
+    handleAttachment,
     handleListCheckpoints,
     handleCheckpointRestore,
     handleAudit,
