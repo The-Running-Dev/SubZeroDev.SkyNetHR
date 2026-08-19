@@ -3464,6 +3464,37 @@ Rejected: **leaving it deleted-with-session and saying so.** Zero mechanism and 
 rather than growth: the audit log grows with approvals, which are human-paced, while a blob
 directory grows with whatever a single command printed.
 Reversibility: cheap. One cap, one test at one call site, and the absent-blob path already exists.
+### 2026-08-19 — D163 No offset index; the spill is read backwards from the tail, as the audit log already is
+Context: `10-design.md` open question 11 held that no append-only file here has an index and every
+read scans, naming two files that needed one — the spill, and `audit.ndjson` as "the worse case",
+since the audit log is never truncated and its scan would grow with the deployment's whole
+lifetime.
+**Half of that is now stale, and checking it is what changed the answer.** S12 landed a bounded
+read: `readAuditPageImpl` walks backwards from the file's end under a scan budget, and I39 bounds
+*the read* rather than merely the result — a filtered query returns a short page with a non-null
+cursor instead of walking to byte 0. The audit log is therefore not the worse case and is not
+unindexed-and-scanning; it is solved, by a technique rather than by a sidecar.
+Chosen: no offset index, for the spill either, and the same technique instead. `readEventsAfter`
+finds `after + 1` by reading **backwards from the tail** and then emits forward, which costs
+O(envelopes since the disconnect) rather than O(file). This matches the access pattern rather than
+fighting it: a reconnect's `Last-Event-ID` is recent almost by definition, because the client just
+dropped.
+**The case that scans most often is not the one an index would fix.** D147 makes the payroll view a
+fold over every `usage` event in the spill, O(spill) per read, and a fold reads everything by
+definition — an index gives it nothing at all. So the index's only beneficiary was deep replay, and
+that is the case the backwards read already answers. Open question 11 named the index as the fix
+for "both files that need it" without separating seek from aggregation, and separating them is what
+leaves nothing for a sidecar to do.
+Rejected: **an offset sidecar.** It buys O(1) seek and costs a second file that must stay
+consistent with the spill, a crash story for a torn index against a torn spill — the spill's own
+torn tail is already an accepted hazard (#33) and a second file doubles that surface — and byte
+offsets becoming a quasi-public interface. D86 already refused exactly that for the audit cursor:
+"a byte offset makes the file's physical layout a public interface, which is exactly what open
+question 11's index would move."
+Rejected: **deferring again with a stated threshold.** Honest, and it leaves a question open that
+turns out to be answerable now, on evidence already in the tree.
+Reversibility: cheap. Nothing is built that an index would later have to be retrofitted around; a
+sidecar remains addable if a fold, not a seek, ever becomes the bound.
 
 ## Open
 

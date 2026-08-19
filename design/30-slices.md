@@ -292,7 +292,8 @@ Acceptance:
     render with no horizontal scrolling, and a reconnect served from the spill renders the same
     envelope sequence on the phone layout as on the desktop one.
 
-Out of scope: an offset index for the spill (#19); the WebSocket reconnect path (S11);
+Out of scope: the spill's read direction, which D163 settles as a backwards seek from the
+tail rather than an offset index (#19); the WebSocket reconnect path (S11);
 truncation of large results (S9); the phone approve-and-deny screen (S4.14 — D57 names it as
 this slice's reason to exist, and it is built where the permission route is); the torn-tail
 defect where one `seq` could name two different events (#33 — a design question S3.6 does not
@@ -591,8 +592,8 @@ Acceptance:
 
 Out of scope: the retention rule for tool-output blobs, which is S23's — D162 gives them a
 per-session byte budget, and this slice's S9.5 is what makes that cheap by having already
-specified the absent-blob path; an offset index for the spill; virtualised scrollback beyond
-whatever S9.6 requires.
+specified the absent-blob path; an offset index for the spill, which D163 declines (#19);
+virtualised scrollback beyond whatever S9.6 requires.
 
 ## S10 — Stop asking me about this one
 
@@ -714,7 +715,8 @@ Acceptance:
     and executes nothing (I26).
 
 Out of scope: the incident filters and grouping (S17 — the same read with `incidentsOnly`); an
-offset index for `audit.ndjson` (#19, which now carries this file as well as the spill); any
+offset index for `audit.ndjson` — D163 declines one, and I39's bounded backwards read is why this
+file never needed it (#19); any
 retention, rotation or truncation rule — I13 forbids shortening this file, and the bounded
 window is what makes that survivable.
 
@@ -1322,6 +1324,41 @@ it); a deployment-wide rather than per-session budget, which needs a tally nothi
 let one session exhaust every other session's allowance — the argument D53's rejected
 per-deployment token budget already made; any retention rule for `audit.ndjson`, which I13 forbids
 shortening.
+## S24 — Read the spill backwards
+
+**Tier one**, and small. D163 declined the offset index and specified the read direction instead;
+this makes the tree match. S3 landed against a forward scan from byte 0, whose cost the design
+accepted at the time and no longer does.
+
+Delivers: Reopening a very long session is fast. A reconnect costs time proportional to how much
+happened while the operator was away, not to everything that ever happened in that session.
+
+Touches: `store` (`readEventsAfter`).
+
+Depends on: S3, S9 (S24.4 reuses its long-run fixture).
+
+Acceptance:
+  - S24.1 `readEventsAfter` locates `after + 1` by reading backwards from the file's end and then
+    emits forward. Every existing S3 criterion still passes unchanged — S3.1's element-for-element
+    equality, S3.2's spill-served mid-turn replay, S3.4's ended session, S3.6's torn trailing line
+    — asserted by re-running them, because this is a change of strategy and not of behaviour.
+  - S24.2 The bytes read to serve a replay grow with the distance from the tail, not with the
+    file: instrumented against one session's spill at 10 000 and at 100 000 envelopes, replaying
+    from the last 100 in each, with both figures and both elapsed times stated in the slice report.
+    The two byte counts should be within noise of each other, and that is the criterion.
+  - S24.3 `after = 0` — a replay of the whole session — still works and is still O(file), because
+    it genuinely asks for every envelope. It is not a regression and the slice report says so
+    rather than reporting a bound it does not have.
+  - S24.4 A torn trailing line is still dropped and logged, and the file is still not modified by
+    the read (S3.6), asserted with the tear now at the point the backwards read starts rather than
+    where a forward read would have ended.
+  - S24.5 No offset index, sidecar or cache file is created: a search of `store` finds no second
+    file written beside `events.ndjson`, and the storage layout is unchanged (D163).
+
+Out of scope: the payroll fold's O(spill) cost, which is a fold and not a seek and which no index
+or read direction changes (D147, D163); `audit.ndjson`, which already reads this way (I39); any
+change to `readEventsAfter`'s signature or to the replay contract — S24.1 exists to assert there
+is none.
 
 ---
 
@@ -1345,7 +1382,9 @@ worse of the two irregularities. See S19 for why the verticality rule's purpose 
 - **A lock file preventing two server processes over one storage root** (#21) — **resolved by
   D161 and no longer uncovered.** Taken, and built by S22; the staleness objection is answered by
   reusing D23's own liveness test rather than by new machinery.
-- **An offset index** for the spill and now for `audit.ndjson` (#19).
+- **An offset index** for the spill and for `audit.ndjson` (#19) — **resolved by D163 and no
+  longer uncovered.** Declined: the audit read already walks backwards under a scan budget, the
+  spill takes the same technique, and the fold that scans most often is one no index could help.
 - **Attachments on `POST /message`** — **resolved by D160 and no longer uncovered.** Designed and
   sliced as S21, which opens with a probe of whether the Claude CLI accepts non-text content
   blocks at all and stops if it does not (#22).
