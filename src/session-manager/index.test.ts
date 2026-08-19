@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { existsSync, realpathSync } from 'node:fs';
-import { mkdtemp, mkdir, chmod, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, chmod, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { execFile, spawn } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -16,6 +16,10 @@ import type { AuditRecord, Caps, ChecklistItemId, Checkpoints, Config, Envelope,
 const execFileAsync = promisify(execFile);
 
 const FIXTURE = path.join(process.cwd(), 'src', 'adapters', 'claude', 'fixtures', 'fake-claude-cli.mjs');
+// (S21.8) The Codex fixture is the sanctioned stand-in for a vendor whose adapter declares
+// `acceptsAttachments: false` (D91) — Codex's own is hardcoded false (S21.8's finding names
+// no Codex transport as probed for non-text content).
+const CODEX_FIXTURE = path.join(process.cwd(), 'src', 'adapters', 'codex', 'fixtures', 'fake-codex-cli.mjs');
 
 // A turn deliberately left stalled on an unanswered permission (S4.12, S5.10) leaves its
 // child alive with nothing in this file to end it. `edge/sse/index.test.ts` carries the
@@ -99,7 +103,7 @@ async function makeManager(
       auditPageMax: 200,
       reviewBodyBytes: 1024,
       requisitionTextBytes: 1024,
-      standingRuleBytes: 1024,
+      standingRuleBytes: 1024, attachmentBytes: 10485760, attachmentCount: 5,
       ...capsOverride,
     },
     sessionCookieMaxAgeSeconds: 2592000,
@@ -150,7 +154,7 @@ test('S1.9 — the throwaway harness auto-denies a permission.request and the tu
     close: () => {},
   });
 
-  const messaged = await manager.message(sessionId, owner, 'do the thing');
+  const messaged = await manager.message(sessionId, owner, 'do the thing', []);
   assert.equal(messaged.ok, true);
 
   await waitUntil(() => received.some((e) => e.kind === 'permission.request'));
@@ -187,7 +191,7 @@ test('S1.5 — seq starts at 1 and is contiguous over 200+ envelopes, assigned o
   const received: Envelope[] = [];
   await manager.subscribe(created.value.sessionId, owner, 0, { deliver: (e) => received.push(e), close: () => {} });
 
-  await manager.message(created.value.sessionId, owner, 'go');
+  await manager.message(created.value.sessionId, owner, 'go', []);
   await waitUntil(() => received.some((e) => e.kind === 'turn.ended'), 15000);
 
   assert.ok(received.length >= 200);
@@ -225,7 +229,7 @@ test('an unspawnable executable still pairs turn.started with turn.ended and fre
     const received: Envelope[] = [];
     await manager.subscribe(created.value.sessionId, owner, 0, { deliver: (e) => received.push(e), close: () => {} });
 
-    const messaged = await manager.message(created.value.sessionId, owner, 'go');
+    const messaged = await manager.message(created.value.sessionId, owner, 'go', []);
     assert.equal(messaged.ok, false);
     if (!messaged.ok) assert.equal(messaged.error.code, 'adapter');
 
@@ -237,7 +241,7 @@ test('an unspawnable executable still pairs turn.started with turn.ended and fre
     assert.equal((ended!.data as { stopReason: string }).stopReason, 'error');
 
     // The slot is free again: a second message must not report turn_in_flight.
-    const again = await manager.message(created.value.sessionId, owner, 'go');
+    const again = await manager.message(created.value.sessionId, owner, 'go', []);
     assert.equal(again.ok, false);
     if (!again.ok) assert.notEqual(again.error.code, 'turn_in_flight');
   } finally {
@@ -296,7 +300,7 @@ test('S3.1 — reconnecting with Last-Event-ID: N delivers N+1 onward and nothin
 
   const control: Envelope[] = [];
   await manager.subscribe(sessionId, owner, 0, { deliver: (e) => control.push(e), close: () => {} });
-  await manager.message(sessionId, owner, 'go');
+  await manager.message(sessionId, owner, 'go', []);
   await waitUntil(() => control.some((e) => e.kind === 'turn.ended'), 15000);
 
   // A reconnect after the 20th envelope: everything from 21 onward, and nothing before it.
@@ -322,7 +326,7 @@ test('S3.2 — a too-old Last-Event-ID is served from the spill for a live sessi
 
   const control: Envelope[] = [];
   await manager.subscribe(sessionId, owner, 0, { deliver: (e) => control.push(e), close: () => {} });
-  await manager.message(sessionId, owner, 'go');
+  await manager.message(sessionId, owner, 'go', []);
 
   // Past the 10-envelope ring, still mid-turn.
   await waitUntil(() => control.length >= 15);
@@ -351,7 +355,7 @@ test('S3.3 — replay_gap is emitted exactly once when the spill genuinely canno
 
   const control: Envelope[] = [];
   await manager.subscribe(sessionId, owner, 0, { deliver: (e) => control.push(e), close: () => {} });
-  await manager.message(sessionId, owner, 'go');
+  await manager.message(sessionId, owner, 'go', []);
   await waitUntil(() => control.some((e) => e.kind === 'turn.ended'));
 
   // The spill genuinely cannot serve: its file is gone. The ring (capacity 1) cannot
@@ -378,7 +382,7 @@ test('S3.4 — the same spill-served replay works for a session in state ended',
 
   const control: Envelope[] = [];
   await manager.subscribe(sessionId, owner, 0, { deliver: (e) => control.push(e), close: () => {} });
-  await manager.message(sessionId, owner, 'go');
+  await manager.message(sessionId, owner, 'go', []);
   await waitUntil(() => control.some((e) => e.kind === 'turn.ended') && control.some((e) => e.kind === 'session.started'));
   const durableHistory = [...control];
 
@@ -400,7 +404,7 @@ test('S3.4 — the same spill-served replay works for a session in state ended',
   const eventsPath = path.join(storageRoot, 'sessions', sessionId, 'events.ndjson');
   await chmod(eventsPath, 0o444);
   try {
-    await manager.message(sessionId, owner, 'go again');
+    await manager.message(sessionId, owner, 'go again', []);
     await waitUntil(() => {
       const got = manager.get(sessionId, owner);
       return got.ok && got.value.state === 'ended';
@@ -447,7 +451,7 @@ test('S3.7 — a subscriber past subscriberQueueHighWater is dropped with a gap 
   // A subscriber that is live before the second turn starts, and so is never buffered.
   const unaffected: Envelope[] = [];
   await manager.subscribe(sessionId, owner, 0, { deliver: (e) => unaffected.push(e), close: () => {} });
-  await manager.message(sessionId, owner, 'go');
+  await manager.message(sessionId, owner, 'go', []);
   await waitUntil(() => unaffected.some((e) => e.kind === 'turn.ended'), 15000);
 
   // This one subscribes with its replay pinned open, so every envelope of the second turn
@@ -465,7 +469,7 @@ test('S3.7 — a subscriber past subscriberQueueHighWater is dropped with a gap 
   // issued the instant the first turn is seen to end is refused as `turn_in_flight`.
   const before = unaffected.length;
   for (;;) {
-    const sent = await manager.message(sessionId, owner, 'go again');
+    const sent = await manager.message(sessionId, owner, 'go again', []);
     if (sent.ok) break;
     assert.equal(sent.error.code, 'turn_in_flight', `second turn refused: ${sent.error.code}`);
     await new Promise((resolve) => setTimeout(resolve, 10));
@@ -506,7 +510,7 @@ test('S3.8 — a disconnected client does not reach the child: the turn runs to 
 
   const transient: Envelope[] = [];
   const sub = await manager.subscribe(sessionId, owner, 0, { deliver: (e) => transient.push(e), close: () => {} });
-  await manager.message(sessionId, owner, 'go');
+  await manager.message(sessionId, owner, 'go', []);
   assert.equal(sub.ok, true);
   if (sub.ok) {
     await waitUntil(() => transient.length >= 5);
@@ -516,8 +520,9 @@ test('S3.8 — a disconnected client does not reach the child: the turn runs to 
   await waitUntil(() => control.some((e) => e.kind === 'turn.ended'), 15000);
 
   // The scenario's shape is fixed regardless of who was watching: one turn.started, one
-  // session.started, 200 message/usage pairs, one turn.ended.
-  assert.equal(control.filter((e) => e.kind === 'message').length, 200);
+  // session.started, 200 message/usage pairs, one turn.ended — plus the one `message`
+  // envelope `message()` itself emits for the operator's own text (D160, S21.2).
+  assert.equal(control.filter((e) => e.kind === 'message').length, 201);
   assert.equal(control.filter((e) => e.kind === 'turn.ended').length, 1);
   const seqs = control.map((e) => e.seq as unknown as number);
   for (let i = 1; i < seqs.length; i++) assert.equal(seqs[i], seqs[i - 1]! + 1, 'seq stays contiguous across the disconnect');
@@ -538,7 +543,7 @@ test('S3.2 — a session whose ring holds nothing at all still replays its whole
 
   const control: Envelope[] = [];
   await manager.subscribe(sessionId, owner, 0, { deliver: (e) => control.push(e), close: () => {} });
-  await manager.message(sessionId, owner, 'go');
+  await manager.message(sessionId, owner, 'go', []);
   await waitUntil(() => control.some((e) => e.kind === 'turn.ended'));
 
   const fresh: Envelope[] = [];
@@ -561,7 +566,7 @@ test('S3.3 — a Last-Event-ID past the end of the session is reported as a gap,
 
   const control: Envelope[] = [];
   await manager.subscribe(sessionId, owner, 0, { deliver: (e) => control.push(e), close: () => {} });
-  await manager.message(sessionId, owner, 'go');
+  await manager.message(sessionId, owner, 'go', []);
   await waitUntil(() => control.some((e) => e.kind === 'turn.ended'));
   const lastSeq = control[control.length - 1]!.seq as unknown as number;
 
@@ -588,7 +593,7 @@ async function runOneRequest(scenario: string, workspaceRoot: string, manager: A
   const { sessionId } = created.value;
   const received: Envelope[] = [];
   await manager.subscribe(sessionId, owner, 0, { deliver: (e) => received.push(e), close: () => {} });
-  const messaged = await manager.message(sessionId, owner, 'go');
+  const messaged = await manager.message(sessionId, owner, 'go', []);
   assert.equal(messaged.ok, true);
   await waitUntil(() => received.some((e) => e.kind === 'permission.request'));
   const requestEnvelope = received.find((e) => e.kind === 'permission.request')!;
@@ -643,7 +648,7 @@ test('S4.3 — every permission.request is followed by exactly one permission.re
 
   const received: Envelope[] = [];
   await manager.subscribe(sessionId, owner, 0, { deliver: (e) => received.push(e), close: () => {} });
-  await manager.message(sessionId, owner, 'go');
+  await manager.message(sessionId, owner, 'go', []);
 
   const answeredIds: string[] = [];
   for (let i = 0; i < 3; i++) {
@@ -786,7 +791,7 @@ test('S4.9 — a child that dies with requests outstanding resolves each one can
 
   const received: Envelope[] = [];
   await manager.subscribe(sessionId, owner, 0, { deliver: (e) => received.push(e), close: () => {} });
-  await manager.message(sessionId, owner, 'go');
+  await manager.message(sessionId, owner, 'go', []);
 
   await waitUntil(() => received.some((e) => e.kind === 'turn.ended'));
 
@@ -873,7 +878,7 @@ test('S4.15 — a turn spawning with no --resume on a session that already ran o
   await manager.subscribe(sessionId, owner, 0, { deliver: (e) => received.push(e), close: () => {} });
 
   // First turn: the fixture never reports system/init, so cliSessionId never gets set.
-  await manager.message(sessionId, owner, 'go');
+  await manager.message(sessionId, owner, 'go', []);
   await waitUntil(() => received.some((e) => e.kind === 'turn.ended'));
 
   const beforeSecondTurn = received.length;
@@ -881,7 +886,7 @@ test('S4.15 — a turn spawning with no --resume on a session that already ran o
   // the subscriber sees the envelope (S3.7's same race) — retry rather than assert once.
   let messaged;
   for (;;) {
-    messaged = await manager.message(sessionId, owner, 'go again');
+    messaged = await manager.message(sessionId, owner, 'go again', []);
     if (messaged.ok) break;
     assert.equal(messaged.error.code, 'turn_in_flight', `second turn refused: ${messaged.error.code}`);
     await new Promise((r) => setTimeout(r, 10));
@@ -907,7 +912,7 @@ const RULE_CAPS: Caps = {
   auditPageMax: 200,
   reviewBodyBytes: 1024,
   requisitionTextBytes: 1024,
-  standingRuleBytes: 32,
+  standingRuleBytes: 32, attachmentBytes: 10485760, attachmentCount: 5,
 };
 
 function fakeRequest(tool: string, matchTarget: string | null): PermissionRequest {
@@ -959,7 +964,7 @@ test("D108/D109 — match: tool equality, anchored wildcard, and shell metachara
 
 async function runOneTurn(manager: Awaited<ReturnType<typeof makeManager>>['manager'], sessionId: string, owner: OperatorId, received: Envelope[]) {
   const before = received.length;
-  const messaged = await manager.message(sessionId as never, owner, 'go');
+  const messaged = await manager.message(sessionId as never, owner, 'go', []);
   assert.equal(messaged.ok, true, messaged.ok ? undefined : JSON.stringify(messaged.error));
   await waitUntil(() => received.slice(before).some((e) => e.kind === 'permission.request'));
   return { before, slice: () => received.slice(before) };
@@ -1077,7 +1082,7 @@ test('S10.5 — a standing rule does not outlive its session: a new session on t
   const sessionIdA = createdA.value.sessionId;
   const receivedA: Envelope[] = [];
   await manager.subscribe(sessionIdA, ownerA, 0, { deliver: (e) => receivedA.push(e), close: () => {} });
-  await manager.message(sessionIdA, ownerA, 'go');
+  await manager.message(sessionIdA, ownerA, 'go', []);
   await waitUntil(() => receivedA.some((e) => e.kind === 'permission.request'));
   const requestIdA = (receivedA.find((e) => e.kind === 'permission.request')!.data as { requestId: string }).requestId;
   const answeredA = await manager.answerPermission(sessionIdA, ownerA, {
@@ -1097,7 +1102,7 @@ test('S10.5 — a standing rule does not outlive its session: a new session on t
   const sessionIdB = createdB.value.sessionId;
   const receivedB: Envelope[] = [];
   await manager.subscribe(sessionIdB, ownerB, 0, { deliver: (e) => receivedB.push(e), close: () => {} });
-  await manager.message(sessionIdB, ownerB, 'go');
+  await manager.message(sessionIdB, ownerB, 'go', []);
   await waitUntil(() => receivedB.some((e) => e.kind === 'permission.request'));
   // Give an incorrect auto-resolution a moment to happen before asserting it did not.
   await new Promise((r) => setTimeout(r, 100));
@@ -1221,7 +1226,7 @@ test('S5.1/S5.3/S5.4 — interrupt resolves an outstanding permission cancelled_
 
   const received: Envelope[] = [];
   await manager.subscribe(sessionId, owner, 0, { deliver: (e) => received.push(e), close: () => {} });
-  const messaged = await manager.message(sessionId, owner, 'go');
+  const messaged = await manager.message(sessionId, owner, 'go', []);
   assert.equal(messaged.ok, true);
   if (!messaged.ok) return;
   const { turnId } = messaged.value;
@@ -1260,7 +1265,7 @@ test('S5.1/S5.3/S5.4 — interrupt resolves an outstanding permission cancelled_
   if (summary.ok) assert.equal(summary.value.state, 'live');
 
   // The turn slot is free again — a new message is not turn_in_flight.
-  const again = await manager.message(sessionId, owner, 'go again');
+  const again = await manager.message(sessionId, owner, 'go again', []);
   assert.equal(again.ok, true);
 });
 
@@ -1280,7 +1285,7 @@ test('S5.2 — interrupt terminates the whole process tree: no live descendant f
 
   const received: Envelope[] = [];
   await manager.subscribe(sessionId, owner, 0, { deliver: (e) => received.push(e), close: () => {} });
-  const messaged = await manager.message(sessionId, owner, 'go');
+  const messaged = await manager.message(sessionId, owner, 'go', []);
   assert.equal(messaged.ok, true);
   if (!messaged.ok) return;
   const { turnId } = messaged.value;
@@ -1344,7 +1349,7 @@ test('S5.5/S5.6 — end sets ended, emits session.ended, refuses a further messa
     assert.notEqual(summary.value.endedAt, null);
   }
 
-  const messaged = await manager.message(sessionId, owner, 'go');
+  const messaged = await manager.message(sessionId, owner, 'go', []);
   assert.equal(messaged.ok, false);
   if (!messaged.ok) assert.equal(messaged.error.code, 'session_ended');
 
@@ -1426,8 +1431,8 @@ test('S5.8 — the workspace claim and the turn slot are each claimed in the sam
   const { sessionId } = createSuccess.value;
 
   const [m1, m2] = await Promise.all([
-    manager.message(sessionId, owner, 'a'),
-    manager.message(sessionId, owner, 'b'),
+    manager.message(sessionId, owner, 'a', []),
+    manager.message(sessionId, owner, 'b', []),
   ]);
   assert.equal([m1, m2].filter((r) => r.ok).length, 1, 'exactly one message was accepted');
   const messageFailure = [m1, m2].find((r) => !r.ok);
@@ -1648,7 +1653,7 @@ test('S6.8 - a ckpt.git that cannot be initialised yields session.notice/warn ch
   assert.equal((notice!.data as { level: string }).level, 'warn');
 
   // The session is still usable: a message still runs a turn.
-  const messaged = await manager.message(created.value.sessionId, owner, 'go');
+  const messaged = await manager.message(created.value.sessionId, owner, 'go', []);
   assert.equal(messaged.ok, true, 'the session is created and usable without checkpoints');
 });
 
@@ -1827,7 +1832,7 @@ test('S7.2/S7.3 — a rehydrated session is ended with endedAt set and lastSeq d
     assert.equal(got.value.lastSeq, 6, 'lastSeq follows the spill, not the stale meta.json value');
   }
 
-  const messaged = await manager2.message(sessionId as never, record.owner, 'hello');
+  const messaged = await manager2.message(sessionId as never, record.owner, 'hello', []);
   assert.equal(messaged.ok, false);
   if (!messaged.ok) assert.equal(messaged.error.code, 'session_ended');
 });
@@ -2087,7 +2092,7 @@ test('D100 — a failed spill append ends the session, clears the turn slot (I8)
   const { sessionId } = created.value;
 
   failAppends = true;
-  const sent = await manager.message(sessionId, owner, 'go');
+  const sent = await manager.message(sessionId, owner, 'go', []);
 
   // The session is ended, not merely marked: `state === 'ended'` implies `turn === null`
   // (I8), and the only way to observe the slot from outside is what a second message is
@@ -2101,7 +2106,7 @@ test('D100 — a failed spill append ends the session, clears the turn slot (I8)
   assert.equal(sent.ok, false);
   if (!sent.ok) assert.equal(sent.error.code, 'session_ended');
 
-  const again = await manager.message(sessionId, owner, 'again');
+  const again = await manager.message(sessionId, owner, 'again', []);
   assert.equal(again.ok, false);
   if (!again.ok) assert.equal(again.error.code, 'session_ended', 'a surviving turn slot would refuse with turn_in_flight instead');
 
@@ -2136,7 +2141,7 @@ test('S9.8 — a spill failure mid-turn kills the child, resolves the outstandin
   await manager.subscribe(sessionId, owner, 0, { deliver: (e) => received.push(e), close: () => {} });
 
   failNextPermissionRequest = true;
-  const sent = await manager.message(sessionId, owner, 'go');
+  const sent = await manager.message(sessionId, owner, 'go', []);
   assert.equal(sent.ok, true);
 
   await waitUntil(() => received.some((e) => e.kind === 'session.ended'), 5000);
@@ -2213,7 +2218,7 @@ test('S17.3 — a live child dying with requests outstanding also reaches the in
 
   const received: Envelope[] = [];
   await manager.subscribe(sessionId, owner, 0, { deliver: (e) => received.push(e), close: () => {} });
-  await manager.message(sessionId, owner, 'go');
+  await manager.message(sessionId, owner, 'go', []);
   await waitUntil(() => received.some((e) => e.kind === 'turn.ended'));
 
   const page = await manager.readAudit({
@@ -2252,7 +2257,7 @@ test('S9.1/S9.2/S9.4 — a tool.result over the byte cap is truncated before its
   async function runOneTurn(bigBytes: number): Promise<{ turnId: string; result: Envelope }> {
     process.env['SKYNET_BIG_TOOL_RESULT_BYTES'] = String(bigBytes);
     const before = received.length;
-    const messaged = await manager.message(sessionId, owner, 'go');
+    const messaged = await manager.message(sessionId, owner, 'go', []);
     assert.equal(messaged.ok, true);
     await waitUntil(() => received.some((e, i) => i >= before && e.kind === 'permission.request'));
     const requestId = (received.find((e, i) => i >= before && e.kind === 'permission.request')!.data as { requestId: string }).requestId;
@@ -2317,7 +2322,7 @@ test('S9.5 — a tool.result under the byte cap is never truncated and writes no
   await manager.subscribe(sessionId, owner, 0, { deliver: (e) => received.push(e), close: () => {} });
 
   process.env['SKYNET_BIG_TOOL_RESULT_BYTES'] = '500';
-  const messaged = await manager.message(sessionId, owner, 'go');
+  const messaged = await manager.message(sessionId, owner, 'go', []);
   assert.equal(messaged.ok, true);
   await waitUntil(() => received.some((e) => e.kind === 'permission.request'));
   const requestId = (received.find((e) => e.kind === 'permission.request')!.data as { requestId: string }).requestId;
@@ -2353,7 +2358,7 @@ test('S9.5 — a blob the store cannot write does not undo the envelope\'s trunc
   await manager.subscribe(sessionId, owner, 0, { deliver: (e) => received.push(e), close: () => {} });
 
   process.env['SKYNET_BIG_TOOL_RESULT_BYTES'] = '2000';
-  const messaged = await manager.message(sessionId, owner, 'go');
+  const messaged = await manager.message(sessionId, owner, 'go', []);
   assert.equal(messaged.ok, true);
   await waitUntil(() => received.some((e) => e.kind === 'permission.request'));
   const requestId = (received.find((e) => e.kind === 'permission.request')!.data as { requestId: string }).requestId;
@@ -2565,7 +2570,7 @@ test('S14.3 — a tick carries no turnId and lands between turn.started and turn
   const received: Envelope[] = [];
   await manager.subscribe(sessionId, owner, 0, { deliver: (e) => received.push(e), close: () => {} });
 
-  const messaged = await manager.message(sessionId, owner, 'do the thing');
+  const messaged = await manager.message(sessionId, owner, 'do the thing', []);
   assert.equal(messaged.ok, true);
   await waitUntil(() => received.some((e) => e.kind === 'permission.request'));
 
@@ -2967,7 +2972,7 @@ test('S16.5 — the payroll read for a live session equals the same read after a
 
   const received: Envelope[] = [];
   await manager.subscribe(sessionId, owner, 0, { deliver: (e) => received.push(e), close: () => {} });
-  const messaged = await manager.message(sessionId, owner, 'do the thing');
+  const messaged = await manager.message(sessionId, owner, 'do the thing', []);
   assert.equal(messaged.ok, true);
   await waitUntil(() => received.some((e) => e.kind === 'permission.request'));
   const requestEnvelope = received.find((e) => e.kind === 'permission.request')!;
@@ -3016,7 +3021,7 @@ test('S16.8 — a payroll read whose spill cannot be read is 500 payroll_unavail
 
   const received: Envelope[] = [];
   await manager.subscribe(sessionId, owner, 0, { deliver: (e) => received.push(e), close: () => {} });
-  const messaged = await manager.message(sessionId, owner, 'still works');
+  const messaged = await manager.message(sessionId, owner, 'still works', []);
   assert.equal(messaged.ok, true, 'the session is unaffected by the failed payroll read');
   await waitUntil(() => received.some((e) => e.kind === 'turn.started'));
 });
@@ -3108,4 +3113,168 @@ test('S20.3 — a session that genuinely burned nothing, with rates configured, 
   const src = await readFile(path.join(process.cwd(), 'src', 'session-manager', 'index.ts'), 'utf8');
   const fold = src.slice(src.indexOf('async function foldPayroll'), src.indexOf('async function foldPayroll') + 3500);
   assert.equal(/burn\.\w+\s*===\s*0|totalBurn\s*===\s*0/.test(fold), false, 'the fold does not derive costCurrency by comparing burn against zero');
+});
+
+// ---------------------------------------------------------------------------
+// S21 — attachments
+// ---------------------------------------------------------------------------
+
+test('S21.2/S21.3 — a message with an attachment emits one AttachmentRef on the message envelope, the blob is written before that envelope, and its bytes never reach events.ndjson', async () => {
+  const writeAttachmentCalls: string[] = [];
+  const appendEventCalls: string[] = [];
+  const { manager, workspaceRoot, storageRoot } = await makeManager('error-result', {}, (store) => ({
+    ...store,
+    async writeAttachment(sessionId, turnId, attachmentId, bytes, mediaType) {
+      writeAttachmentCalls.push(attachmentId as unknown as string);
+      return store.writeAttachment(sessionId, turnId, attachmentId, bytes, mediaType);
+    },
+    async appendEvent(sessionId, envelope) {
+      if (envelope.kind === 'message' && (envelope.data as { role: string }).role === 'user') appendEventCalls.push('message');
+      return store.appendEvent(sessionId, envelope);
+    },
+  }));
+  const owner = 'operator-1' as OperatorId;
+  const projectDir = path.join(workspaceRoot, 'proj-s212');
+  await mkdir(projectDir);
+  const created = await manager.create(owner, { vendor: 'claude', cwd: projectDir, model: null, sandbox: null, requisitionId: null });
+  assert.equal(created.ok, true);
+  if (!created.ok) return;
+  const { sessionId } = created.value;
+
+  const received: Envelope[] = [];
+  await manager.subscribe(sessionId, owner, 0, { deliver: (e) => received.push(e), close: () => {} });
+
+  const recognisablePattern = 'S21-RECOGNISABLE-BYTE-PATTERN-0123456789';
+  const dataBase64 = Buffer.from(recognisablePattern, 'utf8').toString('base64');
+  const messaged = await manager.message(sessionId, owner, 'see attached', [
+    { filename: 'bug.png', mediaType: 'image/png', dataBase64 },
+  ]);
+  assert.equal(messaged.ok, true);
+  if (!messaged.ok) return;
+
+  await waitUntil(() => received.some((e) => e.kind === 'turn.ended'));
+
+  // S21.3: the blob was written (and fsync'd, `store.writeAttachment`'s own contract)
+  // before the envelope naming it was appended.
+  assert.equal(writeAttachmentCalls.length, 1);
+  assert.deepEqual(appendEventCalls, ['message']);
+
+  const messageEnvelope = received.find((e) => e.kind === 'message' && (e.data as { role: string }).role === 'user');
+  assert.ok(messageEnvelope, 'the operator\'s own message was emitted');
+  const data = messageEnvelope!.data as { text: string; attachments: readonly { attachmentId: string; filename: string; mediaType: string; bytes: number }[] };
+  assert.equal(data.text, 'see attached');
+  assert.equal(data.attachments.length, 1);
+  assert.equal(data.attachments[0]!.filename, 'bug.png');
+  assert.equal(data.attachments[0]!.mediaType, 'image/png');
+  assert.equal(data.attachments[0]!.bytes, Buffer.byteLength(recognisablePattern, 'utf8'));
+  assert.equal(data.attachments[0]!.attachmentId, writeAttachmentCalls[0]);
+
+  // I49: no envelope in events.ndjson contains the attachment's bytes — searched as both
+  // raw bytes and as the base64 the client sent, since a naive implementation could leak
+  // either.
+  const spill = await readFile(path.join(storageRoot, 'sessions', sessionId, 'events.ndjson'), 'utf8');
+  assert.equal(spill.includes(recognisablePattern), false, 'raw attachment bytes leaked into events.ndjson');
+  assert.equal(spill.includes(dataBase64), false, 'base64 attachment bytes leaked into events.ndjson');
+});
+
+test('S21.4 — a hostile filename is never used to build a path, and is preserved verbatim in the ref for display', async () => {
+  const { manager, workspaceRoot, storageRoot } = await makeManager('error-result');
+  const owner = 'operator-1' as OperatorId;
+  const projectDir = path.join(workspaceRoot, 'proj-s214');
+  await mkdir(projectDir);
+  const created = await manager.create(owner, { vendor: 'claude', cwd: projectDir, model: null, sandbox: null, requisitionId: null });
+  assert.equal(created.ok, true);
+  if (!created.ok) return;
+  const { sessionId } = created.value;
+
+  const received: Envelope[] = [];
+  await manager.subscribe(sessionId, owner, 0, { deliver: (e) => received.push(e), close: () => {} });
+
+  for (const evilFilename of ['../../escape.txt', 'C:\\Windows\\evil', 'nul\0byte']) {
+    const endedBefore = received.filter((e) => e.kind === 'turn.ended').length;
+    const messaged = await manager.message(sessionId, owner, 'go', [
+      { filename: evilFilename, mediaType: 'text/plain', dataBase64: Buffer.from('x').toString('base64') },
+    ]);
+    assert.equal(messaged.ok, true, `refused for filename ${JSON.stringify(evilFilename)}: ${messaged.ok ? '' : JSON.stringify(messaged.error)}`);
+    await waitUntil(() => received.filter((e) => e.kind === 'turn.ended').length > endedBefore);
+
+    const messageEnvelope = [...received].reverse().find((e) => e.kind === 'message' && (e.data as { role: string }).role === 'user');
+    const ref = (messageEnvelope!.data as { attachments: readonly { attachmentId: string; filename: string }[] }).attachments[0]!;
+    assert.equal(ref.filename, evilFilename, 'the operator\'s filename is preserved verbatim for display');
+    assert.match(ref.attachmentId, /^[0-9a-f-]{36}$/, 'the path segment is a server-minted UUID, never the filename');
+  }
+
+  // The blob directory holds only server-minted ids as path segments — never a filename.
+  const attachmentsRoot = path.join(storageRoot, 'sessions', sessionId, 'attachments');
+  const turnDirs = await readdir(attachmentsRoot);
+  for (const turnDir of turnDirs) {
+    const entries = await readdir(path.join(attachmentsRoot, turnDir));
+    for (const entry of entries) assert.match(entry, /^[0-9a-f-]{36}(\.meta)?$/);
+  }
+});
+
+test('S21.5 — an attachment over the byte cap, or a message over the attachment count cap, is refused 422-shaped and nothing is written', async () => {
+  const { manager, workspaceRoot, storageRoot } = await makeManager('error-result', { attachmentBytes: 8, attachmentCount: 1 });
+  const owner = 'operator-1' as OperatorId;
+  const projectDir = path.join(workspaceRoot, 'proj-s215');
+  await mkdir(projectDir);
+  const created = await manager.create(owner, { vendor: 'claude', cwd: projectDir, model: null, sandbox: null, requisitionId: null });
+  assert.equal(created.ok, true);
+  if (!created.ok) return;
+  const { sessionId } = created.value;
+
+  const oversized = await manager.message(sessionId, owner, 'go', [
+    { filename: 'big.png', mediaType: 'image/png', dataBase64: Buffer.from('way too many bytes for the cap').toString('base64') },
+  ]);
+  assert.equal(oversized.ok, false);
+  if (!oversized.ok) {
+    assert.equal(oversized.error.code, 'bad_request');
+    if (oversized.error.code === 'bad_request') assert.equal(oversized.error.field, 'attachments');
+  }
+
+  const tooMany = await manager.message(sessionId, owner, 'go', [
+    { filename: 'a.png', mediaType: 'image/png', dataBase64: Buffer.from('a').toString('base64') },
+    { filename: 'b.png', mediaType: 'image/png', dataBase64: Buffer.from('b').toString('base64') },
+  ]);
+  assert.equal(tooMany.ok, false);
+  if (!tooMany.ok) {
+    assert.equal(tooMany.error.code, 'bad_request');
+    if (tooMany.error.code === 'bad_request') assert.equal(tooMany.error.field, 'attachments');
+  }
+
+  // Neither refusal wrote anything, and neither started a turn.
+  assert.equal(existsSync(path.join(storageRoot, 'sessions', sessionId, 'attachments')), false);
+  const summary = manager.get(sessionId, owner);
+  assert.equal(summary.ok, true);
+});
+
+test('S21.8 — an adapter declaring acceptsAttachments: false refuses the whole message naming attachments, and no turn starts', async () => {
+  process.env['SKYNET_CODEX_EXECUTABLE'] = CODEX_FIXTURE;
+  delete process.env['SKYNET_CODEX_NO_APP_SERVER'];
+  process.env['SKYNET_CODEX_SCENARIO'] = 'full';
+  const { manager, workspaceRoot, storageRoot } = await makeManager('error-result');
+  const owner = 'operator-1' as OperatorId;
+  const projectDir = path.join(workspaceRoot, 'proj-s218');
+  await mkdir(projectDir);
+  const created = await manager.create(owner, { vendor: 'codex', cwd: projectDir, model: null, sandbox: 'read-only', requisitionId: null });
+  assert.equal(created.ok, true);
+  if (!created.ok) return;
+  const { sessionId } = created.value;
+
+  const received: Envelope[] = [];
+  await manager.subscribe(sessionId, owner, 0, { deliver: (e) => received.push(e), close: () => {} });
+
+  const messaged = await manager.message(sessionId, owner, 'see attached', [
+    { filename: 'bug.png', mediaType: 'image/png', dataBase64: Buffer.from('x').toString('base64') },
+  ]);
+  assert.equal(messaged.ok, false);
+  if (!messaged.ok) {
+    assert.equal(messaged.error.code, 'bad_request');
+    if (messaged.error.code === 'bad_request') assert.equal(messaged.error.field, 'attachments');
+  }
+
+  // No turn started: no turn.started was ever delivered, and nothing was written.
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  assert.equal(received.some((e) => e.kind === 'turn.started'), false);
+  assert.equal(existsSync(path.join(storageRoot, 'sessions', sessionId, 'attachments')), false);
 });

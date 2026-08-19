@@ -5,6 +5,7 @@ import type {
   AdapterError,
   AdapterNotification,
   AdapterOptions,
+  AttachmentPayload,
   CallId,
   CliSessionId,
   PermissionDecision,
@@ -691,8 +692,16 @@ export function createCodexAdapter(
   const adapter: Adapter = {
     vendor: 'codex',
     policy: { mode: 'preauthorised', sandbox, banner },
+    // (D160/S21.8) Undeclared, not merely unprobed: no finding has verified either Codex
+    // transport carries a non-text content block, so this stays `false` until one does.
+    acceptsAttachments: false,
 
-    send(text: string, resume: CliSessionId | null, _turnId: TurnId): Promise<Result<void, AdapterError>> {
+    send(
+      text: string,
+      _attachments: readonly AttachmentPayload[],
+      resume: CliSessionId | null,
+      _turnId: TurnId,
+    ): Promise<Result<void, AdapterError>> {
       return transport === 'app-server' ? runAppServer(text, resume) : runExec(text, resume);
     },
 

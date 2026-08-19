@@ -5,6 +5,7 @@ import type {
   AdapterError,
   AdapterNotification,
   AdapterOptions,
+  AttachmentPayload,
   CallId,
   CliSessionId,
   PermissionDecision,
@@ -29,6 +30,11 @@ const KILL_GRACE_MS = 2000;
 // twelve-row vendor mapping — flagging them as `adapter_unknown_record` would spam the
 // operator with noise on every ordinary turn. Genuinely unrecognised `type`s still do
 // (S1.4).
+// (S21 fix) The Anthropic API validates an `image` content block's `media_type` against a
+// fixed set of raster types — the same set `edge/http-common`'s read route allow-lists for
+// echoing `Content-Type`. Only these are ever wrapped as `image` blocks on `send`'s stdin.
+const CLAUDE_IMAGE_MEDIA_TYPES = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
+
 const IGNORED_TOP_LEVEL_TYPES = new Set(['rate_limit_event', 'control_response']);
 const IGNORED_SYSTEM_SUBTYPES = new Set([
   'hook_started',
@@ -233,8 +239,12 @@ export function createClaudeAdapter(opts: AdapterOptions & { readonly executable
   const adapter: Adapter = {
     vendor: 'claude',
     policy: { mode: 'interactive', sandbox: null, banner: null },
+    // (D160/S21.1) Verified against the real CLI: a `user` message whose `content` array
+    // holds a non-text `image` block is accepted and forwarded (`design/findings/S21-
+    // attachment-probe.md`).
+    acceptsAttachments: true,
 
-    send(text: string, resume: CliSessionId | null, turnId: TurnId): Promise<Result<void, AdapterError>> {
+    send(text: string, attachments: readonly AttachmentPayload[], resume: CliSessionId | null, turnId: TurnId): Promise<Result<void, AdapterError>> {
       return new Promise((resolve) => {
         currentTurnId = turnId;
         resultSeen = false;
@@ -292,10 +302,23 @@ export function createClaudeAdapter(opts: AdapterOptions & { readonly executable
           if (settled) return;
           settled = true;
           notify({ kind: 'spawned', pid: proc.pid ?? -1, pgid: isWindows ? null : (proc.pid ?? null), image: executable });
+          // (D160/S21.1) One `image` content block per attachment, ahead of the text —
+          // the same `content` array shape the finding verified against a real CLI run.
+          // `design/findings/S21-attachment-probe.md` only ever probed an image
+          // `media_type`; the Anthropic API is documented to validate an `image` block's
+          // `media_type` against a fixed set of raster types, so a non-image attachment
+          // (a log, a spec — S21's own examples) is named in text instead of risking the
+          // whole turn on an unverified block shape.
+          const content: Record<string, unknown>[] = attachments.map((a) =>
+            CLAUDE_IMAGE_MEDIA_TYPES.has(a.ref.mediaType)
+              ? { type: 'image', source: { type: 'base64', media_type: a.ref.mediaType, data: Buffer.from(a.data).toString('base64') } }
+              : { type: 'text', text: `[attachment "${a.ref.filename}" (${a.ref.mediaType}) omitted: Claude only accepts image attachments]` },
+          );
+          content.push({ type: 'text', text });
           const wrote = writeLine({
             type: 'user',
             session_id: cliSessionId ?? '',
-            message: { role: 'user', content: [{ type: 'text', text }] },
+            message: { role: 'user', content },
             parent_tool_use_id: null,
           });
           resolve(wrote ? { ok: true, value: undefined } : { ok: false, error: { code: 'write_failed', detail: 'stdin not writable immediately after spawn' } });

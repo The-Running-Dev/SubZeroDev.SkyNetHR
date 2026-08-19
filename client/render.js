@@ -31,9 +31,43 @@ function pretty(value) {
   }
 }
 
-function messageNode(doc, data) {
+// (D160/S21.10) The same allow-list the read route serves `Content-Type` under — an image
+// renders inline under the document's existing `img-src 'self'`; everything else is a
+// download naming the file and its size. `filename` reaches the DOM only as a text node
+// (`el`'s `textContent`), so an upload named `<img src=x onerror=alert(1)>` renders as
+// literal characters and executes nothing (I26, D74).
+const ATTACHMENT_IMAGE_ALLOWLIST = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
+
+function formatBytes(n) {
+  if (n < 1024) return `${n} B`;
+  const kib = n / 1024;
+  if (kib < 1024) return `${kib.toFixed(1)} KiB`;
+  return `${(kib / 1024).toFixed(1)} MiB`;
+}
+
+function attachmentNode(doc, ref, sessionId, turnId) {
+  const href = `/api/sessions/${encodeURIComponent(sessionId)}/attachments/${encodeURIComponent(turnId)}/${encodeURIComponent(ref.attachmentId)}`;
+  if (ATTACHMENT_IMAGE_ALLOWLIST.has(ref.mediaType)) {
+    const img = el(doc, 'img', 'message__attachment-image');
+    img.setAttribute('src', href);
+    img.setAttribute('alt', ref.filename);
+    return img;
+  }
+  const link = el(doc, 'a', 'message__attachment-link');
+  link.setAttribute('href', href);
+  link.appendChild(el(doc, 'span', 'message__attachment-name', ref.filename));
+  link.appendChild(el(doc, 'span', 'message__attachment-size', ` (${formatBytes(ref.bytes)})`));
+  return link;
+}
+
+function messageNode(doc, data, handlers) {
   const body = el(doc, 'div', 'message');
   body.appendChild(el(doc, 'div', 'message__text', data.text));
+  if (Array.isArray(data.attachments) && data.attachments.length > 0 && handlers && handlers.sessionId) {
+    const attachments = el(doc, 'div', 'message__attachments');
+    for (const ref of data.attachments) attachments.appendChild(attachmentNode(doc, ref, handlers.sessionId, data.turnId));
+    body.appendChild(attachments);
+  }
   return row(doc, data.role === 'user' ? 'user' : 'assistant', data.role === 'user' ? 'you' : 'agent', body);
 }
 

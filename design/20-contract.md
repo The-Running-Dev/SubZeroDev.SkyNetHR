@@ -797,7 +797,7 @@ interface SessionMetaFile {
 | `meta.json` | `sessionId` from the directory name | — | Written by temp-file-then-atomic-rename, never in place, on exactly three occasions: create, a `state` transition, a `cliSessionId` change. Never per event |
 | `events.ndjson` | `(sessionId, seq)` | `seq` ascending, contiguous from 1 | Append-only, written in `seq` order through the session's own append chain (D89). Not fsync'd per line. **Read backwards from the tail to locate `after + 1`, then emitted forward** — O(envelopes since the disconnect), not O(file). No offset index exists and none is planned (D163) |
 | `tool-output/<turnId>/<callId>` | `(sessionId, turnId, callId)` | — | Written once, never appended. `turnId` is in the path because `callId` is vendor-minted and only *assumed* session-unique. Bounded per session by `Caps.sessionToolOutputBytes`: past the budget the blob is **not written**, and the fetch answers `404 no_such_output` exactly as S9.5 already specifies (D162). Nothing already written is ever evicted |
-| `attachments/<turnId>/<attachmentId>` | `(sessionId, turnId, attachmentId)` | — | Written once, never appended, fsync'd before the envelope naming it exists (I49). `attachmentId` is server-minted, so the operator's `filename` never reaches a path. Removed with the session (D25, D160) |
+| `attachments/<turnId>/<attachmentId>` | `(sessionId, turnId, attachmentId)` | — | Written once, never appended, fsync'd before the envelope naming it exists (I49). `attachmentId` is server-minted, so the operator's `filename` never reaches a path. A sidecar `attachments/<turnId>/<attachmentId>.meta` holds the stored `mediaType` as UTF-8 text, written the same way, so the read route can echo it for an allow-listed image type without scanning the spill for the `AttachmentRef` that named this id. Removed with the session (D25, D160) |
 | `audit.ndjson` | append order | append order, read newest first | Server-wide. fsync'd before the decision it records reaches the child. Never truncated, never deleted with a session. Every read is a bounded window resumed by `AuditCursor` |
 | `pids.ndjson` | append order; `pid` is not unique over time | append order | Server-wide. Two line shapes: a `ProcessRecord` at spawn, a `ProcessTombstone` at exit (D95). The latest line for a `pid` decides liveness; the spawn line carries everything else |
 | `server.lock` | — | — | Server-wide, one `ServerLock` object, written before boot's first step and removed at clean shutdown (D161). Not append-only. Reclaimed on a stale holder by D23's three-part test; never reclaimed when `hostname` is another host |
@@ -918,6 +918,12 @@ interface Store {
   // Tool output blobs
   writeToolOutput(sessionId: SessionId, turnId: TurnId, callId: CallId, bytes: Buffer): Promise<Result<void, StoreError>>;
   openToolOutput(sessionId: SessionId, turnId: TurnId, callId: CallId): Promise<Result<NodeJS.ReadableStream, StoreError>>;
+
+  // (D160) Attachment blobs, D22's tool-output shape reversed — fsync'd before the envelope
+  // naming them exists (I49). `mediaType` rides alongside so a later `open` can answer the
+  // read route's allow-list check (S21.6) without scanning the spill.
+  writeAttachment(sessionId: SessionId, turnId: TurnId, attachmentId: AttachmentId, bytes: Buffer, mediaType: string): Promise<Result<void, StoreError>>;
+  openAttachment(sessionId: SessionId, turnId: TurnId, attachmentId: AttachmentId): Promise<Result<{ readonly stream: NodeJS.ReadableStream; readonly mediaType: string }, StoreError>>;
 
   // Server-wide append-only files
   appendAudit(record: AuditRecord): Promise<Result<void, StoreError>>;   // durable: fsync before it returns
@@ -1196,7 +1202,7 @@ interface SessionManager {
   list(owner: OperatorId): readonly SessionSummary[];
   get(sessionId: SessionId, owner: OperatorId): Result<SessionSummary, SessionError>;
 
-  message(sessionId: SessionId, owner: OperatorId, text: string): Promise<Result<{ turnId: TurnId }, SessionError>>;
+  message(sessionId: SessionId, owner: OperatorId, text: string, attachments: readonly AttachmentUpload[]): Promise<Result<{ turnId: TurnId }, SessionError>>;
   answerPermission(sessionId: SessionId, owner: OperatorId, answer: PermissionAnswer): Promise<Result<{ accepted: boolean }, SessionError>>;
   interrupt(sessionId: SessionId, owner: OperatorId, turnId: TurnId): Promise<Result<void, SessionError>>;
   end(sessionId: SessionId, owner: OperatorId): Promise<Result<void, SessionError>>;
@@ -1205,6 +1211,9 @@ interface SessionManager {
   listCheckpoints(sessionId: SessionId, owner: OperatorId): Promise<Result<readonly Checkpoint[], SessionError>>;
   restore(sessionId: SessionId, owner: OperatorId, sha: GitSha): Promise<Result<void, SessionError>>;
   openToolOutput(sessionId: SessionId, owner: OperatorId, turnId: TurnId, callId: CallId): Promise<Result<NodeJS.ReadableStream, SessionError>>;
+  // (D160) Same ownership check as `openToolOutput`; the edge maps a missing or unreadable
+  // blob to `404 no_such_attachment` (S21.6, S21.7).
+  openAttachment(sessionId: SessionId, owner: OperatorId, turnId: TurnId, attachmentId: AttachmentId): Promise<Result<{ readonly stream: NodeJS.ReadableStream; readonly mediaType: string }, SessionError>>;
 
   // Replays from the ring, else from the spill, else delivers one `error / replay_gap`,
   // then joins the live stream.
@@ -1378,13 +1387,18 @@ The tool-output route serves `X-Content-Type-Options: nosniff` and
 `Content-Disposition: attachment` alongside `text/plain`.
 
 **The attachment route never echoes an upload's declared media type unguarded** (D160). It serves
-`X-Content-Type-Options: nosniff` and `Content-Disposition: attachment` on every response, and
-sets `Content-Type` to the stored `mediaType` only when that value is in a server-side allow-list
-of image types — `image/png`, `image/jpeg`, `image/gif`, `image/webp` — and to
-`application/octet-stream` otherwise. An operator-uploaded `text/html` served under its own type
-on the console's origin is stored XSS holding the console's credentials, which is D74's population
-arriving as bytes rather than as text. The allow-list is what lets the client render a screenshot
-with `<img src>` under the document's existing `img-src 'self'` while everything else downloads.
+`X-Content-Type-Options: nosniff` on every response, and sets `Content-Type` to the stored
+`mediaType` only when that value is in a server-side allow-list of image types — `image/png`,
+`image/jpeg`, `image/gif`, `image/webp` — and to `application/octet-stream` otherwise. An
+operator-uploaded `text/html` served under its own type on the console's origin is stored XSS
+holding the console's credentials, which is D74's population arriving as bytes rather than as
+text. `Content-Disposition` follows the same allow-list check — `inline` for an allow-listed
+image, `attachment` otherwise — because Safari/WebKit honors `Content-Disposition: attachment`
+even on an `<img>` subresource fetch and would show a broken-image icon instead of painting it;
+`nosniff` plus the `Content-Type` allow-list (not `Content-Disposition`) is what stops a
+non-image type from ever being rendered as markup. This is what lets the client render a
+screenshot with `<img src>` under the document's existing `img-src 'self'` while everything else
+downloads.
 
 `POST /message` refuses, with `422 bad_request` naming the field and nothing written: an
 attachment whose decoded size exceeds `Caps.attachmentBytes`; a message carrying more than

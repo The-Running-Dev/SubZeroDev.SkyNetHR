@@ -209,6 +209,12 @@ export function loadConfig(env: Readonly<Record<string, string | undefined>>): R
   // other text caps is deliberately generous for the grammar it actually holds.
   const standingRuleBytes = parseIntEnv(env, 'CAPS_STANDING_RULE_BYTES', 1024);
   if (!standingRuleBytes.ok) return standingRuleBytes;
+  // (D160) A refusal threshold, not a truncation (D84): 10 MiB comfortably covers a
+  // screenshot without inviting a deployment to treat this route as general file storage.
+  const attachmentBytes = parseIntEnv(env, 'CAPS_ATTACHMENT_BYTES', 10 * 1024 * 1024);
+  if (!attachmentBytes.ok) return attachmentBytes;
+  const attachmentCount = parseIntEnv(env, 'CAPS_ATTACHMENT_COUNT', 5);
+  if (!attachmentCount.ok) return attachmentCount;
 
   const caps: Caps = {
     ringCapacity: ringCapacity.value,
@@ -219,6 +225,8 @@ export function loadConfig(env: Readonly<Record<string, string | undefined>>): R
     reviewBodyBytes: reviewBodyBytes.value,
     requisitionTextBytes: requisitionTextBytes.value,
     standingRuleBytes: standingRuleBytes.value,
+    attachmentBytes: attachmentBytes.value,
+    attachmentCount: attachmentCount.value,
   };
 
   const includeRaw = env['INCLUDE_RAW'] === 'true';

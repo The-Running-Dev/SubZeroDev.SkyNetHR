@@ -22,7 +22,7 @@ function baseConfig(storageRoot: string): Config {
       auditPageMax: 200,
       reviewBodyBytes: 1024,
       requisitionTextBytes: 1024,
-      standingRuleBytes: 1024,
+      standingRuleBytes: 1024, attachmentBytes: 10485760, attachmentCount: 5,
     },
     sessionCookieMaxAgeSeconds: 2592000,
     includeRaw: false,
@@ -81,7 +81,7 @@ function envelope(sessionId: string, seq: number): Envelope {
     sessionId: sessionId as never,
     ts: new Date().toISOString() as never,
     kind: 'message',
-    data: { turnId: 't1' as never, role: 'user', text: `line ${seq}` },
+    data: { turnId: 't1' as never, role: 'user', text: `line ${seq}`, attachments: [] },
   };
 }
 
@@ -162,6 +162,47 @@ test('tool-output ids that are not a single path segment are refused; a plain id
     const chunks: Buffer[] = [];
     for await (const chunk of opened.value) chunks.push(chunk as Buffer);
     assert.equal(Buffer.concat(chunks).toString('utf8'), 'hello');
+  }
+});
+
+test('S21.3/S21.4 — openAttachment on a missing blob returns not_found; a written attachment round-trips bytes and the stored mediaType', async () => {
+  const storageRoot = await mkdtemp(path.join(tmpdir(), 'skynet-store-'));
+  const storeResult = await createStore(baseConfig(storageRoot));
+  if (!storeResult.ok) return;
+  const store = storeResult.value;
+  const record = sessionRecord('sess-5');
+  await store.createSession(record);
+
+  const missing = await store.openAttachment(record.id, 't1' as never, 'att-1' as never);
+  assert.equal(missing.ok, false);
+  if (!missing.ok) assert.equal(missing.error.code, 'not_found');
+
+  const wrote = await store.writeAttachment(record.id, 't1' as never, 'att-1' as never, Buffer.from('screenshot-bytes'), 'image/png');
+  assert.equal(wrote.ok, true);
+  const opened = await store.openAttachment(record.id, 't1' as never, 'att-1' as never);
+  assert.equal(opened.ok, true);
+  if (opened.ok) {
+    assert.equal(opened.value.mediaType, 'image/png');
+    const chunks: Buffer[] = [];
+    for await (const chunk of opened.value.stream) chunks.push(chunk as Buffer);
+    assert.equal(Buffer.concat(chunks).toString('utf8'), 'screenshot-bytes');
+  }
+});
+
+test('S21.4 — attachment ids that are not a single path segment are refused', async () => {
+  const storageRoot = await mkdtemp(path.join(tmpdir(), 'skynet-store-'));
+  const storeResult = await createStore(baseConfig(storageRoot));
+  if (!storeResult.ok) return;
+  const store = storeResult.value;
+  const record = sessionRecord('sess-6b');
+  await store.createSession(record);
+
+  for (const evil of ['..', '../evil', '..\\evil', 'a/b', 'a\\b', '\0evil']) {
+    const wrote = await store.writeAttachment(record.id, 't1' as never, evil as never, Buffer.from('x'), 'text/plain');
+    assert.equal(wrote.ok, false, `writeAttachment accepted attachmentId ${JSON.stringify(evil)}`);
+    const openedEvil = await store.openAttachment(record.id, evil as never, 'att-1' as never);
+    assert.equal(openedEvil.ok, false, `openAttachment accepted turnId ${JSON.stringify(evil)}`);
+    if (!openedEvil.ok) assert.equal(openedEvil.error.code, 'not_found');
   }
 });
 

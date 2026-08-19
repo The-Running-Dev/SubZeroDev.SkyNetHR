@@ -45,6 +45,16 @@ test('S8.3 — a Codex session reports a preauthorised policy naming its sandbox
   assert.ok(result.value.policy.banner !== null && result.value.policy.banner.includes('read-only'));
 });
 
+// S21.8/D160 — undeclared, not merely unprobed: no finding has verified either Codex
+// transport carries a non-text content block.
+test('S21.8/D160 — a Codex session declares acceptsAttachments: false', () => {
+  delete process.env['SKYNET_CODEX_NO_APP_SERVER'];
+  const { result } = makeAdapter('read-only');
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  assert.equal(result.value.acceptsAttachments, false);
+});
+
 // S8.3/S8.4 — the app-server transport's full mapping: message, thinking, tool.call/
 // tool.result, usage from `last`, and zero permission.request events across the turn.
 test('S8.3, S8.4 — app-server: the mapped table, and zero permission.request events', async () => {
@@ -55,7 +65,7 @@ test('S8.3, S8.4 — app-server: the mapped table, and zero permission.request e
   if (!result.ok) return;
   const adapter = result.value;
 
-  const sendResult = await adapter.send('hello', null, 'turn-1' as never);
+  const sendResult = await adapter.send('hello', [], null, 'turn-1' as never);
   assert.equal(sendResult.ok, true);
 
   await waitUntil(() => eventsOf(notifications, 'turn.ended').length > 0);
@@ -99,7 +109,7 @@ test('S8.5 — app-server: an unrecognised notification method is a fatal schema
   assert.equal(result.ok, true);
   if (!result.ok) return;
 
-  const sendResult = await result.value.send('hello', null, 'turn-2' as never);
+  const sendResult = await result.value.send('hello', [], null, 'turn-2' as never);
   assert.equal(sendResult.ok, false);
   if (sendResult.ok) return;
   assert.equal(sendResult.error.code, 'schema_mismatch');
@@ -116,7 +126,7 @@ test('S8.5 — app-server: an unrecognised item type is a fatal schema mismatch'
   const { result } = makeAdapter();
   assert.equal(result.ok, true);
   if (!result.ok) return;
-  const sendResult = await result.value.send('hello', null, 'turn-3' as never);
+  const sendResult = await result.value.send('hello', [], null, 'turn-3' as never);
   assert.equal(sendResult.ok, false);
   if (sendResult.ok) return;
   assert.equal(sendResult.error.code, 'schema_mismatch');
@@ -131,7 +141,7 @@ test('S8.4 — an approval request under the shipped policy is declined without 
   const { result, notifications } = makeAdapter();
   assert.equal(result.ok, true);
   if (!result.ok) return;
-  const sendResult = await result.value.send('hello', null, 'turn-4' as never);
+  const sendResult = await result.value.send('hello', [], null, 'turn-4' as never);
   assert.equal(sendResult.ok, true);
 
   await waitUntil(() => eventsOf(notifications, 'turn.ended').length > 0);
@@ -147,7 +157,7 @@ test('app-server: the child closing with no turn/completed seen maps to turn.end
   const { result, notifications } = makeAdapter();
   assert.equal(result.ok, true);
   if (!result.ok) return;
-  await result.value.send('hello', null, 'turn-5' as never);
+  await result.value.send('hello', [], null, 'turn-5' as never);
   await waitUntil(() => eventsOf(notifications, 'turn.ended').length > 0);
   assert.equal((eventsOf(notifications, 'turn.ended')[0]!.event.data as { stopReason: string }).stopReason, 'process_exit');
 });
@@ -157,7 +167,7 @@ test('app-server: a malformed JSON line is non-fatal and the stream continues', 
   const { result, notifications } = makeAdapter();
   assert.equal(result.ok, true);
   if (!result.ok) return;
-  await result.value.send('hello', null, 'turn-6' as never);
+  await result.value.send('hello', [], null, 'turn-6' as never);
   await waitUntil(() => eventsOf(notifications, 'turn.ended').length > 0);
   const errors = eventsOf(notifications, 'error');
   assert.ok(errors.some((e) => (e.event.data as { kind: string }).kind === 'adapter_bad_line'));
@@ -175,7 +185,7 @@ test('S8.3, S8.7 — exec fallback: lifecycle and messages map, tool events and 
   assert.equal(result.ok, true);
   if (!result.ok) return;
 
-  const sendResult = await result.value.send('hello', null, 'turn-7' as never);
+  const sendResult = await result.value.send('hello', [], null, 'turn-7' as never);
   assert.equal(sendResult.ok, true);
   await waitUntil(() => eventsOf(notifications, 'turn.ended').length > 0);
 
@@ -203,7 +213,7 @@ test('S8.5 — exec fallback: an unrecognised record type is a fatal schema mism
   const { result } = makeAdapter();
   assert.equal(result.ok, true);
   if (!result.ok) return;
-  const sendResult = await result.value.send('hello', null, 'turn-8' as never);
+  const sendResult = await result.value.send('hello', [], null, 'turn-8' as never);
   assert.equal(sendResult.ok, false);
   if (sendResult.ok) return;
   assert.equal(sendResult.error.code, 'schema_mismatch');
