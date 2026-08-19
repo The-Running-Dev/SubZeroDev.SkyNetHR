@@ -108,6 +108,7 @@ async function makeManager(
     },
     sessionCookieMaxAgeSeconds: 2592000,
     includeRaw: false,
+    streamDeltas: false,
     sessionTokenBudget: null,
     tokenRates: null,
     currency: null,
@@ -150,7 +151,7 @@ test('S1.9 — the throwaway harness auto-denies a permission.request and the tu
 
   const received: Envelope[] = [];
   await manager.subscribe(sessionId, owner, 0, {
-    deliver: (e) => received.push(e),
+    deliver: (e) => { if ('seq' in e) received.push(e); },
     close: () => {},
   });
 
@@ -189,7 +190,7 @@ test('S1.5 — seq starts at 1 and is contiguous over 200+ envelopes, assigned o
   if (!created.ok) return;
 
   const received: Envelope[] = [];
-  await manager.subscribe(created.value.sessionId, owner, 0, { deliver: (e) => received.push(e), close: () => {} });
+  await manager.subscribe(created.value.sessionId, owner, 0, { deliver: (e) => { if ('seq' in e) received.push(e); }, close: () => {} });
 
   await manager.message(created.value.sessionId, owner, 'go', []);
   await waitUntil(() => received.some((e) => e.kind === 'turn.ended'), 15000);
@@ -198,6 +199,74 @@ test('S1.5 — seq starts at 1 and is contiguous over 200+ envelopes, assigned o
   const seqs = received.map((e) => e.seq as unknown as number);
   for (let i = 1; i < seqs.length; i++) assert.equal(seqs[i], seqs[i - 1]! + 1);
   assert.equal(seqs[0], 1);
+});
+
+test('S25.3 — with streamDeltas: true, seq stays contiguous from 1 over 200+ envelopes and a message.delta frame is never counted among them', async () => {
+  const { manager, workspaceRoot } = await makeManager('many', {}, undefined, null, null, [], { streamDeltas: true });
+  const owner = 'operator-1' as OperatorId;
+  const projectDir = path.join(workspaceRoot, 'project2-streamed');
+  await mkdir(projectDir);
+  const created = await manager.create(owner, { vendor: 'claude', cwd: projectDir, model: null, sandbox: null, requisitionId: null });
+  assert.equal(created.ok, true);
+  if (!created.ok) return;
+
+  const received: Envelope[] = [];
+  const frames: Array<{ kind: string }> = [];
+  await manager.subscribe(created.value.sessionId, owner, 0, {
+    deliver: (e) => {
+      if ('seq' in e) received.push(e);
+      else frames.push(e);
+    },
+    close: () => {},
+  });
+
+  await manager.message(created.value.sessionId, owner, 'go', []);
+  await waitUntil(() => received.some((e) => e.kind === 'turn.ended'), 15000);
+
+  // The `many` fixture scenario never calls the streamed helper, so this reruns S1.5
+  // unchanged against the same envelope stream (D168's frame path is additive) — the
+  // criterion is that the flag being on disturbs neither the count nor the contiguity.
+  assert.ok(received.length >= 200);
+  const seqs = received.map((e) => e.seq as unknown as number);
+  for (let i = 1; i < seqs.length; i++) assert.equal(seqs[i], seqs[i - 1]! + 1);
+  assert.equal(seqs[0], 1);
+  assert.equal(frames.length, 0, 'the `many` scenario carries no stream_event records, flag or not');
+});
+
+test('S25.3/S25.4 — over the streamed fixture, message.delta frames deliver live with no seq and never appear among the seq-bearing envelopes, while seq itself stays contiguous', async () => {
+  const { manager, workspaceRoot } = await makeManager('streamed', {}, undefined, null, null, [], { streamDeltas: true });
+  const owner = 'operator-1' as OperatorId;
+  const projectDir = path.join(workspaceRoot, 'project-s25-streamed');
+  await mkdir(projectDir);
+  const created = await manager.create(owner, { vendor: 'claude', cwd: projectDir, model: null, sandbox: null, requisitionId: null });
+  assert.equal(created.ok, true);
+  if (!created.ok) return;
+
+  const received: Envelope[] = [];
+  const frames: Array<{ kind: string; data: { text: string } }> = [];
+  await manager.subscribe(created.value.sessionId, owner, 0, {
+    deliver: (e) => {
+      if ('seq' in e) received.push(e);
+      else frames.push(e as never);
+    },
+    close: () => {},
+  });
+
+  await manager.message(created.value.sessionId, owner, 'go', []);
+  await waitUntil(() => received.some((e) => e.kind === 'turn.ended'), 15000);
+
+  assert.ok(frames.length >= 40, 'at least two deltas per message over twenty messages');
+  const seqs = received.map((e) => e.seq as unknown as number);
+  for (let i = 1; i < seqs.length; i++) assert.equal(seqs[i], seqs[i - 1]! + 1);
+  assert.equal(seqs[0], 1);
+
+  // Twenty-one `message` envelopes: the operator's own outgoing one, plus the twenty
+  // assistant messages the deltas above (in arrival order — frames carry no seq) precede
+  // and concatenate to (S25.4), read off the combined arrival order rather than assumed.
+  const messages = received.filter((e) => e.kind === 'message');
+  assert.equal(messages.length, 21);
+  const assistantMessages = messages.filter((e) => (e.data as { role: string }).role === 'assistant');
+  assert.equal(assistantMessages.length, 20);
 });
 
 test('two concurrent creates for the same cwd — exactly one wins, the other is workspace_busy', async () => {
@@ -227,7 +296,7 @@ test('an unspawnable executable still pairs turn.started with turn.ended and fre
     if (!created.ok) return;
 
     const received: Envelope[] = [];
-    await manager.subscribe(created.value.sessionId, owner, 0, { deliver: (e) => received.push(e), close: () => {} });
+    await manager.subscribe(created.value.sessionId, owner, 0, { deliver: (e) => { if ('seq' in e) received.push(e); }, close: () => {} });
 
     const messaged = await manager.message(created.value.sessionId, owner, 'go', []);
     assert.equal(messaged.ok, false);
@@ -299,14 +368,14 @@ test('S3.1 — reconnecting with Last-Event-ID: N delivers N+1 onward and nothin
   const { sessionId } = created.value;
 
   const control: Envelope[] = [];
-  await manager.subscribe(sessionId, owner, 0, { deliver: (e) => control.push(e), close: () => {} });
+  await manager.subscribe(sessionId, owner, 0, { deliver: (e) => { if ('seq' in e) control.push(e); }, close: () => {} });
   await manager.message(sessionId, owner, 'go', []);
   await waitUntil(() => control.some((e) => e.kind === 'turn.ended'), 15000);
 
   // A reconnect after the 20th envelope: everything from 21 onward, and nothing before it.
   const cutoff = control[19]!.seq;
   const post: Envelope[] = [];
-  await manager.subscribe(sessionId, owner, cutoff, { deliver: (e) => post.push(e), close: () => {} });
+  await manager.subscribe(sessionId, owner, cutoff, { deliver: (e) => { if ('seq' in e) post.push(e); }, close: () => {} });
 
   assert.ok(post.length > 0);
   assert.ok(post.every((e) => (e.seq as unknown as number) > (cutoff as unknown as number)));
@@ -325,7 +394,7 @@ test('S3.2 — a too-old Last-Event-ID is served from the spill for a live sessi
   const { sessionId } = created.value;
 
   const control: Envelope[] = [];
-  await manager.subscribe(sessionId, owner, 0, { deliver: (e) => control.push(e), close: () => {} });
+  await manager.subscribe(sessionId, owner, 0, { deliver: (e) => { if ('seq' in e) control.push(e); }, close: () => {} });
   await manager.message(sessionId, owner, 'go', []);
 
   // Past the 10-envelope ring, still mid-turn.
@@ -333,7 +402,7 @@ test('S3.2 — a too-old Last-Event-ID is served from the spill for a live sessi
   const staleAfter = control[4]!.seq; // well behind the ring's current oldest
 
   const late: Envelope[] = [];
-  await manager.subscribe(sessionId, owner, staleAfter, { deliver: (e) => late.push(e), close: () => {} });
+  await manager.subscribe(sessionId, owner, staleAfter, { deliver: (e) => { if ('seq' in e) late.push(e); }, close: () => {} });
 
   await waitUntil(() => control.some((e) => e.kind === 'turn.ended'));
   await waitUntil(() => late.some((e) => e.kind === 'turn.ended'));
@@ -354,7 +423,7 @@ test('S3.3 — replay_gap is emitted exactly once when the spill genuinely canno
   const { sessionId } = created.value;
 
   const control: Envelope[] = [];
-  await manager.subscribe(sessionId, owner, 0, { deliver: (e) => control.push(e), close: () => {} });
+  await manager.subscribe(sessionId, owner, 0, { deliver: (e) => { if ('seq' in e) control.push(e); }, close: () => {} });
   await manager.message(sessionId, owner, 'go', []);
   await waitUntil(() => control.some((e) => e.kind === 'turn.ended'));
 
@@ -364,7 +433,7 @@ test('S3.3 — replay_gap is emitted exactly once when the spill genuinely canno
   await rm(path.join(storageRoot, 'sessions', sessionId, 'events.ndjson'));
 
   const gapped: Envelope[] = [];
-  await manager.subscribe(sessionId, owner, 0, { deliver: (e) => gapped.push(e), close: () => {} });
+  await manager.subscribe(sessionId, owner, 0, { deliver: (e) => { if ('seq' in e) gapped.push(e); }, close: () => {} });
 
   assert.deepEqual(errorKinds(gapped), ['replay_gap']);
   assert.equal(gapped.length, 1, 'exactly one replay_gap; the subscriber still joins the live stream after it, it just has nothing left to hear');
@@ -381,7 +450,7 @@ test('S3.4 — the same spill-served replay works for a session in state ended',
   const { sessionId } = created.value;
 
   const control: Envelope[] = [];
-  await manager.subscribe(sessionId, owner, 0, { deliver: (e) => control.push(e), close: () => {} });
+  await manager.subscribe(sessionId, owner, 0, { deliver: (e) => { if ('seq' in e) control.push(e); }, close: () => {} });
   await manager.message(sessionId, owner, 'go', []);
   await waitUntil(() => control.some((e) => e.kind === 'turn.ended') && control.some((e) => e.kind === 'session.started'));
   const durableHistory = [...control];
@@ -414,7 +483,7 @@ test('S3.4 — the same spill-served replay works for a session in state ended',
   }
 
   const replayed: Envelope[] = [];
-  await manager.subscribe(sessionId, owner, 0, { deliver: (e) => replayed.push(e), close: () => {} });
+  await manager.subscribe(sessionId, owner, 0, { deliver: (e) => { if ('seq' in e) replayed.push(e); }, close: () => {} });
   assert.deepEqual(replayed.slice(0, durableHistory.length), durableHistory);
 });
 
@@ -450,7 +519,7 @@ test('S3.7 — a subscriber past subscriberQueueHighWater is dropped with a gap 
 
   // A subscriber that is live before the second turn starts, and so is never buffered.
   const unaffected: Envelope[] = [];
-  await manager.subscribe(sessionId, owner, 0, { deliver: (e) => unaffected.push(e), close: () => {} });
+  await manager.subscribe(sessionId, owner, 0, { deliver: (e) => { if ('seq' in e) unaffected.push(e); }, close: () => {} });
   await manager.message(sessionId, owner, 'go', []);
   await waitUntil(() => unaffected.some((e) => e.kind === 'turn.ended'), 15000);
 
@@ -460,7 +529,7 @@ test('S3.7 — a subscriber past subscriberQueueHighWater is dropped with a gap 
   let overflowClosed = false;
   holdNextReplay = true;
   const subscribing = manager.subscribe(sessionId, owner, 0, {
-    deliver: (e) => overflowSink.push(e),
+    deliver: (e) => { if ('seq' in e) overflowSink.push(e); },
     close: () => { overflowClosed = true; },
   });
 
@@ -506,10 +575,10 @@ test('S3.8 — a disconnected client does not reach the child: the turn runs to 
   // A control subscriber, live from the start, never closes — the ground truth for what
   // the turn actually produced.
   const control: Envelope[] = [];
-  await manager.subscribe(sessionId, owner, 0, { deliver: (e) => control.push(e), close: () => {} });
+  await manager.subscribe(sessionId, owner, 0, { deliver: (e) => { if ('seq' in e) control.push(e); }, close: () => {} });
 
   const transient: Envelope[] = [];
-  const sub = await manager.subscribe(sessionId, owner, 0, { deliver: (e) => transient.push(e), close: () => {} });
+  const sub = await manager.subscribe(sessionId, owner, 0, { deliver: (e) => { if ('seq' in e) transient.push(e); }, close: () => {} });
   await manager.message(sessionId, owner, 'go', []);
   assert.equal(sub.ok, true);
   if (sub.ok) {
@@ -542,12 +611,12 @@ test('S3.2 — a session whose ring holds nothing at all still replays its whole
   const { sessionId } = created.value;
 
   const control: Envelope[] = [];
-  await manager.subscribe(sessionId, owner, 0, { deliver: (e) => control.push(e), close: () => {} });
+  await manager.subscribe(sessionId, owner, 0, { deliver: (e) => { if ('seq' in e) control.push(e); }, close: () => {} });
   await manager.message(sessionId, owner, 'go', []);
   await waitUntil(() => control.some((e) => e.kind === 'turn.ended'));
 
   const fresh: Envelope[] = [];
-  await manager.subscribe(sessionId, owner, 0, { deliver: (e) => fresh.push(e), close: () => {} });
+  await manager.subscribe(sessionId, owner, 0, { deliver: (e) => { if ('seq' in e) fresh.push(e); }, close: () => {} });
 
   assert.deepEqual(errorKinds(fresh), [], 'a readable spill is not a gap');
   assert.ok(fresh.length > 0, 'a fresh subscriber does not get an empty transcript');
@@ -565,13 +634,13 @@ test('S3.3 — a Last-Event-ID past the end of the session is reported as a gap,
   const { sessionId } = created.value;
 
   const control: Envelope[] = [];
-  await manager.subscribe(sessionId, owner, 0, { deliver: (e) => control.push(e), close: () => {} });
+  await manager.subscribe(sessionId, owner, 0, { deliver: (e) => { if ('seq' in e) control.push(e); }, close: () => {} });
   await manager.message(sessionId, owner, 'go', []);
   await waitUntil(() => control.some((e) => e.kind === 'turn.ended'));
   const lastSeq = control[control.length - 1]!.seq as unknown as number;
 
   const beyond: Envelope[] = [];
-  await manager.subscribe(sessionId, owner, (lastSeq + 500) as never, { deliver: (e) => beyond.push(e), close: () => {} });
+  await manager.subscribe(sessionId, owner, (lastSeq + 500) as never, { deliver: (e) => { if ('seq' in e) beyond.push(e); }, close: () => {} });
 
   assert.deepEqual(errorKinds(beyond), ['replay_gap'], 'an unreachable resume point is a gap, not silence');
   assert.equal(beyond.length, 1);
@@ -592,7 +661,7 @@ async function runOneRequest(scenario: string, workspaceRoot: string, manager: A
   if (!created.ok) throw new Error('unreachable');
   const { sessionId } = created.value;
   const received: Envelope[] = [];
-  await manager.subscribe(sessionId, owner, 0, { deliver: (e) => received.push(e), close: () => {} });
+  await manager.subscribe(sessionId, owner, 0, { deliver: (e) => { if ('seq' in e) received.push(e); }, close: () => {} });
   const messaged = await manager.message(sessionId, owner, 'go', []);
   assert.equal(messaged.ok, true);
   await waitUntil(() => received.some((e) => e.kind === 'permission.request'));
@@ -636,6 +705,26 @@ test('S4.2 — allow and deny each round-trip to the real child and the agent pr
   }
 });
 
+test('S25.3 — with streamDeltas: true, allow and deny still each round-trip to the real child and the agent proceeds accordingly', async () => {
+  const owner = 'operator-1' as OperatorId;
+  for (const decision of ['allow', 'deny'] as const) {
+    const { manager, workspaceRoot } = await makeManager('full', {}, undefined, null, null, [], { streamDeltas: true });
+    const { sessionId, received, requestEnvelope } = await runOneRequest('full', workspaceRoot, manager, owner, `proj-s25-s42-${decision}`);
+    const requestId = (requestEnvelope.data as { requestId: string }).requestId;
+
+    const answered = await manager.answerPermission(sessionId, owner, { requestId: requestId as never, decision, scope: 'once', rule: null, reason: null });
+    assert.equal(answered.ok, true);
+    if (answered.ok) assert.equal(answered.value.accepted, true);
+
+    await waitUntil(() => received.some((e) => e.kind === 'tool.result'));
+    const toolResult = received.find((e) => e.kind === 'tool.result')!;
+    assert.equal((toolResult.data as { ok: boolean }).ok, decision === 'allow');
+
+    await waitUntil(() => received.some((e) => e.kind === 'turn.ended'));
+    assert.equal((received.find((e) => e.kind === 'turn.ended')!.data as { stopReason: string }).stopReason, 'completed');
+  }
+});
+
 test('S4.3 — every permission.request is followed by exactly one permission.resolved with the same requestId, over a run of three requests, before or at turn.ended', async () => {
   const { manager, workspaceRoot } = await makeManager('many-permissions');
   const owner = 'operator-1' as OperatorId;
@@ -647,7 +736,7 @@ test('S4.3 — every permission.request is followed by exactly one permission.re
   const { sessionId } = created.value;
 
   const received: Envelope[] = [];
-  await manager.subscribe(sessionId, owner, 0, { deliver: (e) => received.push(e), close: () => {} });
+  await manager.subscribe(sessionId, owner, 0, { deliver: (e) => { if ('seq' in e) received.push(e); }, close: () => {} });
   await manager.message(sessionId, owner, 'go', []);
 
   const answeredIds: string[] = [];
@@ -671,6 +760,41 @@ test('S4.3 — every permission.request is followed by exactly one permission.re
   );
   const turnEndedSeq = received.find((e) => e.kind === 'turn.ended')!.seq as unknown as number;
   for (const r of resolutions) assert.ok((r.seq as unknown as number) <= turnEndedSeq, 'every resolution precedes or is at turn.ended');
+});
+
+test('S25.3 — with streamDeltas: true, every permission.request is still followed by exactly one permission.resolved, over a run of three requests, before or at turn.ended', async () => {
+  const { manager, workspaceRoot } = await makeManager('many-permissions', {}, undefined, null, null, [], { streamDeltas: true });
+  const owner = 'operator-1' as OperatorId;
+  const projectDir = path.join(workspaceRoot, 'proj-s25-s43');
+  await mkdir(projectDir);
+  const created = await manager.create(owner, { vendor: 'claude', cwd: projectDir, model: null, sandbox: null, requisitionId: null });
+  assert.equal(created.ok, true);
+  if (!created.ok) return;
+  const { sessionId } = created.value;
+
+  const received: Envelope[] = [];
+  await manager.subscribe(sessionId, owner, 0, { deliver: (e) => { if ('seq' in e) received.push(e); }, close: () => {} });
+  await manager.message(sessionId, owner, 'go', []);
+
+  const answeredIds: string[] = [];
+  for (let i = 0; i < 3; i++) {
+    await waitUntil(() => received.filter((e) => e.kind === 'permission.request').length > i);
+    const req = received.filter((e) => e.kind === 'permission.request')[i]!;
+    const requestId = (req.data as { requestId: string }).requestId;
+    const answered = await manager.answerPermission(sessionId, owner, { requestId: requestId as never, decision: 'allow', scope: 'once', rule: null, reason: null });
+    assert.equal(answered.ok, true);
+    answeredIds.push(requestId);
+  }
+  await waitUntil(() => received.some((e) => e.kind === 'turn.ended'));
+
+  const requests = received.filter((e) => e.kind === 'permission.request');
+  const resolutions = received.filter((e) => e.kind === 'permission.resolved');
+  assert.equal(requests.length, 3);
+  assert.equal(resolutions.length, 3);
+  assert.deepEqual(
+    resolutions.map((e) => (e.data as { requestId: string }).requestId).sort(),
+    answeredIds.sort(),
+  );
 });
 
 test('S4.4 — a second client answering an already-resolved request gets accepted: false, and only one audit record exists', async () => {
@@ -790,7 +914,7 @@ test('S4.9 — a child that dies with requests outstanding resolves each one can
   const { sessionId } = created.value;
 
   const received: Envelope[] = [];
-  await manager.subscribe(sessionId, owner, 0, { deliver: (e) => received.push(e), close: () => {} });
+  await manager.subscribe(sessionId, owner, 0, { deliver: (e) => { if ('seq' in e) received.push(e); }, close: () => {} });
   await manager.message(sessionId, owner, 'go', []);
 
   await waitUntil(() => received.some((e) => e.kind === 'turn.ended'));
@@ -875,7 +999,7 @@ test('S4.15 — a turn spawning with no --resume on a session that already ran o
   const { sessionId } = created.value;
 
   const received: Envelope[] = [];
-  await manager.subscribe(sessionId, owner, 0, { deliver: (e) => received.push(e), close: () => {} });
+  await manager.subscribe(sessionId, owner, 0, { deliver: (e) => { if ('seq' in e) received.push(e); }, close: () => {} });
 
   // First turn: the fixture never reports system/init, so cliSessionId never gets set.
   await manager.message(sessionId, owner, 'go', []);
@@ -1010,7 +1134,7 @@ test("S10.4 — a later request matching a held rule is auto-answered every time
   const { sessionId } = created.value;
 
   const received: Envelope[] = [];
-  await manager.subscribe(sessionId, owner, 0, { deliver: (e) => received.push(e), close: () => {} });
+  await manager.subscribe(sessionId, owner, 0, { deliver: (e) => { if ('seq' in e) received.push(e); }, close: () => {} });
 
   // Turn 1: answered manually with scope: 'always', which is what creates the rule.
   const first = await runOneTurn(manager, sessionId, owner, received);
@@ -1081,7 +1205,7 @@ test('S10.5 — a standing rule does not outlive its session: a new session on t
   if (!createdA.ok) return;
   const sessionIdA = createdA.value.sessionId;
   const receivedA: Envelope[] = [];
-  await manager.subscribe(sessionIdA, ownerA, 0, { deliver: (e) => receivedA.push(e), close: () => {} });
+  await manager.subscribe(sessionIdA, ownerA, 0, { deliver: (e) => { if ('seq' in e) receivedA.push(e); }, close: () => {} });
   await manager.message(sessionIdA, ownerA, 'go', []);
   await waitUntil(() => receivedA.some((e) => e.kind === 'permission.request'));
   const requestIdA = (receivedA.find((e) => e.kind === 'permission.request')!.data as { requestId: string }).requestId;
@@ -1101,7 +1225,7 @@ test('S10.5 — a standing rule does not outlive its session: a new session on t
   if (!createdB.ok) return;
   const sessionIdB = createdB.value.sessionId;
   const receivedB: Envelope[] = [];
-  await manager.subscribe(sessionIdB, ownerB, 0, { deliver: (e) => receivedB.push(e), close: () => {} });
+  await manager.subscribe(sessionIdB, ownerB, 0, { deliver: (e) => { if ('seq' in e) receivedB.push(e); }, close: () => {} });
   await manager.message(sessionIdB, ownerB, 'go', []);
   await waitUntil(() => receivedB.some((e) => e.kind === 'permission.request'));
   // Give an incorrect auto-resolution a moment to happen before asserting it did not.
@@ -1225,7 +1349,7 @@ test('S5.1/S5.3/S5.4 — interrupt resolves an outstanding permission cancelled_
   assert.equal(noopEarly.ok, true);
 
   const received: Envelope[] = [];
-  await manager.subscribe(sessionId, owner, 0, { deliver: (e) => received.push(e), close: () => {} });
+  await manager.subscribe(sessionId, owner, 0, { deliver: (e) => { if ('seq' in e) received.push(e); }, close: () => {} });
   const messaged = await manager.message(sessionId, owner, 'go', []);
   assert.equal(messaged.ok, true);
   if (!messaged.ok) return;
@@ -1284,7 +1408,7 @@ test('S5.2 — interrupt terminates the whole process tree: no live descendant f
   const { sessionId } = created.value;
 
   const received: Envelope[] = [];
-  await manager.subscribe(sessionId, owner, 0, { deliver: (e) => received.push(e), close: () => {} });
+  await manager.subscribe(sessionId, owner, 0, { deliver: (e) => { if ('seq' in e) received.push(e); }, close: () => {} });
   const messaged = await manager.message(sessionId, owner, 'go', []);
   assert.equal(messaged.ok, true);
   if (!messaged.ok) return;
@@ -1333,7 +1457,7 @@ test('S5.5/S5.6 — end sets ended, emits session.ended, refuses a further messa
   if (!secondCreate.ok) assert.equal(secondCreate.error.code, 'workspace_busy');
 
   const received: Envelope[] = [];
-  await manager.subscribe(sessionId, owner, 0, { deliver: (e) => received.push(e), close: () => {} });
+  await manager.subscribe(sessionId, owner, 0, { deliver: (e) => { if ('seq' in e) received.push(e); }, close: () => {} });
 
   const ended = await manager.end(sessionId, owner);
   assert.equal(ended.ok, true);
@@ -1530,7 +1654,7 @@ test('S5.11 — a delete that fails part-way still removes the registry entry an
   const { sessionId } = created.value;
 
   const received: Envelope[] = [];
-  await manager.subscribe(sessionId, owner, 0, { deliver: (e) => received.push(e), close: () => {} });
+  await manager.subscribe(sessionId, owner, 0, { deliver: (e) => { if ('seq' in e) received.push(e); }, close: () => {} });
 
   const removed = await manager.remove(sessionId, owner);
   assert.equal(removed.ok, true, 'a storage failure does not become a 5xx; it is reported non-fatally');
@@ -1646,7 +1770,7 @@ test('S6.8 - a ckpt.git that cannot be initialised yields session.notice/warn ch
   const created = await manager.create(owner, { vendor: 'claude', cwd: projectDir, model: null, sandbox: null, requisitionId: null });
   assert.equal(created.ok, true);
   if (!created.ok) return;
-  await manager.subscribe(created.value.sessionId, owner, 0, { deliver: (e) => received.push(e), close: () => {} });
+  await manager.subscribe(created.value.sessionId, owner, 0, { deliver: (e) => { if ('seq' in e) received.push(e); }, close: () => {} });
 
   const notice = received.find((e) => e.kind === 'session.notice' && (e.data as { code: string }).code === 'checkpoints_unavailable');
   assert.ok(notice, 'checkpoints_unavailable was announced');
@@ -1896,7 +2020,7 @@ test('S7.4 — a spill ending on an unpaired turn.started is closed at boot: out
   assert.equal(booted.ok, true);
 
   const replayed: Envelope[] = [];
-  await manager2.subscribe(sessionId as never, record.owner, 0, { deliver: (e) => replayed.push(e), close: () => {} });
+  await manager2.subscribe(sessionId as never, record.owner, 0, { deliver: (e) => { if ('seq' in e) replayed.push(e); }, close: () => {} });
 
   const seqs = replayed.map((e) => e.seq as unknown as number);
   for (let i = 1; i < seqs.length; i++) assert.equal(seqs[i], seqs[i - 1]! + 1, 'contiguous seq, continuing from where the spill left off');
@@ -2226,7 +2350,7 @@ test('S9.8 — a spill failure mid-turn kills the child, resolves the outstandin
   const { sessionId } = created.value;
 
   const received: Envelope[] = [];
-  await manager.subscribe(sessionId, owner, 0, { deliver: (e) => received.push(e), close: () => {} });
+  await manager.subscribe(sessionId, owner, 0, { deliver: (e) => { if ('seq' in e) received.push(e); }, close: () => {} });
 
   failNextPermissionRequest = true;
   const sent = await manager.message(sessionId, owner, 'go', []);
@@ -2305,7 +2429,7 @@ test('S17.3 — a live child dying with requests outstanding also reaches the in
   const { sessionId } = created.value;
 
   const received: Envelope[] = [];
-  await manager.subscribe(sessionId, owner, 0, { deliver: (e) => received.push(e), close: () => {} });
+  await manager.subscribe(sessionId, owner, 0, { deliver: (e) => { if ('seq' in e) received.push(e); }, close: () => {} });
   await manager.message(sessionId, owner, 'go', []);
   await waitUntil(() => received.some((e) => e.kind === 'turn.ended'));
 
@@ -2340,7 +2464,7 @@ test('S9.1/S9.2/S9.4 — a tool.result over the byte cap is truncated before its
   const { sessionId } = created.value;
 
   const received: Envelope[] = [];
-  await manager.subscribe(sessionId, owner, 0, { deliver: (e) => received.push(e), close: () => {} });
+  await manager.subscribe(sessionId, owner, 0, { deliver: (e) => { if ('seq' in e) received.push(e); }, close: () => {} });
 
   async function runOneTurn(bigBytes: number): Promise<{ turnId: string; result: Envelope }> {
     process.env['SKYNET_BIG_TOOL_RESULT_BYTES'] = String(bigBytes);
@@ -2352,6 +2476,14 @@ test('S9.1/S9.2/S9.4 — a tool.result over the byte cap is truncated before its
     const answered = await manager.answerPermission(sessionId, owner, { requestId: requestId as never, decision: 'allow', scope: 'once', rule: null, reason: null });
     assert.equal(answered.ok, true);
     await waitUntil(() => received.slice(before).some((e) => e.kind === 'tool.result'));
+    // The `big-tool-result` scenario writes its `result` record immediately after the
+    // tool_result one, so `tool.result` and `turn.ended` arrive within a few
+    // milliseconds of each other. `waitUntil` polls at 10ms, which is wide enough on a
+    // loaded runner to land between them — and `entry.turn` is only cleared at
+    // `turn.ended`, so the caller's next `message()` would be refused `turn_in_flight`
+    // (ubuntu CI on #173). Waiting for the turn to actually close is what makes the
+    // next turn's start deterministic rather than a race against the poll interval.
+    await waitUntil(() => received.slice(before).some((e) => e.kind === 'turn.ended'));
     const result = received.slice(before).find((e) => e.kind === 'tool.result')!;
     if (messaged.ok) return { turnId: messaged.value.turnId as unknown as string, result };
     throw new Error('unreachable');
@@ -2407,7 +2539,7 @@ test('S9.5 — a tool.result under the byte cap is never truncated and writes no
   const { sessionId } = created.value;
 
   const received: Envelope[] = [];
-  await manager.subscribe(sessionId, owner, 0, { deliver: (e) => received.push(e), close: () => {} });
+  await manager.subscribe(sessionId, owner, 0, { deliver: (e) => { if ('seq' in e) received.push(e); }, close: () => {} });
 
   process.env['SKYNET_BIG_TOOL_RESULT_BYTES'] = '500';
   const messaged = await manager.message(sessionId, owner, 'go', []);
@@ -2443,7 +2575,7 @@ test('S9.5 — a blob the store cannot write does not undo the envelope\'s trunc
   const { sessionId } = created.value;
 
   const received: Envelope[] = [];
-  await manager.subscribe(sessionId, owner, 0, { deliver: (e) => received.push(e), close: () => {} });
+  await manager.subscribe(sessionId, owner, 0, { deliver: (e) => { if ('seq' in e) received.push(e); }, close: () => {} });
 
   process.env['SKYNET_BIG_TOOL_RESULT_BYTES'] = '2000';
   const messaged = await manager.message(sessionId, owner, 'go', []);
@@ -2469,7 +2601,7 @@ test('S23.1/S23.2 — past the session tool-output budget the envelope is unaffe
   const { sessionId } = created.value;
 
   const received: Envelope[] = [];
-  await manager.subscribe(sessionId, owner, 0, { deliver: (e) => received.push(e), close: () => {} });
+  await manager.subscribe(sessionId, owner, 0, { deliver: (e) => { if ('seq' in e) received.push(e); }, close: () => {} });
 
   async function runOneTurn(bigBytes: number): Promise<{ turnId: string; result: Envelope }> {
     process.env['SKYNET_BIG_TOOL_RESULT_BYTES'] = String(bigBytes);
@@ -2480,6 +2612,14 @@ test('S23.1/S23.2 — past the session tool-output budget the envelope is unaffe
     const requestId = (received.find((e, i) => i >= before && e.kind === 'permission.request')!.data as { requestId: string }).requestId;
     await manager.answerPermission(sessionId, owner, { requestId: requestId as never, decision: 'allow', scope: 'once', rule: null, reason: null });
     await waitUntil(() => received.slice(before).some((e) => e.kind === 'tool.result'));
+    // The `big-tool-result` scenario writes its `result` record immediately after the
+    // tool_result one, so `tool.result` and `turn.ended` arrive within a few
+    // milliseconds of each other. `waitUntil` polls at 10ms, which is wide enough on a
+    // loaded runner to land between them — and `entry.turn` is only cleared at
+    // `turn.ended`, so the caller's next `message()` would be refused `turn_in_flight`
+    // (ubuntu CI on #173). Waiting for the turn to actually close is what makes the
+    // next turn's start deterministic rather than a race against the poll interval.
+    await waitUntil(() => received.slice(before).some((e) => e.kind === 'turn.ended'));
     const result = received.slice(before).find((e) => e.kind === 'tool.result')!;
     if (messaged.ok) return { turnId: messaged.value.turnId as unknown as string, result };
     throw new Error('unreachable');
@@ -2686,7 +2826,7 @@ test('S14.2/S14.9 — a tick emits one checklist.item.completed { itemId, by } a
   const { sessionId } = created.value;
 
   const received: Envelope[] = [];
-  await manager.subscribe(sessionId, owner, 0, { deliver: (e) => received.push(e), close: () => {} });
+  await manager.subscribe(sessionId, owner, 0, { deliver: (e) => { if ('seq' in e) received.push(e); }, close: () => {} });
   const seqBefore = received.reduce((max, e) => Math.max(max, e.seq as unknown as number), 0);
 
   const ticked = await manager.tickChecklistItem(sessionId, owner, 'welcome' as ChecklistItemId);
@@ -2717,7 +2857,7 @@ test('S14.3 — a tick carries no turnId and lands between turn.started and turn
   const { sessionId } = created.value;
 
   const received: Envelope[] = [];
-  await manager.subscribe(sessionId, owner, 0, { deliver: (e) => received.push(e), close: () => {} });
+  await manager.subscribe(sessionId, owner, 0, { deliver: (e) => { if ('seq' in e) received.push(e); }, close: () => {} });
 
   const messaged = await manager.message(sessionId, owner, 'do the thing', []);
   assert.equal(messaged.ok, true);
@@ -2760,7 +2900,7 @@ test('S14.4 — a second tick for an already-complete item is idempotent: 200, n
   const { sessionId } = created.value;
 
   const received: Envelope[] = [];
-  await manager.subscribe(sessionId, owner, 0, { deliver: (e) => received.push(e), close: () => {} });
+  await manager.subscribe(sessionId, owner, 0, { deliver: (e) => { if ('seq' in e) received.push(e); }, close: () => {} });
 
   assert.equal((await manager.tickChecklistItem(sessionId, owner, 'welcome' as ChecklistItemId)).ok, true);
   const afterFirst = await manager.checklist(sessionId, owner);
@@ -3040,7 +3180,7 @@ test('D130 — boot marks every session live at shutdown with one session.notice
 
   const notices = async (sessionId: string): Promise<Envelope[]> => {
     const out: Envelope[] = [];
-    await manager2.subscribe(sessionId as never, wasLive.owner, 0, { deliver: (e) => out.push(e), close: () => {} });
+    await manager2.subscribe(sessionId as never, wasLive.owner, 0, { deliver: (e) => { if ('seq' in e) out.push(e); }, close: () => {} });
     return out.filter((e) => e.kind === 'session.notice' && (e.data as { code: string }).code === 'server_restart');
   };
 
@@ -3057,7 +3197,7 @@ test('D130 — boot marks every session live at shutdown with one session.notice
   const manager3 = createSessionManager({ config, store, checkpoints, records: notImplementedProxy<Records>('records') });
   assert.equal((await manager3.boot()).ok, true);
   const afterSecondBoot: Envelope[] = [];
-  await manager3.subscribe('sess-d130-live' as never, wasLive.owner, 0, { deliver: (e) => afterSecondBoot.push(e), close: () => {} });
+  await manager3.subscribe('sess-d130-live' as never, wasLive.owner, 0, { deliver: (e) => { if ('seq' in e) afterSecondBoot.push(e); }, close: () => {} });
   assert.equal(
     afterSecondBoot.filter((e) => e.kind === 'session.notice' && (e.data as { code: string }).code === 'server_restart').length,
     1,
@@ -3123,7 +3263,7 @@ test('S16.5 — the payroll read for a live session equals the same read after a
   const { sessionId } = created.value;
 
   const received: Envelope[] = [];
-  await manager.subscribe(sessionId, owner, 0, { deliver: (e) => received.push(e), close: () => {} });
+  await manager.subscribe(sessionId, owner, 0, { deliver: (e) => { if ('seq' in e) received.push(e); }, close: () => {} });
   const messaged = await manager.message(sessionId, owner, 'do the thing', []);
   assert.equal(messaged.ok, true);
   await waitUntil(() => received.some((e) => e.kind === 'permission.request'));
@@ -3172,7 +3312,7 @@ test('S16.8 — a payroll read whose spill cannot be read is 500 payroll_unavail
   if (!got.ok) assert.equal(got.error.code, 'payroll_unavailable');
 
   const received: Envelope[] = [];
-  await manager.subscribe(sessionId, owner, 0, { deliver: (e) => received.push(e), close: () => {} });
+  await manager.subscribe(sessionId, owner, 0, { deliver: (e) => { if ('seq' in e) received.push(e); }, close: () => {} });
   const messaged = await manager.message(sessionId, owner, 'still works', []);
   assert.equal(messaged.ok, true, 'the session is unaffected by the failed payroll read');
   await waitUntil(() => received.some((e) => e.kind === 'turn.started'));
@@ -3294,7 +3434,7 @@ test('S21.2/S21.3 — a message with an attachment emits one AttachmentRef on th
   const { sessionId } = created.value;
 
   const received: Envelope[] = [];
-  await manager.subscribe(sessionId, owner, 0, { deliver: (e) => received.push(e), close: () => {} });
+  await manager.subscribe(sessionId, owner, 0, { deliver: (e) => { if ('seq' in e) received.push(e); }, close: () => {} });
 
   const recognisablePattern = 'S21-RECOGNISABLE-BYTE-PATTERN-0123456789';
   const dataBase64 = Buffer.from(recognisablePattern, 'utf8').toString('base64');
@@ -3340,7 +3480,7 @@ test('S21.4 — a hostile filename is never used to build a path, and is preserv
   const { sessionId } = created.value;
 
   const received: Envelope[] = [];
-  await manager.subscribe(sessionId, owner, 0, { deliver: (e) => received.push(e), close: () => {} });
+  await manager.subscribe(sessionId, owner, 0, { deliver: (e) => { if ('seq' in e) received.push(e); }, close: () => {} });
 
   for (const evilFilename of ['../../escape.txt', 'C:\\Windows\\evil', 'nul\0byte']) {
     const endedBefore = received.filter((e) => e.kind === 'turn.ended').length;
@@ -3414,7 +3554,7 @@ test('S21.8 — an adapter declaring acceptsAttachments: false refuses the whole
   const { sessionId } = created.value;
 
   const received: Envelope[] = [];
-  await manager.subscribe(sessionId, owner, 0, { deliver: (e) => received.push(e), close: () => {} });
+  await manager.subscribe(sessionId, owner, 0, { deliver: (e) => { if ('seq' in e) received.push(e); }, close: () => {} });
 
   const messaged = await manager.message(sessionId, owner, 'see attached', [
     { filename: 'bug.png', mediaType: 'image/png', dataBase64: Buffer.from('x').toString('base64') },

@@ -24,6 +24,8 @@ import type {
   Envelope,
   EventKind,
   EventPayloadMap,
+  Frame,
+  FrameKind,
   GitSha,
   IsoTimestamp,
   LiveSession,
@@ -57,6 +59,7 @@ import type {
   TurnId,
   Usage,
 } from '../contract/index.js';
+import { isFrame } from '../contract/index.js';
 
 const isWindows = platform === 'win32';
 const isDarwin = platform === 'darwin';
@@ -238,6 +241,17 @@ export function createSessionManager(deps: {
     return { destroyed, deleted };
   }
 
+  // `raw` is attached under the one rule both `emit` and `emitFrame` share: only when
+  // `config.includeRaw` is on and the caller actually passed one.
+  function optionalRaw(raw: unknown): { raw: unknown } | Record<string, never> {
+    return config.includeRaw && raw !== undefined ? { raw } : {};
+  }
+
+  // The one-line fan-out `deliverDirect`, `emit` and `emitFrame` all share.
+  function deliverToAll(entry: SessionEntry, envelope: Envelope | Frame): void {
+    for (const sub of entry.subscribers) sub.deliver(envelope);
+  }
+
   // S9.8: delivers a completion envelope live-only, bypassing the ring and the spill —
   // both belong to `emit`, and by the time this is called the spill has already failed
   // to hold the envelope that triggered the failure. Pushing these to the ring anyway
@@ -252,7 +266,7 @@ export function createSessionManager(deps: {
     // otherwise a client that saw this envelope live gets told it is past the end of
     // history it already has.
     entry.record.lastSeq = envelope.seq;
-    for (const sub of entry.subscribers) sub.deliver(envelope);
+    deliverToAll(entry, envelope);
   }
 
   // Returns the envelope it built (so a caller like `tickChecklistItem` can read back the
@@ -270,7 +284,7 @@ export function createSessionManager(deps: {
       ts: nowIso(),
       kind,
       data,
-      ...(config.includeRaw && raw !== undefined ? { raw } : {}),
+      ...optionalRaw(raw),
     } as Envelope<K>;
     entry.record.lastSeq = envelope.seq;
 
@@ -278,7 +292,7 @@ export function createSessionManager(deps: {
     // never after an `await`, which is what keeps two envelopes from ever being
     // delivered out of the order their `seq` was assigned in.
     store.pushRing(entry.record.id, envelope as Envelope);
-    for (const sub of entry.subscribers) sub.deliver(envelope as Envelope);
+    deliverToAll(entry, envelope as Envelope);
 
     // The durable spill write is I/O and does not resolve in call order on its own;
     // chaining it onto the session's write queue is what keeps `events.ndjson` written
@@ -376,6 +390,22 @@ export function createSessionManager(deps: {
     });
     await entry.writeQueue;
     return envelope;
+  }
+
+  // (D168, I51) A `message.delta` is a frame, not an envelope: no `seq` is assigned, the
+  // ring and the spill are never touched, and delivery goes only to subscribers already
+  // registered — never to `entry.record.lastSeq`, which is what a reconnect's
+  // `Last-Event-ID` is checked against (I1). That is what makes a delta invisible to a
+  // subscriber that has to replay: it was never a position in the stream to replay from.
+  function emitFrame<K extends FrameKind>(entry: SessionEntry, kind: K, data: EventPayloadMap[K], raw?: unknown): void {
+    const frame = {
+      sessionId: entry.record.id,
+      ts: nowIso(),
+      kind,
+      data,
+      ...optionalRaw(raw),
+    } as Frame<K>;
+    deliverToAll(entry, frame);
   }
 
   // S7.10: proves the storage root is actually writable right now, not merely that it
@@ -853,6 +883,7 @@ export function createSessionManager(deps: {
         model: input.model,
         sandbox: input.sandbox,
         notify: (n) => handleNotification(sessionId, n),
+        streamDeltas: config.streamDeltas,
       });
       if (!adapterResult.ok) {
         // S13.9: any failure after the claim releases it — the requisition reads
@@ -1347,6 +1378,14 @@ export function createSessionManager(deps: {
             sink.deliver(envelope);
             return;
           }
+          // (D168, I51) A frame has no `seq` and is never replayed — a subscriber still
+          // catching up from the ring or the spill is, for a frame's purposes, no
+          // different from one that has to reconnect: it receives no deltas for a
+          // message already in flight and renders the `message` when it lands. Buffering
+          // it here (or counting it against `highWater`, which exists to bound how much
+          // *replayable* history a slow catch-up can pile up) would hold onto something
+          // this subscriber's live pass-through below can never legitimately flush.
+          if (isFrame(envelope)) return;
           if (buffered.length >= highWater) {
             dropped = true;
             entry.subscribers.delete(proxy);
@@ -1748,6 +1787,14 @@ export function createSessionManager(deps: {
           return;
         }
         const payload = turn && KINDS_CARRYING_TURN_ID.has(kind) ? { ...eventData, turnId: turn.turnId } : eventData;
+        // (D168, I51) A delta never closes a turn, never carries a permission, and is
+        // never spilled — routed through `emitFrame` instead of `emit`, and returned
+        // here rather than falling into the `turn.ended`/autoApprove handling below,
+        // neither of which a `message.delta` ever triggers.
+        if (kind === 'message.delta') {
+          emitFrame(entry, kind, payload as never, raw);
+          return;
+        }
         // Cleared before the event is emitted, not after: `emit` delivers to
         // subscribers synchronously but then awaits the spill write, so a caller
         // reacting to the delivered `turn.ended` (e.g. sending the next message) must

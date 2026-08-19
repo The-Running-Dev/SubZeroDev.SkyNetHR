@@ -27,6 +27,7 @@ function baseConfig(storageRoot: string): Config {
     },
     sessionCookieMaxAgeSeconds: 2592000,
     includeRaw: false,
+    streamDeltas: false,
     sessionTokenBudget: null,
     tokenRates: null,
     currency: null,

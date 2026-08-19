@@ -216,6 +216,24 @@ export type Envelope<K extends EventKind = EventKind> = K extends EventKind
     }
   : never;
 
+// (D168, I51) Not everything a client receives is an envelope. A `message.delta` is a
+// frame: delivered to live subscribers and to nobody else, carrying no `seq`, never
+// entering the ring buffer, never appended to the spill, and never replayed. A frame is
+// an envelope minus `seq` — the manager assigns `sessionId`, `ts` and the payload's
+// `turnId` exactly as for any other kind, and assigns no `seq`, because a frame has no
+// position in the replayable stream.
+export type FrameKind = 'message.delta';
+
+export type Frame<K extends FrameKind = FrameKind> = K extends FrameKind
+  ? {
+      readonly sessionId: SessionId;
+      readonly ts: IsoTimestamp;
+      readonly kind: K;
+      readonly data: EventPayloadMap[K];
+      readonly raw?: unknown; // present only when config.includeRaw
+    }
+  : never;
+
 // ---------------------------------------------------------------------------
 // Event payloads
 // ---------------------------------------------------------------------------
@@ -607,6 +625,10 @@ export interface Config {
   // upstream proxy's and its lifetime is not ours to set.
   readonly sessionCookieMaxAgeSeconds: number;
   readonly includeRaw: boolean;
+  // (S25.6) Requests token-level `message.delta` frames from a transport that gates them
+  // behind a flag. Defaults off; off produces today's envelope sequence unchanged. A
+  // transport that streams deltas unconditionally ignores it (`AdapterOptions.streamDeltas`).
+  readonly streamDeltas: boolean;
   readonly sessionTokenBudget: number | null; // (tier two) per session; null disables the view's budget
   readonly tokenRates: TokenRates | null; // (tier two) null disables the cost tile (D158)
   readonly currency: string | null; // (tier two) label only; never interpreted (D158)
@@ -687,6 +709,12 @@ export interface AdapterOptions {
   readonly model: string | null;
   readonly sandbox: SandboxMode | null;
   readonly notify: (n: AdapterNotification) => void;
+  // (S25.6) Whether to request token-level `message.delta` frames from a transport that
+  // gates them behind a flag. An adapter whose transport streams deltas unconditionally
+  // ignores it. Defaults off (`Config.streamDeltas`); off reproduces today's envelope
+  // sequence element for element. Which adapters read it, and how, is `adapters/*`'s own
+  // vendor knowledge (I20) and is not stated here.
+  readonly streamDeltas: boolean;
 }
 
 // (D160) An attachment as the adapter receives it: the ref the envelope carries, plus the bytes.
@@ -767,8 +795,16 @@ export interface PermissionAnswer {
 }
 
 export interface SubscriberSink {
-  deliver(envelope: Envelope): void;
+  // (D168, I51) A frame carries no `seq`; a sink distinguishes the two by that absence
+  // rather than a wrapper of its own — `isFrame` below is the one place that check lives.
+  deliver(envelope: Envelope | Frame): void;
   close(): void;
+}
+
+// (D168, I51) The one place `'seq' in envelope` is written — every caller that needs to
+// tell a `Frame` apart from an `Envelope` imports this instead of repeating the check.
+export function isFrame(envelope: Envelope | Frame): envelope is Frame {
+  return !('seq' in envelope);
 }
 
 export interface Subscription {

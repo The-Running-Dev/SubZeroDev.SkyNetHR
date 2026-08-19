@@ -236,6 +236,9 @@ export function loadConfig(env: Readonly<Record<string, string | undefined>>): R
 
   const includeRaw = env['INCLUDE_RAW'] === 'true';
 
+  // (S25.6) Defaults off; off reproduces today's envelope sequence element for element.
+  const streamDeltas = env['STREAM_DELTAS'] === 'true';
+
   // The `Max-Age` on the cookie `POST /api/login` mints. Read only under `shared-secret`;
   // the header modes' credential belongs to the upstream proxy and its lifetime is not
   // ours to set. Thirty days is the default rather than a constant, because shortening a
@@ -291,6 +294,7 @@ export function loadConfig(env: Readonly<Record<string, string | undefined>>): R
       caps,
       sessionCookieMaxAgeSeconds: sessionCookieMaxAgeSeconds.value,
       includeRaw,
+      streamDeltas,
       sessionTokenBudget,
       tokenRates: tokenRates.value,
       currency,

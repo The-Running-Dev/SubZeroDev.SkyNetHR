@@ -43,6 +43,15 @@ const IGNORED_SYSTEM_SUBTYPES = new Set([
   'post_turn_summary',
 ]);
 
+// `stream_event` subtypes `--include-partial-messages` emits that this adapter does not
+// map to anything (S25.1, `design/findings/S25-token-streaming-probe.md`). `message_start`
+// and `message_delta` carry an interim/final `usage` the adapter already reads off the
+// `assistant` record instead (D75); `content_block_start`/`content_block_stop` and
+// `message_stop` carry nothing this vocabulary renders. Harmless and expected, so ignored
+// rather than raising `adapter_unknown_record` on every streamed turn — the same reasoning
+// as `IGNORED_TOP_LEVEL_TYPES` above.
+const IGNORED_STREAM_EVENT_TYPES = new Set(['message_start', 'content_block_start', 'content_block_stop', 'message_delta', 'message_stop']);
+
 // `PermissionRequest.matchTarget`'s projection table (D109) — the only place tool-shape
 // knowledge is permitted to live (I46). Four rows, because four are what
 // `design/findings/S1-claude-adapter.md` names; every other tool, including every
@@ -203,6 +212,27 @@ export function createClaudeAdapter(opts: AdapterOptions & { readonly executable
         return;
       }
 
+      // (S25.3, D168) Only present with `--include-partial-messages` on. Wraps the raw
+      // Anthropic Messages API streaming event shapes; only `content_block_delta` carrying
+      // a `text_delta` maps to anything — a `message.delta` frame, never an envelope
+      // (I51). `thinking_delta` and `input_json_delta` are a different content-block kind
+      // each and out of this slice's scope (`design/30-slices.md § S25`); ignored rather
+      // than mapped, the same as the subtypes in `IGNORED_STREAM_EVENT_TYPES`.
+      case 'stream_event': {
+        const event = rec['event'] as Record<string, unknown> | undefined;
+        const eventType = event?.['type'];
+        if (eventType === 'content_block_delta') {
+          const delta = event?.['delta'] as Record<string, unknown> | undefined;
+          if (delta?.['type'] === 'text_delta' && typeof delta['text'] === 'string' && delta['text'].length > 0) {
+            emitEvent('message.delta', { role: 'assistant', text: delta['text'] }, rec);
+          }
+          return;
+        }
+        if (typeof eventType === 'string' && IGNORED_STREAM_EVENT_TYPES.has(eventType)) return;
+        emitEvent('error', { kind: 'adapter_unknown_record', message: `unrecognised stream_event type: ${String(eventType)}`, fatal: false }, rec);
+        return;
+      }
+
       case 'result': {
         resultSeen = true;
         const subtype = rec['subtype'];
@@ -233,6 +263,9 @@ export function createClaudeAdapter(opts: AdapterOptions & { readonly executable
     ];
     if (opts.model) args.push('--model', opts.model);
     if (resume) args.push('--resume', resume);
+    // (S25.6) Off by default; off reproduces today's envelope sequence element for
+    // element, since no `stream_event` record is ever sent without this flag.
+    if (opts.streamDeltas) args.push('--include-partial-messages');
     return args;
   }
 

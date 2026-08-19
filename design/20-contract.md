@@ -29,10 +29,7 @@ a pointer in the same commit**. That replacement is descriptive drift corrected 
 found (`AGENTS.md` *Hard rules*), not a contract amendment, and it needs no approval. It is
 one-way: a later pass never turns a pointer back into a scaffold.
 
-**S25 owes one scaffold: `FrameKind` and `Frame`**, under *Types § Event envelope*. Nothing in
-the tree declares a frame today, because `message.delta` is currently constructed as an ordinary
-envelope; D168 rules that it is not one, and the slice that materialises these two declarations
-replaces that block with a pointer in the same commit.
+`FrameKind` and `Frame` are declared in `src/contract/index.ts`, next to `Envelope` (S25).
 
 **A comment in the tree is not the canonical statement of a rule.** The declarations in
 `src/contract/index.ts` carry explanatory comments, many of them copied from earlier
@@ -254,26 +251,15 @@ which *Rules the renderer may rely on* already permits.
 **It holds for both vendors**, so persistence never becomes vendor-dependent for one kind: Codex's
 `item/agentMessage/delta` is a frame on the same terms as Claude's.
 
-Where the code does not yet declare this shape it is scaffolded here. A frame is an envelope minus
-`seq` — the manager assigns `sessionId`, `ts` and the payload's `turnId` as it always has, and
-assigns no `seq`, because a frame has no position in the replayable stream:
-
-```ts
-export type FrameKind = 'message.delta';
-
-export type Frame<K extends FrameKind = FrameKind> = K extends FrameKind
-  ? {
-      readonly sessionId: SessionId;
-      readonly ts: IsoTimestamp;
-      readonly kind: K;
-      readonly data: EventPayloadMap[K];
-      readonly raw?: unknown;
-    }
-  : never;
-```
-
-`raw` is present only when `config.includeRaw`. It exists for debugging and **must never be
+A frame is an envelope minus `seq` — the manager assigns `sessionId`, `ts` and the payload's
+`turnId` as it always has, and assigns no `seq`, because a frame has no position in the
+replayable stream. `raw` (`src/contract/index.ts`) exists for debugging and **must never be
 rendered**.
+
+`Config.streamDeltas` (`src/config/index.ts`) is what makes the Claude CLI emit them at all —
+defaulting off, threaded to the adapter as `AdapterOptions.streamDeltas` — and is the only new
+deployment flag S25 owes (S25.6). Named vendor-neutrally, per I20: Codex streams deltas
+unconditionally and simply ignores it.
 
 ### Event payloads
 
@@ -1616,6 +1602,7 @@ Verified against `Forks-Claude-Code-Chat@ab6e307`, and against the installed CLI
 | `result`, subtype success | `turn.ended`, `stopReason: 'completed'`; close stdin |
 | `result`, any other subtype | `turn.ended`, `stopReason: 'error'`; close stdin |
 | `close` with no `result` seen | `turn.ended`, `stopReason: 'process_exit'` |
+| `stream_event` → `content_block_delta` → `delta.type: 'text_delta'` | `message.delta` — a **frame**, on the same terms as Codex's (D168, I51) |
 | A record on the ignored list below | *nothing*, deliberately — **not** `adapter_unknown_record` |
 
 Launched with `-p --output-format stream-json --input-format stream-json --verbose
@@ -1635,17 +1622,17 @@ Anything outside both the twelve rows and that list still raises `adapter_unknow
 non-fatally, with the record preserved in `raw`. **The list is a vendor fact and lives with the
 vendor's adapter; adding to it is an adapter change, never a change to `ErrorEventKind`.**
 
-**This table has no `message.delta` row and the absence is S25's to close, from observation** (D165,
-D168). `--include-partial-messages` is proven to emit usable incremental text that concatenates
-byte for byte to the final `message`, and to disturb neither the `control_request` round trip nor
-the per-`message.id` usage normalisation — that is S25.1's finding
-(`design/findings/S25-token-streaming-probe.md`), not a mapping. The `stream_event` records it
-observed are in neither the rows above nor the ignore list below, so an adapter that has not yet
-mapped them raises `adapter_unknown_record` for each, non-fatally, which is the correct behaviour
-for an unmapped record and not a defect to work around. **No row is written here in advance of the
-adapter that observes it**, exactly as the Codex tables were filled by S8.1 rather than
-hypothesised. What D168 fixes ahead of that work is only what a delta *is* once mapped: a frame,
-on the same terms as Codex's (I51).
+**The `message.delta` row above is S25.3's**, filled from observation the same way the Codex
+tables were filled by S8.1 rather than hypothesised: `--include-partial-messages` is proven to
+emit usable incremental text that concatenates byte for byte to the final `message`, and to
+disturb neither the `control_request` round trip nor the per-`message.id` usage normalisation —
+S25.1's finding (`design/findings/S25-token-streaming-probe.md`). Every other `stream_event`
+subtype the probe observed — `message_start`, `content_block_start`, `content_block_stop`, the
+top-level `message_delta` (its own final `usage`, unread — D75/S1.11's dedup already reads
+`assistant`'s) and `message_stop` — carries nothing this vocabulary renders and is ignored the
+same way the top-level ignore list below is, rather than raising `adapter_unknown_record` on
+every streamed turn. Only reachable with the flag on (S25.6); off, no `stream_event` record is
+ever sent and this row is dead code.
 
 `updatedPermissions` is never sent (I47). Standing approvals are held by this server and matched
 here, so that every match still produces a `permission.request` / `permission.resolved` pair and

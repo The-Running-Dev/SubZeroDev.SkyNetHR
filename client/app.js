@@ -1,4 +1,4 @@
-import { createIncidentGroupsBuilder, renderAuditRow, renderEvent, renderPayrollSummary, renderRequisitionRow, renderReviewRow, renderSummaryRow } from './render.js';
+import { appendMessageDeltaText, createIncidentGroupsBuilder, renderAuditRow, renderEvent, renderPayrollSummary, renderRequisitionRow, renderReviewRow, renderSummaryRow } from './render.js';
 
 const $ = (id) => document.getElementById(id);
 
@@ -53,6 +53,12 @@ const state = {
   // "no output for N min" indicator (D21: no server-side timer, the client watches its own
   // silence). `null` until the first envelope after a stream (re)opens.
   lastEnvelopeAt: null,
+  // (D168, S25.5) turnId -> the bubble its first `message.delta` rendered. Grown in place
+  // by later deltas for the same turnId; the `message` that follows is suppressed and the
+  // entry removed once it lands. Reset on every `openStream`, same as `pendingPermissions`
+  // — a reconnect never replays a delta (I51), so no entry survives one, and a stale entry
+  // left behind would suppress a `message` that has no bubble to match it against.
+  streamedMessages: new Map(),
 };
 
 function currentSession() {
@@ -491,6 +497,43 @@ function handleEnvelope(sessionId, envelope) {
       return;
     }
   }
+  // (D168, S25.5) A `message.delta` carries no `seq` and is never replayed — a client's
+  // resume point must be unchanged by receiving one (I1). It renders by growing the
+  // in-progress bubble for its `turnId` rather than appending a new node per delta; the
+  // `message` that follows is picked up by the block below, which suppresses it once that
+  // bubble already exists.
+  // A `message.delta` is never handled by the generic path below, session match or not —
+  // a stale-session delta (the in-flight-during-a-switch race documented above) must be
+  // dropped outright, not fall through to render as an orphan bubble in whatever
+  // transcript is currently on screen.
+  if (envelope.kind === 'message.delta') {
+    if (envelope.sessionId === state.sessionId) {
+      const turnId = envelope.data.turnId;
+      const existing = state.streamedMessages.get(turnId);
+      const transcript = $('transcript');
+      if (existing) {
+        appendMessageDeltaText(existing, envelope.data.text);
+        transcript.scrollTop = transcript.scrollHeight;
+      } else {
+        const node = renderEvent(document, envelope, handlers);
+        if (node !== null) {
+          state.streamedMessages.set(turnId, node);
+          transcript.appendChild(node);
+          transcript.scrollTop = transcript.scrollHeight;
+        }
+      }
+    }
+    return;
+  }
+  // The client renders deltas or the `message` that follows them and never both, picking
+  // by `turnId` (20-contract.md § Rules the renderer may rely on) — this bubble already
+  // has the text, delta by delta, from the block above.
+  if (envelope.kind === 'message' && envelope.data && envelope.data.role === 'assistant' && state.streamedMessages.has(envelope.data.turnId)) {
+    state.streamedMessages.delete(envelope.data.turnId);
+    state.lastSeq = envelope.seq;
+    return;
+  }
+
   state.lastSeq = envelope.seq;
   const node = renderEvent(document, envelope, handlers);
   if (node === null) return;
@@ -514,13 +557,21 @@ function openSseStream(sessionId) {
   // An ended session still streams — its whole transcript replays from the spill (D40) —
   // so "connected" is true and is not the thing the operator needs told. Saying it anyway
   // would overwrite the one message explaining why they cannot type.
-  stream.onopen = () => (sessionIsEnded() ? applySessionAvailability() : status('connected', 'ok'));
+  stream.onopen = () => {
+    // A browser-level auto-reconnect fires this too, not just the first connect — and a
+    // reconnect never replays a delta (I51), so any entry left over from a turn that was
+    // mid-stream when the connection dropped must not survive it either, or the `message`
+    // that follows on replay gets suppressed with nothing left to show for it.
+    state.streamedMessages = new Map();
+    if (sessionIsEnded()) applySessionAvailability();
+    else status('connected', 'ok');
+  };
   stream.onerror = () => status('reconnecting…', 'warn');
 
   for (const kind of [
     'session.started', 'session.ended', 'session.notice',
     'turn.started', 'turn.ended', 'usage',
-    'message', 'thinking', 'tool.call', 'tool.result',
+    'message', 'message.delta', 'thinking', 'tool.call', 'tool.result',
     'permission.request', 'permission.resolved', 'checkpoint.created', 'checklist.item.completed', 'error',
   ]) {
     stream.addEventListener(kind, (event) => {
@@ -557,6 +608,11 @@ function openWsStream(sessionId) {
   let lastError = null;
 
   stream.onopen = () => {
+    // Same reasoning as the SSE path's onopen: this fires on a reconnect too (the
+    // `onclose` handler below calls `openWsStream` directly, not `openStream`), and a
+    // reconnect never replays a delta (I51), so a stale entry from an interrupted turn
+    // must not survive it either.
+    state.streamedMessages = new Map();
     stream.send(JSON.stringify({ after: state.lastSeq }));
     if (sessionIsEnded()) applySessionAvailability();
     else status('connected', 'ok');
@@ -595,6 +651,7 @@ function openStream(sessionId) {
   state.turnLive = false;
   state.currentTurnId = null;
   state.lastEnvelopeAt = null;
+  state.streamedMessages = new Map();
   clear($('transcript'));
   applyStatusBadge();
   applyTurnControls();
@@ -1058,6 +1115,7 @@ async function confirmTerminate() {
   state.turnLive = false;
   state.currentTurnId = null;
   state.lastEnvelopeAt = null;
+  state.streamedMessages = new Map();
   clear($('transcript'));
   resetReviewForm();
   $('compose').hidden = true;
