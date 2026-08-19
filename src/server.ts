@@ -99,6 +99,10 @@ async function main(): Promise<void> {
   // `docker stop` would wait out its grace period first. Closing the listener stops new
   // connections while in-flight ones drain; a second signal is the operator saying they
   // are done waiting.
+  // Bounds `releaseLock` below so a stuck storage mount cannot hold the exit this handler
+  // exists to guarantee — the same shape as the adapters' own SIGTERM-then-SIGKILL grace.
+  const RELEASE_LOCK_TIMEOUT_MS = 2000;
+
   let stopping = false;
   const stop = (signal: NodeJS.Signals): void => {
     if (stopping) process.exit(1);
@@ -106,9 +110,10 @@ async function main(): Promise<void> {
     console.log(`${signal} received — closing the listener.`);
     server.close(() => {
       // D161: removes `server.lock` so the next boot on this storage root takes it
-      // without invoking the staleness path at all. Not fatal if it fails — the next
-      // boot's reclaim is what recovers from a lock nobody removed.
-      void store.value.releaseLock().then(() => process.exit(0));
+      // without invoking the staleness path at all. Not fatal if it fails, or if it never
+      // settles — the next boot's reclaim is what recovers from a lock nobody removed.
+      const timeout = new Promise<void>((resolve) => setTimeout(resolve, RELEASE_LOCK_TIMEOUT_MS).unref());
+      void Promise.race([store.value.releaseLock().then(() => undefined), timeout]).then(() => process.exit(0));
     });
   };
   process.on('SIGTERM', () => stop('SIGTERM'));
