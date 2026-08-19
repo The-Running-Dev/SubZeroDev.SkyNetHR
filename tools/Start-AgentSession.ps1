@@ -4,6 +4,13 @@
     Launches the right agent session for a kit command, and refuses to carry a
     session across a boundary that AGENTS.md says must not be carried.
 
+    Development tooling. NOT part of the SkyNet HR server (D164). The "agent
+    sessions" it supervises are the ones a developer runs against this
+    repository, not the ones the product drives for an operator - two senses of
+    the phrase, and D14's wording conflated them, which is how this file came to
+    be listed as unreconciled against the server/SSE/adapter architecture. It has
+    no relationship to that architecture and needs none.
+
 .DESCRIPTION
     Three jobs, in order of how much they are worth:
 

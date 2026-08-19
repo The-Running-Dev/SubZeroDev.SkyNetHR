@@ -1142,7 +1142,9 @@ worse of the two irregularities. See S19 for why the verticality rule's purpose 
 - **Attachments on `POST /message`** — undesigned, and out of the contract until a design
   decision puts them back (#22).
 - **Who renders `ToolCall.summary`** — unowned between the adapter and the manager (#23).
-- **`Start-AgentSession.ps1`** (#17), unreconciled against this architecture.
+- **`Start-AgentSession.ps1`** (#17) — **resolved by D164 and never belonged on this list.** It is
+  development tooling, not a product component, so no slice covers it for the same reason no slice
+  covers `Test-DesignDrift.ps1`.
 - **What a dragged ticket does**, and whether operator-driven assignment needs a
   definition-of-done item (#26). D52 keeps the gesture; no tier-two item is a backlog, so
   nothing here provides for it.

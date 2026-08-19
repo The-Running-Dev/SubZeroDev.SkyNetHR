@@ -2471,8 +2471,14 @@ these are cited by number elsewhere in this document and in the slices.
    round is not drift but undetermined input, and it is carried where it can be checked:
    `20-contract.md § Unresolved` 5 to 11, each naming its issue, and the seven slices that
    open with a stop rather than with code.
-10. `Start-AgentSession.ps1` (D14) is unreconciled against this architecture. Tracked as issue
-    #17; not restated here.
+10. **Resolved by D164: there was nothing to reconcile.** This item held that
+    `tools/Start-AgentSession.ps1` (D14) was unreconciled against this architecture. It is not part
+    of this architecture: it routes an agent-kit slash command to the model family
+    `AGENTS.md § Command routing` prescribes and enforces that file's session boundaries, which is
+    development tooling, gated with the rest of `tools/` by S19.11. The item existed because D14
+    called the script's subject "supervising agent sessions", which reads as the product's session
+    supervision and means the developer's — two senses of the phrase, and this question inherited
+    the wrong one. (#17)
 11. **No append-only file here has an index, and every read scans.** For the spill this is
     acceptable at the expected volume and not at 100× it, where opening an old session becomes
     a multi-second scan that grows with the session's own history. **`audit.ndjson` is the
