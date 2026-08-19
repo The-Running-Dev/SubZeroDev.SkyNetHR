@@ -458,17 +458,31 @@ export function createSessionManager(deps: {
     }
   }
 
+  // D161/D23: the two limbs common to both callers below — `startedAt` later than the
+  // host's last boot, and the live process's image still matching. The third limb ("no
+  // `exitedAt`") isn't read here because it's asserted structurally by each caller instead:
+  // `readOpenPids` guarantees it for a `ProcessRecord`, and a `ServerLock`'s own absence
+  // (`releaseLock` removes the file) is that limb for a lock. `actualImage` is returned
+  // alongside `live` so `reapOne` can still name what it saw without a second exec call.
+  async function checkLiveness(
+    candidate: { readonly pid: number; readonly startedAt: IsoTimestamp; readonly image: string },
+    hostBootAt: number,
+  ): Promise<{ live: boolean; startedAfterBoot: boolean; actualImage: string | null }> {
+    const startedAfterBoot = new Date(candidate.startedAt).getTime() > hostBootAt;
+    const actualImage = startedAfterBoot ? await getProcessImage(candidate.pid) : null;
+    const live = actualImage !== null && imagesMatch(candidate.image, actualImage);
+    return { live, startedAfterBoot, actualImage };
+  }
+
   // S7.5/S7.6 (D23, I19): the pid-reuse guard. An entry is reaped — tree killed, then
   // tombstoned — only when it has no `exitedAt` (guaranteed by `readOpenPids`), its
   // `startedAt` is later than the host's last boot, and the live process's image still
   // matches. Anything failing either of the remaining two tests is logged and tombstoned
   // without being touched: a stale record is bookkeeping, a wrong kill is an incident.
   async function reapOne(record: ProcessRecord, hostBootAt: number): Promise<void> {
-    const startedAfterBoot = new Date(record.startedAt).getTime() > hostBootAt;
-    const actualImage = startedAfterBoot ? await getProcessImage(record.pid) : null;
-    const imageOk = actualImage !== null && imagesMatch(record.image, actualImage);
+    const { live, startedAfterBoot, actualImage } = await checkLiveness(record, hostBootAt);
 
-    if (startedAfterBoot && imageOk) {
+    if (live) {
       await killProcessTree(record.pid, record.pgid);
     } else {
       console.warn(
@@ -479,16 +493,12 @@ export function createSessionManager(deps: {
     await store.tombstonePid(record.pid, nowIso());
   }
 
-  // D161/D23: one implementation of the three-part liveness test, called from two places —
-  // `reapOne` above (against `pids.ndjson`) and `claimLock`'s `LivenessProbe` (against
-  // `server.lock`) — so `store` acquires no dependency on process enumeration. The first
-  // limb (no `exitedAt`) is satisfied structurally for a lock: `releaseLock` removes the
-  // file, so the file's absence is that limb, and only the other two are read here.
+  // D161/D23: one implementation of the three-part liveness test (`checkLiveness` above),
+  // called from two places — `reapOne` above (against `pids.ndjson`) and `claimLock`'s
+  // `LivenessProbe` (against `server.lock`) — so `store` acquires no dependency on process
+  // enumeration.
   async function isLiveHolder(holder: ServerLock, hostBootAt: number): Promise<boolean> {
-    const startedAfterBoot = new Date(holder.startedAt).getTime() > hostBootAt;
-    if (!startedAfterBoot) return false;
-    const actualImage = await getProcessImage(holder.pid);
-    return actualImage !== null && imagesMatch(holder.image, actualImage);
+    return (await checkLiveness(holder, hostBootAt)).live;
   }
 
   // S16: burn, idle time and the budget subtraction are folds over the session's own
@@ -688,11 +698,26 @@ export function createSessionManager(deps: {
     async boot(): Promise<Result<void, StartupError>> {
       // S7.10: a storage root that exists but cannot be written (permissions revoked,
       // mounted read-only, since `createStore` last touched it) is refused here rather
-      // than discovered mid-rehydration.
-      const writable = await probeStorageWritable(config.storageRoot);
+      // than discovered mid-rehydration. Run alongside the image probe below — neither
+      // depends on the other's result, and only `writable.ok` has to be checked before
+      // `claimLock` is called (S22.6).
+      const [writable, selfImage] = await Promise.all([probeStorageWritable(config.storageRoot), getProcessImage(process.pid)]);
       if (!writable.ok) return writable;
 
       const hostBootAt = Date.now() - os.uptime() * 1000;
+
+      // `self.image` drives every later liveness comparison against this lock
+      // (`isLiveHolder`/`checkLiveness` above) — an unresolved probe silently persisted as
+      // `'unknown'` can never match a real image name later, which would falsely mark this
+      // lock stale and let a second server reclaim it while this one is still running. Warn
+      // loudly rather than staying silent about it.
+      if (selfImage === null) {
+        console.warn(
+          "[session-manager] boot: could not determine this process's own image; server.lock will carry " +
+            "image: 'unknown', which no later liveness check can match — a second boot on this host may " +
+            'falsely treat this lock as stale while this server is still running',
+        );
+      }
 
       // Step 0 (D161): claim `<storage>/server.lock` before the reap step below, not
       // merely before `listen` — reaping kills process trees it believes are orphans and
@@ -702,7 +727,7 @@ export function createSessionManager(deps: {
         pid: process.pid,
         hostname: os.hostname(),
         startedAt: nowIso(),
-        image: (await getProcessImage(process.pid)) ?? 'unknown',
+        image: selfImage ?? 'unknown',
       };
       const claimed = await store.claimLock(self, (holder) => isLiveHolder(holder, hostBootAt));
       if (!claimed.ok) return claimed;

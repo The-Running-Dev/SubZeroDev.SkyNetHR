@@ -1,6 +1,6 @@
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import { createReadStream } from 'node:fs';
-import { mkdir, open, readdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { link, mkdir, open, readdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { createInterface } from 'node:readline';
 import path from 'node:path';
 import type {
@@ -33,6 +33,10 @@ import type {
 
 function ioError(filePath: string, detail: string): Result<never, StoreError> {
   return { ok: false, error: { code: 'io', path: filePath, detail } };
+}
+
+function startupIoError(filePath: string, detail: string): Result<never, StartupError> {
+  return { ok: false, error: { code: 'storage_unwritable', path: filePath, detail } };
 }
 
 function sessionDir(storageRoot: string, sessionId: SessionId): string {
@@ -73,6 +77,28 @@ async function atomicWrite(targetPath: string, contents: string): Promise<void> 
   const tmpPath = path.join(dir, `.${path.basename(targetPath)}.${randomBytes(6).toString('hex')}.tmp`);
   await writeFile(tmpPath, contents, 'utf8');
   await rename(tmpPath, targetPath);
+}
+
+// A plain read-then-write against `targetPath` leaves a window between the read and the
+// write where a second caller can make the same "absent" observation and also write —
+// `rename` above overwrites unconditionally, so it cannot detect that. `link` closes the
+// window: writing the full contents to a private temp file first means only a complete
+// write is ever visible under `targetPath`, and `link` is an atomic, exclusive create that
+// fails with `EEXIST` (never touching the target's content) when something already claimed
+// it first. Returns `'claimed'` or `'exists'`; anything else throws.
+async function tryClaimExclusive(targetPath: string, contents: string): Promise<'claimed' | 'exists'> {
+  const dir = path.dirname(targetPath);
+  const tmpPath = path.join(dir, `.${path.basename(targetPath)}.${randomBytes(6).toString('hex')}.tmp`);
+  await writeFile(tmpPath, contents, 'utf8');
+  try {
+    await link(tmpPath, targetPath);
+    return 'claimed';
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'EEXIST') return 'exists';
+    throw err;
+  } finally {
+    await rm(tmpPath, { force: true });
+  }
 }
 
 async function appendLine(filePath: string, line: string, fsync: boolean): Promise<Result<void, StoreError>> {
@@ -667,33 +693,44 @@ export async function createStore(config: Config): Promise<Result<Store, StoreEr
     // The claim precedes `session-manager.boot`'s reap step, so a failed claim must not have
     // touched any server-wide file — this method only ever reads and (on success) rewrites
     // `server.lock` itself.
+    //
+    // The "absent" row is claimed via `tryClaimExclusive`, not a plain read-then-write: two
+    // processes racing this method against the same absent/just-reclaimed lock must not both
+    // observe "absent" and both succeed — that would silently defeat the one-server guarantee
+    // this method exists to provide. The loop below only reclaims-and-retries; it never writes
+    // `self` except through the exclusive claim, so the property holds on every iteration.
     async claimLock(self: ServerLock, isLive: LivenessProbe): Promise<Result<void, StartupError>> {
       const filePath = lockPath(storageRoot);
-      let existingRaw: string | null;
-      try {
-        existingRaw = await readFile(filePath, 'utf8');
-      } catch (err) {
-        if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
-          existingRaw = null;
-        } else {
-          return { ok: false, error: { code: 'storage_unwritable', path: filePath, detail: (err as Error).message } };
-        }
-      }
+      const payload = JSON.stringify(self);
 
-      if (existingRaw !== null) {
+      for (;;) {
+        let outcome: 'claimed' | 'exists';
+        try {
+          outcome = await tryClaimExclusive(filePath, payload);
+        } catch (err) {
+          return startupIoError(filePath, (err as Error).message);
+        }
+        if (outcome === 'claimed') return { ok: true, value: undefined };
+
+        let existingRaw: string;
+        try {
+          existingRaw = await readFile(filePath, 'utf8');
+        } catch (err) {
+          if ((err as NodeJS.ErrnoException).code === 'ENOENT') continue; // reclaimed out from under us — retry the exclusive claim
+          return startupIoError(filePath, (err as Error).message);
+        }
+
         let holder: ServerLock | null = null;
         try {
           holder = JSON.parse(existingRaw) as ServerLock;
         } catch {
           holder = null;
         }
+
         if (holder !== null) {
           // I50: the liveness test cannot see another machine's process table, so a lock
           // naming a different host is never reclaimed, whatever its pid says.
-          if (holder.hostname !== self.hostname) {
-            return { ok: false, error: { code: 'storage_locked', path: filePath, holder } };
-          }
-          if (await isLive(holder)) {
+          if (holder.hostname !== self.hostname || (await isLive(holder))) {
             return { ok: false, error: { code: 'storage_locked', path: filePath, holder } };
           }
           console.warn(
@@ -704,14 +741,16 @@ export async function createStore(config: Config): Promise<Result<Store, StoreEr
           // unclean shutdown need manual intervention.
           console.warn(`[store] server.lock at ${filePath} is unparseable; reclaiming it as a stale holder`);
         }
-      }
 
-      try {
-        await atomicWrite(filePath, JSON.stringify(self));
-      } catch (err) {
-        return { ok: false, error: { code: 'storage_unwritable', path: filePath, detail: (err as Error).message } };
+        try {
+          await rm(filePath, { force: true });
+        } catch (err) {
+          return startupIoError(filePath, (err as Error).message);
+        }
+        // Loop back to retry the exclusive claim now that the stale/unparseable lock is
+        // gone. A concurrent claimant racing this same window can only win one of the two
+        // exclusive creates — the loser correctly re-reads and refuses.
       }
-      return { ok: true, value: undefined };
     },
 
     async releaseLock(): Promise<Result<void, StoreError>> {
@@ -719,6 +758,7 @@ export async function createStore(config: Config): Promise<Result<Store, StoreEr
       try {
         await rm(filePath, { force: true });
       } catch (err) {
+        console.warn(`[store] releaseLock: failed to remove ${filePath}: ${(err as Error).message}`);
         return ioError(filePath, (err as Error).message);
       }
       return { ok: true, value: undefined };
