@@ -20,6 +20,14 @@ on:
     types: [completed]
   workflow_dispatch:
 
+# Serialised, never cancelled: two merges landing in quick succession would otherwise race
+# to push `:latest`, and the slower run pushing second leaves `:latest` resolving to the
+# older commit. Cancelling instead would drop the immutable `:<sha>` tag for a commit that
+# passed `verify`, so the queue waits rather than discards.
+concurrency:
+  group: publish
+  cancel-in-progress: false
+
 permissions:
   contents: read
 
@@ -48,9 +56,16 @@ jobs:
       # shared-secret needs no reverse proxy, and a loopback-only bind needs no
       # TRUST_PROXY entry. No claude CLI credential is mounted — this smoke test only
       # proves the server starts and binds; it never drives a real turn.
+      # `/data` is a Docker-managed volume, never a host bind mount: a bind mount keeps the
+      # host directory's ownership, and the runner user is uid 1001 while the image runs as
+      # uid 1000 (`node`), so the Dockerfile's `chown node:node /data` would be masked and
+      # `createStore` (src/store/index.ts) would fail EACCES on `mkdir /data/sessions`
+      # before the server ever binds. A fresh named volume inherits the image's ownership.
+      # `/workspaces` stays a bind mount — it is only ever read.
       - name: Start the container
         run: |
-          mkdir -p /tmp/skynet-hr-workspace /tmp/skynet-hr-storage
+          mkdir -p /tmp/skynet-hr-workspace
+          docker volume create skynet-hr-smoke-storage
           docker run -d --name skynet-hr \
             -p 3000:3000 \
             -e BIND_HOST=0.0.0.0 \
@@ -60,7 +75,7 @@ jobs:
             -e WORKSPACE_ROOTS=/workspaces \
             -e STORAGE_ROOT=/data \
             -v /tmp/skynet-hr-workspace:/workspaces \
-            -v /tmp/skynet-hr-storage:/data \
+            -v skynet-hr-smoke-storage:/data \
             "skynet-hr:${{ env.IMAGE_SHA }}"
 
       - name: Wait for the container to answer
@@ -76,7 +91,9 @@ jobs:
 
       - name: Stop the container
         if: always()
-        run: docker rm -f skynet-hr
+        run: |
+          docker rm -f skynet-hr
+          docker volume rm -f skynet-hr-smoke-storage
 
       - name: Save the gated image
         run: |
