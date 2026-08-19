@@ -946,7 +946,9 @@ Acceptance:
   - S16.9 The route carries the ownership check: another operator gets `404 no_such_session`
     (I23).
 
-Out of scope: cost in currency, and cost per shipped PR — neither has a source (#27); a
+Out of scope: cost per shipped PR, which has no source inside this server — D158 cuts it and
+substitutes a priced-burn tile, built in **S20** because this slice had already landed when that
+decision was taken (#27); a
 per-deployment or per-operator budget until #29 says otherwise, and a per-operator one needs the
 operator record D3 refuses; pricing lookups (D61 declines to pre-decide them); storing any of
 this — every number here is a fold over what the session already wrote.
@@ -1119,6 +1121,121 @@ CLI in CI: the suite drives `fake-claude-cli.mjs` through the `SKYNET_CLAUDE_EXE
 (D91), so the criteria that say a **real** child — S1.1, S4.2 — stay proven locally, and this
 gate must not be reported as having reproven them. Caching, artifact upload and test reporters.
 
+## S20 — What the session cost, in money
+
+**Tier two**, brief item 8's fourth clause. It is a slice of its own rather than two criteria
+appended to S16 because **S16 had already landed** when D158 was taken: adding acceptance criteria
+to a closed slice rewrites what its issue meant by done. S1.11 and S4.15 are not a precedent for
+doing so here — both named behaviour the design had always specified and no slice had owned, where
+this is new scope from a new decision.
+
+Delivers: An operator sees what a session cost in money, not only in tokens — the same burn the
+payroll screen already shows, priced against rates the deployment sets. Where the price cannot
+honestly be computed, the figure is absent rather than zero, so nobody reads a free session and an
+unmeasurable one as the same thing.
+
+Touches: `session-manager` (the payroll fold), `contract` (`PayrollView`, `TokenRates`, `Config`),
+`config`, `client` (the tile).
+
+Depends on: S16.
+
+Acceptance:
+  - S20.1 `costCurrency` is `burn`'s four components each priced at `config.tokenRates` and
+    summed, with `currency` echoed from configuration and never interpreted — no conversion, no
+    lookup, no network call. Asserted against a fixture with known component counts and known
+    rates, the expected figure stated in the slice report (D158).
+  - S20.2 `costCurrency` and `currency` are both `null`, never `0`, in each of the two cases that
+    produce no priced figure: `config.tokenRates` unset, and a session whose transport reports no
+    usage.
+  - S20.3 The unavailable case is derived from the same signal as
+    `session.notice / usage_unavailable` and **never** from testing `burn` for zero — asserted by
+    a search of the payroll fold finding no zero-comparison against `burn`, and by a session that
+    genuinely burned nothing still reporting a priced `0` rather than `null`
+    (`20-contract.md § Unresolved` 12, D146).
+  - S20.4 The client renders an absent figure as absent — no tile, or an explicit "not available"
+    — and never as a currency-formatted zero. Asserted on both null cases from S20.2.
+  - S20.5 The slice report states plainly that the figure is an estimate against operator-set
+    rates and not a vendor's billed amount, and the client says so where the tile is shown.
+
+Out of scope: per-model rates — `Usage` carries no model identifier and `UsageEvent` is
+`{ turnId, usage }`, so keying rates per model needs a new field on a public event payload and a
+change in every adapter; D158 records the resulting imprecision as known and retained. Currency
+conversion, any pricing lookup against a vendor, and any figure presented as a bill. Making
+`PayrollView.burn` nullable, which is #30 and #91's and which D158 adds weight to without settling.
+
+## S21 — Hand the agent a file
+
+**Tier one's route, but not a tier-one item** — no definition-of-done item names attachments. D160
+designed them at the owner's direction after the alternative, dropping them, was recommended and
+declined. **It opens with a probe**, in the shape S8.1 and S10.1 use: the vendor behaviour it rests
+on has never been observed, and a slice that guesses it builds a route onto a transport that may
+refuse the payload.
+
+Delivers: An operator can attach a file to a message — a screenshot of the bug, a log, a spec —
+and the agent receives it alongside the text. The attachment stays part of the transcript: it is
+there on a reconnect, on another device, and after a refresh, and it disappears with the session
+when the session is removed. Where the agent's vendor cannot accept files at all, the operator is
+told so rather than having the file silently ignored.
+
+Touches: `store` (`writeAttachment`, `openAttachment`), `session-manager` (the message path),
+`adapters/*` (`send`'s new parameter, `acceptsAttachments`), `edge/*` (the upload validation and
+the read route), `client` (the picker and the rendering), `config` (`caps`), `contract`.
+
+Depends on: S1, S2, S3 (S21.7's replay), S5 (S21.9 needs `DELETE`).
+
+Acceptance:
+  - S21.1 A written finding, committed before any transport code, answering whether
+    `claude --input-format stream-json` accepts a `user` message whose `content` array holds a
+    non-text block — an `image` block at minimum — and what it does with one it rejects. The
+    command run and its observed output are cited. **If the CLI does not accept them, the slice
+    stops here**: the remaining criteria are recorded as blocked rather than failed, no
+    workaround is built, and what to do instead is `/design`'s. Writing the file into the
+    workspace and naming its path to the agent is explicitly **not** a fallback to reach for — it
+    is a different feature the operator can already perform themselves.
+  - S21.2 A message with attachments returns `202 { turnId }` and the emitted `message` envelope
+    carries one `AttachmentRef` per upload, with `filename`, `mediaType` and the decoded `bytes`.
+    **No envelope in `events.ndjson` contains attachment bytes** — asserted by uploading a
+    recognisable byte pattern and searching the whole spill for it (I49).
+  - S21.3 Each blob is written and fsync'd before the envelope naming it is constructed, asserted
+    by a store double recording call order (I49) — the same shape S4.6 uses for the audit record.
+  - S21.4 The path is `attachments/<turnId>/<attachmentId>` with a server-minted `attachmentId`,
+    and the operator's `filename` never reaches it: an upload named `../../escape.txt`, one named
+    `C:\\Windows\\evil`, and one named with a NUL byte each store safely under a minted id, with
+    the original preserved verbatim in the ref for display (I49).
+  - S21.5 The caps refuse rather than truncate: an attachment over `caps.attachmentBytes` and a
+    message over `caps.attachmentCount` are each `422 bad_request` naming the field, with nothing
+    written to disk and nothing shortened (D84, D160). Asserted by confirming the attachments
+    directory is unchanged after each refusal.
+  - S21.6 `GET /api/sessions/:id/attachments/:turnId/:attachmentId` serves the bytes with
+    `X-Content-Type-Options: nosniff` and `Content-Disposition: attachment` on **every** response,
+    and echoes the stored `mediaType` only for the image allow-list — `image/png`, `image/jpeg`,
+    `image/gif`, `image/webp` — serving `application/octet-stream` otherwise. Asserted with an
+    upload declaring `text/html` whose body is a script: the response carries
+    `application/octet-stream`, and navigating to the URL directly executes nothing.
+  - S21.7 The route carries the ownership check — another operator gets `404 no_such_session`,
+    never `403` (I23) — and a missing or unreadable blob is `404 no_such_attachment` with the
+    envelope unaffected. A replay served from the spill after a reconnect renders the same refs,
+    and the client fetches the bytes as it does on a live stream (S3.1).
+  - S21.8 An adapter declaring `acceptsAttachments: false` refuses the whole message with
+    `422 bad_request` naming `attachments`, and no turn starts. Asserted with a stub adapter, and
+    the edge tests the capability rather than the vendor — a search of `edge/` for `claude` and
+    `codex` still returns nothing (I20, S1.10).
+  - S21.9 `DELETE /api/sessions/:id` removes `attachments/` with the rest, and `audit.ndjson`
+    stays byte-identical (D25). This extends S5.9's list, which had no attachments to name.
+  - S21.10 The client renders an allow-listed image inline under the document's existing
+    `img-src 'self'` and every other type as a download naming the file and its size. The
+    `filename` is a text node: an upload named `<img src=x onerror=alert(1)>` renders as literal
+    characters and executes nothing (I26, D74).
+
+Out of scope: attachments on any route other than `POST /message`; an audit record for an upload —
+D160 rules there is none and S14.10 is the precedent, so a criterion asserting `audit.ndjson`
+unchanged across an upload belongs here only as part of S21.9; a separate upload route and the
+orphan sweep it would need (D160 rejects it); attachment support for Codex, which S21.8 makes a
+declared capability rather than a promise; resending an attachment on a later turn; and any
+retention rule beyond deletion with the session — attachments are a second store that grows with
+operator behaviour rather than session count, which is #20's question and now covers this directory
+too.
+
 ## S22 — One server per storage root
 
 **Tier one**, and small. D161 decided it; this builds it. It exists because the single-process
@@ -1190,14 +1307,17 @@ worse of the two irregularities. See S19 for why the verticality rule's purpose 
   D161 and no longer uncovered.** Taken, and built by S22; the staleness objection is answered by
   reusing D23's own liveness test rather than by new machinery.
 - **An offset index** for the spill and now for `audit.ndjson` (#19).
-- **Attachments on `POST /message`** — undesigned, and out of the contract until a design
-  decision puts them back (#22).
+- **Attachments on `POST /message`** — **resolved by D160 and no longer uncovered.** Designed and
+  sliced as S21, which opens with a probe of whether the Claude CLI accepts non-text content
+  blocks at all and stops if it does not (#22).
 - **Who renders `ToolCall.summary`** — unowned between the adapter and the manager (#23).
 - **`Start-AgentSession.ps1`** (#17), unreconciled against this architecture.
 - **What a dragged ticket does**, and whether operator-driven assignment needs a
   definition-of-done item (#26). D52 keeps the gesture; no tier-two item is a backlog, so
   nothing here provides for it.
-- **Cost per shipped PR** (#27) — a prototype payroll tile with no source. S16 excludes it.
+- **Cost per shipped PR** (#27) — **resolved by D158 and no longer uncovered.** The figure had no
+  source inside this server; it is replaced by a priced-burn tile, which S20 builds. Reinstating
+  the original would need a forge integration and a brief amendment.
 
 **Untracked, found while writing this set:**
 
