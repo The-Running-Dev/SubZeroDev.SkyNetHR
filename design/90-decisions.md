@@ -3252,6 +3252,40 @@ in `src/` changed to produce them, and none of `design/00-brief.md`, `design/20-
 `design/30-slices.md` needed a word altered — the "Hosting the model" non-goal already drew the
 boundary this artifact stays inside of.
 
+### 2026-08-19 — D162 Tool-output blobs get a per-session byte budget, refused at write
+Context: `10-design.md` open question 2. Tool-output blobs (D22) are the only storage that grows
+with tool volume rather than with session count, and one `find`-heavy turn can outweigh a month of
+transcripts. Today they are deleted with their session and otherwise never — the option list called
+that "a decision made by not making one".
+Chosen: `Caps.sessionToolOutputBytes` bounds the **total** blob bytes one session may store. Past
+it, the blob is not written and the tool result is unaffected in every other way: the envelope
+still carries `truncated: true` and the true pre-truncation `bytes`, and the fetch route answers
+`404 no_such_output`. Deletion with the session (D25) is unchanged and remains the other half of
+the rule.
+**What makes this cheap is that blob absence is already a designed state.** S9.5 specifies that a
+missing or unreadable blob is `404 no_such_output` with the truncated envelope unaffected, so this
+introduces no error path — it reaches an existing one deliberately. Enforcement is at write and
+therefore synchronous, which keeps it inside the guard rule D32 already governs and avoids a
+sweeper, a timer, and a second thing that can disagree with the directory.
+**The rule stops at tool output and does not reach `attachments/`** (D160). The two directories
+look alike and are not: a tool-output blob is the output of a command that can be run again, and an
+attachment is operator-supplied and unreconstructible. Dropping the first costs a convenience;
+dropping the second destroys the only copy. An attachment is bounded at upload by
+`Caps.attachmentBytes` and `Caps.attachmentCount` instead, which refuse the write rather than
+discard a stored file.
+Rejected: **an age-based sweep at boot.** Predictable, and it never runs on a server that stays up
+— which is this deployment. It also bounds nothing about a single burst, which is the case the
+question was asked about.
+Rejected: **evicting the oldest blobs within a session** rather than refusing new ones. It keeps
+the budget while preserving recency, and it is rejected because it makes a completed, fetchable
+link go dead later for reasons the operator never sees, and because scanning and deleting inside a
+live session's directory is exactly the sweeper this decision avoids.
+Rejected: **leaving it deleted-with-session and saying so.** Zero mechanism and consistent with
+`audit.ndjson`'s accepted unbounded growth, and rejected because the objection here is *rate*
+rather than growth: the audit log grows with approvals, which are human-paced, while a blob
+directory grows with whatever a single command printed.
+Reversibility: cheap. One cap, one test at one call site, and the absent-blob path already exists.
+
 ## Open
 
 Staging only. Once an item becomes an issue it leaves this list.

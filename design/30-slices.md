@@ -588,10 +588,10 @@ Acceptance:
     `session.notice / error` with code `storage_failure` are emitted, and no envelope
     reaches the ring that the spill does not hold (D41).
 
-Out of scope: a retention rule for tool-output blobs (carried in
-`90-decisions.md § Open` — they are the one store that grows with tool volume rather than
-session count); an offset index for the spill; virtualised scrollback beyond whatever S9.6
-requires.
+Out of scope: the retention rule for tool-output blobs, which is S23's — D162 gives them a
+per-session byte budget, and this slice's S9.5 is what makes that cheap by having already
+specified the absent-blob path; an offset index for the spill; virtualised scrollback beyond
+whatever S9.6 requires.
 
 ## S10 — Stop asking me about this one
 
@@ -1118,6 +1118,45 @@ CLI in CI: the suite drives `fake-claude-cli.mjs` through the `SKYNET_CLAUDE_EXE
 (D91), so the criteria that say a **real** child — S1.1, S4.2 — stay proven locally, and this
 gate must not be reported as having reproven them. Caching, artifact upload and test reporters.
 
+## S23 — Bound what one session's tool output can cost
+
+**Tier one**, and small. D162 decided it; this builds it. It is separable from S9 because S9 has
+landed and because S9.5 already built the only thing that made it hard — the absent-blob path.
+
+Delivers: One session running something that prints enormously cannot fill the server's disk. Past
+a configured budget its tool output stops being kept, while the transcript still says exactly how
+much there was, so nobody is misled into thinking a command printed less than it did.
+
+Touches: `store` (`writeToolOutput`, the per-session tally), `config` (`caps`), `contract`.
+
+Depends on: S9.
+
+Acceptance:
+  - S23.1 A session whose stored blob bytes have reached `caps.sessionToolOutputBytes` writes no
+    further blob, and the tool result is otherwise unaffected: the envelope still carries
+    `truncated: true` and the true pre-truncation `bytes`, and it is byte-identical in the ring and
+    in the spill (S9.1, I3).
+  - S23.2 The fetch for an unwritten blob is `404 no_such_output` — the path S9.5 already
+    specifies, asserted here as reached deliberately rather than by failure.
+  - S23.3 **Nothing already written is ever evicted.** Over a run that crosses the budget, every
+    blob written before the crossing is still fetchable afterwards, byte for byte (D162).
+  - S23.4 The budget is total per session, not per turn and not per call: asserted with many small
+    results summing past it, and with one large result crossing it alone.
+  - S23.5 The tally survives a restart — a rehydrated session's budget reflects what is on disk,
+    not a counter that reset — asserted by restarting with a session already past the budget and
+    confirming no further blob is written.
+  - S23.6 `attachments/` is not bounded by this cap and is not swept by it: a session past its
+    tool-output budget still stores attachments normally, subject only to
+    `caps.attachmentBytes` and `caps.attachmentCount` (D162, D160).
+  - S23.7 The enforcement is synchronous at the write call site — no timer, no sweeper, no
+    background scan. Asserted by a search of `store` finding no scheduled work over `tool-output/`.
+
+Out of scope: an age-based sweep (D162 rejects it); evicting already-written blobs (D162 rejects
+it); a deployment-wide rather than per-session budget, which needs a tally nothing holds and would
+let one session exhaust every other session's allowance — the argument D53's rejected
+per-deployment token budget already made; any retention rule for `audit.ndjson`, which I13 forbids
+shortening.
+
 ---
 
 ## What no slice covers
@@ -1135,7 +1174,8 @@ worse of the two irregularities. See S19 for why the verticality rule's purpose 
 
 - **Token-level streaming** — whether `--include-partial-messages` yields usable deltas and
   whether `message.delta` survives contact with it (#13).
-- **A retention rule for tool-output blobs** (#20).
+- **A retention rule for tool-output blobs** (#20) — **resolved by D162 and no longer uncovered.**
+  A per-session byte budget refused at write, built by S23.
 - **A lock file preventing two server processes over one storage root** (#21), which tier two
   widens: two processes would each consume the same approved requisition.
 - **An offset index** for the spill and now for `audit.ndjson` (#19).
