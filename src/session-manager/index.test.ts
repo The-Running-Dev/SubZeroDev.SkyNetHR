@@ -103,7 +103,7 @@ async function makeManager(
       auditPageMax: 200,
       reviewBodyBytes: 1024,
       requisitionTextBytes: 1024,
-      standingRuleBytes: 1024, attachmentBytes: 10485760, attachmentCount: 5,
+      standingRuleBytes: 1024, attachmentBytes: 10485760, attachmentCount: 5, sessionToolOutputBytes: 10485760,
       ...capsOverride,
     },
     sessionCookieMaxAgeSeconds: 2592000,
@@ -912,7 +912,7 @@ const RULE_CAPS: Caps = {
   auditPageMax: 200,
   reviewBodyBytes: 1024,
   requisitionTextBytes: 1024,
-  standingRuleBytes: 32, attachmentBytes: 10485760, attachmentCount: 5,
+  standingRuleBytes: 32, attachmentBytes: 10485760, attachmentCount: 5, sessionToolOutputBytes: 10485760,
 };
 
 function fakeRequest(tool: string, matchTarget: string | null): PermissionRequest {
@@ -2456,6 +2456,67 @@ test('S9.5 — a blob the store cannot write does not undo the envelope\'s trunc
   const data = result.data as { truncated: boolean; bytes: number };
   assert.equal(data.truncated, true, 'the envelope is still truncated even though the blob write failed');
   assert.equal(data.bytes, 2000);
+});
+
+test('S23.1/S23.2 — past the session tool-output budget the envelope is unaffected but the blob 404s', async () => {
+  const { manager, workspaceRoot } = await makeManager('big-tool-result', { toolResultBytes: 100, sessionToolOutputBytes: 3000 });
+  const owner = 'operator-1' as OperatorId;
+  const projectDir = path.join(workspaceRoot, 'proj-s23');
+  await mkdir(projectDir);
+  const created = await manager.create(owner, { vendor: 'claude', cwd: projectDir, model: null, sandbox: null, requisitionId: null });
+  assert.equal(created.ok, true);
+  if (!created.ok) return;
+  const { sessionId } = created.value;
+
+  const received: Envelope[] = [];
+  await manager.subscribe(sessionId, owner, 0, { deliver: (e) => received.push(e), close: () => {} });
+
+  async function runOneTurn(bigBytes: number): Promise<{ turnId: string; result: Envelope }> {
+    process.env['SKYNET_BIG_TOOL_RESULT_BYTES'] = String(bigBytes);
+    const before = received.length;
+    const messaged = await manager.message(sessionId, owner, 'go', []);
+    assert.equal(messaged.ok, true);
+    await waitUntil(() => received.some((e, i) => i >= before && e.kind === 'permission.request'));
+    const requestId = (received.find((e, i) => i >= before && e.kind === 'permission.request')!.data as { requestId: string }).requestId;
+    await manager.answerPermission(sessionId, owner, { requestId: requestId as never, decision: 'allow', scope: 'once', rule: null, reason: null });
+    await waitUntil(() => received.slice(before).some((e) => e.kind === 'tool.result'));
+    const result = received.slice(before).find((e) => e.kind === 'tool.result')!;
+    if (messaged.ok) return { turnId: messaged.value.turnId as unknown as string, result };
+    throw new Error('unreachable');
+  }
+
+  // First turn: 2000 bytes, over toolResultBytes so it is truncated and the blob is
+  // written — 2000 of the 3000-byte session budget spent.
+  const first = await runOneTurn(2000);
+  const firstData = first.result.data as { callId: string; truncated: boolean; bytes: number };
+  assert.equal(firstData.truncated, true);
+  assert.equal(firstData.bytes, 2000);
+  // The blob write is fired off without being awaited (I1/I27, see the writeToolOutput
+  // call site in session-manager), so give it a moment to land before checking for it.
+  await waitUntil(async () => {
+    const probe = await manager.openToolOutput(sessionId, owner, first.turnId as never, firstData.callId as never);
+    if (probe.ok) for await (const _chunk of probe.value) void _chunk;
+    return probe.ok;
+  });
+  const openedFirst = await manager.openToolOutput(sessionId, owner, first.turnId as never, firstData.callId as never);
+  assert.equal(openedFirst.ok, true, 'the first blob is well under the session budget');
+  if (openedFirst.ok) for await (const _chunk of openedFirst.value) void _chunk;
+
+  // Second turn: another 2000 bytes. 2000 + 2000 > 3000, so the budget refuses this blob —
+  // but S23.1 says the envelope is otherwise unaffected: still truncated:true, still the
+  // true pre-truncation `bytes`.
+  const second = await runOneTurn(2000);
+  const secondData = second.result.data as { callId: string; truncated: boolean; bytes: number };
+  assert.equal(secondData.truncated, true, 'S23.1: truncated is unaffected by the budget refusal');
+  assert.equal(secondData.bytes, 2000, 'S23.1: bytes is unaffected by the budget refusal');
+
+  // Give the (also fire-and-forget) second write a moment to settle before checking that
+  // it never landed — there is nothing to poll for on the negative side.
+  await new Promise((r) => setTimeout(r, 200));
+  const openedSecond = await manager.openToolOutput(sessionId, owner, second.turnId as never, secondData.callId as never);
+  assert.equal(openedSecond.ok, false, 'S23.2: the budget-refused blob was never written');
+  if (!openedSecond.ok) assert.equal(openedSecond.error.code, 'storage');
+  if (!openedSecond.ok && openedSecond.error.code === 'storage') assert.equal(openedSecond.error.cause.code, 'not_found');
 });
 
 // ---------------------------------------------------------------------------

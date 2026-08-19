@@ -22,7 +22,7 @@ function baseConfig(storageRoot: string): Config {
       auditPageMax: 200,
       reviewBodyBytes: 1024,
       requisitionTextBytes: 1024,
-      standingRuleBytes: 1024, attachmentBytes: 10485760, attachmentCount: 5,
+      standingRuleBytes: 1024, attachmentBytes: 10485760, attachmentCount: 5, sessionToolOutputBytes: 10485760,
     },
     sessionCookieMaxAgeSeconds: 2592000,
     includeRaw: false,
@@ -893,4 +893,93 @@ test('S22.5 — releaseLock is a no-op, not an error, when there is no lock to r
   const { store } = await newStore();
   const released = await store.releaseLock();
   assert.equal(released.ok, true);
+});
+
+async function newStoreWithToolOutputCap(sessionToolOutputBytes: number): Promise<{ storageRoot: string; store: Store }> {
+  const storageRoot = await mkdtemp(path.join(tmpdir(), 'skynet-store-'));
+  const config = baseConfig(storageRoot);
+  const storeResult = await createStore({ ...config, caps: { ...config.caps, sessionToolOutputBytes } });
+  assert.equal(storeResult.ok, true);
+  if (!storeResult.ok) throw new Error('store failed to init');
+  return { storageRoot, store: storeResult.value };
+}
+
+test('S23.1/S23.3 — many small blobs summing past the budget: earlier ones keep their bytes, the crossing one is not written', async () => {
+  const { store } = await newStoreWithToolOutputCap(30);
+  const record = sessionRecord('sess-s23-1');
+  await store.createSession(record);
+
+  const first = await store.writeToolOutput(record.id, 't1' as never, 'call-1' as never, Buffer.from('a'.repeat(15)));
+  assert.equal(first.ok, true);
+  const second = await store.writeToolOutput(record.id, 't1' as never, 'call-2' as never, Buffer.from('b'.repeat(15)));
+  assert.equal(second.ok, true);
+  // 15 + 15 = 30, at the budget; one more byte crosses it.
+  const third = await store.writeToolOutput(record.id, 't1' as never, 'call-3' as never, Buffer.from('c'));
+  assert.equal(third.ok, true, 'a budget-refused write is not an error');
+
+  const openedFirst = await store.openToolOutput(record.id, 't1' as never, 'call-1' as never);
+  assert.equal(openedFirst.ok, true, 'a blob written before the crossing stays fetchable');
+  if (openedFirst.ok) {
+    const chunks: Buffer[] = [];
+    for await (const chunk of openedFirst.value) chunks.push(chunk as Buffer);
+    assert.equal(Buffer.concat(chunks).toString('utf8'), 'a'.repeat(15), 'byte-identical, not evicted');
+  }
+  const openedSecond = await store.openToolOutput(record.id, 't1' as never, 'call-2' as never);
+  assert.equal(openedSecond.ok, true);
+
+  const openedThird = await store.openToolOutput(record.id, 't1' as never, 'call-3' as never);
+  assert.equal(openedThird.ok, false, 'S23.2: the refused blob was never written, so the fetch is not_found');
+  if (!openedThird.ok) assert.equal(openedThird.error.code, 'not_found');
+});
+
+test('S23.4 — one large result crossing the budget alone is refused the same way', async () => {
+  const { store } = await newStoreWithToolOutputCap(10);
+  const record = sessionRecord('sess-s23-2');
+  await store.createSession(record);
+
+  const wrote = await store.writeToolOutput(record.id, 't1' as never, 'call-1' as never, Buffer.from('x'.repeat(11)));
+  assert.equal(wrote.ok, true, 'a budget-refused write is not an error');
+  const opened = await store.openToolOutput(record.id, 't1' as never, 'call-1' as never);
+  assert.equal(opened.ok, false);
+  if (!opened.ok) assert.equal(opened.error.code, 'not_found');
+});
+
+test('S23.5 — the tally is read off disk, not held in memory: a fresh store over the same storage root still refuses past the budget', async () => {
+  const { storageRoot } = await newStoreWithToolOutputCap(20);
+  const config = baseConfig(storageRoot);
+  const cappedConfig = { ...config, caps: { ...config.caps, sessionToolOutputBytes: 20 } };
+  const firstStoreResult = await createStore(cappedConfig);
+  assert.equal(firstStoreResult.ok, true);
+  if (!firstStoreResult.ok) return;
+  const record = sessionRecord('sess-s23-3');
+  await firstStoreResult.value.createSession(record);
+  const wrote = await firstStoreResult.value.writeToolOutput(record.id, 't1' as never, 'call-1' as never, Buffer.from('y'.repeat(20)));
+  assert.equal(wrote.ok, true);
+
+  // A brand-new store instance over the same storage root, with no in-memory carryover.
+  const secondStoreResult = await createStore(cappedConfig);
+  assert.equal(secondStoreResult.ok, true);
+  if (!secondStoreResult.ok) return;
+  const refused = await secondStoreResult.value.writeToolOutput(record.id, 't1' as never, 'call-2' as never, Buffer.from('z'));
+  assert.equal(refused.ok, true, 'a budget-refused write is not an error');
+  const opened = await secondStoreResult.value.openToolOutput(record.id, 't1' as never, 'call-2' as never);
+  assert.equal(opened.ok, false, 'the rehydrated tally already reflects the 20 bytes on disk');
+});
+
+test('S23.6 — attachments are not bounded by the tool-output budget', async () => {
+  const { store } = await newStoreWithToolOutputCap(1);
+  const record = sessionRecord('sess-s23-4');
+  await store.createSession(record);
+
+  // The tool-output budget is already exhausted...
+  const wrote = await store.writeToolOutput(record.id, 't1' as never, 'call-1' as never, Buffer.from('xx'));
+  assert.equal(wrote.ok, true);
+  const opened = await store.openToolOutput(record.id, 't1' as never, 'call-1' as never);
+  assert.equal(opened.ok, false, 'sanity: the tool-output budget did refuse the blob above');
+
+  // ...but an attachment, an unrelated directory and cap, still writes normally.
+  const attached = await store.writeAttachment(record.id, 't1' as never, 'att-1' as never, Buffer.from('hello'), 'text/plain');
+  assert.equal(attached.ok, true);
+  const openedAttachment = await store.openAttachment(record.id, 't1' as never, 'att-1' as never);
+  assert.equal(openedAttachment.ok, true);
 });

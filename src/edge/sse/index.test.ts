@@ -96,7 +96,7 @@ async function makeEdge(
       auditPageMax: 200,
       reviewBodyBytes: 1024,
       requisitionTextBytes: 1024,
-      standingRuleBytes: 1024, attachmentBytes: 10485760, attachmentCount: 5,
+      standingRuleBytes: 1024, attachmentBytes: 10485760, attachmentCount: 5, sessionToolOutputBytes: 10485760,
     },
     sessionCookieMaxAgeSeconds: 2592000,
     includeRaw: false,
@@ -299,7 +299,7 @@ describe('S13 — POST/GET /api/requisitions, POST /api/requisitions/:id/decisio
           auditPageMax: 200,
           reviewBodyBytes: 1024,
           requisitionTextBytes: 8,
-          standingRuleBytes: 1024, attachmentBytes: 10485760, attachmentCount: 5,
+          standingRuleBytes: 1024, attachmentBytes: 10485760, attachmentCount: 5, sessionToolOutputBytes: 10485760,
         },
       },
       undefined,
@@ -399,7 +399,7 @@ describe('S15 — POST/GET /api/reviews, POST /api/reviews/:id, POST /api/review
           auditPageMax: 200,
           reviewBodyBytes: 8,
           requisitionTextBytes: 1024,
-          standingRuleBytes: 1024, attachmentBytes: 10485760, attachmentCount: 5,
+          standingRuleBytes: 1024, attachmentBytes: 10485760, attachmentCount: 5, sessionToolOutputBytes: 10485760,
         },
       },
       undefined,
@@ -588,7 +588,7 @@ describe('S2.10 — SSE retry hint', () => {
     const h = await makeEdge(undefined, {
       caps: {
         ringCapacity: 500, toolResultBytes: 65536, subscriberQueueHighWater: 1000,
-        keepaliveMs: 15000, auditPageMax: 200, reviewBodyBytes: 1024, requisitionTextBytes: 1024, standingRuleBytes: 1024, attachmentBytes: 10485760, attachmentCount: 5,
+        keepaliveMs: 15000, auditPageMax: 200, reviewBodyBytes: 1024, requisitionTextBytes: 1024, standingRuleBytes: 1024, attachmentBytes: 10485760, attachmentCount: 5, sessionToolOutputBytes: 10485760,
       },
     });
     const id = await newSession(h, 'r1');
@@ -605,7 +605,7 @@ describe('S2.10 — SSE keepalive', () => {
     const h = await makeEdge(undefined, {
       caps: {
         ringCapacity: 500, toolResultBytes: 65536, subscriberQueueHighWater: 1000,
-        keepaliveMs: 60, auditPageMax: 200, reviewBodyBytes: 1024, requisitionTextBytes: 1024, standingRuleBytes: 1024, attachmentBytes: 10485760, attachmentCount: 5,
+        keepaliveMs: 60, auditPageMax: 200, reviewBodyBytes: 1024, requisitionTextBytes: 1024, standingRuleBytes: 1024, attachmentBytes: 10485760, attachmentCount: 5, sessionToolOutputBytes: 10485760,
       },
     });
     const id = await newSession(h, 'k1');
@@ -1170,7 +1170,7 @@ const S9_CAPS: Config['caps'] = {
   auditPageMax: 200,
   reviewBodyBytes: 1024,
   requisitionTextBytes: 1024,
-  standingRuleBytes: 1024, attachmentBytes: 10485760, attachmentCount: 5,
+  standingRuleBytes: 1024, attachmentBytes: 10485760, attachmentCount: 5, sessionToolOutputBytes: 10485760,
 };
 
 describe('S9.2/S9.3/S9.5 — GET .../tool-output/:turnId/:callId', () => {

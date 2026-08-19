@@ -1,6 +1,6 @@
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import { createReadStream } from 'node:fs';
-import { link, mkdir, open, readdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { link, mkdir, open, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { createInterface } from 'node:readline';
 import path from 'node:path';
 import type {
@@ -69,6 +69,36 @@ function isSafePathSegment(name: string): boolean {
     !name.includes('\0') &&
     name === path.basename(name)
   );
+}
+
+// (D162, S23) The tally is never held in memory — it is recomputed from the directory on
+// every write, which is what makes it survive a restart with no rehydration step and rules
+// out a second counter that could disagree with the directory it is meant to describe.
+async function toolOutputBytesUsed(storageRoot: string, sessionId: SessionId): Promise<number> {
+  const dir = path.join(sessionDir(storageRoot, sessionId), 'tool-output');
+  let turnDirs: string[];
+  try {
+    turnDirs = await readdir(dir);
+  } catch {
+    return 0;
+  }
+  let total = 0;
+  for (const turnDir of turnDirs) {
+    let callFiles: string[];
+    try {
+      callFiles = await readdir(path.join(dir, turnDir));
+    } catch {
+      continue;
+    }
+    for (const callFile of callFiles) {
+      try {
+        total += (await stat(path.join(dir, turnDir, callFile))).size;
+      } catch {
+        continue;
+      }
+    }
+  }
+  return total;
 }
 
 // Temp-file-then-atomic-rename, in the same directory so the rename is on one volume.
@@ -561,6 +591,14 @@ export async function createStore(config: Config): Promise<Result<Store, StoreEr
       const filePath = path.join(dir, callId);
       if (!isSafePathSegment(turnId) || !isSafePathSegment(callId)) {
         return ioError(filePath, 'id is not a single path segment');
+      }
+      // (D162, S23) Past the session's tool-output budget the blob is withheld, not an
+      // error: the caller's envelope is built independently of this write's outcome (S9.1),
+      // and the absent blob is answered by the fetch route's existing `no_such_output` path
+      // (S9.5) rather than a new one. Nothing already written is evicted to make room.
+      const used = await toolOutputBytesUsed(storageRoot, sessionId);
+      if (used + bytes.length > config.caps.sessionToolOutputBytes) {
+        return { ok: true, value: undefined };
       }
       try {
         await mkdir(dir, { recursive: true });

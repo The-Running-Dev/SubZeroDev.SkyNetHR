@@ -586,6 +586,12 @@ export interface Caps {
   readonly standingRuleBytes: number; // rejection threshold for one StandingRuleExpression
   readonly attachmentBytes: number; // (D160) rejection threshold, decoded, per attachment
   readonly attachmentCount: number; // (D160) rejection threshold, attachments per message
+  // Total blob bytes one session may store. Past it the blob is not written, the envelope
+  // still carries `truncated: true` and the true pre-truncation size, and the fetch route
+  // answers `404 no_such_output` exactly as S9.5 already specifies. Nothing already written
+  // is ever evicted, and the rule does not reach `attachments/` (D160): a tool blob is a
+  // re-runnable command's output, an attachment is the operator's only copy.
+  readonly sessionToolOutputBytes: number;
 }
 
 export interface Config {
