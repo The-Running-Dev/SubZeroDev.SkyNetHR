@@ -3495,6 +3495,34 @@ Rejected: **deferring again with a stated threshold.** Honest, and it leaves a q
 turns out to be answerable now, on evidence already in the tree.
 Reversibility: cheap. Nothing is built that an index would later have to be retrofitted around; a
 sidecar remains addable if a fold, not a seek, ever becomes the bound.
+### 2026-08-19 — D164 `Start-AgentSession.ps1` is development tooling and is not reconciled against the product
+Context: `10-design.md` open question 10 and issue #17 held that `tools/Start-AgentSession.ps1`
+(D14) is "unreconciled against this architecture" — that it assumes a local interactive terminal
+rather than the server/SSE/adapter shape D1 to D12 settled on — and that reconciling it should
+wait until a slice first needs a CLI launcher.
+Chosen: **there is nothing to reconcile, because the script is not part of the product.** Its own
+header states its three jobs: routing an agent-kit slash command to the model family
+`AGENTS.md § Command routing` prescribes, refusing to carry a session across a boundary
+`§ Session boundaries` forbids, and launching it in the project directory. It is a developer's
+tool for driving *this repository's own development*, sitting in `tools/` beside
+`Test-DesignDrift.ps1` and `Measure-Session.ps1`, and gated with them by S19.11's Pester job.
+Nothing about the server, the SSE edge or the adapter boundary bears on it, and a CLI launcher for
+the product remains unbuilt and unasked-for.
+**The confusion has a traceable source and it is worth naming, because it is what will cause the
+question to be asked again.** D14 justified relocating the script here on the grounds that "its
+subject — supervising agent sessions — is this repo's concern, not the kit's". That sentence reads
+as the *product's* session supervision, which is exactly what this repository is about. It is not
+what the script does: those are the *developer's* agent sessions. Two senses of "agent session",
+and open question 10 inherited the wrong one.
+Rejected: **reconciling it against the server/SSE/adapter architecture.** It would build a product
+CLI launcher no definition-of-done item asks for, out of a script that does something else.
+Rejected: **moving it back to `SubZeroDev.AgentKit`.** There is a real argument for it — if the
+script's subject is routing `AGENTS.md`'s own commands, that is the kit's subject, and D14's stated
+reason rests on the same conflation this decision identifies. It is declined because a re-reading
+of an unchanged file is not new evidence, and *Budget discipline* forbids relitigating a signed-off
+decision without some. Recorded here so the argument is retained rather than rediscovered.
+Reversibility: cheap. Nothing is built or moved; a later decision to relocate the script is a pure
+move, exactly as D14 was.
 
 ## Open
 
