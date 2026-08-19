@@ -1,0 +1,81 @@
+# The deployment artifact (design/90-decisions.md, 2026-08-19 — "The deployment artifact
+# borrows the host's authenticated Claude CLI"). Pulls the image `.github/workflows/
+# publish.yml` already built and pushed to GHCR — never builds. docker-compose.dev.yml is
+# the local-development counterpart; it has `build:` and a deliberately different image
+# name so a local `up --build` there can never tag something as this deployable image.
+#
+#   docker compose pull && docker compose up -d
+#
+# Deliberately not a Compose override layer over the dev file — both stand alone and are
+# read top-to-bottom on their own (SubZeroDev.Adventures/docker-compose.yml's header makes
+# the same call, for the same reason).
+#
+# TLS and public routing are not this file's to declare (design/00-brief.md's "Hosting the
+# model" non-goal covers the model only, but the brief's Constraints already draw this
+# narrower boundary: "no inbound internet exposure assumed. Deployment sits behind either a
+# reverse proxy that authenticates, or a LAN boundary"). This service joins the
+# pre-existing `proxy-net` and nothing more — not what else is on it, not what terminates
+# TLS in front of it — the same boundary SubZeroDev.com, SubZeroDev.Blog's blog-mcp and
+# SubZeroDev.Adventures each draw in their own deployment file.
+#
+# Operator prerequisites, none of them handled here:
+#   - `proxy-net` must already exist (`docker network create proxy-net`). Declared
+#     `external: true`, so Compose fails fast rather than silently creating an isolated
+#     network the reverse proxy is not attached to.
+#   - Every variable below with a `:?` interpolation and no default. Deployed via
+#     Portainer, set these in the stack's own "Environment variables" — Portainer feeds
+#     them into `${...}` interpolation directly and never writes a `.env` file, so an
+#     `env_file:` directive on the service below would break under Portainer even though
+#     it works from a manual `docker compose` invocation (the same reasoning
+#     SubZeroDev.Adventures/docker-compose.yml and SubZeroDev.Blog/docker-compose.yml both
+#     record). Running this file by hand instead, copy a `.env` file next to it; Compose
+#     loads that automatically for the same interpolation.
+#   - `WORKSPACE_ROOTS_HOST_DIR` and `CLAUDE_CREDENTIALS_DIR`, the two host paths bind-
+#     mounted below. There is no sensible default for either — they are this specific
+#     host's project tree and this specific operator's already-authenticated `claude` CLI
+#     state (design/00-brief.md's "Hosting the model" non-goal: no vendor credential lives
+#     in the image itself).
+#   - Pick an `AUTH_MODE` (design/90-decisions.md D3) and set the variables it needs.
+#     `proxy-header` needs `AUTH_USER_HEADER` and `TRUST_PROXY`; `open-webui` needs those
+#     plus `AUTH_SESSION_HEADER`; `shared-secret` needs `AUTH_COOKIE_NAME` and
+#     `AUTH_SECRET`. `src/config/index.ts` refuses to start on a routable bind with a
+#     header-trusting mode and no `TRUST_PROXY` entry (S2.8) — that refusal is the
+#     deployment's own safety net, not something this file re-implements.
+
+services:
+  skynet-hr:
+    image: "${SKYNET_HR_IMAGE:-ghcr.io/the-running-dev/skynet-hr:latest}"
+    pull_policy: always
+    container_name: skynet-hr
+    restart: unless-stopped
+    environment:
+      BIND_HOST: 0.0.0.0
+      BIND_PORT: "3000"
+      AUTH_MODE: "${AUTH_MODE:?Set AUTH_MODE to proxy-header, open-webui or shared-secret}"
+      AUTH_USER_HEADER: "${AUTH_USER_HEADER:-}"
+      AUTH_SESSION_HEADER: "${AUTH_SESSION_HEADER:-}"
+      AUTH_COOKIE_NAME: "${AUTH_COOKIE_NAME:-}"
+      AUTH_SECRET: "${AUTH_SECRET:-}"
+      TRUST_PROXY: "${TRUST_PROXY:-}"
+      WORKSPACE_ROOTS: /workspaces
+      STORAGE_ROOT: /data
+      ALLOWED_ORIGINS: "${ALLOWED_ORIGINS:?Set ALLOWED_ORIGINS to the console's own origin(s), comma-separated}"
+      SESSION_COOKIE_MAX_AGE_SECONDS: "${SESSION_COOKIE_MAX_AGE_SECONDS:-}"
+      SESSION_TOKEN_BUDGET: "${SESSION_TOKEN_BUDGET:-}"
+      # D10: standalone deployment streams over SSE; behind a proxy that buffers or does
+      # not pass through `text/event-stream`, set EDGE=ws instead.
+      EDGE: "${EDGE:-sse}"
+    volumes:
+      - "${WORKSPACE_ROOTS_HOST_DIR:?Set WORKSPACE_ROOTS_HOST_DIR to the project tree this deployment is allowed to open sessions against}:/workspaces"
+      - "skynet-hr-storage:/data"
+      - "${CLAUDE_CREDENTIALS_DIR:?Set CLAUDE_CREDENTIALS_DIR to this host's already-authenticated claude CLI credential directory, e.g. ~/.claude}:/home/node/.claude"
+    networks:
+      - proxy-net
+
+volumes:
+  skynet-hr-storage:
+
+networks:
+  # Not created here — see the operator prerequisites above.
+  proxy-net:
+    external: true

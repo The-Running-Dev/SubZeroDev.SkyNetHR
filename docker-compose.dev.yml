@@ -1,0 +1,46 @@
+# Local-development Compose file: builds from source. The repository root's
+# docker-compose.yml is the deployment counterpart; it pulls the published GHCR image and
+# builds nothing (see that file's header, and SubZeroDev.Blog's tools/blog-mcp/docker-
+# compose.yml + SubZeroDev.Adventures' server/docker-compose.yml for the same build-vs-
+# pull split — this repo keeps both files at the root, rather than nesting this one under a
+# subdirectory, because the Dockerfile's build context is already the whole repository and
+# there is no self-contained subtree to nest it under, unlike those two).
+#
+#   docker compose -f docker-compose.dev.yml up -d --build
+#
+# Three bind mounts an operator must point at real host paths before starting:
+#   WORKSPACE_ROOTS_HOST_DIR   a throwaway project directory the console is allowed to
+#                              open sessions against (design/00-brief.md's jail, D4)
+#   STORAGE_ROOT_HOST_DIR      where session transcripts, checkpoints and the audit log
+#                              persist across container restarts
+#   CLAUDE_CREDENTIALS_DIR     the host's already-authenticated `claude` CLI state
+#                              (typically ~/.claude) — this container holds no vendor
+#                              credential of its own (design/00-brief.md's "Hosting the
+#                              model" non-goal); it borrows the operator's own instead of
+#                              baking one in.
+#
+# AUTH_MODE defaults to shared-secret here only because it needs no reverse proxy to test
+# locally — src/config/index.ts still refuses to start with none configured (S2.8).
+
+services:
+  skynet-hr:
+    build:
+      context: .
+    image: skynet-hr:dev
+    container_name: skynet-hr-dev
+    environment:
+      BIND_HOST: 0.0.0.0
+      BIND_PORT: "3000"
+      AUTH_MODE: "${AUTH_MODE:-shared-secret}"
+      AUTH_COOKIE_NAME: "${AUTH_COOKIE_NAME:-skynet_hr_session}"
+      AUTH_SECRET: "${AUTH_SECRET:?Set AUTH_SECRET to a throwaway local dev value}"
+      WORKSPACE_ROOTS: /workspaces
+      STORAGE_ROOT: /data
+      ALLOWED_ORIGINS: "${ALLOWED_ORIGINS:-http://localhost:3000}"
+      EDGE: "${EDGE:-sse}"
+    ports:
+      - "${SKYNET_HR_PORT:-3000}:3000"
+    volumes:
+      - "${WORKSPACE_ROOTS_HOST_DIR:?Set WORKSPACE_ROOTS_HOST_DIR to a test project directory}:/workspaces"
+      - "${STORAGE_ROOT_HOST_DIR:-./.data/dev}:/data"
+      - "${CLAUDE_CREDENTIALS_DIR:?Set CLAUDE_CREDENTIALS_DIR to your host claude CLI's credential directory, e.g. ~/.claude}:/home/node/.claude"
