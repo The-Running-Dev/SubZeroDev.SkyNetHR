@@ -3252,6 +3252,44 @@ in `src/` changed to produce them, and none of `design/00-brief.md`, `design/20-
 `design/30-slices.md` needed a word altered — the "Hosting the model" non-goal already drew the
 boundary this artifact stays inside of.
 
+### 2026-08-19 — D159 `ToolCall.summary` is the adapter's, and D109 already governed it
+Context: `20-contract.md § Unresolved` 4 carried the owner of `ToolCall.summary` as open, calling
+the adapter's authorship "the one place that reading is uncomfortable" — vendor code producing a
+display string. It has sat open since the contract was first derived. What the item does not say is
+that the identical question was answered three days later for a sibling field: D109 asked whether
+the tool-to-string projection behind `matchTarget` belongs to the adapter or to `session-manager`,
+and ruled for the adapter, because a projection table is tool-shape knowledge and
+`Bash`/`Read`/`Edit`/`Write` are one vendor's vocabulary — "a table there hard-codes Claude's
+vocabulary into vendor-neutral code and is wrong the moment another adapter ships".
+Chosen: the adapter owns `summary`, and this is recorded as decided rather than tolerated. D109's
+argument transfers without modification: summarising a tool call in one line requires knowing which
+field of that tool's input is the interesting one, which is the same table by a different name. The
+tree already reflects it and reflects the kinship — `summariseToolCall` sits in its own module
+beside the Claude adapter, `summariseCommand` beside the Codex one, and `projectMatchTarget` shares
+`BASH_COMMAND_FIELD` with the summariser precisely "so the two can't silently disagree about it".
+**A constraint is added rather than left implied: `summary` is display-only.** Above `adapters/*`
+it is rendered as a text node and nothing else — no parsing, no matching, nothing persisted or
+security-relevant derived from it (I48). That is what bounds the cost of vendor code producing a
+display string: it makes the string's shape non-contractual, so an adapter may change how it reads
+without breaking a consumer. The invariant was checked against the tree before it was written, not
+asserted: `client/render.js` renders it with `el(doc, 'div', 'tool__summary', data.summary)` and
+tests only whether it is empty, which is a display decision and is why I48 permits that one case
+explicitly rather than leaving a true statement looking like a violation.
+Rejected: **moving it to `session-manager`**. It reopens D109 with no new evidence and reintroduces
+the exact boundary violation D109 refused.
+Rejected: **removing `summary` from the wire and letting the client compose one from `name` and
+`input`.** It relocates tool-shape knowledge into the client, which S2.11 forbids outright — a
+search of client sources for `claude` and `codex` must return nothing, and a per-tool field table is
+that vocabulary in all but spelling.
+Rejected: **deriving `summary` above the adapter from `name` + `matchTarget`.** Superficially
+attractive, since it would delete a field and reuse a projection that already exists. It fails
+twice: `matchTarget` is `null` for every tool outside Claude's four mapped rows while a summary must
+exist for all of them, and it couples a display string to a security primitive that I43 and I46
+require be matched anchored and untruncated. A change to how a summary looks would then bear on the
+field the standing-rule grammar matches against.
+Reversibility: cheap. `summary` stays where it already is; the change is a settled owner, a stated
+constraint and one invariant.
+
 ## Open
 
 Staging only. Once an item becomes an issue it leaves this list.

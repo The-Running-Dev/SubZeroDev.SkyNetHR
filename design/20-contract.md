@@ -358,7 +358,8 @@ interface ToolCall {
   readonly callId: CallId;
   readonly name: string;
   readonly input: Readonly<Record<string, unknown>>;
-  readonly summary: string;   // one line, server-rendered, safe to show collapsed
+  readonly summary: string;   // one line, adapter-rendered, safe to show collapsed. Display only:
+                              // nothing above `adapters/*` may parse it or branch on it (I48, D159)
 }
 
 interface ToolResult {
@@ -1675,6 +1676,7 @@ it; where two are named, the second is where a violation would first be observab
 | I45 | A standing rule exists only in its session's in-memory state. Nothing writes one to disk, and a session rehydrated at boot holds none | `session-manager` |
 | I46 | `match` reads only `rule`, `request.tool` and `request.matchTarget`. It never reads `input`, and no tool name appears in `session-manager` | `session-manager` |
 | I47 | `updatedPermissions` is never written to a child's stdin, under any decision or scope | `adapters/*`, `session-manager` |
+| I48 | `ToolCall.summary` is display-only: above `adapters/*` it is rendered as a text node and nothing else. No module parses it, matches against it, or derives anything persisted or security-relevant from it; its shape is not contractual. Testing it for empty, to decide whether to show the line at all, is display and is permitted | `adapters/*`, `session-manager`, `client` |
 
 **I40, I41 and I42 were never allocated, and the gap is left open rather than closed.** The
 numbering jumps from I39 to I43 and nothing is missing. Ids here are cited by number in
@@ -1963,11 +1965,16 @@ are new in this pass and each names the issue that carries it.
    the three rows are filled: there is no wire-level `tool.call` / `tool.result` pair on either
    interface, and the adapter synthesises it from one item's two lifecycle states. What the
    experiment exposed instead is carried as 12 and 13 below. (#14, #18)
-4. **`ToolCall.summary`'s renderer.** The design calls it "server-rendered" and names no
-   owner. It is emitted by the adapter in the shape above, which makes it vendor code
-   producing a display string — the one place that reading is uncomfortable. It is not
-   moved here because moving it would put tool-shape knowledge in the session manager, which
-   is exactly what the vendor boundary forbids. (#23)
+4. **Resolved by D159.** `ToolCall.summary` is the adapter's, and D109 had already governed it:
+   the tool-to-string projection behind `matchTarget` faced the identical question and was ruled
+   the adapter's, because a per-tool field table is one vendor's vocabulary and hard-codes it into
+   vendor-neutral code. Summarising a call in one line needs the same table under a different name.
+   The discomfort this item recorded — vendor code producing a display string — is bounded rather
+   than removed, by I48: `summary` is display-only, nothing above `adapters/*` parses or branches on
+   it, and its shape is not contractual, so an adapter may change how it reads without breaking a
+   consumer. Rejected alternatives are in D159; the sharpest is deriving it from `name` +
+   `matchTarget`, which fails because `matchTarget` is `null` outside Claude's four mapped rows and
+   because it would couple a display string to the field I43 and I46 match against. (#23)
 5. **Resolved by S12.** `session-manager.readAudit` serves the route, delegating straight to
    `Store.readAuditPage`; `session-manager` was chosen over `records` because `records` is
    tier two and does not exist when tier one's `GET /api/audit` must already work, and every
