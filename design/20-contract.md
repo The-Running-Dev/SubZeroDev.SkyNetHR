@@ -1381,6 +1381,21 @@ The SSE edge expresses this by writing no `id:` line for such a frame; on the We
 body's `seq` is the only resume signal a client has, so the rule is the contract's rather than a
 framing detail.
 
+**A session whose durable store has died or been deleted delivers its last few envelopes live and
+only live, and they do consume a `seq`** (D170). There are two such paths and both end a session:
+a spill append that failed (D41) — `permission.resolved / cancelled_process_exit` for each
+outstanding request, `turn.ended / storage_failure`, `session.ended`, `session.notice / error` —
+and a partial delete (D25), which delivers `error / session_delete_incomplete` after the session
+directory is already gone. In both, the file these would be appended to no longer exists, so there
+is no store for them to enter and no replay for them to appear in. **The consequence a client is
+entitled to know is that a delivered `seq` is not proof of a replayable envelope**, on these two
+paths and nowhere else. They are the opposite of a gap frame rather than another instance of it: a
+gap restates a watermark and takes no number, these take a number and advance `lastSeq` — which is
+deliberate, and is what stops a client that saw them live being told, on its next reconnect, that
+its resume point is past the end of a history it already holds. Neither I1 nor I2 is weakened: I1
+governs what `emit` assigns and `emit` produces none of these, and the ring is dropped before the
+first of them is delivered, so it never holds an envelope the spill will not.
+
 A comment line (`: keepalive`) every `Caps.keepaliveMs` keeps intermediaries from closing an idle
 stream, and **is what lets a client tell a silent agent from a dead connection** — which is what
 makes D21's no-server-side-timer rule cost nothing on the wire.
