@@ -3737,6 +3737,69 @@ Rejected: recording the divergence and changing neither side. The alternative D1
 D149 and D169 each rejected for the same reason.
 Reversibility: cheap. Prose plus this entry; no code moves.
 
+### 2026-08-20 — D171 `contract` may declare a discriminator, not only an enumeration, and `isFrame` is one
+Context: `src/contract/index.ts` exports `isFrame`, a type predicate over `Envelope | Frame`,
+read by `session-manager` and `edge/sse`. Both documents say the module exports no such thing:
+`20-contract.md § Public surface § contract` reads "Types, plus **one runtime enumeration**:
+`RATINGS`", and `10-design.md § Module boundaries` said "Types only, no runtime" — a cell D150
+never updated, corrected in this pass. D150 narrowed the property deliberately, to the
+enumeration of a closed union a validator must test membership of, and required each such
+export to be declared in the contract like any other public interface. `isFrame` is neither an
+enumeration nor declared, and D168, which introduced frames, does not mention it.
+Chosen: the contract changes. The frame-versus-envelope split is contract knowledge — I51
+*defines* a frame as an envelope minus `seq` — so the discriminator belongs beside the types it
+discriminates, and one canonical predicate is what D150's own anti-drift argument asks for. The
+declared property widens once more and stays checkable: `contract` exports types, plus the
+enumeration of a closed union a validator must test membership of, plus the discriminator for a
+union the type system cannot separate structurally; each such export is declared there by name.
+**The amendment is not made in this pass**, exactly as D150 declined to make its own: adding a
+public interface `20-contract.md` does not carry is `/contract`'s, `opus`/`high`. Staged in
+`## Open`.
+Rejected: **moving `isFrame` to `session-manager`**, with `edge/sse` importing it over an edge the
+module graph already draws. It keeps both documents true with no amendment. Rejected because a
+predicate over `contract`'s own types would then live in the largest module in the system, and
+because `edge/sse` would gain a concrete import where it takes the manager by injection today.
+Rejected: **inlining `!('seq' in envelope)` at both call sites.** Smallest tree change, no
+amendment. Rejected because two copies of the I51 discriminator is the drift D150's `VENDORS`
+argument was written against, and a third site is one slice away.
+Rejected: recording it and changing neither. The alternative D142, D144, D148, D149, D150, D169
+and D170 each rejected for the same reason — it leaves a grep-checkable sentence false, which is
+worse than an unstated one because it invites a reader to trust it.
+Reversibility: cheap. Prose plus one declared function; nothing persisted and no signature moves.
+
+### 2026-08-20 — D172 An ignore list is a list, and the Claude adapter's two inline drops join it
+Context: `20-contract.md § Vendor mapping — Claude` states the rule as thirteen mapped rows plus a
+**named** ignore list, and then: "Anything outside both the thirteen rows and that list still
+raises `adapter_unknown_record`, non-fatally, with the record preserved in `raw`." Two paths in
+`src/adapters/claude/index.ts` return silently instead, neither on a named list — a
+`control_request` whose `subtype` is not `can_use_tool`, and a `stream_event` →
+`content_block_delta` whose `delta.type` is not `text_delta` (`thinking_delta`,
+`input_json_delta`). The second is commented as though it were on `IGNORED_STREAM_EVENT_TYPES`
+and is not. The Codex adapter has no equivalent: every drop there goes through
+`IGNORED_APP_SERVER_METHODS` or `IGNORED_ITEM_TYPES`.
+Chosen: the code changes. Both cases become members of named ignore sets, so the contract's rule
+stays literally true and the set of things this adapter swallows stays auditable in one place —
+which is the whole value D92 attributed to the list. Implementation against a settled contract,
+so `/fix`'s tier, `sonnet`/`medium`. Staged in `## Open`.
+Rejected: **widening the contract's prose** to permit silent drops of unmapped sub-shapes of a
+mapped record type. Cheapest in the tree and changes no behaviour. Rejected because "outside both
+raises" is the property that made the list worth having, and a carve-out for sub-shapes admits
+every future inline drop without review.
+Rejected: **raising `adapter_unknown_record` for both**, which is what the contract already says
+and needs no document change at all. Rejected because with `streamDeltas` on, every thinking block
+and every streamed tool input would put a diagnostic line in front of the operator on every turn —
+the failure D92 wrote the ignore list to prevent.
+Rejected: recording it and changing neither, for the reason D171 gives.
+Reversibility: cheap. Three strings and two conditions; nothing persisted.
+
 ## Open
 
 Staging only. Once an item becomes an issue it leaves this list.
+
+- **Declare `isFrame` in `20-contract.md § Public surface § contract`** (D171). Widen the
+  module's declared property to admit the discriminator for a union the type system cannot
+  separate structurally, and name `isFrame` there as a public interface. `/contract`,
+  `opus`/`high`. `10-design.md § Module boundaries`' cell is already corrected.
+- **Put the Claude adapter's two inline drops on named ignore lists** (D172) —
+  `control_request` with a `subtype` other than `can_use_tool`, and `content_block_delta` with a
+  `delta.type` other than `text_delta`. `src/adapters/claude/index.ts`. `/fix`, `sonnet`/`medium`.
