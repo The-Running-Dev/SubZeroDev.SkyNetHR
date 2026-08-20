@@ -3795,3 +3795,43 @@ Reversibility: cheap. Three strings and two conditions; nothing persisted.
 ## Open
 
 Staging only. Once an item becomes an issue it leaves this list.
+
+### Whether `PermissionRequest` is a usable second transport for the Claude permission round trip
+
+D88 and D96 verified against the shipping CLI (2.1.226, and again at S10.1) that
+`--permission-prompt-tool stdio` emits no `control_request`/`can_use_tool` at all — the
+mechanism the contract's interactive model (D5, D27) and S1.1/S1.9/S4.2 are built on is dead on
+arrival, tracked upstream as the open `anthropics/claude-code#34046`. D108's grammar work
+proceeded anyway, on a local rule syntax that never depends on the vendor's wire shape.
+
+Claude Code separately ships a `PermissionRequest` hook: the CLI blocks the tool call (default
+timeout 600s) waiting for a decision returned as
+`hookSpecificOutput: { hookEventName: "PermissionRequest", decision: "allow"|"deny", reason }`.
+A shipped MIT-licensed plugin, `warpdotdev/claude-code-warp`, demonstrates it firing with
+`tool_name`/`tool_input` on stdin against a real session — evidence the mechanism itself is live
+on some installed version, independent of whether `--permission-prompt-tool stdio` is.
+
+This is not a proposal to switch — it is a question of whether the hook is a usable second
+transport worth a probe slice, in the shape S8.1, S10.1, S21.1, S25.1 and S26.1 already take
+(D165 is the closest precedent: it opens with the probe and stops for a decision before any
+adapter code). Five things the probe would need to answer, none of which can be settled by
+reading:
+
+1. Does the hook fire at all on the CLI version installed here — check against `claude
+   --version` first, since D88 and D108's dead channel is version-specific to what was probed
+   at the time, not necessarily to every future release.
+2. Does it fire for every tool call, or only some — DoD item 7 promises a record of every
+   approval, and a hook that only sometimes fires is not a substitute for the channel D5 models.
+3. Does the hook's payload carry anything resembling `permission_suggestions` — relevant to
+   D108's local `StandingRuleExpression` grammar, which forwards the vendor field unread
+   precisely because nothing has ever been observed to populate it.
+4. Whether wiring it in requires `claude --settings <file>` as a per-session file, rather than
+   argv JSON — relevant to D90's charset refusal on anything reaching a child's argv, and to
+   D91's Windows shell-launch path, both of which this would need to clear without reopening
+   either.
+5. Whether per-session `--settings` injection is the same act D5 already rejected once — a
+   persisted-grant approach — or is materially different and needs its own line saying so,
+   since D5's rejection was about *what* is granted, not about *how* a decision reaches the CLI.
+
+Sources: D5, D27, D88, D90, D91, D96, D107, D108, and
+https://code.claude.com/docs/en/hooks.
