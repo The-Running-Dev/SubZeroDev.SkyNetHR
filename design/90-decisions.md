@@ -3687,6 +3687,56 @@ already written becomes wrong. Going the other way once deltas are in the spill 
 spill with gaps or rewriting existing sessions' `events.ndjson`, and the ring-is-a-strict-suffix-
 of-the-spill invariant makes the intermediate state unrepresentable.
 
+### 2026-08-20 — D169 The attachment refusals are `session-manager`'s, and the documents named the edge
+Context: `10-design.md § Control flow 2` drew `edge : attachments? adapter.acceptsAttachments,
+count and size caps` and `20-contract.md § adapters/*` said "the edge reads it to refuse". All
+three refusals — `acceptsAttachments`, `Caps.attachmentCount`, `Caps.attachmentBytes` — are in
+`session-manager.message`, ahead of the turn-slot claim and inside the same unbroken synchronous
+block (I5). The edge's only attachment-shaped use of the caps is deriving a request body-size
+bound. The refusal a client sees is `422 bad_request` with nothing written either way, so this was
+never a behaviour difference; it was two documents naming the wrong module.
+Chosen: the documents change. An edge holds no reference to a live session's adapter — `EdgeDeps`
+carries `manager`, `records`, `config` and `identity`, and reaches `adapters` only for `VENDORS`
+(D126) — so an edge-side check needs a new method on `SessionManager` exposing an adapter
+capability. `10-design.md § Module boundaries` already justifies the `edge/http-common → adapters`
+arrow as membership testing *and nothing else*, so the tree matches that paragraph and these two
+statements were the outliers.
+Rejected: moving the check to the edge. It widens a public interface — `/contract`'s call — to
+relocate a check whose outcome is identical, and leaves attachment validation living in two places
+rather than one.
+Rejected: recording the divergence and changing neither side. The alternative D142, D144, D148 and
+D149 each rejected for the same reason: the next pass rediscovers it.
+Reversibility: cheap. Prose in two files; no code moves.
+
+### 2026-08-20 — D170 A dying session's last envelopes are live-only and do take a `seq`
+Context: `session-manager` has two paths that build an `Envelope`, assign it a `seq`, advance
+`record.lastSeq`, deliver it to the current subscribers, and touch neither the ring nor the spill:
+`deliverDirect`, which carries D41's storage-failure completion set, and `remove()`'s
+`error / session_delete_incomplete` (D25). So a delivered envelope carrying a `seq` is not always
+replayable. Nothing said so. `20-contract.md § Streaming` enumerated exactly two envelopes outside
+the durable stream — `replay_gap` (D156) and `message.delta` (D168) — and this is a third family
+with the opposite shape: a gap restates a watermark and consumes no number, these consume one.
+Chosen: state it, in `§ Streaming` beside the other two, and leave I1 and I2 alone. Both are
+literally true — I1 governs what `emit` assigns and `emit` produces none of these, and `emit`'s
+failure branch drops the ring before the first of them goes out, so the ring never holds an
+envelope the spill will not (I2). What was missing was the consumer-facing consequence, not an
+invariant. The behaviour itself is right: in both paths the file these would be appended to is dead
+or already deleted, so there is nothing to append to and nothing to replay from, and advancing
+`lastSeq` is what stops a client that saw them live being told on its next reconnect that its
+resume point is past the end of history it already holds.
+Rejected: **widening I1's exception clause to three items.** More complete, and it makes the
+property assertable in the module that owns it — but amending an invariant is a decision
+`AGENTS.md` routes to `/contract`, and I1's scope sentence is not false today, so the amendment
+would be restating in the invariant what the section beside it now says.
+Rejected: **routing both through `emitFrame` so they carry no `seq` at all**, matching
+`message.delta`. Structurally the cleanest — nothing delivered with a `seq` would then be
+unreplayable — and it changes the delivery shape of `turn.ended`, `session.ended` and `error` on
+paths every client already handles as envelopes, and gives up the `lastSeq` bump the reconnect
+check depends on. It is also implementation against a settled contract, which is `/fix`'s tier.
+Rejected: recording the divergence and changing neither side. The alternative D142, D144, D148,
+D149 and D169 each rejected for the same reason.
+Reversibility: cheap. Prose plus this entry; no code moves.
+
 ## Open
 
 Staging only. Once an item becomes an issue it leaves this list.

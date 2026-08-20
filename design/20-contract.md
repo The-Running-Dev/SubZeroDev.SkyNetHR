@@ -926,9 +926,12 @@ with, so `taskkill /T /F` is one step and the grace period has nothing to elapse
 either "you will be asked" or a standing sandbox banner. `sandbox` is the operator's choice and
 is validated by the adapter.
 
-**`acceptsAttachments` is a capability, not a vendor test** (D160). The edge reads it to refuse
+**`acceptsAttachments` is a capability, not a vendor test** (D160). It is read to refuse
 `attachments` with `422 bad_request` on a vendor whose transport carries no non-text content,
-which is a question about a capability and not about which vendor this is — so I20 holds.
+which is a question about a capability and not about which vendor this is — so I20 holds. **The
+reader is `session-manager`, not an edge**, along with the two attachment caps beside it: an edge
+holds no reference to a live session's adapter, and giving it one would put an adapter capability
+on `SessionManager`'s interface to relocate a check whose refusal is identical either way.
 
 **`VENDORS` is the one enumeration of `Vendor`'s members and it is declared beside
 `createAdapter`'s switch, not in `contract`** (D126), because a list that is not beside the
@@ -1378,6 +1381,21 @@ The SSE edge expresses this by writing no `id:` line for such a frame; on the We
 body's `seq` is the only resume signal a client has, so the rule is the contract's rather than a
 framing detail.
 
+**A session whose durable store has died or been deleted delivers its last few envelopes live and
+only live, and they do consume a `seq`** (D170). There are two such paths and both end a session:
+a spill append that failed (D41) — `permission.resolved / cancelled_process_exit` for each
+outstanding request, `turn.ended / storage_failure`, `session.ended`, `session.notice / error` —
+and a partial delete (D25), which delivers `error / session_delete_incomplete` after the session
+directory is already gone. In both, the file these would be appended to no longer exists, so there
+is no store for them to enter and no replay for them to appear in. **The consequence a client is
+entitled to know is that a delivered `seq` is not proof of a replayable envelope**, on these two
+paths and nowhere else. They are the opposite of a gap frame rather than another instance of it: a
+gap restates a watermark and takes no number, these take a number and advance `lastSeq` — which is
+deliberate, and is what stops a client that saw them live being told, on its next reconnect, that
+its resume point is past the end of a history it already holds. Neither I1 nor I2 is weakened: I1
+governs what `emit` assigns and `emit` produces none of these, and the ring is dropped before the
+first of them is delivered, so it never holds an envelope the spill will not.
+
 A comment line (`: keepalive`) every `Caps.keepaliveMs` keeps intermediaries from closing an idle
 stream, and **is what lets a client tell a silent agent from a dead connection** — which is what
 makes D21's no-server-side-timer rule cost nothing on the wire.
@@ -1612,13 +1630,13 @@ CLI does not run non-interactively and the stream-json transport never starts. O
 messages and `control_response` are single JSON lines written to stdin, **which stays open for
 the whole turn**.
 
-**The twelve rows are not the CLI's whole vocabulary, and the mapper must not treat them as one**
+**The thirteen rows are not the CLI's whole vocabulary, and the mapper must not treat them as one**
 (D92). The live stream carries records that are ordinary, harmless, and no part of this
 vocabulary; raising `error / adapter_unknown_record` for each would put a diagnostic line in
 front of the operator on every routine turn. The adapter therefore holds a named ignore list —
 top-level `rate_limit_event` and `control_response`, and the `system` subtypes `hook_started`,
 `hook_response`, `thinking_tokens` and `post_turn_summary` — and returns silently for those.
-Anything outside both the twelve rows and that list still raises `adapter_unknown_record`,
+Anything outside both the thirteen rows and that list still raises `adapter_unknown_record`,
 non-fatally, with the record preserved in `raw`. **The list is a vendor fact and lives with the
 vendor's adapter; adding to it is an adapter change, never a change to `ErrorEventKind`.**
 

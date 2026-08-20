@@ -27,7 +27,7 @@ const KILL_GRACE_MS = 2000;
 // does not render. Verified against a real CLI run (`design/findings/S1-claude-adapter.md`):
 // `rate_limit_event` and several `system` subtypes (`hook_started`, `hook_response`,
 // `thinking_tokens`, `post_turn_summary`, ...) are common, harmless, and no part of the
-// twelve-row vendor mapping — flagging them as `adapter_unknown_record` would spam the
+// thirteen-row vendor mapping — flagging them as `adapter_unknown_record` would spam the
 // operator with noise on every ordinary turn. Genuinely unrecognised `type`s still do
 // (S1.4).
 // (S21 fix) The Anthropic API validates an `image` content block's `media_type` against a
