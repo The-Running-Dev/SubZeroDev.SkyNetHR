@@ -47,7 +47,7 @@ The design's riskiest bets, and where each is exercised:
 
 | Bet | Exercised |
 |---|---|
-| The Claude CLI can be driven over stdio with stdin held open across a permission round trip | S1 (the wire, auto-denied), S4 (the feature) |
+| The Claude CLI can be driven over stdio with stdin held open across a permission round trip | S1 (the wire, auto-denied), S4 (the feature), S26 (against the real binary, which no earlier slice reached) |
 | The ring buffer is a strict suffix of the spill, so replay can be served from either | S3 |
 | A child's whole process tree can be terminated on Windows and on Linux | S5, and S7 reuses the same mechanism |
 | Codex exposes a live stream resembling its rollout schema | S8.1 |
@@ -72,9 +72,11 @@ S12's route and S18 on S10's held rules. **S19 is reachable as soon as S7 has la
 should be taken there rather than left to the end: everything after it is written against a
 suite that has still only ever run on one of the two supported platforms.
 
-**Seven slices open with a stop rather than with code.** S8.1, S10.1, S12.1, S13.1, S14.1,
-S15.1 and S16.2 — one each, in seven slices — name a question the design or the contract has
-not answered, and each says the slice stops until it does. That is the shape an unresolved
+**Ten slices open with a stop rather than with code.** S8.1, S10.1, S12.1, S13.1, S14.1,
+S15.1, S16.2, S21.1, S25.1 and S26.1 name a question the design, the contract, or the vendor's
+observed behaviour has not answered, and each says the slice stops until it does. **Two of them
+stop a second time after the probe reports** — S25.2 and S26.6 — because a measurement that
+settles what is possible does not settle what should be built. That is the shape an unresolved
 input has to take here: a criterion that is checkable, because the amendment either landed or
 it did not, rather than an implementer's guess wearing the amendment's clothes.
 
@@ -1420,6 +1422,108 @@ deciding S25.2 — this slice surfaces the measurement and stops.
 
 ---
 
+## S26 — Ask before you run it, against the real binary
+
+**Tier one, and it is brief item 4.** "Approve or deny a Claude tool-permission request, and have
+the agent continue" is a definition-of-done item, and today it is met against a stand-in: S4 built
+the whole approval path and S1.1, S1.9 and S4.2 are verified against a fixture CLI speaking the
+documented wire shape, because at 2.1.226 the real binary emitted no `can_use_tool` at all (D88,
+D96, #56). **It opens with a probe and stops a second time for a decision**, the shape S10, S21 and
+S25 already take, because the premise that probe would confirm is already contradicted by this
+repository's own evidence — see the note under S26.1.
+
+Delivers: An operator supervising a Claude session is actually asked before a tool runs — the
+approval prompt this console has always specified, working against the agent the operator really
+runs rather than against a stand-in — or, where the agent still will not ask before some of what it
+does, a written answer naming exactly which of its actions go unwatched, so nobody is told a
+session is supervised when part of it is not.
+
+Touches: `adapters/claude` (spawn arguments, and the decision path if it moves), `config`,
+`session-manager` (a second entry point into the `pending` map, only if S26.6 rules one in),
+`edge/*` (only if a decision reaches the server from outside the child), `contract` (a prerequisite,
+not a part — S26.7).
+
+Depends on: S1, S2, S4.
+
+Acceptance:
+  - S26.1 A written finding, committed before any transport code and before any spawn-argument
+    change, citing every command run and its observed output, against the real installed CLI with
+    its version named — answering whether `control_request` / `can_use_tool` fires under the flags
+    this server actually spawns with, and for which tools. **The premise is already in doubt and
+    this criterion settles it rather than assuming it**: D88's three probes at 2.1.226 (`Read`,
+    `Bash`, `Bash` under `--permission-mode manual`) saw no prompt at all, while S25's run 4 at
+    2.1.227 answered a real `can_use_tool` for `Write` and the tool then ran
+    (`design/findings/S25-token-streaming-probe.md`). Two readings are open and the finding must
+    name which holds: the upstream defect was fixed between those versions, or the prompt was
+    always tool-dependent and neither probe set covered the other's tools. Both cannot be true, and
+    the documents currently state only the first observation.
+  - S26.2 **Coverage is the finding, not the round trip.** For each `--permission-mode` the CLI
+    accepts, the finding lists every probed tool that prompted and every one that ran with no
+    prompt, over at least `Read`, `Write`, `Edit` and `Bash`, each run to completion so that a tool
+    which merely ran late is not recorded as one that ran unasked. A transport that misses a tool
+    is worse than no transport, because it reports a supervised session that partly is not one, so
+    a gap here is a result to be stated and not a probe to be re-run until it closes.
+  - S26.3 Only where S26.1 and S26.2 leave a gap: the same finding answers whether the vendor's
+    `PermissionRequest` hook fires under those same flags and whether it can carry an operator's
+    decision back. **The finding qualifies the name at every use** — the vendor's hook and this
+    repository's `PermissionRequest` type share it, the collision is the vendor's, and a finding
+    that leaves a reader to infer which one a sentence means is not usable evidence.
+  - S26.4 **The question that decides whether the hook is viable at all, answered before any of its
+    details.** A hook is a separate short-lived process, not a channel on the child's stdio, so an
+    operator's decision reaches it by a path this design has never specified. The finding states,
+    from observation, how a decision would reach that process and whether D26's ordering — the
+    audit record durable *before* the response reaches the child — survives the process boundary
+    that D33 and I11 were not written against. **Where it cannot be shown to survive, the hook is
+    not viable and the slice records it so**: S26.5 and the hook half of S26.6 are recorded blocked
+    rather than failed, and no partial transport is built to see how far it gets.
+  - S26.5 Only where S26.4 says the ordering survives: whether a hook can be injected for one
+    spawned session without writing into the operator's own settings. `--settings` accepts inline
+    JSON on 2.1.227 and is documented, so the mechanism looks reachable and whether a hook injected
+    that way actually fires is unverified. Asserted by observing the hook fire in a spawned session
+    while the operator's own settings file is byte-identical before and after.
+  - S26.6 **The slice stops a second time, for a decision, before any transport changes.** Two
+    questions, both `/design`'s at its own tier: whether the hook is adopted where S26.2 found a
+    gap, against what it costs — a second process on the approval path, a local surface that can
+    approve a tool call, and who may reach it; and whether a tool call arriving with no preceding
+    approval request is surfaced to the operator at all, given the console can see one on the wire
+    but has never been told to say anything about it. This slice may not settle either by
+    implementing one.
+  - S26.7 Any surface a hook process reaches gains a declared shape in `20-contract.md` before it
+    ships. That is a contract amendment at `/contract`'s tier; this slice may not introduce a
+    signature the contract does not carry, and the amendment landing is what makes this criterion
+    checkable.
+  - S26.8 Where S26.1 reports the round trip firing: allow and deny each round-trip to a **real**
+    `claude` child, on one real tool call run both ways, with the child's subsequent output recorded
+    for each — S1.1, S1.9 and S4.2 re-run against the real binary rather than the fixture, which is
+    what #56 has blocked since D88 and the only thing that closes it.
+  - S26.9 The fixture CLI stays and every assertion resting on it passes unchanged, re-run rather
+    than assumed. A working real binary does not retire the deterministic test path: D88 chose it
+    for reproducibility, not only for the defect, and both suites green is the criterion.
+  - S26.10 The ordering guarantees are asserted against the real binary and not only against the
+    fixture: the `AuditRecord` is fsync'd before the response reaches the child (I10, D26), the
+    `pending` delete is synchronous with the lookup so two answers in one tick produce exactly one
+    audit record and exactly one write (D33, S4.5), and every request has exactly one resolution
+    over a run containing at least three (I9, I11).
+  - S26.11 Any change to what this server spawns is configuration, defaulting to what it spawns
+    today: a deployment with the new setting off produces the same argument vector and the same
+    envelope sequence, element for element. The permission path is not re-pointed on the strength of
+    one probe.
+
+Out of scope: **Codex, and D5.** A restored Claude round trip is what D5 already assumes — D5 makes
+Codex `preauthorised` because Codex's runtime prompt is unreachable on `exec --json`, and says
+nothing this evidence touches. It is worth naming because "a runtime approval path was found" reads
+exactly like D5's own reversibility clause and is not it. Also out: standing rules and the matcher
+(S10 owns the grammar, and an auto-answer enters by the same path and needs no second one);
+**auditing the operator's own hooks**, which already run inside every session this server spawns and
+are already visible on the wire the adapter reads, a live property of today's build that is staged
+in `design/90-decisions.md § Open` and is its own issue whichever way this probe goes; fixing
+anthropics/claude-code#34046 or acting on `--permission-prompt-tool stdio` being accepted at 2.1.227
+while absent from `--help` — the probe records that, and what to do about an undocumented flag the
+permission path depends on is a decision, not a fix; inventing the shape of any surface a hook
+process would reach; and retiring the fixture CLI.
+
+---
+
 ## What no slice covers
 
 Stated so it is a decision rather than an omission. Every item below is already a GitHub issue
@@ -1470,5 +1574,6 @@ worse of the two irregularities. See S19 for why the verticality rule's purpose 
   aggregation. S16 covers the part with a source — burn and idle over a session's own event log.
   Whether the rest is in scope, and from what data, is unanswered.
 
-Next: run `/track` in a fresh session to open the issues for S12 to S18 and to sync the
-existing ones. `/slices` does not write to GitHub.
+Next: run `/track` in a fresh session to open the issues for S12 to S18 and for S26, to sync
+the existing ones, and to clear the `PermissionRequest` hook items from
+`design/90-decisions.md § Open` once S26's issue carries them. `/slices` does not write to GitHub.
