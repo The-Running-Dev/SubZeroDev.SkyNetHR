@@ -1656,13 +1656,14 @@ ever sent and this row is dead code.
 here, so that every match still produces a `permission.request` / `permission.resolved` pair and
 an audit record.
 
-**`permission_suggestions` stays forwarded unmapped, permanently rather than pending a decision**
-(D104, D108). The field is not merely un-mapped but **unobservable**: the `control_request` that
-would carry it has never appeared on this transport across two independent probes three days
-apart, and the upstream defect was stale-closed without a fix. A mapping cannot be written
-against a shape nobody has seen, so the adapter passes the array through as `readonly unknown[]`
-and nothing narrows it (I44). Deleting the field was considered and rejected: forwarding costs
-nothing and keeps the payload from being dropped silently if the channel ever starts firing.
+**`permission_suggestions` stays forwarded unmapped** (D104, D108). At the time of D108's two
+probes the field had never appeared on this transport, so no mapping could be written against a
+shape nobody had seen; S26.1 later observed it, populated, on every `control_request` for a
+state-mutating tool call (`design/findings/S26-real-permission-round-trip.md`), which reopens the
+premise D108 rested on without reopening D108's grammar choice itself — carried to
+`90-decisions.md § Open`. The adapter still passes the array through as `readonly unknown[]` and
+nothing narrows it (I44); forwarding costs nothing and keeps the payload from being dropped
+silently regardless of how that question resolves.
 
 **`matchTarget` is this adapter's projection table**, and it is the only place tool-shape
 knowledge is permitted to live (I46). It is emitted verbatim — no case folding, no separator
@@ -1696,12 +1697,13 @@ mixing it in would misreport burn. Probes and fixtures:
 `design/findings/S1-claude-adapter.md`. **The obligation stays the adapter's; no caller
 compensates for it.**
 
-**Claude's runtime approval is the one not observed on a live wire** (D88). Its handshake was read
-out of the prior art and is documented by the vendor; run against the installed CLI at 2.1.226,
-`--permission-prompt-tool stdio` emits no `can_use_tool` of any subtype and the tool simply
-executes. That is an open upstream defect, tracked since 2.1.6, with three probes recorded in
-`design/findings/S1-claude-adapter.md`. It does not reopen D5: **a vendor defect in a documented
-mechanism is behaviour to be restored, not a capability that was never there** (D96).
+**Claude's runtime approval fires for a state-mutating tool call and not for a read-only one**,
+under the default mode this server spawns with — observed against the real, installed CLI at
+2.1.228, driven through this adapter's own `send()` (D173, S26.1,
+`design/findings/S26-real-permission-round-trip.md`). D88's original probes (a `Read`, and a
+non-redirecting `Bash echo`) were both the safe case; the "no `can_use_tool` of any subtype"
+reading generalised past what those two commands could show. It does not reopen D5: the
+mechanism was never a capability that was not there (D96).
 
 ## Vendor mapping — Codex
 
@@ -1889,9 +1891,11 @@ never reappears.
    it adds operator-chosen content to the agent's context, which is the *confused agent* row with
    a known author. (#22)
 2. **Resolved by S10.1 and this pass** (D108–D110). Open question 8 is answered, and the answer
-   is narrower than "insufficient": `permission_suggestions` is **unobservable** — the
-   `control_request` carrying it has never appeared on this transport across two independent
-   probes, and the upstream defect was stale-closed unfixed. `StandingRuleExpression` is
+   is narrower than "insufficient": at the time of S10.1's probes `permission_suggestions` had
+   never appeared on this transport. S26.1 later observed it populated
+   (`design/findings/S26-real-permission-round-trip.md`), which reopens that premise without
+   reopening the grammar choice itself — carried to `90-decisions.md § Open`.
+   `StandingRuleExpression` is
    therefore a local grammar, `"<tool>:<pattern>"`, declared above with its full constraint;
    `parseStandingRule` and `match` are declared under `session-manager`; the tool-shape
    knowledge `match` would have needed moved to the adapter as `PermissionRequest.matchTarget`,
