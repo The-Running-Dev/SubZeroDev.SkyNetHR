@@ -3740,36 +3740,3 @@ Reversibility: cheap. Prose plus this entry; no code moves.
 ## Open
 
 Staging only. Once an item becomes an issue it leaves this list.
-
-- Does Claude Code's `PermissionRequest` hook fire under `-p --output-format stream-json`, and
-  can it carry an operator's decision back? It is a candidate for the workaround #56 already
-  admits, for a round trip that has never once been observed on this transport (D88, D96,
-  S10.1). The vendor's hook shares a name with this project's own `PermissionRequest` type; the
-  collision is theirs, and any finding has to say which one it means.
-- **A hook is a separate short-lived process, not a channel on the child's stdio.** So the
-  operator's decision reaches it by a path this design has never specified, and D26's ordering —
-  the audit record durable *before* the response reaches the child — must survive a process
-  boundary that D33 and I11 were not written against. This is the question that decides whether
-  the hook is viable at all, not a detail of it.
-- Can a hook be injected for one spawned session without writing into the operator's own
-  settings? `--settings <file-or-json>` is present in `claude --help` on 2.1.227 and documented
-  as taking inline JSON, so the mechanism looks reachable. Whether a hook injected that way
-  actually fires is unverified.
-- Which tool calls does the hook cover, and under which permission modes? A transport that
-  misses a tool is worse than no transport: it reports a supervised session that silently is not
-  one. The vendor documents coverage and a deciding JSON shape; none of it is verified here, and
-  the one vendor claim this repository did check independently turned out to be wrong.
-- `--permission-prompt-tool stdio` is accepted on 2.1.227 but absent from `--help` — both halves
-  verified directly, 2026-08-20. An undocumented flag is what D88's defect looks like from the
-  outside, and it is a poor foundation for the permission half of this design whichever
-  transport wins.
-- **A working hook would not reopen D5.** D5 makes Codex `preauthorised` because Codex's runtime
-  prompt is unreachable on `exec --json`; restoring Claude's round trip is what D5 already
-  assumes and says nothing about Codex. Worth stating because "a runtime approval hook was
-  found" reads exactly like D5's own reversibility clause, and is not it.
-- Operator-configured hooks already run inside every session this server spawns, and are already
-  visible on the wire the adapter reads — `system hook_started` / `hook_response` appear in
-  S10.1's own trace, and the child inherits `process.env` whole. Nothing audits them, and the
-  threat model treats that log as the artifact making multi-operator use defensible. A live
-  property of today's build rather than a question about the hook, and probably its own issue
-  whichever way the probe goes.
