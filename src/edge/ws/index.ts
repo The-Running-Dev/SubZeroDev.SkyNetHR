@@ -1,7 +1,7 @@
 import type { IncomingMessage, RequestListener, ServerResponse } from 'node:http';
 import type { Socket } from 'node:net';
 import { createHash } from 'node:crypto';
-import type { AttachmentId, CallId, ChecklistItemId, Envelope, Frame, SessionId, Seq, Subscription, TurnId } from '../../contract/index.js';
+import type { AttachmentId, CallId, ChecklistItemId, Envelope, Frame, RequisitionId, ReviewId, SessionId, Seq, Subscription, TurnId } from '../../contract/index.js';
 import { sendError } from '../error-envelope/index.js';
 import {
   type EdgeDeps,
@@ -152,7 +152,6 @@ function writeCloseFrame(socket: Socket, code: number, reason: string): void {
 
 export function createWsEdge(deps: EdgeDeps): WsRequestListener {
   const { config, identity, manager } = deps;
-  void deps.records; // tier two composes through it (D77); nothing in this slice reads it.
 
   const {
     handleCreate,
@@ -167,6 +166,14 @@ export function createWsEdge(deps: EdgeDeps): WsRequestListener {
     handleCheckpointRestore,
     handleAudit,
     handleLogin,
+    handleRaiseRequisition,
+    handleListRequisitions,
+    handleDecideRequisition,
+    handleCreateReview,
+    handleAppendReview,
+    handleFinaliseReview,
+    handleListReviews,
+    handleGetReview,
     handleChecklist,
     handleTickChecklistItem,
     handlePayroll,
@@ -390,6 +397,53 @@ export function createWsEdge(deps: EdgeDeps): WsRequestListener {
         }
         if (method === 'GET' && pathname === '/api/audit') {
           return handleAudit(req, res);
+        }
+        if (method === 'GET' && pathname === '/api/requisitions') {
+          return handleListRequisitions(req, res);
+        }
+        if (method === 'POST' && pathname === '/api/requisitions') {
+          return handleRaiseRequisition(req, res, owner);
+        }
+
+        const requisitionRoute = /^\/api\/requisitions\/([^/]+)\/decision$/.exec(pathname);
+        if (method === 'POST' && requisitionRoute !== null) {
+          let decodedRequisitionId: string;
+          try {
+            decodedRequisitionId = decodeURIComponent(requisitionRoute[1]!);
+          } catch {
+            return sendError(res, 'bad_request', 'requisition id is not a valid path segment', { field: 'requisitionId' });
+          }
+          return handleDecideRequisition(req, res, owner, decodedRequisitionId as RequisitionId);
+        }
+
+        if (method === 'GET' && pathname === '/api/reviews') {
+          return handleListReviews(req, res);
+        }
+        if (method === 'POST' && pathname === '/api/reviews') {
+          return handleCreateReview(req, res, owner);
+        }
+
+        const reviewFinaliseRoute = /^\/api\/reviews\/([^/]+)\/finalise$/.exec(pathname);
+        if (method === 'POST' && reviewFinaliseRoute !== null) {
+          let decodedReviewId: string;
+          try {
+            decodedReviewId = decodeURIComponent(reviewFinaliseRoute[1]!);
+          } catch {
+            return sendError(res, 'bad_request', 'review id is not a valid path segment', { field: 'reviewId' });
+          }
+          return handleFinaliseReview(req, res, owner, decodedReviewId as ReviewId);
+        }
+
+        const reviewRoute = /^\/api\/reviews\/([^/]+)$/.exec(pathname);
+        if (reviewRoute !== null) {
+          let decodedReviewId: string;
+          try {
+            decodedReviewId = decodeURIComponent(reviewRoute[1]!);
+          } catch {
+            return sendError(res, 'bad_request', 'review id is not a valid path segment', { field: 'reviewId' });
+          }
+          if (method === 'POST') return handleAppendReview(req, res, owner, decodedReviewId as ReviewId);
+          if (method === 'GET') return handleGetReview(req, res, owner, decodedReviewId as ReviewId);
         }
 
         const sessionRoute = /^\/api\/sessions\/([^/]+)(\/[^?]*)?$/.exec(pathname);
