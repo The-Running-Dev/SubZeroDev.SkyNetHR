@@ -56,6 +56,30 @@ test('S21.8/D160 — a Codex session declares acceptsAttachments: false', () => 
   assert.equal(result.value.acceptsAttachments, false);
 });
 
+// D146/D149 — the exec fallback cannot report usage, so it warns once at session start;
+// app-server can report usage and emits no such notice.
+test('D146/D149 — usage_unavailable is emitted once for exec, never for app-server', async () => {
+  process.env['SKYNET_CODEX_NO_APP_SERVER'] = '1';
+  const exec = makeAdapter();
+  assert.equal(exec.result.ok, true);
+  await waitUntil(() => eventsOf(exec.notifications, 'session.notice').length > 0);
+  const execNotices = eventsOf(exec.notifications, 'session.notice');
+  assert.equal(execNotices.length, 1);
+  assert.deepEqual(execNotices[0]!.event.data, {
+    level: 'warn',
+    code: 'usage_unavailable',
+    text: "this session's transport reports no token usage; its burn is unknown, not zero",
+  });
+  delete process.env['SKYNET_CODEX_NO_APP_SERVER'];
+
+  const appServer = makeAdapter();
+  assert.equal(appServer.result.ok, true);
+  // No turn is run on this adapter, so nothing else will ever arrive on `notifications` —
+  // a fixed wait is what distinguishes "never emitted" from "not emitted yet".
+  await new Promise((r) => setTimeout(r, 50));
+  assert.equal(eventsOf(appServer.notifications, 'session.notice').length, 0);
+});
+
 // S8.3/S8.4 — the app-server transport's full mapping: message, thinking, tool.call/
 // tool.result, usage from `last`, and zero permission.request events across the turn.
 test('S8.3, S8.4 — app-server: the mapped table, and zero permission.request events', async () => {
