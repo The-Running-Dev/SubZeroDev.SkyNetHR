@@ -84,7 +84,7 @@ function Get-IssueCriteriaIds {
             $ids.Add($Matches[1].Trim())
         }
     }
-    @($ids)
+    ,@($ids)
 }
 
 function Get-OpenIssueList {
@@ -209,7 +209,7 @@ function ConvertTo-WorkRefLines {
     $lines.Add("State: $($Issue.state)")
     $lines.Add("Rank: $Rank")
     $lines.Add("MirroredAt: $Sha")
-    $lines.Add("Criteria: $($criteria -join ', ')")
+    $lines.Add("Criteria:$(if ($criteria.Count) { ' ' + ($criteria -join ', ') })")
     ,@($lines)
 }
 
