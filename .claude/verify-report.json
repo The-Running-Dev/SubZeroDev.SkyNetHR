@@ -1,0 +1,19 @@
+{
+  "gates": [
+    {
+      "name": "Run tests",
+      "status": "Passed",
+      "detail": "npm test — 411 tests, 59 suites, 409 pass, 0 fail, 2 skipped, duration 66668.4ms"
+    },
+    {
+      "name": "Parse-check PowerShell scripts",
+      "status": "Passed",
+      "detail": "Checked 19 files; PARSE_OK — [System.Management.Automation.Language.Parser]::ParseFile reported zero parse errors on every *.ps1 file outside node_modules"
+    },
+    {
+      "name": "Run Pester tests",
+      "status": "Passed",
+      "detail": "Invoke-Pester -Path tools -Output Detailed -PassThru — Tests Passed: 133, Failed: 0, Skipped: 0, Inconclusive: 0, NotRun: 0, Result: Passed, Duration 00:01:08.82"
+    }
+  ]
+}

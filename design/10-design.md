@@ -989,7 +989,7 @@ flowchart TD
 
 | Module | Owns | Depends on | Exposes |
 |---|---|---|---|
-| `contract` | The normalised vocabulary | *nothing* | Types only, no runtime |
+| `contract` | The normalised vocabulary | *nothing* | Types, plus the enumeration of a closed union a validator must test membership of — `RATINGS` (D150) |
 | `config` | Roots, auth mode, bind address, origin allow-list, caps | `contract`, `jail` | A validated config object |
 | `identity` | Request → `OperatorId`, or rejection | `config` | One function per deployment mode |
 | `jail` | Path resolution, normalisation and containment | `contract` | `resolveInsideRoot`, `pathsOverlap`, `stripExtendedPrefix` |
@@ -1669,8 +1669,8 @@ whole** (D100). S1 owns the half that keeps the invariants true: the turn slot i
 (I8) and a state change is still on disk (I16). The half that needs a child killed and a notice
 vocabulary — interrupting the live turn with `stopReason: 'storage_failure'` and emitting
 `session.ended` plus `session.notice / error` — is **S5's**, which owns interrupt and the process
-tree kill. Until S5 lands, a session struck by a spill failure stops accepting turns and says
-nothing on the wire about why.
+tree kill. Both halves have landed; the split is recorded because reading either as the whole is
+what D100 was written to prevent.
 
 ### Records boundary (tier two)
 
@@ -1704,9 +1704,8 @@ what this paragraph's ordering governs (D120).
 ### Platform divergence (tier one)
 
 D64 makes Windows and Linux both supported targets held to the same definition of done and
-gated by an automated run that does not exist yet. That gate needs a target list, and it is
-a design artifact rather than a CI detail, because these are the places where one design
-compiles into two behaviours:
+gated by an automated run. That gate needs a target list, and it is a design artifact rather than
+a CI detail, because these are the places where one design compiles into two behaviours:
 
 | Surface | Windows | Linux | Where it is decided |
 |---|---|---|---|
