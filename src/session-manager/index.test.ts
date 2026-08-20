@@ -2463,23 +2463,35 @@ test('S17.3 — a live child dying with requests outstanding also reaches the in
   await manager.message(sessionId, owner, 'go', []);
   await waitUntil(() => received.some((e) => e.kind === 'turn.ended'));
 
-  const page = await manager.readAudit({
-    before: null,
-    limit: 200,
-    sessionId: null,
-    operator: null,
-    since: null,
-    until: null,
-    incidentsOnly: true,
+  // `turn.ended` is delivered to subscribers synchronously inside the same callback
+  // that starts the 'exited' handling (`emit`'s synchronous prefix, session-manager/
+  // index.ts), but the cancellation `AuditRecord`s it triggers are appended
+  // best-effort, off that same handling's own `await` — so seeing `turn.ended` is not
+  // a guarantee both appends have reached disk yet. #130 (windows-latest CI, "1 !== 2")
+  // was this: a single immediate read landing in the gap, not a lost or corrupted
+  // record — 300 local re-runs of a polling version of this assertion always converged
+  // to 2, never fewer. `waitUntil` is what the rest of this suite already uses for an
+  // eventually-true condition; a single-shot read after `turn.ended` was the defect.
+  let forced: readonly { operator: string | null; decision: string }[] = [];
+  await waitUntil(async () => {
+    const page = await manager.readAudit({
+      before: null,
+      limit: 200,
+      sessionId: null,
+      operator: null,
+      since: null,
+      until: null,
+      incidentsOnly: true,
+    });
+    assert.equal(page.ok, true);
+    if (!page.ok) return false;
+    forced = page.value.records.filter((r) => r.sessionId === sessionId && r.reason === 'cancelled_process_exit');
+    return forced.length === 2;
   });
-  assert.equal(page.ok, true);
-  if (page.ok) {
-    const forced = page.value.records.filter((r) => r.sessionId === sessionId && r.reason === 'cancelled_process_exit');
-    assert.equal(forced.length, 2, 'both outstanding requests, cancelled by the child dying, appear as incidents');
-    for (const r of forced) {
-      assert.equal(r.operator, null);
-      assert.equal(r.decision, 'deny');
-    }
+  assert.equal(forced.length, 2, 'both outstanding requests, cancelled by the child dying, appear as incidents');
+  for (const r of forced) {
+    assert.equal(r.operator, null);
+    assert.equal(r.decision, 'deny');
   }
 });
 
