@@ -3849,17 +3849,3 @@ the vendor, not an action this repository takes.
 ## Open
 
 Staging only. Once an item becomes an issue it leaves this list.
-
-### Whether `StandingRuleExpression` should map `permission_suggestions` now that it is observed
-
-D108 chose a local grammar, `"<tool>:<pattern>"`, because `permission_suggestions` had never been
-observed on the wire at the time (two probes, D108, S10.1). D173/S26.1 directly observed the
-field, populated with `addRules`/`addDirectories` suggestions, on every real `control_request` for
-a state-mutating tool call (`design/findings/S26-real-permission-round-trip.md`). This does not
-retroactively make D108 wrong — the local grammar is still implemented, still tested, still
-shipped — but the premise that justified never mapping the vendor's own field no longer holds
-unqualified. Worth a future `/design` or `/contract` pass to decide, not S26's to decide: does
-`permission_suggestions` become a second, richer *input* to standing-rule creation (e.g.
-pre-filling an operator's rule from the vendor's own suggested pattern), or does the local grammar
-stay the only source and the vendor field stays forwarded-and-unread as D104 originally chose,
-now for a documented reason instead of an absent one?
