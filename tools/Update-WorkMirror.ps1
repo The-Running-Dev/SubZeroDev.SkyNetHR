@@ -76,7 +76,7 @@ function New-WorkMirrorResult {
 #>
 function Get-IssueCriteriaIds {
     param([string] $Body)
-    if ([string]::IsNullOrWhiteSpace($Body)) { return @() }
+    if ([string]::IsNullOrWhiteSpace($Body)) { return ,@() }
 
     $ids = [System.Collections.Generic.List[string]]::new()
     foreach ($line in ($Body -split "`r?`n")) {
