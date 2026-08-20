@@ -1612,13 +1612,13 @@ CLI does not run non-interactively and the stream-json transport never starts. O
 messages and `control_response` are single JSON lines written to stdin, **which stays open for
 the whole turn**.
 
-**The twelve rows are not the CLI's whole vocabulary, and the mapper must not treat them as one**
+**The thirteen rows are not the CLI's whole vocabulary, and the mapper must not treat them as one**
 (D92). The live stream carries records that are ordinary, harmless, and no part of this
 vocabulary; raising `error / adapter_unknown_record` for each would put a diagnostic line in
 front of the operator on every routine turn. The adapter therefore holds a named ignore list —
 top-level `rate_limit_event` and `control_response`, and the `system` subtypes `hook_started`,
 `hook_response`, `thinking_tokens` and `post_turn_summary` — and returns silently for those.
-Anything outside both the twelve rows and that list still raises `adapter_unknown_record`,
+Anything outside both the thirteen rows and that list still raises `adapter_unknown_record`,
 non-fatally, with the record preserved in `raw`. **The list is a vendor fact and lives with the
 vendor's adapter; adding to it is an adapter change, never a change to `ErrorEventKind`.**
 

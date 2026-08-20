@@ -148,7 +148,8 @@ array is still forwarded verbatim and read by nothing (D104, I44).
 - **The rendering.** A 5,359-line `<script>` inside a template literal, 5,053 lines of CSS
   in another, `innerHTML =` throughout, no virtualisation, no batching. An unbounded DOM.
 - **No token-level streaming.** `--include-partial-messages` appears nowhere in that
-  source; assistant text arrives as whole blocks. We should try the flag — see *Open*.
+  source; assistant text arrives as whole blocks. The flag was tried and shipped — see open
+  question 5.
 - **The CSP.** `default-src * 'unsafe-inline' 'unsafe-eval' data: blob:` — survivable in a
   webview whose only user owns the machine, disqualifying in a browser app that renders
   model output.
@@ -818,7 +819,7 @@ encodes is `store`'s business.
   meta.json           schemaVersion + Session, minus turn/buffer/subscribers   (D49)
   events.ndjson       envelopes, append-only
   tool-output/<turnId>/<callId>   untruncated tool output, one file per call  (D22)
-  attachments/<turnId>/<attachmentId>   operator uploads, one file each      (D160)
+  attachments/<turnId>/<attachmentId>   operator uploads, each with a .meta sidecar  (D160)
   ckpt.git/           shadow git dir, work-tree = the session's workspace
 <storage>/audit.ndjson
 <storage>/pids.ndjson                                                (D23)
@@ -1658,7 +1659,7 @@ a client tell a silent agent from a dead connection, so this costs nothing on th
 | Delete while a turn is in flight | Manager turn state | `409 turn_in_flight` | "Finish or interrupt first" | Nothing deleted |
 | Operator ends a session | `POST /:id/end` | `state = 'ended'`, `endedAt` set, `session.ended` emitted, `meta.json` rewritten (D36) | Compose box disabled; everything still readable | **Workspace freed** for D30. Transcript, checkpoints and blobs all intact |
 | End while a turn is in flight | Manager turn state | `409 turn_in_flight` | "Finish or interrupt first" | Nothing changed |
-| Delete a live idle or ended session | — | Remove `meta.json`, `events.ndjson`, `tool-output/`, `ckpt.git/` and the registry entry. **`audit.ndjson` untouched** (D25) | Session gone from the list | Audit history intact; checkpoints unrecoverable |
+| Delete a live idle or ended session | — | Remove the session directory whole — `meta.json`, `events.ndjson`, `tool-output/`, `attachments/` and `ckpt.git/` — and the registry entry. **`audit.ndjson` untouched** (D25) | Session gone from the list | Audit history intact; checkpoints unrecoverable |
 | Partial failure during delete | Filesystem error | `error`, non-fatal; registry entry removed anyway | "Session removed, storage may need cleaning" | Orphaned files on disk, named in the log. Preferred over a session that reappears |
 | Storage root unwritable at boot | Startup check | **Refuse to start** | Startup error | — |
 
@@ -2427,7 +2428,8 @@ Ordered by how much they hurt to retrofit:
 5. **Event size caps and backpressure.**
 6. **Process supervision and reaping.**
 7. **The audit log.**
-8. **Token-level streaming**, if `--include-partial-messages` proves out.
+8. **Token-level streaming**, which `--include-partial-messages` proved out (S25, off by
+   default).
 
 Items 1, 2 and 3 are the ones that dictate structure. The rest can be added to a sound
 structure without disturbing it.
