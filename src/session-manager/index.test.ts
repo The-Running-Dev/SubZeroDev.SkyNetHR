@@ -318,6 +318,36 @@ test('an unspawnable executable still pairs turn.started with turn.ended and fre
   }
 });
 
+test('#131 — an unspawnable executable emits error { kind: agent_unavailable, fatal: true } before the paired turn.ended', async () => {
+  const { manager, workspaceRoot } = await makeManager('full');
+  process.env['SKYNET_CLAUDE_EXECUTABLE'] = 'skynet-no-such-binary';
+  try {
+    const owner = 'operator-1' as OperatorId;
+    const projectDir = path.join(workspaceRoot, 'project3b');
+    await mkdir(projectDir);
+    const created = await manager.create(owner, { vendor: 'claude', cwd: projectDir, model: null, sandbox: null, requisitionId: null });
+    assert.equal(created.ok, true);
+    if (!created.ok) return;
+
+    const received: Envelope[] = [];
+    await manager.subscribe(created.value.sessionId, owner, 0, { deliver: (e) => { if ('seq' in e) received.push(e); }, close: () => {} });
+
+    const messaged = await manager.message(created.value.sessionId, owner, 'go', []);
+    assert.equal(messaged.ok, false);
+
+    const errorIdx = received.findIndex((e) => e.kind === 'error');
+    const endedIdx = received.findIndex((e) => e.kind === 'turn.ended');
+    assert.ok(errorIdx !== -1, 'error event was emitted');
+    assert.ok(endedIdx !== -1, 'turn.ended was emitted');
+    assert.ok(errorIdx < endedIdx, 'error precedes the paired turn.ended');
+    const errData = received[errorIdx]!.data as { kind: string; fatal: boolean };
+    assert.equal(errData.kind, 'agent_unavailable');
+    assert.equal(errData.fatal, true);
+  } finally {
+    process.env['SKYNET_CLAUDE_EXECUTABLE'] = FIXTURE;
+  }
+});
+
 test('a model carrying shell metacharacters is refused with bad_request before any session exists', async () => {
   const { manager, workspaceRoot } = await makeManager('full');
   const owner = 'operator-1' as OperatorId;
