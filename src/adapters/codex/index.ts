@@ -203,6 +203,21 @@ export function createCodexAdapter(
     notify({ kind: 'event', event: { kind, data, raw } as never });
   }
 
+  // D146/D149: the `exec --json` fallback reports no `usage` events at all (its basis is
+  // undetermined, `20-contract.md § Vendor mapping — Codex § Usage`), so `PayrollView.burn`
+  // would otherwise sum to zero indistinguishable from an idle session. Queued rather than
+  // called inline: `createCodexAdapter` returns synchronously, before the manager has
+  // registered this session's entry against `opts.notify`'s closure (`session-manager`'s
+  // `create` sets it right after this call returns), so a synchronous `notify` here would
+  // be dropped. Queuing lets that registration finish first — it is still session-manager's
+  // very next synchronous step, well ahead of any `turn.started`, which cannot fire before
+  // an operator's first `message()` call.
+  if (transport === 'exec') {
+    queueMicrotask(() => {
+      emitEvent('session.notice', { level: 'warn', code: 'usage_unavailable', text: "this session's transport reports no token usage; its burn is unknown, not zero" }, null);
+    });
+  }
+
   function terminate(proc: ChildProcess): void {
     if (proc.pid === undefined) return;
     if (isWindows) {
