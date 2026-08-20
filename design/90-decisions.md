@@ -3792,6 +3792,74 @@ the failure D92 wrote the ignore list to prevent.
 Rejected: recording it and changing neither, for the reason D171 gives.
 Reversibility: cheap. Three strings and two conditions; nothing persisted.
 
+### 2026-08-20 — D173 D88/D96's "no `control_request` fires" was two probe artifacts stacked, not a CLI defect
+
+Context: S26.1 (`design/30-slices.md § S26`) required a written finding, against the real
+installed CLI, on whether `control_request`/`can_use_tool` fires under the flags this server
+spawns with — the mechanism D88 and D96 recorded as broken, tracked as an open upstream defect
+(`anthropics/claude-code#34046`). `design/findings/S26-real-permission-round-trip.md` has the
+full method and seven probe scripts. It fires, and correctly resolves both `allow` and `deny`,
+driven through the unmodified production adapter (`src/adapters/claude/index.ts`) against the
+real, installed CLI (2.1.228) — including a real double-answer rejection on a real child
+(`{ok:true, value:{accepted:false}}`), matching the fixture-tested exactly-one-resolution
+guarantee (D33, I9, I11) with a real process on the other end of the pipe.
+
+Two things were true at once, and untangling them took most of the slice. **First**: the CLI's
+prompt is genuinely tool/content-dependent, not universal — it fires for `Write`, `Edit`, and any
+`Bash` command with a side effect, and does not fire for `Read` or a side-effect-free `Bash`
+command, under the default mode (and `manual`, which `system/init` reports identically). D88's
+two original probes (a `Read`, and `echo hello-from-bash-tool` — no redirect) were both,
+unrecognised at the time, the safe case; the "no prompt of any subtype, in any case" reading in
+`10-design.md § The hard problem` and `20-contract.md § Vendor mapping — Claude` generalised past
+what those two commands could show. S25's run 4 (a `Write`, prompted) already contradicted the
+generalisation and was logged as a puzzle rather than the missing half. **Second, independently**:
+every standalone probe script written against this question — D88's original three, and this
+finding's own first four attempts — closed the child's stdin immediately after writing the `user`
+record, before any `control_request` could be answered on it. The CLI aborts the wait
+near-instantly on a closed pipe (`AbortError: Stream closed`). Run against a state-mutating
+command with that bug present, every mode looks broken regardless of what the CLI would actually
+do. The production `send()` never had this bug — it was already correct, and its own fixture test
+already documents the trap by name (`src/adapters/claude/index.test.ts`, S1.1's comment) — but
+nobody had run it against the real binary before this slice to find out.
+
+Chosen: correct the premise in place, the same way D27 and D96 corrected D5's — `10-design.md §
+The hard problem` and `20-contract.md`'s Claude vendor-mapping section now state the
+tool-dependent behaviour and cite this finding, and the table row claiming Claude's approval is
+"not observed on a live wire" is corrected to "observed for state-mutating tool calls." D88 and
+D96 are left standing as a record of what was believed and why, per the entries above; they are
+not rewritten. `permission_suggestions` (D104, D108) is a related casualty: S10.1's probes were
+the same miscounted "never appears" observation, and S26.1 directly observed it populated on
+every state-mutating `control_request`. That reopens D108's *premise* without reopening its
+*grammar choice*, which belongs to whoever next touches `StandingRuleExpression` — carried to
+`## Open` below rather than decided here, since S10 is out of S26's scope (`design/30-slices.md §
+S26`, *Out of scope*).
+
+Rejected: leaving D88/D96 uncorrected and only landing S26's code-level consequence (none — no
+transport change was needed). The documents would keep stating a universal "does not fire" that
+three separate pieces of evidence (S25.1's run 4, this finding, and the fixture test's own
+defensive comment) already contradicted, which is exactly the drift `AGENTS.md § Source of truth`
+exists to catch. Rejected treating this as `/design`'s tier rather than correcting inline: this is
+a factual correction to an observed capability, the same category D27 and D96 already established
+as correctable within the slice that discovers it, not a new invariant, non-goal, or interface.
+
+Reversibility: not applicable — a factual correction, not a design choice. `anthropics/claude-code#34046`
+can be closed or narrowed to the tool-dependent behaviour actually observed; that is a report to
+the vendor, not an action this repository takes.
+
 ## Open
 
 Staging only. Once an item becomes an issue it leaves this list.
+
+### Whether `StandingRuleExpression` should map `permission_suggestions` now that it is observed
+
+D108 chose a local grammar, `"<tool>:<pattern>"`, because `permission_suggestions` had never been
+observed on the wire at the time (two probes, D108, S10.1). D173/S26.1 directly observed the
+field, populated with `addRules`/`addDirectories` suggestions, on every real `control_request` for
+a state-mutating tool call (`design/findings/S26-real-permission-round-trip.md`). This does not
+retroactively make D108 wrong — the local grammar is still implemented, still tested, still
+shipped — but the premise that justified never mapping the vendor's own field no longer holds
+unqualified. Worth a future `/design` or `/contract` pass to decide, not S26's to decide: does
+`permission_suggestions` become a second, richer *input* to standing-rule creation (e.g.
+pre-filling an operator's rule from the vendor's own suggested pattern), or does the local grammar
+stay the only source and the vendor field stays forwarded-and-unread as D104 originally chose,
+now for a documented reason instead of an absent one?

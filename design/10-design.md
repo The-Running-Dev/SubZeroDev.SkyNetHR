@@ -136,10 +136,14 @@ or the injected script the rollback was invoked to remove. Our restore semantics
 **Coarse "always allow" patterns.** Deriving `npm run *` from a concrete command so a
 standing approval is a shape rather than a string. We need this, and the instruction that
 stood here — do not invent a grammar before looking at what `permission_suggestions` offers
-on the wire — was followed and returned nothing. **The field is not merely un-mapped, it is
-unobservable**: the `control_request` that would carry it has never appeared on this
-transport across two independent probes three days apart, and the upstream defect was
-stale-closed without a fix. So the grammar is ours after all, and it is a local one —
+on the wire — was followed and returned nothing, at the time D108 was decided: the
+`control_request` carrying it had never appeared on the two probes taken then. **S26.1 later
+observed the field, populated, on every `control_request` for a state-mutating tool call**
+(`design/findings/S26-real-permission-round-trip.md`) — the two probes D108 rested on were
+both the safe, no-prompt case, the same miscount `10-design.md § The hard problem` corrects
+(D173). This does not reopen D108's grammar choice, which is S10's and out of S26's scope;
+it is carried to `90-decisions.md § Open` as a question for whoever next touches
+`StandingRuleExpression`. The grammar remains the local one —
 `"<tool>:<pattern>"`, declared in `20-contract.md § Event payloads` (D108). The vendor's
 array is still forwarded verbatim and read by nothing (D104, I44).
 
@@ -175,7 +179,7 @@ implementation starts rather than discovered in it.
 | Mechanism | `control_request` / `control_response` over stdio | `approval_policy`, `sandbox_mode` in config. Under `app-server` a runtime prompt arrives as a JSON-RPC **request**, `item/commandExecution/requestApproval`; `exec --json` has no such channel and cannot have one |
 | Granularity | This command, this path, now | The sandbox is whole-session. An `on-request` prompt is per call, and is reachable on one of the two transports |
 | Operator sees | A prompt they answer | A sandbox chosen in advance. Nothing more under the shipped policy, which is `preauthorised` |
-| Source | Documented by the vendor and observed in the fork — **not** against the shipping CLI, where it does not fire (D88) | Observed against `codex-cli 0.146.0`, both transports — `design/findings/S8-codex-adapter.md` (S8.1) |
+| Source | Observed against the shipping CLI for state-mutating tool calls (D173, S26.1) — `design/findings/S26-real-permission-round-trip.md` | Observed against `codex-cli 0.146.0`, both transports — `design/findings/S8-codex-adapter.md` (S8.1) |
 
 **Codex has a runtime approval concept of its own, and S8.1 established that it is
 reachable.** Every profile in `codex/PROFILES.md` carries `approval_policy = "on-request"`,
@@ -187,25 +191,25 @@ genuine JSON-RPC request, `item/commandExecution/requestApproval`, carrying `rea
 it sends nothing of the kind and structurally cannot: that transport is non-interactive by
 construction and represents a sandbox denial only as the model narrating its own failure.
 
-So the asymmetry is one of **verification, not of capability**, and the two slices that
-probed it moved it in opposite directions. **Claude's runtime approval is the one not
-observed on a live wire** (D88). Its handshake was read out of the fork and is documented by
-the vendor; run against the installed CLI at 2.1.226, `--permission-prompt-tool stdio` emits
-no `can_use_tool` of any subtype and the tool simply executes. That is an open upstream
-defect — anthropics/claude-code#34046, tracked since 2.1.6 — with three probes recorded in
-`design/findings/S1-claude-adapter.md`. **Codex's is now the observed one**, which is the
-reverse of what this section assumed when it was written. The Claude column that reads
-"verified" above therefore means *verified in someone else's code*, which is not the same
-thing and cost this project a slice to find out. A
-lowest-common-denominator design — launch-time policy only — would throw away the single
-most valuable thing the console offers, which is approving a tool call from somewhere that
-is not the server's terminal, and it would do so on the strength of an assumption nobody has
-tested.
+So the asymmetry looked, for a time, like one of **verification, not of capability** — and
+S26.1 found that reading incomplete too. **Claude's runtime approval fires for a
+state-mutating tool call — `Write`, `Edit`, a side-effecting `Bash` command — and does not
+fire for a read-only one, under the default mode this server spawns with** (S26.1,
+`design/findings/S26-real-permission-round-trip.md`). D88's two probes (a `Read`, and a
+non-redirecting `Bash echo`) were both the safe case, so "no prompt" was correct for those
+specific commands; the mistake was generalising that to "the channel never fires," which a
+third, contradicting probe (S25's run 4, a `Write`) had already put in question. Driven
+correctly — the child's stdin held open, which is what `src/adapters/claude/index.ts`'s
+production `send()` already does — the round trip works for both `allow` and `deny`, against
+the real installed CLI, with the same exactly-one-resolution guarantees the fixture suite
+already asserts. **Codex's runtime approval is also observed**, unchanged from S8.1. The
+Claude column that read "verified" above meant *verified in someone else's code* until S26;
+it is now verified against the shipping CLI too.
 
-**Decision: model the interactive case as the contract, and let Codex under-deliver
-against it, visibly.** See `90-decisions.md` D5, D27 for the corrected premise above, and D96
-for why the broken Claude handshake does not reopen D5 — a vendor defect in a documented
-mechanism is behaviour to be restored, not a capability that was never there.
+**Decision: model the interactive case as the contract.** See `90-decisions.md` D5, D27 for
+the corrected premise, D96 for why the once-thought-broken Claude handshake did not reopen
+D5, and D173 for S26's correction of D88/D96 themselves — the mechanism was not broken; two
+probe scripts (D88's and, initially, S26's own) were.
 A Codex session launches with an explicit `sandbox_mode`, surfaces that mode in the UI as a
 standing banner, and emits no `permission.request` events. The client must therefore treat
 "no permission events" as a normal state for a session, not as a stuck turn.
