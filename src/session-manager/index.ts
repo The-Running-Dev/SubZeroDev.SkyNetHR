@@ -1080,6 +1080,11 @@ export function createSessionManager(deps: {
       // and only `create` sets `state: 'live'`, always alongside a real adapter.
       const sendResult = await entry.adapter!.send(text, attachmentPayloads, entry.record.cliSessionId, turnId);
       if (!sendResult.ok) {
+        // D143/#131: the operator learns why, not just that the turn ended, whenever the
+        // cause is the agent CLI being unreachable.
+        if (sendResult.error.code === 'agent_unavailable') {
+          await emit(entry, 'error', { kind: 'agent_unavailable', message: sendResult.error.detail, fatal: true });
+        }
         // The `turn.started` above is already durable; pair it (I14, D39) before
         // freeing the slot, or the log carries an open turn no restart ever repairs.
         await emit(entry, 'turn.ended', { turnId, stopReason: 'error', usage: null });
