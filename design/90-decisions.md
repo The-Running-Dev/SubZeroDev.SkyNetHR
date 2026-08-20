@@ -3687,6 +3687,27 @@ already written becomes wrong. Going the other way once deltas are in the spill 
 spill with gaps or rewriting existing sessions' `events.ndjson`, and the ring-is-a-strict-suffix-
 of-the-spill invariant makes the intermediate state unrepresentable.
 
+### 2026-08-20 — D169 The attachment refusals are `session-manager`'s, and the documents named the edge
+Context: `10-design.md § Control flow 2` drew `edge : attachments? adapter.acceptsAttachments,
+count and size caps` and `20-contract.md § adapters/*` said "the edge reads it to refuse". All
+three refusals — `acceptsAttachments`, `Caps.attachmentCount`, `Caps.attachmentBytes` — are in
+`session-manager.message`, ahead of the turn-slot claim and inside the same unbroken synchronous
+block (I5). The edge's only attachment-shaped use of the caps is deriving a request body-size
+bound. The refusal a client sees is `422 bad_request` with nothing written either way, so this was
+never a behaviour difference; it was two documents naming the wrong module.
+Chosen: the documents change. An edge holds no reference to a live session's adapter — `EdgeDeps`
+carries `manager`, `records`, `config` and `identity`, and reaches `adapters` only for `VENDORS`
+(D126) — so an edge-side check needs a new method on `SessionManager` exposing an adapter
+capability. `10-design.md § Module boundaries` already justifies the `edge/http-common → adapters`
+arrow as membership testing *and nothing else*, so the tree matches that paragraph and these two
+statements were the outliers.
+Rejected: moving the check to the edge. It widens a public interface — `/contract`'s call — to
+relocate a check whose outcome is identical, and leaves attachment validation living in two places
+rather than one.
+Rejected: recording the divergence and changing neither side. The alternative D142, D144, D148 and
+D149 each rejected for the same reason: the next pass rediscovers it.
+Reversibility: cheap. Prose in two files; no code moves.
+
 ## Open
 
 Staging only. Once an item becomes an issue it leaves this list.

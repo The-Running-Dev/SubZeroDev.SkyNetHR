@@ -926,9 +926,12 @@ with, so `taskkill /T /F` is one step and the grace period has nothing to elapse
 either "you will be asked" or a standing sandbox banner. `sandbox` is the operator's choice and
 is validated by the adapter.
 
-**`acceptsAttachments` is a capability, not a vendor test** (D160). The edge reads it to refuse
+**`acceptsAttachments` is a capability, not a vendor test** (D160). It is read to refuse
 `attachments` with `422 bad_request` on a vendor whose transport carries no non-text content,
-which is a question about a capability and not about which vendor this is — so I20 holds.
+which is a question about a capability and not about which vendor this is — so I20 holds. **The
+reader is `session-manager`, not an edge**, along with the two attachment caps beside it: an edge
+holds no reference to a live session's adapter, and giving it one would put an adapter capability
+on `SessionManager`'s interface to relocate a check whose refusal is identical either way.
 
 **`VENDORS` is the one enumeration of `Vendor`'s members and it is declared beside
 `createAdapter`'s switch, not in `contract`** (D126), because a list that is not beside the

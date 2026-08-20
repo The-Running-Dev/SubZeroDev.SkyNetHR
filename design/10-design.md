@@ -1148,10 +1148,10 @@ spend and a second approval to ask for. Both claims release on any later failure
 POST /api/sessions/:id/message {text}
   edge     → origin allow-list check                → 403 bad_origin        (D29)
   edge     → identity, then manager.get(id, owner)  → 404 if not owner
-  edge     : attachments? adapter.acceptsAttachments, count and size caps
-                                     any failing → 422 bad_request, nothing written (D160)
   manager  : state == 'live'?  else → 409 session_ended
   manager  : turn == null?     else → 409 turn_in_flight
+  manager  : attachments? adapter.acceptsAttachments, count and size caps
+                                     any failing → 422 bad_request, nothing written (D160)
   manager  : turn = {turnId, phase:'starting'}         SYNCHRONOUS          (D32)
   ──────────── every check above completes before the first await ────────────
   manager  → checkpoints.commit("before turn N")   → checkpoint.created
