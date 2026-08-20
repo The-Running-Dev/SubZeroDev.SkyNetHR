@@ -3795,11 +3795,3 @@ Reversibility: cheap. Three strings and two conditions; nothing persisted.
 ## Open
 
 Staging only. Once an item becomes an issue it leaves this list.
-
-- **Declare `isFrame` in `20-contract.md § Public surface § contract`** (D171). Widen the
-  module's declared property to admit the discriminator for a union the type system cannot
-  separate structurally, and name `isFrame` there as a public interface. `/contract`,
-  `opus`/`high`. `10-design.md § Module boundaries`' cell is already corrected.
-- **Put the Claude adapter's two inline drops on named ignore lists** (D172) —
-  `control_request` with a `subtype` other than `can_use_tool`, and `content_block_delta` with a
-  `delta.type` other than `text_delta`. `src/adapters/claude/index.ts`. `/fix`, `sonnet`/`medium`.
