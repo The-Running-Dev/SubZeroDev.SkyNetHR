@@ -2132,17 +2132,23 @@ belong to the `exec --json` fallback alone; neither affects a session on `app-se
       resolution and an append during teardown, which is what D177 rules out. Worse, the
       adapter reports a killed turn as `stopReason: 'interrupted'`, which is the exact
       misattribution D177 refuses: a shutdown reported as the operator's own act.
-    - **A kill on the recorded `pid` / `pgid`**, the shape boot's reap already uses, emits
-      nothing and needs no manager surface, but it reads `pids.ndjson` to find its targets —
-      "repair what you find", the side of D177's own distinction shutdown is not on — and it is a
-      further copy of D38's mechanism, which is already written three times
+    - **A kill on the recorded `pid` / `pgid` from `server.ts`**, the shape boot's reap uses,
+      needs no manager surface — **and does not escape the problem either.** Boot's reap emits
+      nothing because no adapter exists to notice; at shutdown one does, still watching that
+      child, so its `exited` notification fires exactly as above. It also reads `pids.ndjson`
+      to find its targets — "repair what you find", the side of D177's own distinction shutdown
+      is not on — and adds a further copy of D38's mechanism, already written three times
       (`src/adapters/claude/`, `src/adapters/codex/`, `src/session-manager/`).
     - **A shutdown method on `SessionManager`**, which is the only holder of the live sessions'
       adapters, is a new public interface on a type that has `boot` and deliberately no
-      counterpart — the shape D176 rejected for closing subscriptions, arrived at for a different
-      reason.
+      counterpart — the shape D176 rejected for closing subscriptions, though it was rejected
+      there because the HTTP server reached the outcome by itself, which for step 3 it cannot.
 
-    Whichever is taken, the thing that must be decided with it is **what silences the `exited`
-    path**, since a tree kill by any route produces that notification. Nothing may be invented
-    here: this is a public-surface question and a contract amendment, not an implementation
-    detail. I52 is the constraint the answer is checked against.
+    **The choice is narrower than it first looks, and that is the finding.** A tree kill by any
+    route produces the `exited` notification, so **something must silence that path**, and the
+    only modules that can are the one holding the sink (`session-manager`) and the one raising
+    it (`adapters/*`). Neither is reachable from `server.ts` without a new surface on
+    `SessionManager`, so "no manager counterpart" is not among the available outcomes — only
+    which counterpart, and whether the silencing lives in the manager or as a `detach` on the
+    adapter. Nothing may be invented here: it is a public-surface question and a contract
+    amendment. I52 is what the answer is checked against.
