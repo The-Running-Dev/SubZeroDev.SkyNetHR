@@ -922,6 +922,12 @@ on the pid: the recorded process is the agent CLI, and what holds the workspace 
 it spawned. Terminate-then-force is the POSIX half only — Windows has no signal to be graceful
 with, so `taskkill /T /F` is one step and the grace period has nothing to elapse over (D148).
 
+**`Adapter` gains nothing for shutdown, and that is deliberate** (D178). There is no `detach`,
+and no way for an adapter to be told the server is stopping: the silence step 3 needs lives on
+`SessionManager`'s own notification sink instead (I55) — one public addition rather than two,
+since the manager surface is needed either way. A vendor adapter still knows nothing about
+server lifecycle, which is the direction I20 fixes.
+
 **`policy` is the vendor's capability, fixed at create**, and is what the client renders as
 either "you will be asked" or a standing sandbox banner. `sandbox` is the operator's choice and
 is validated by the adapter.
@@ -1055,6 +1061,50 @@ What the declarations cannot say:
   **Every step here repairs state some earlier process left, and shutdown deliberately leaves
   all of it** — see *`server`* below, and I52. So `server_restart` fires on an orderly stop
   exactly as it does after a power cut: boot cannot tell them apart and is not asked to.
+- **`boot` has exactly one counterpart, and it exists because shutdown's step 3 has nowhere
+  else to live** (D178; *`server`* below for the step it serves). Not yet declared — the slice
+  that adds it to `SessionManager` deletes this block, since the pointer opening this section
+  already names the file:
+
+  ```
+  shutdown(): Promise<void>;
+  ```
+
+  It takes no owner and no arguments, like `boot`, and **returns no `Result`**: shutdown is
+  best-effort throughout and no error union gains a variant for it. It does three things, in
+  this order:
+
+  ```
+  0. mute    the manager's own notify sink stops delivering, every kind      (D178, I55)
+  1. kill    adapter.kill() for every live turn — the TREE, D38's mechanism  (D177)
+  2. record  one ProcessTombstone per child killed, written at kill time     (D178)
+  ```
+
+  **The mute is at the sink and not in the `exited` handler, and the tree is what settles
+  that.** A tree kill by any route drives the adapter's `exited` notification, whose handler
+  resolves every outstanding permission — a `permission.resolved` emitted and an `AuditRecord`
+  appended for each, as I11 requires — and the adapter's `turn.ended` follows it as a *second,
+  separate* notification inside the same synchronous callback. A mute written into the handler
+  would catch the cancellations and miss the turn's closure, which is both an emission during
+  teardown (I52) and a shutdown reported under a stop reason D24 reserves for the operator's
+  own act. Muting where every notification already passes catches both and leaves no second
+  path for a later change to forget. **It covers all four members of `AdapterNotification`, not
+  the three the outcome turns on**: a `spawned` arriving behind the mute is dropped too, so that
+  child is never recorded in `pids.ndjson` and no tombstone is owed for it — it is killed all
+  the same, because the adapter holds it.
+
+  **The mute is one-way, and shutdown is its only caller.** Nothing clears it, and no parameter
+  narrows it to one session. A method that could blind a live session while the server keeps
+  running is the hazard that kept this off `Adapter` as a `detach` (*`adapters/*`* above).
+
+  **The tombstone is written at kill time rather than in response to an exit**, which is what
+  the mute buys rather than what it costs: with the sink muted the manager never learns the
+  child died, so the record no longer has to win a race against whatever budget the drain has
+  left. It names the pid this server recorded for that turn at `spawned`. **Shutdown never
+  reads `pids.ndjson` to decide what to kill** — its targets are the live sessions this manager
+  already holds, and finding them in the file is the "repair what you find" side of D177's
+  distinction, which shutdown is not on. How the pid reaches this point is internal to the
+  module and is not a surface question.
 - **`CreateSessionInput.cwd` is the client's string and is never used after the jail check.**
   `model` is constrained rather than free text — `/^[A-Za-z0-9][A-Za-z0-9.:/_-]*$/`, else
   `422 bad_request` — because it reaches a child's argv, which Windows passes through a shell
@@ -1275,7 +1325,13 @@ from D23.
 `session.notice / warn` (`checkpoint_skipped`) and the turn proceeding with no restore point.
 Nothing further is owed.
 
-**How step 3 reaches those children is `## Unresolved` 14**, and nothing downstream may invent it.
+**How step 3 reaches those children is `SessionManager`'s one shutdown method** (D178,
+`## Unresolved` 14; declared under *`session-manager`* above with what it must do). `server.ts`
+kills nothing itself: it holds no adapter, and a kill it issued against a recorded `pid` — boot's
+reap shape — would drive the same `exited` notification into a manager that is still watching,
+with no surface available to mute it. The method never rejects, and **this caller bounds it**,
+from the module constants beside the drain's and the release's rather than from `Config`, which
+is what lets step 4 follow it unconditionally.
 
 ### `client`
 
@@ -1715,9 +1771,10 @@ highest-value section in this document.
 | I49 | An attachment's bytes never enter `events.ndjson`, and an operator's `filename` never reaches a filesystem path — the server-minted `AttachmentId` is the only path segment. The blob is written and fsync'd before the `message` envelope naming it is constructed | `store`, `session-manager` |
 | I50 | A storage root is held by at most one server process. `<storage>/server.lock` is claimed **before boot's reap step**, not merely before `listen`, and a lock naming a `hostname` other than this host is never reclaimed whatever its `pid` says. A boot that refuses on a held lock has written nothing server-wide (D161) | `store`, `session-manager` |
 | I51 | A `message.delta` is a live-only frame, for **both** vendors: it is assigned no `seq`, no `Envelope` is ever constructed for it, it never enters the ring buffer, it is never appended to `events.ndjson`, and it is never replayed. It is delivered to the subscribers attached when it is produced and to no others. Deltas for one `turnId` concatenate in arrival order to the `message` that follows (D168) | `session-manager`, `adapters/*` |
-| I52 | A shutdown establishes no durable state and holds no session invariant. It marks no session ended, closes no turn on disk, appends to no spill, writes no `session.notice`, and emits no envelope. Its only durable write is one `ProcessTombstone` per child it killed, which records what shutdown *did* rather than repairing what it found. Every repair stays boot's, so the crash path and the orderly path converge on one implementation of each (D174) | `server` |
+| I52 | A shutdown establishes no durable state and holds no session invariant. It marks no session ended, closes no turn on disk, appends to no spill, writes no `session.notice`, and emits no envelope. Its only durable write is one `ProcessTombstone` per child it killed, which records what shutdown *did* rather than repairing what it found. Every repair stays boot's, so the crash path and the orderly path converge on one implementation of each (D174). **It is held by construction rather than by inspection**: I55 stops every notification at the sink, so no code below it is in a position to emit, resolve or append during teardown (D178) | `server`, `session-manager` |
 | I53 | `<storage>/server.lock` is removed only as the last act before exit, after the listener has closed and after the kill step has run. A shutdown that cannot get that far leaves the lock rather than releasing it early, and the next boot reclaims it on the other two limbs of D23's test (D175) | `server` |
 | I54 | A shutdown's completion never depends on a client disconnecting. Every step past the guard is bounded, so the exit is reached whether or not a subscriber is still attached — the clean path is reachable in the configuration that ships, not only when nobody was watching (D176) | `server` |
+| I55 | From the moment `SessionManager`'s shutdown method is entered, no `AdapterNotification` of any kind reaches a handler. The mute sits on the manager's own `notify` sink, which every notification already passes through, and **not** on the `exited` handler: `turn.ended` arrives as a second, separate notification after `exited` inside the same synchronous callback, so a mute on the handler would silence the cancellations and let the turn's closure through. The mute is one-way — nothing clears it, and shutdown is its only caller (D178) | `session-manager` |
 
 **I40, I41 and I42 were never allocated, and the gap is left open rather than closed.** The
 numbering jumps from I39 to I43 and nothing is missing. Ids here are cited by number in
@@ -2117,38 +2174,24 @@ belong to the `exec --json` fallback alone; neither affects a session on `app-se
     here: it is invisible above the adapter boundary and may well be right, but S8.7 reserves the
     choice, and writing it into the mapping table would decide it by omission. (#93)
 
-14. **What reaches the live turns' children at shutdown's step 3.** D177 fixes the *outcome*
-    exactly — the tree dies, one `ProcessTombstone` per child, and no envelope, no audit append
-    and no spill write (I52) — and names no call site for it. `10-design.md § Shutdown ordering`
-    says "D38's mechanism", and D177's landing note in `90-decisions.md § Open` says "whatever
-    reaches `Adapter.kill` for the live turn", which is the gap rather than the answer, because
-    the three candidates are not interchangeable:
+14. **Resolved by D178.** The call site is one new method on `SessionManager`, declared under
+    *Public surface § `session-manager`* with the three things it must do and the order it must
+    do them in; `server.ts` calls it and kills nothing of its own. The finding this item
+    recorded is what forced that shape rather than being set aside by it: a tree kill by **any**
+    route drives the adapter's `exited` notification, so something has to silence that path, and
+    the only modules that can are the one holding the sink and the one raising it. `server.ts`
+    reaches neither without a new surface on `SessionManager`, so "no manager counterpart" was
+    never among the outcomes.
 
-    - **`Adapter.kill` as it stands does the forbidden thing.** The child's death drives the
-      adapter's `exited` notification, whose handler resolves every outstanding permission —
-      emitting a `permission.resolved` and appending an `AuditRecord` for each, as I11 requires
-      — and the adapter's `turn.ended` follows it in the same callback
-      (`src/session-manager/index.ts`, `src/adapters/claude/index.ts`). That is emission,
-      resolution and an append during teardown, which is what D177 rules out. Worse, the
-      adapter reports a killed turn as `stopReason: 'interrupted'`, which is the exact
-      misattribution D177 refuses: a shutdown reported as the operator's own act.
-    - **A kill on the recorded `pid` / `pgid` from `server.ts`**, the shape boot's reap uses,
-      needs no manager surface — **and does not escape the problem either.** Boot's reap emits
-      nothing because no adapter exists to notice; at shutdown one does, still watching that
-      child, so its `exited` notification fires exactly as above. It also reads `pids.ndjson`
-      to find its targets — "repair what you find", the side of D177's own distinction shutdown
-      is not on — and adds a further copy of D38's mechanism, already written three times
-      (`src/adapters/claude/`, `src/adapters/codex/`, `src/session-manager/`).
-    - **A shutdown method on `SessionManager`**, which is the only holder of the live sessions'
-      adapters, is a new public interface on a type that has `boot` and deliberately no
-      counterpart — the shape D176 rejected for closing subscriptions, though it was rejected
-      there because the HTTP server reached the outcome by itself, which for step 3 it cannot.
+    The silence is the manager's, and it sits in the manager's own `notify` closure rather than
+    in the `exited` handler — measurable rather than stylistic, because `turn.ended` is a
+    second, separate notification arriving after `exited` inside the same synchronous callback,
+    so a mute on the handler would catch the cancellations and miss the turn's closure (I55).
+    `Adapter.detach()` was rejected on cost and blast radius: two public additions rather than
+    one, since the manager surface is needed either way, and a method whose only correct caller
+    is shutdown blinds a live session silently in every other hand. **I52 is then met by
+    construction rather than by inspection** — nothing reaches the sink, so nothing below it is
+    in a position to emit, resolve or append — and the `ProcessTombstone` moves to kill time,
+    where it no longer has to win a race against whatever budget the drain has left.
 
-    **The choice is narrower than it first looks, and that is the finding.** A tree kill by any
-    route produces the `exited` notification, so **something must silence that path**, and the
-    only modules that can are the one holding the sink (`session-manager`) and the one raising
-    it (`adapters/*`). Neither is reachable from `server.ts` without a new surface on
-    `SessionManager`, so "no manager counterpart" is not among the available outcomes — only
-    which counterpart, and whether the silencing lives in the manager or as a `detach` on the
-    adapter. Nothing may be invented here: it is a public-surface question and a contract
-    amendment. I52 is what the answer is checked against.
+    Building it is staged in `90-decisions.md § Open` with D174–D177's, and is not yet issued.
