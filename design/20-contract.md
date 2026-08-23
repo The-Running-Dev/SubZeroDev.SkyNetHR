@@ -1660,10 +1660,10 @@ an audit record.
 probes the field had never appeared on this transport, so no mapping could be written against a
 shape nobody had seen; S26.1 later observed it, populated, on every `control_request` for a
 state-mutating tool call (`design/findings/S26-real-permission-round-trip.md`), which reopens the
-premise D108 rested on without reopening D108's grammar choice itself — carried to
-`90-decisions.md § Open`. The adapter still passes the array through as `readonly unknown[]` and
-nothing narrows it (I44); forwarding costs nothing and keeps the payload from being dropped
-silently regardless of how that question resolves.
+premise D108 rested on without reopening D108's grammar choice itself — carried as #194. The
+adapter still passes the array through as `readonly unknown[]` and nothing narrows it (I44);
+forwarding costs nothing and keeps the payload from being dropped silently regardless of how
+that question resolves.
 
 **`matchTarget` is this adapter's projection table**, and it is the only place tool-shape
 knowledge is permitted to live (I46). It is emitted verbatim — no case folding, no separator
@@ -1894,8 +1894,7 @@ never reappears.
    is narrower than "insufficient": at the time of S10.1's probes `permission_suggestions` had
    never appeared on this transport. S26.1 later observed it populated
    (`design/findings/S26-real-permission-round-trip.md`), which reopens that premise without
-   reopening the grammar choice itself — carried to `90-decisions.md § Open`.
-   `StandingRuleExpression` is
+   reopening the grammar choice itself — carried as #194. `StandingRuleExpression` is
    therefore a local grammar, `"<tool>:<pattern>"`, declared above with its full constraint;
    `parseStandingRule` and `match` are declared under `session-manager`; the tool-shape
    knowledge `match` would have needed moved to the adapter as `PermissionRequest.matchTarget`,
