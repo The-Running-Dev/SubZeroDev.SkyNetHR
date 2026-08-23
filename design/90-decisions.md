@@ -3919,13 +3919,57 @@ code in the configuration that ships.
 Reversibility: cheap. Landing point: staged in `## Open` below, because this is a code change taken
 outside a slice and `agent.md` is explicit that a decision with no landing point does not land.
 
+### 2026-08-23 — D177 Shutdown kills the turn's child tree, and leaves the turn's closure to boot
+Context: `10-design.md § Open questions` 15. Nothing killed the child at shutdown. The adapter
+spawns `detached` on POSIX because D38's process-group kill requires it, so a terminal's Ctrl-C
+reaches the server and not the agent: the CLI survives the console that was supervising it, keeps
+write access to the operator's work-tree, and is collected only if the server comes back on that
+host with a matching image. In the container the cgroup takes the tree and the question is moot;
+on a bare host a server that never comes back leaves an unsupervised agent writing to a repository
+indefinitely.
+Chosen: shutdown kills the live turn's process tree, between the drain and the lock release, by
+D38's mechanism — the one interrupt and boot's reap already share. **This is not D21's timer under
+another name.** D21 refused to end a turn on elapsed silence because a long compile and a hang are
+indistinguishable and only the operator can separate them; this step makes no judgement about the
+turn, it observes that there will shortly be no console at all. The cost is stated rather than
+hidden: **`docker stop` and Ctrl-C end a turn in flight**, and what is left behind is what
+interrupt leaves behind — files already written stay written, and the pre-turn checkpoint is what
+returns the workspace (D24).
+**The kill does not go through interrupt, and that boundary is what keeps D174 intact.** Routing it
+through the manager would emit `turn.ended`, resolve every pending permission and start the spill's
+append chain at the moment the process is trying to exit, all under a stop reason D24 reserves for
+the operator's own act. So the step is a tree kill and one `ProcessTombstone`, and nothing else;
+the turn is closed at the next boot by D39, under `server_restart`, which is both truthful and the
+reason D130's payroll marker already pairs with. Shutdown terminates what it started; boot repairs
+what it finds.
+The tombstone is the one durable write a shutdown makes, and it records something shutdown *did*
+rather than repairing something it *found*, which is why it does not reopen D174. It is
+best-effort and bounded like the release: a lost one leaves a dead pid recorded live, and D23's
+reuse guard tombstones it at the next boot rather than killing whatever now holds that pid — the
+case that guard exists for.
+Rejected: **leaving it to boot's reap, recorded as accepted risk.** Consistent with D174 read at
+its widest, and free in the container. Rejected because outside one it inverts the project's own
+premise, and because the whole of the orphan's cost is conditional on an assumption — that the
+server comes back, on this host, with a matching image — that nothing guarantees.
+Rejected: **killing only outside a container.** Cheapest in stated cost, and it puts the code path
+in the one configuration that never exercises it, so the shipped artifact would be the untested
+case. That is the shape D174 rejects for finalise-at-shutdown, arrived at from the other side.
+Rejected: **routing the kill through `SessionManager.interrupt`.** Reuses a tested path and needs
+no new call site, and it makes shutdown emit, append and resolve during teardown and reports a
+shutdown as an operator interruption — the misattribution `10-design.md § Interrupt` property 1
+exists to prevent.
+Reversibility: cheap. One step in one handler. Landing point: staged in `## Open` below, with
+D176's.
+
 ## Open
 
 Staging only. Once an item becomes an issue it leaves this list.
 
-- **Bound the shutdown drain so the clean path is reachable (D176).** `server.ts` waits on
-  `server.close()`, which never settles while any client is subscribed, so `releaseLock` and the
-  zero exit are unreachable whenever an operator is watching. Needs a grace window and a forced
-  close of what remains, then release, then exit. Tier one, small, `server.ts` only.
-- **Settle whether shutdown kills the turn’s child tree** — `10-design.md § Open questions` 15.
-  Owner decision, not an issue until it is answered.
+- **Build *Shutdown ordering* (D174–D177).** `server.ts` today closes the listener and races
+  `releaseLock` against a timeout inside the close callback. Three gaps against the section:
+  `server.close()` never settles while any client is subscribed, so the callback — and with it
+  both `releaseLock` and the zero exit — is unreachable whenever an operator is watching (D176);
+  no step kills the live turn's child tree (D177); and the release must stay last (D175). Needs a
+  bounded drain then a forced close of what remains, then the tree kill and its tombstone, then
+  release, then exit. Tier one, small; `server.ts`, plus whatever reaches `Adapter.kill` for the
+  live turn. D174 is the argument the other three rest on and builds nothing of its own.

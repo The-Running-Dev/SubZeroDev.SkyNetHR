@@ -2103,7 +2103,7 @@ cleaned up automatically.
 
 ### Shutdown ordering
 
-Four steps, and the first thing to say about them is what is **not** among them.
+Five steps, and the first thing to say about them is what is **not** among them.
 
 ```
 0. guard    a second signal exits immediately, non-zero                       (D174)
@@ -2112,15 +2112,18 @@ Four steps, and the first thing to say about them is what is **not** among them.
             new turn; in-flight requests finish
 2. drain    bounded. Whatever is still connected when the window closes is
             closed — a subscriber's stream is not idle and never drains       (D176)
-3. release  remove <storage>/server.lock, bounded, then exit zero             (D175)
+3. kill     the live turn's child TREE, then tombstone it                     (D177)
+            D38's mechanism — the one interrupt and boot's reap already share
+            NOT routed through interrupt: no turn.ended, no stop reason here
+4. release  remove <storage>/server.lock, bounded, then exit zero             (D175)
 ```
 
 **Nothing here repairs anything, and that is the design** (D174). Sessions are not marked
-ended, an open turn is not closed on disk, no `session.notice / server_restart` is written,
-no child is tombstoned. Each of those is boot's — D20, D39, D130 and D23 in that order — and
-leaving them there is what keeps exactly one implementation of each. The reason is that
-**shutdown is not guaranteed to run.** A `SIGKILL`, an OOM kill and a power cut each produce
-no shutdown at all, so boot must handle the unfinalised case whatever shutdown does; a
+ended, an open turn is not closed on disk, no `session.notice / server_restart` is written.
+Each of those is boot's — D20, D39 and D130 in that order — and leaving them there is what
+keeps exactly one implementation of each. The reason is that **shutdown is not guaranteed to
+run.** A `SIGKILL`, an OOM kill and a power cut each produce no shutdown at all, so boot must
+handle the unfinalised case whatever shutdown does; a
 shutdown that also finalised would be a second implementation of boot's repair whose only
 distinguishing property is running slightly more often. It would also be the *tested* one,
 because it is what a developer exercises with Ctrl-C, leaving the path that actually matters
@@ -2128,9 +2131,12 @@ the one nobody drives.
 
 So these two sections are not mirror images and must not be read as one. **Boot is the repair
 pass; shutdown is an optimisation over it.** The bar shutdown is held to is therefore not
-"leave things tidy" but "leave nothing boot does not already expect" — and since it writes
-nothing at all, and removes one file, it clears that bar by construction rather than by
-argument.
+"leave things tidy" but "leave nothing boot does not already expect". Step 3 is the one place
+that bar has to be argued rather than met by writing nothing, and the argument is a
+distinction: **shutdown terminates what it started; it does not repair what it finds.** A
+tombstone records a child this process killed, which is D95's ordinary exit record reached by
+an unusual route. Closing that child's turn is a different act, it stays D39's, and it happens
+at boot under the truthful `server_restart` reason rather than here under a borrowed one.
 
 **The lock is claimed first and released last, and that ordering is D161 read backwards**
 (D175). D161 put the claim ahead of boot's reap step because a second server that got as far
@@ -2154,7 +2160,7 @@ stream, which is the entire point of it. Probed rather than assumed: one open ev
 enough that the close callback never fires. Both the lock release and the exit sit behind that
 callback, so **a server with any operator watching it never completes a clean shutdown on its
 own.** It waits out the supervisor's grace period, takes `SIGKILL`, and leaves the lock behind
-— which makes D175's release code that runs only when nobody was connected, and makes the
+— which turns D175's release into code that runs only when nobody was connected, and turns the
 reclaim path S22.5 exists to keep exceptional into the ordinary one.
 
 Bounding the drain is safe for a reason worth stating rather than assuming: **dropping a
@@ -2163,15 +2169,49 @@ reach back far enough, for live and ended sessions alike, and a stream cut witho
 precisely the case that path was built for. The client meets a disconnect it already knows how
 to survive.
 
-What is left behind differs across the four ways a server can stop by almost nothing, and that
-is the measure of how little shutdown is load-bearing:
+**Step 3 ends the turn's child, and the reason is that supervision is what has ended** (D177).
+The adapter spawns `detached` on POSIX, because D38's process-group kill requires it, so a
+terminal's Ctrl-C reaches the server and not the agent: without step 3 the tree outlives the
+console that was watching it. In the deployment artifact that would cost nothing — the
+container takes the whole cgroup — and outside one it inverts this project's own premise, an
+agent CLI holding write access to the operator's work-tree with nobody reading its stream, and
+collected by boot's reap only if the server comes back, on that host, with a matching image.
+
+**This is not D21's timer arriving by another name.** D21 refused to kill a turn on elapsed
+silence because a long compile is indistinguishable from a hang, and the operator is the only
+one who can tell them apart. Step 3 makes no such judgement: it does not decide the turn is
+stuck, it observes that there will shortly be no console at all. The cost is real and is stated
+rather than hidden — **`docker stop` and Ctrl-C end a turn in flight** — and what it leaves
+behind is what interrupt leaves behind, since files the agent already wrote stay written and
+the pre-turn checkpoint is what returns the workspace (D24).
+
+**It does not route through interrupt, and that is the boundary that keeps D174 intact.** The
+manager's interrupt path emits `turn.ended`, resolves every pending permission and starts the
+spill's append chain — all at the moment the process is trying to exit, and all reported under
+a stop reason D24 reserves for the operator's own act. So step 3 is a tree kill and one
+`ProcessTombstone`, and nothing else. The turn is closed at the next boot, by D39, under
+`server_restart`, which is both the truthful reason and the one D130's payroll marker already
+pairs with.
+
+The tombstone is the only durable write a shutdown makes. It is best-effort and bounded like
+the release: if it is lost, `pids.ndjson` records a dead pid as live, and D23's reuse guard
+tombstones it at the next boot rather than killing whatever now holds that pid — which is the
+case that guard was built for.
+
+What is left behind, by the way the server was stopped:
 
 | Ended by | `server.lock` | Spill of a turn in flight | Child | What boot does |
 |---|---|---|---|---|
-| One signal, drain completes | Removed | Ends on an unpaired `turn.started` | Still running | Reclaim not invoked. D39 closes the turn, D130 marks the outage, D23 reaps the tree |
-| One signal, drain times out | Removed | As above | Still running | As above |
-| A second signal | **Left** | As above | Still running | Reclaimed on D23's test and logged; the rest as above |
+| One signal, drain completes | Removed | Ends on an unpaired `turn.started` | Killed and tombstoned | Reclaim not invoked, reap finds nothing. D39 still closes the turn, D130 still marks the outage |
+| One signal, drain times out | Removed | As above | As above | As above |
+| A second signal | **Left** | As above | **Still running** — the guard exits before step 3 | Reclaimed on D23's test and logged; D23 reaps the tree; the rest as above |
 | `SIGKILL`, OOM, power cut | **Left** | As above | Still running, or gone with the container | As above — except after a host crash, where the `startedAt` limb tombstones the entry rather than killing anything |
+
+**Two of the four rows still leave a tree for boot to reap**, and both are ways of stopping
+that shutdown does not get to control — which is why D177 adds a step without taking anything
+away from D23. The spill column does not vary at all, and that is the measure of how little
+shutdown is load-bearing: every one of these ends a turn in flight the same way on disk, and
+boot repairs all four identically.
 
 **A shutdown can leave `ckpt.git/index.lock`** behind, where the process dies with a
 `git commit` in flight, and that is an already-designed state rather than a new one:
@@ -2180,16 +2220,6 @@ a `session.notice / warn` naming `index.lock`, and the turn proceeding without a
 point. Nothing is owed here, which is D174's argument holding under a case it was not written
 for.
 
-**The turn's child is the one thing this section does not settle** — open question 15. Nothing
-kills it today. The adapter spawns `detached` on POSIX, so a terminal's Ctrl-C reaches the
-server and not the agent, and the tree outlives the console that was supervising it. In the
-deployment artifact that costs nothing, because the container takes the whole cgroup with it.
-Outside one it is this console's own premise inverted — an agent CLI holding write access to
-the operator's work-tree, running unwatched — and boot's reap collects it only if the server
-comes back, on that host, with a matching image. The mechanism to do better already exists and
-is the one interrupt and the reap both use (D38). What is unsettled is not how but whether: a
-`docker stop` that ends a turn in flight is a policy choice about the operator's work, and
-that is the owner's rather than this document's.
 
 ## Alternatives considered
 
@@ -2516,7 +2546,13 @@ the drain is bounded and whatever is still connected is then closed; rejected th
 wait, under which one subscriber keeps the close callback from ever firing so the clean path is
 unreachable whenever anybody is watching, and rejected closing subscriptions through the
 manager, which adds a shutdown surface to a `SessionManager` that deliberately has only `boot`
-in order to reach an outcome the HTTP server produces by itself.
+in order to reach an outcome the HTTP server produces by itself. **D177** — shutdown kills the
+live turn's child tree between the drain and the release, and does not route the kill through
+interrupt; rejected leaving it to boot's reap, which outside a container leaves an agent CLI
+writing to the operator's work-tree unwatched on an assumption that the server comes back,
+rejected killing only outside a container, which puts the code path in the one configuration
+that never exercises it, and rejected reusing `SessionManager.interrupt`, which would emit,
+append and resolve at teardown and report a shutdown as an operator's own act.
 
 Standing decisions this design rests on, all in `90-decisions.md`: D1/D10 transport,
 D2 sequencing, D3 delegated auth, D4 the jail, D5 the permission asymmetry, D6 shadow git,
@@ -2737,20 +2773,16 @@ these are cited by number elsewhere in this document and in the slices.
 
 **Needing a decision from the owner (tier one, opened by *Shutdown ordering*):**
 
-15. **Should a shutdown kill the turn's child process tree?** Nothing does today, and
-    *Shutdown ordering* records why that is defensible without being settled. **The cost is
-    real and it divides by deployment.** In the container it is moot: the cgroup takes the
-    tree. On a bare host it is not. The adapter spawns `detached` on POSIX — D38's
-    process-group kill requires it — so a terminal's Ctrl-C reaches the server and not the
-    agent, and the CLI survives the console that was supervising it, keeps write access to the
-    operator's work-tree, and is collected only if the server comes back on that host with a
-    matching image. A server that never comes back leaves it running indefinitely.
-    **The mechanism is not the question.** `Adapter.kill` and D38's tree kill both exist, and
-    the step would sit after quiesce and before release, for D175's reason. The question is
-    whether ending a turn nobody asked to end is right for `docker stop` and for Ctrl-C.
-    Against: D21 put every judgement about ending a turn with the operator, and a shutdown kill
-    is that judgement taken by the clock. For: once the server is going away the turn cannot be
-    supervised at all, so this is not a timeout on a slow turn but the end of supervision — and
-    an unsupervised agent holding write access to a work-tree is the hazard *Threat model* is
-    built around. **Only the owner can settle which of those this console is for**, and the
-    answer decides one step rather than a design.
+15. **Resolved by D177: shutdown kills the tree.** The question was whether a `docker stop` or a
+    Ctrl-C should end a turn in flight, given that nothing did — the adapter spawns `detached`
+    on POSIX, because D38's process-group kill requires it, so a terminal's interrupt reached
+    the server and not the agent. **What settled it was that this is not D21's timer.** D21
+    refused to kill a turn on elapsed silence because a long compile and a hang are
+    indistinguishable and only the operator can tell them apart; step 3 makes no judgement
+    about the turn at all, it observes that there will shortly be no console. Left alone, the
+    orphan holds write access to the operator's work-tree unwatched, and boot's reap collects
+    it only if the server comes back on that host with a matching image. The container case —
+    where the cgroup takes the tree and the step is free — was what made *kill only outside a
+    container* tempting, and is exactly why it was rejected: it puts the code path where it
+    never runs. The kill is **not** routed through interrupt, so shutdown still emits nothing
+    and closes nothing; see *Shutdown ordering*.
