@@ -660,7 +660,7 @@ though it were new is silent wrong state rather than a parse error.
 | `attachments/<turnId>/<attachmentId>` | `(sessionId, turnId, attachmentId)` | — | Written once, never appended, fsync'd before the envelope naming it exists (I49). `attachmentId` is server-minted, so the operator's `filename` never reaches a path. A sidecar `attachments/<turnId>/<attachmentId>.meta` holds the stored `mediaType` as UTF-8 text, written the same way, so the read route can echo it for an allow-listed image type without scanning the spill for the `AttachmentRef` that named this id. Removed with the session (D25, D160) |
 | `audit.ndjson` | append order | append order, read newest first | Server-wide. fsync'd before the decision it records reaches the child (I10). Never truncated, never deleted with a session (I13). Every read is a bounded window resumed by `AuditCursor` (I39) |
 | `pids.ndjson` | append order; `pid` is not unique over time | append order | Server-wide. Two line shapes: a `ProcessRecord` at spawn, a `ProcessTombstone` at exit (D95). The latest line for a `pid` decides liveness; the spawn line carries everything else |
-| `server.lock` | — | — | Server-wide, one `ServerLock` object, written before boot's first step and removed at clean shutdown (D161). Not append-only. Reclaimed on a stale holder by D23's liveness test; never reclaimed when `hostname` is another host |
+| `server.lock` | — | — | Server-wide, one `ServerLock` object, written before boot's first step and removed as shutdown's last act, after the children are gone (D161, D175). A shutdown that does not get that far leaves it. Not append-only. Reclaimed on a stale holder by D23's liveness test; never reclaimed when `hostname` is another host |
 | `reviews.ndjson` *(tier two)* | `reviewId` | append order; the latest line for an id wins | Server-wide. Never rewritten. Survives deletion of the session it names (D67). Durable per line (D128). A `final` line is terminal — no later line for that id is written |
 | `requisitions.ndjson` *(tier two)* | `requisitionId` | append order; the latest line for an id wins | Server-wide. Never rewritten. **Not durable per line**, which is why a lost consumption line reverts an approval to spendable — D68's written exception |
 | `ckpt.git/` | git object ids | git history | Git is the store. `add -A` honours the workspace's own `.gitignore`, and neither `read-tree` nor `clean -fd` takes `-x`, so exactly the same set is left alone |
@@ -1051,6 +1051,10 @@ What the declarations cannot say:
   complete, which is a wrong answer rather than a slow one. **Step 4 runs before listening
   because the requisition guards are synchronous** and a claim that must be taken without an
   `await` cannot read a file to find out whether the requisition is approved.
+
+  **Every step here repairs state some earlier process left, and shutdown deliberately leaves
+  all of it** — see *`server`* below, and I52. So `server_restart` fires on an orderly stop
+  exactly as it does after a power cut: boot cannot tell them apart and is not asked to.
 - **`CreateSessionInput.cwd` is the client's string and is never used after the jail check.**
   `model` is constrained rather than free text — `/^[A-Za-z0-9][A-Za-z0-9.:/_-]*$/`, else
   `422 bad_request` — because it reaches a child's argv, which Windows passes through a shell
@@ -1156,6 +1160,122 @@ resumable position exactly as SSE's gap frame carries no `id:`.
 `<meta name="skynet-edge" content="sse">` or `content="ws"`, set by whichever edge serves the
 document — a `<meta>` tag and not a `<script>`, so it costs the strict CSP nothing. The client
 reads it once at load and never probes.
+
+### `server`
+
+`src/server.ts` is the composition root, and it has **no exported declaration to point at** —
+it is a process. Its surface is the process contract: what it accepts on the way in, what it
+does on the way out, and what it leaves on disk either way. That is stated here in full, on the
+same grounds a Markdown command file's is.
+
+It loads config, builds `store`, `records`, `checkpoints` and `session-manager`, runs boot in
+the order *`session-manager`* fixes above, wires exactly one edge (D10, D117) — plus
+`server.on('upgrade', listener.handleUpgrade)` where `config.edge === 'ws'` — and only then
+listens (I18). Every refusal on that path exits non-zero having named the fix on stderr, and
+none of them is a warning.
+
+**Shutdown runs five steps and, as with boot, the order is the point**
+(`10-design.md` § *Shutdown ordering*):
+
+```
+0. guard    a second signal exits immediately, non-zero                       (D174)
+1. quiesce  close the listener: no new connection, so no new session or turn
+2. drain    bounded; whatever is still connected when the window closes
+            is closed                                                         (D176)
+3. kill     every live turn's child TREE, then one ProcessTombstone each      (D177)
+4. release  remove <storage>/server.lock, bounded, then exit zero             (D175)
+```
+
+**What is *not* among them is the load-bearing part** (D174, I52). No session is marked ended,
+no turn is closed on disk, no `session.notice / server_restart` is written, and no envelope is
+emitted. Each of those is boot's — D20, D39 and D130 — and stays boot's, because a `SIGKILL`,
+an OOM kill and a power cut produce no shutdown at all, so boot must handle the unfinalised
+case whatever shutdown does. A shutdown that also finalised would be a second implementation of
+boot's repair distinguished only by running more often, and it would be the *tested* one, since
+Ctrl-C is what a developer exercises. **The bar is therefore not "leave things tidy" but "leave
+nothing boot does not already expect"**, and writing nothing clears it.
+
+**Step 2's bound is what makes the clean path reachable at all**, which is a correction to the
+obvious implementation rather than a refinement of it. `server.close()` fires its callback when
+the last connection is gone, and a subscribed client is by construction never idle — its
+response is open for the life of the stream. With one open event stream the callback does not
+fire (measured, not assumed; the deployment image is `node:22`, where it was not re-run), so a
+release and an exit sitting behind it are unreachable **whenever any operator is watching**. The
+drain window must be shorter than the supervisor's grace period, because completing before that
+period's `SIGKILL` is the entire purpose of bounding it. **Neither this bound nor the release's
+is a `Config` field**; they are module constants beside the existing `RELEASE_LOCK_TIMEOUT_MS`,
+and promoting either to a deployment flag is a contract amendment.
+
+**Force-closing a subscriber loses nothing.** D40 already serves a reconnect from the spill when
+the ring cannot reach back far enough, for live and ended sessions alike, and a stream cut
+without warning is precisely the case that path was built for. **Subscriptions are not closed
+through `SessionManager`**: it has `boot` and deliberately no counterpart, and the HTTP server
+reaches this outcome by itself.
+
+**Step 3 kills because supervision is what has ended, not because a turn was judged stuck.** The
+adapter spawns `detached` on POSIX — D38's process-group kill requires it — so a terminal's
+Ctrl-C reaches this server and not the agent, and without this step the tree outlives the
+console that was watching it: an agent CLI holding write access to the operator's work-tree with
+nobody reading its stream. **This is not D21's timer under another name.** D21 refused to end a
+turn on elapsed silence because a long compile and a hang are indistinguishable and only the
+operator can separate them; this step makes no judgement about the turn at all. The cost is
+stated rather than hidden — **`docker stop` and Ctrl-C end a turn in flight** — and what it
+leaves behind is what interrupt leaves behind: files the agent already wrote stay written, and
+the pre-turn checkpoint is what returns the workspace (D24).
+
+**It does not route through `SessionManager.interrupt`, and that boundary is what keeps I52
+intact.** Interrupt emits `turn.ended`, resolves every pending permission and starts the spill's
+append chain — all at the moment the process is trying to exit, and all under a stop reason D24
+reserves for the operator's own act. The turn is closed instead at the next boot, by D39, under
+`server_restart`, which is both the truthful reason and the one D130's payroll marker already
+pairs with. **Shutdown terminates what it started; boot repairs what it finds** — and a
+`ProcessTombstone` records something shutdown *did*, which is why it is the one durable write
+I52 permits.
+
+**"Every live turn", not "the live turn".** Sessions are independent and each may hold one turn
+(I4), so a shutdown may face several children at once. Killing one of them and not the rest
+would leave exactly the orphan step 3 exists to prevent.
+
+**The tombstone is best-effort and bounded like the release.** A lost one leaves `pids.ndjson`
+recording a dead pid as live, and D23's reuse guard then tombstones it at the next boot rather
+than killing whatever now holds that pid (I19) — the case that guard exists for.
+
+**The lock is released last, and that is D161 read backwards** (D175, I53). D161 put the claim
+ahead of boot's reap step because a second server that got as far as reaping cannot tell the
+first server's live agents from its own dead ones. A release issued while this server still has
+children recorded with no `exitedAt` opens the identical window from the other end, and a
+restart is the one moment at which a successor is certain to be starting. **Failing to release
+is safe by design rather than by luck**: a `ServerLock` carries no `exitedAt` because the file's
+absence *is* the first limb of D23's test (*Types § Server lock*), so a lock nobody removed is
+reclaimed on the strength of the other two. What clean release buys is keeping that reclaim off
+the ordinary restart — a guard exercised on every boot has stopped being a guard.
+
+**Shutdown raises nothing.** Past the guard every step is best-effort: a failure is logged and
+the next step runs, and **no variant is added to any error union** for it. The guard is the only
+non-zero exit — the operator saying they are done waiting, on which nothing below it is retried.
+
+**What is left behind, by how the server was stopped:**
+
+| Ended by | `server.lock` | Spill of a turn in flight | Children | What boot does |
+|---|---|---|---|---|
+| One signal, drain completes | Removed | Ends on an unpaired `turn.started` | Killed and tombstoned | Reclaim not invoked, reap finds nothing. D39 still closes the turn, D130 still marks the outage |
+| One signal, drain times out | Removed | As above | As above | As above |
+| A second signal | **Left** | As above | **Still running** — the guard exits before step 3 | Reclaimed on D23's test and logged; the reap kills the tree; the rest as above |
+| `SIGKILL`, OOM, power cut | **Left** | As above | Still running, or gone with the container | As above — except after a host crash, where the `startedAt` limb tombstones the entry rather than killing anything |
+
+**The spill column does not vary, and that is the measure of how little shutdown is
+load-bearing**: all four end a turn in flight identically on disk, and boot repairs all four the
+same way. **Two of the four still leave a tree for boot's reap**, and both are ways of stopping
+that shutdown does not control — which is why D177 adds a step without taking anything away
+from D23.
+
+**A shutdown may leave `ckpt.git/index.lock`** behind, where the process dies with a
+`git commit` in flight. That is an already-designed state rather than a new one:
+`CheckpointError.locked` above has the next turn's checkpoint failing with a
+`session.notice / warn` (`checkpoint_skipped`) and the turn proceeding with no restore point.
+Nothing further is owed.
+
+**How step 3 reaches those children is `## Unresolved` 14**, and nothing downstream may invent it.
 
 ### `client`
 
@@ -1595,6 +1715,9 @@ highest-value section in this document.
 | I49 | An attachment's bytes never enter `events.ndjson`, and an operator's `filename` never reaches a filesystem path — the server-minted `AttachmentId` is the only path segment. The blob is written and fsync'd before the `message` envelope naming it is constructed | `store`, `session-manager` |
 | I50 | A storage root is held by at most one server process. `<storage>/server.lock` is claimed **before boot's reap step**, not merely before `listen`, and a lock naming a `hostname` other than this host is never reclaimed whatever its `pid` says. A boot that refuses on a held lock has written nothing server-wide (D161) | `store`, `session-manager` |
 | I51 | A `message.delta` is a live-only frame, for **both** vendors: it is assigned no `seq`, no `Envelope` is ever constructed for it, it never enters the ring buffer, it is never appended to `events.ndjson`, and it is never replayed. It is delivered to the subscribers attached when it is produced and to no others. Deltas for one `turnId` concatenate in arrival order to the `message` that follows (D168) | `session-manager`, `adapters/*` |
+| I52 | A shutdown establishes no durable state and holds no session invariant. It marks no session ended, closes no turn on disk, appends to no spill, writes no `session.notice`, and emits no envelope. Its only durable write is one `ProcessTombstone` per child it killed, which records what shutdown *did* rather than repairing what it found. Every repair stays boot's, so the crash path and the orderly path converge on one implementation of each (D174) | `server` |
+| I53 | `<storage>/server.lock` is removed only as the last act before exit, after the listener has closed and after the kill step has run. A shutdown that cannot get that far leaves the lock rather than releasing it early, and the next boot reclaims it on the other two limbs of D23's test (D175) | `server` |
+| I54 | A shutdown's completion never depends on a client disconnecting. Every step past the guard is bounded, so the exit is reached whether or not a subscriber is still attached — the clean path is reachable in the configuration that ships, not only when nobody was watching (D176) | `server` |
 
 **I40, I41 and I42 were never allocated, and the gap is left open rather than closed.** The
 numbering jumps from I39 to I43 and nothing is missing. Ids here are cited by number in
@@ -1993,3 +2116,33 @@ belong to the `exec --json` fallback alone; neither affects a session on `app-se
     composing a session-unique `CallId` from `(turnId, itemId)` — is deliberately **not** taken
     here: it is invisible above the adapter boundary and may well be right, but S8.7 reserves the
     choice, and writing it into the mapping table would decide it by omission. (#93)
+
+14. **What reaches the live turns' children at shutdown's step 3.** D177 fixes the *outcome*
+    exactly — the tree dies, one `ProcessTombstone` per child, and no envelope, no audit append
+    and no spill write (I52) — and names no call site for it. `10-design.md § Shutdown ordering`
+    says "D38's mechanism", and D177's landing note in `90-decisions.md § Open` says "whatever
+    reaches `Adapter.kill` for the live turn", which is the gap rather than the answer, because
+    the three candidates are not interchangeable:
+
+    - **`Adapter.kill` as it stands does the forbidden thing.** The child's death drives the
+      adapter's `exited` notification, whose handler resolves every outstanding permission —
+      emitting a `permission.resolved` and appending an `AuditRecord` for each, as I11 requires
+      — and the adapter's `turn.ended` follows it in the same callback
+      (`src/session-manager/index.ts`, `src/adapters/claude/index.ts`). That is emission,
+      resolution and an append during teardown, which is what D177 rules out. Worse, the
+      adapter reports a killed turn as `stopReason: 'interrupted'`, which is the exact
+      misattribution D177 refuses: a shutdown reported as the operator's own act.
+    - **A kill on the recorded `pid` / `pgid`**, the shape boot's reap already uses, emits
+      nothing and needs no manager surface, but it reads `pids.ndjson` to find its targets —
+      "repair what you find", the side of D177's own distinction shutdown is not on — and it is a
+      further copy of D38's mechanism, which is already written three times
+      (`src/adapters/claude/`, `src/adapters/codex/`, `src/session-manager/`).
+    - **A shutdown method on `SessionManager`**, which is the only holder of the live sessions'
+      adapters, is a new public interface on a type that has `boot` and deliberately no
+      counterpart — the shape D176 rejected for closing subscriptions, arrived at for a different
+      reason.
+
+    Whichever is taken, the thing that must be decided with it is **what silences the `exited`
+    path**, since a tree kill by any route produces that notification. Nothing may be invented
+    here: this is a public-surface question and a contract amendment, not an implementation
+    detail. I52 is the constraint the answer is checked against.
