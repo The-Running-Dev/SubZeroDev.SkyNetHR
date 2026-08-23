@@ -3978,6 +3978,12 @@ function — it is what an adapter is handed at create, `AdapterOptions.notify` 
 covers `exited`, `event` and `cli-session` in one place and leaves no second path for a later
 change to forget. `Adapter` is untouched, which keeps server lifecycle out of `adapters/*` in the
 direction I20 fixes: a vendor adapter still knows nothing about the server stopping.
+**The sink rather than the `exited` handler is the load-bearing half, and the tree says why:**
+`turn.ended` is a *second, separate* notification the adapter sends immediately after `exited`
+and inside the same synchronous callback (`src/session-manager/index.ts`). A mute written into
+the handler would silence the cancellations and let the turn's closure through — an emission
+during teardown, which is the thing I52 forbids — so only a mute at the point every
+notification passes catches both.
 **The tombstone stops being exit-driven, and that is the gain rather than the cost.** With the
 sink muted the manager never learns the child died, so it writes the `ProcessTombstone` from the
 process record at the moment it issues the kill. D177's record no longer has to win a race against

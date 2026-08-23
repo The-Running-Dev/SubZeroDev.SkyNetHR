@@ -2209,7 +2209,12 @@ question was only which module carries the silence.
 **It is the manager's, and it sits in the manager's own `notify` closure rather than in the
 `exited` handler.** Every `AdapterNotification` already passes through that one function — it
 is what an adapter is handed at create — so muting there covers `exited`, `event` and
-`cli-session` together, and leaves no second path for a later change to forget. `SessionManager`
+`cli-session` together, and leaves no second path for a later change to forget. **That the
+choke point rather than the handler is the right place is measurable, not stylistic**: the
+adapter sends `turn.ended` as a second, separate notification immediately after `exited` and
+inside the same synchronous callback (`src/session-manager/index.ts`), so a mute written into
+the `exited` handler would let the turn's closure through and only a mute at the sink catches
+both. `SessionManager`
 gains one method for `server.ts` to call and `Adapter` gains nothing, which keeps server
 lifecycle out of `adapters/*` in the direction I20 fixes. The rejected shape was a `detach` on
 the adapter, silencing at the source: it costs two public additions rather than one, since the
