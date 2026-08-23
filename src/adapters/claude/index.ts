@@ -98,6 +98,57 @@ export function createClaudeAdapter(opts: AdapterOptions & { readonly executable
     return true;
   }
 
+  // Mirrors `../codex/index.ts`'s identical helper: SIGTERM-then-SIGKILL on POSIX,
+  // `taskkill /T /F` on Windows. Extracted so both `kill()` (an operator interrupt) and
+  // `failSchemaMismatch` (a malformed known record, below) can end the child the same way.
+  function terminate(proc: ChildProcess): void {
+    if (proc.pid === undefined) return;
+    if (isWindows) {
+      spawn('taskkill', ['/PID', String(proc.pid), '/T', '/F']).once('error', () => {});
+      return;
+    }
+    const pid = proc.pid;
+    try {
+      process.kill(-pid, 'SIGTERM');
+    } catch {
+      try {
+        proc.kill('SIGTERM');
+      } catch {
+        // Already gone.
+      }
+    }
+    setTimeout(() => {
+      if (child !== proc) return; // already exited; 'close' cleared it
+      try {
+        process.kill(-pid, 'SIGKILL');
+      } catch {
+        try {
+          proc.kill('SIGKILL');
+        } catch {
+          // Already gone.
+        }
+      }
+    }, KILL_GRACE_MS).unref();
+  }
+
+  // A known record variant whose required nested shape does not hold (#202): fatal, not a
+  // diagnostic. Ends this child/turn — the server and every other session stay healthy — by
+  // emitting the fatal event, closing the turn if `result` never arrived, and terminating
+  // the child. `resultSeen` guards against the `close` handler synthesising a second
+  // `turn.ended` once the child actually exits.
+  function failSchemaMismatch(detail: string, rec: unknown): void {
+    emitEvent('error', { kind: 'adapter_schema_mismatch', message: detail, fatal: true }, rec);
+    if (!resultSeen) {
+      resultSeen = true;
+      emitEvent('turn.ended', { stopReason: 'error', usage: null }, null);
+    }
+    if (child) terminate(child);
+  }
+
+  function isPlainObject(value: unknown): value is Record<string, unknown> {
+    return typeof value === 'object' && value !== null && !Array.isArray(value);
+  }
+
   function handleRecord(rec: Record<string, unknown>): void {
     const type = rec['type'];
 
@@ -130,10 +181,24 @@ export function createClaudeAdapter(opts: AdapterOptions & { readonly executable
       }
 
       case 'assistant': {
-        const message = rec['message'] as Record<string, unknown> | undefined;
+        const rawMessage = rec['message'];
+        if (rawMessage !== undefined && !isPlainObject(rawMessage)) {
+          return failSchemaMismatch('assistant record carried a non-object message', rec);
+        }
+        const message = rawMessage as Record<string, unknown> | undefined;
         const messageId = typeof message?.['id'] === 'string' ? (message['id'] as string) : null;
-        const usage = message?.['usage'] as Record<string, unknown> | undefined;
+        const rawUsage = message?.['usage'];
+        if (rawUsage !== undefined && !isPlainObject(rawUsage)) {
+          return failSchemaMismatch('assistant message carried a non-object usage', rec);
+        }
+        const usage = rawUsage as Record<string, unknown> | undefined;
         if (usage && messageId !== null && messageId !== lastUsageMessageId) {
+          for (const field of ['input_tokens', 'output_tokens', 'cache_read_input_tokens', 'cache_creation_input_tokens']) {
+            const value = usage[field];
+            if (value !== undefined && typeof value !== 'number') {
+              return failSchemaMismatch(`assistant message usage.${field} was not numeric`, rec);
+            }
+          }
           lastUsageMessageId = messageId;
           emitEvent(
             'usage',
@@ -148,18 +213,36 @@ export function createClaudeAdapter(opts: AdapterOptions & { readonly executable
             rec,
           );
         }
-        const content = (message?.['content'] as Array<Record<string, unknown>> | undefined) ?? [];
+        const rawContent = message?.['content'];
+        if (rawContent !== undefined && !Array.isArray(rawContent)) {
+          return failSchemaMismatch('assistant message carried a non-array content', rec);
+        }
+        const content = (rawContent as Array<Record<string, unknown>> | undefined) ?? [];
         for (const block of content) {
+          if (!isPlainObject(block)) {
+            return failSchemaMismatch('assistant message content carried a non-object block', rec);
+          }
           if (block['type'] === 'text' && typeof block['text'] === 'string' && block['text'].length > 0) {
             emitEvent('message', { role: 'assistant', text: block['text'] }, rec);
           } else if (block['type'] === 'thinking' && typeof block['thinking'] === 'string' && block['thinking'].length > 0) {
             emitEvent('thinking', { text: block['thinking'] }, rec);
           } else if (block['type'] === 'tool_use') {
-            const name = String(block['name'] ?? '');
-            const input = (block['input'] as Record<string, unknown>) ?? {};
+            const id = block['id'];
+            if (typeof id !== 'string') {
+              return failSchemaMismatch('tool_use block carried a non-string id', rec);
+            }
+            const name = block['name'];
+            if (typeof name !== 'string') {
+              return failSchemaMismatch('tool_use block carried a non-string name', rec);
+            }
+            const rawInput = block['input'];
+            if (rawInput !== undefined && !isPlainObject(rawInput)) {
+              return failSchemaMismatch('tool_use block carried a non-object input', rec);
+            }
+            const input = (rawInput as Record<string, unknown> | undefined) ?? {};
             emitEvent(
               'tool.call',
-              { callId: block['id'], name, input, summary: summariseToolCall(name, input) },
+              { callId: id, name, input, summary: summariseToolCall(name, input) },
               rec,
             );
           }
@@ -168,16 +251,31 @@ export function createClaudeAdapter(opts: AdapterOptions & { readonly executable
       }
 
       case 'user': {
-        const message = rec['message'] as Record<string, unknown> | undefined;
-        const content = (message?.['content'] as Array<Record<string, unknown>> | undefined) ?? [];
+        const rawMessage = rec['message'];
+        if (rawMessage !== undefined && !isPlainObject(rawMessage)) {
+          return failSchemaMismatch('user record carried a non-object message', rec);
+        }
+        const message = rawMessage as Record<string, unknown> | undefined;
+        const rawContent = message?.['content'];
+        if (rawContent !== undefined && !Array.isArray(rawContent)) {
+          return failSchemaMismatch('user message carried a non-array content', rec);
+        }
+        const content = (rawContent as Array<Record<string, unknown>> | undefined) ?? [];
         for (const block of content) {
+          if (!isPlainObject(block)) {
+            return failSchemaMismatch('user message content carried a non-object block', rec);
+          }
           if (block['type'] !== 'tool_result') continue;
+          const callId = block['tool_use_id'];
+          if (typeof callId !== 'string') {
+            return failSchemaMismatch('tool_result block carried a non-string tool_use_id', rec);
+          }
           const raw = block['content'];
           const text = typeof raw === 'string' ? raw : Array.isArray(raw) ? raw.map((p) => (p as { text?: string }).text ?? '').join('') : '';
           emitEvent(
             'tool.result',
             {
-              callId: block['tool_use_id'],
+              callId,
               ok: !block['is_error'],
               output: text,
               truncated: false, // S9 does the capping; out of scope here
@@ -190,13 +288,30 @@ export function createClaudeAdapter(opts: AdapterOptions & { readonly executable
       }
 
       case 'control_request': {
-        const request = rec['request'] as Record<string, unknown> | undefined;
+        const rawRequest = rec['request'];
+        if (rawRequest !== undefined && !isPlainObject(rawRequest)) {
+          return failSchemaMismatch('control_request carried a non-object request', rec);
+        }
+        const request = rawRequest as Record<string, unknown> | undefined;
         if (request?.['subtype'] !== 'can_use_tool') return;
-        const requestId = rec['request_id'] as RequestId;
-        const callId = request['tool_use_id'] as CallId;
-        const tool = request['tool_name'] as string;
-        const input = (request['input'] as Record<string, unknown> | undefined) ?? {};
-        pendingByRequestId.set(requestId, { callId });
+        const requestId = rec['request_id'];
+        if (typeof requestId !== 'string') {
+          return failSchemaMismatch('control_request carried a non-string request_id', rec);
+        }
+        const callId = request['tool_use_id'];
+        if (typeof callId !== 'string') {
+          return failSchemaMismatch('control_request carried a non-string tool_use_id', rec);
+        }
+        const tool = request['tool_name'];
+        if (typeof tool !== 'string') {
+          return failSchemaMismatch('control_request carried a non-string tool_name', rec);
+        }
+        const rawInput = request['input'];
+        if (rawInput !== undefined && !isPlainObject(rawInput)) {
+          return failSchemaMismatch('control_request carried a non-object input', rec);
+        }
+        const input = (rawInput as Record<string, unknown> | undefined) ?? {};
+        pendingByRequestId.set(requestId as RequestId, { callId: callId as CallId });
         emitEvent(
           'permission.request',
           {
@@ -381,7 +496,15 @@ export function createClaudeAdapter(opts: AdapterOptions & { readonly executable
               emitEvent('error', { kind: 'adapter_bad_line', message: (err as Error).message, fatal: false }, line);
               continue;
             }
-            handleRecord(rec);
+            // Final exception boundary (#202): validation above should catch every
+            // malformed known-record shape, but a mapping bug this validation misses
+            // must still contain the offending turn rather than take the whole server
+            // process down with an uncaught exception.
+            try {
+              handleRecord(rec);
+            } catch (err) {
+              failSchemaMismatch(`unhandled error while mapping a Claude record: ${(err as Error).message}`, rec);
+            }
           }
         });
 
@@ -424,40 +547,10 @@ export function createClaudeAdapter(opts: AdapterOptions & { readonly executable
       const proc = child;
       if (!proc || proc.pid === undefined) return;
       killRequested = true;
-      if (isWindows) {
-        // Already terminate-then-force in one step — `/F` — and resolves the tree from
-        // the live process table at kill time (D38), so no separate grace period applies
-        // here. Failing to kill is non-fatal, but an unlistened ChildProcess 'error'
-        // event (taskkill missing, EPERM) throws and takes the whole server down.
-        spawn('taskkill', ['/PID', String(proc.pid), '/T', '/F']).once('error', () => {});
-        return;
-      }
-      const pid = proc.pid;
-      try {
-        process.kill(-pid, 'SIGTERM');
-      } catch {
-        try {
-          proc.kill('SIGTERM');
-        } catch {
-          // Already gone.
-        }
-      }
       // Not awaited: the caller (the manager, on an operator's interrupt) gets its
-      // result back as soon as the signal is dispatched. The force follow-up runs on its
-      // own timer so a tree that ignores SIGTERM — the case the grace period exists for
-      // — is still gone within it, without holding the HTTP response open to find out.
-      setTimeout(() => {
-        if (child !== proc) return; // already exited; 'close' cleared it
-        try {
-          process.kill(-pid, 'SIGKILL');
-        } catch {
-          try {
-            proc.kill('SIGKILL');
-          } catch {
-            // Already gone.
-          }
-        }
-      }, KILL_GRACE_MS).unref();
+      // result back as soon as the signal is dispatched — `terminate`'s own SIGKILL
+      // follow-up runs on its own timer without holding the HTTP response open.
+      terminate(proc);
     },
   };
 

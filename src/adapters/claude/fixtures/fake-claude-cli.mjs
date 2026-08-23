@@ -39,6 +39,14 @@ import { spawn } from 'node:child_process';
 //                   contains a multi-byte UTF-8 character, split so one delta ends right
 //                   before it and the next begins with it. With the flag absent, behaves
 //                   exactly like `many` truncated to twenty (S25.6: off changes nothing).
+//   malformed-content     — an assistant record whose message.content is an object
+//                   instead of an array (#202's reported crash).
+//   malformed-tool-id     — an assistant record whose tool_use block carries a numeric id
+//                   instead of a string (#202).
+//   malformed-control-request — a control_request whose tool_use_id is numeric instead of
+//                   a string (#202).
+//   malformed-usage — an assistant record whose usage.input_tokens is a string instead of
+//                   a number (#202).
 
 const scenario = process.env.SKYNET_TEST_SCENARIO ?? 'full';
 // (S25.6) The real CLI only emits stream_event records when this flag is present
@@ -226,6 +234,42 @@ function runScenario() {
       line({ type: 'totally_unknown_record_kind', payload: 1 });
       assistantText('after the unknown kind', 'msg-u1');
       line({ type: 'result', subtype: 'success' });
+      return;
+    case 'malformed-content':
+      line({ type: 'assistant', message: { id: 'msg-malformed-1', content: {} } });
+      return;
+    case 'malformed-tool-id':
+      line({
+        type: 'assistant',
+        message: {
+          id: 'msg-malformed-2',
+          content: [{ type: 'tool_use', id: 42, name: 'Bash', input: { command: 'echo hi' } }],
+        },
+      });
+      return;
+    case 'malformed-control-request':
+      line({
+        type: 'assistant',
+        message: {
+          id: 'msg-malformed-3',
+          content: [{ type: 'tool_use', id: 'call-1', name: 'Bash', input: { command: 'echo hi' } }],
+        },
+      });
+      line({
+        type: 'control_request',
+        request_id: 'req-1',
+        request: { subtype: 'can_use_tool', tool_use_id: 99, tool_name: 'Bash', input: { command: 'echo hi' }, permission_suggestions: [] },
+      });
+      return;
+    case 'malformed-usage':
+      line({
+        type: 'assistant',
+        message: {
+          id: 'msg-malformed-4',
+          content: [{ type: 'text', text: 'hi' }],
+          usage: { input_tokens: 'five', output_tokens: 7, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 },
+        },
+      });
       return;
     case 'many': {
       for (let i = 0; i < 200; i++) assistantText('message ' + i, 'msg-many-' + i);
