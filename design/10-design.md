@@ -2115,6 +2115,7 @@ Five steps, and the first thing to say about them is what is **not** among them.
 3. kill     the live turn's child TREE, then tombstone it                     (D177)
             D38's mechanism — the one interrupt and boot's reap already share
             NOT routed through interrupt: no turn.ended, no stop reason here
+            the manager mutes its own notify sink before killing              (D178)
 4. release  remove <storage>/server.lock, bounded, then exit zero             (D175)
 ```
 
@@ -2192,6 +2193,35 @@ a stop reason D24 reserves for the operator's own act. So step 3 is a tree kill 
 `ProcessTombstone`, and nothing else. The turn is closed at the next boot, by D39, under
 `server_restart`, which is both the truthful reason and the one D130's payroll marker already
 pairs with.
+
+**What step 3 does route through is the manager, because the sink is the only choke point**
+(D178). A tree kill by any route drives the adapter's `exited` notification, and the manager's
+handler for it resolves every outstanding permission — emitting a `permission.resolved` and
+appending an `AuditRecord` for each, as I11 requires — then reports the turn ended under
+`interrupted`. That is emission, resolution, an append, and the misattribution D177 refuses,
+all reached by killing the child at all. So **something has to silence that path**, and only
+two modules can: the one that raises the notification and the one that holds it. A kill issued
+from `server.ts` against the recorded `pid`/`pgid` — boot's reap shape — does not escape it,
+because boot emits nothing only for want of an adapter to notice, and at shutdown one exists
+and is still watching. "No manager counterpart" was therefore never among the outcomes; the
+question was only which module carries the silence.
+
+**It is the manager's, and it sits in the manager's own `notify` closure rather than in the
+`exited` handler.** Every `AdapterNotification` already passes through that one function — it
+is what an adapter is handed at create — so muting there covers `exited`, `event` and
+`cli-session` together, and leaves no second path for a later change to forget. `SessionManager`
+gains one method for `server.ts` to call and `Adapter` gains nothing, which keeps server
+lifecycle out of `adapters/*` in the direction I20 fixes. The rejected shape was a `detach` on
+the adapter, silencing at the source: it costs two public additions rather than one, since the
+manager surface is needed either way, and it is a method whose only correct caller is shutdown,
+so every other caller blinds a live session without saying so.
+
+**The tombstone stops being exit-driven, and that is a gain rather than a cost.** With the sink
+muted the manager never learns the child died, so it writes the `ProcessTombstone` from the
+process record at the moment it issues the kill, rather than in response to an exit. The record
+no longer depends on that exit arriving inside the drain's remaining budget. I52 is then met by
+construction rather than by inspection — nothing reaches the sink, so nothing can emit, resolve
+or append — and the one durable write left is the one the invariant permits.
 
 The tombstone is the only durable write a shutdown makes. It is best-effort and bounded like
 the release: if it is lost, `pids.ndjson` records a dead pid as live, and D23's reuse guard

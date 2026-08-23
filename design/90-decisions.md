@@ -3961,15 +3961,57 @@ exists to prevent.
 Reversibility: cheap. One step in one handler. Landing point: staged in `## Open` below, with
 D176's.
 
+### 2026-08-23 — D178 Shutdown's kill is silenced at the manager's own sink, not at the adapter
+Context: `20-contract.md § Unresolved` 14. D177 fixed step 3's *outcome* exactly — the tree dies,
+one `ProcessTombstone` per child, no envelope, no audit append, no spill write (I52) — and named
+no call site for it. The three candidates are not interchangeable, and the reason is that a tree
+kill by **any** route drives the adapter's `exited` notification. The manager's handler for that
+resolves every outstanding permission, emitting a `permission.resolved` and appending an
+`AuditRecord` for each as I11 requires, then reports the turn ended under `interrupted` — which is
+emission, resolution, an append, and precisely the misattribution D177 refuses. So the real
+question was never whether to silence that path but where the silence lives, and only two modules
+can hold it: `adapters/*` raises the notification, `session-manager` holds it. `server.ts` reaches
+neither without a new surface, so a manager counterpart was never optional.
+Chosen: **the manager's own `notify` closure carries the mute, and `SessionManager` gains one
+method for `server.ts` to call.** Every `AdapterNotification` already passes through that single
+function — it is what an adapter is handed at create, `AdapterOptions.notify` — so muting there
+covers `exited`, `event` and `cli-session` in one place and leaves no second path for a later
+change to forget. `Adapter` is untouched, which keeps server lifecycle out of `adapters/*` in the
+direction I20 fixes: a vendor adapter still knows nothing about the server stopping.
+**The tombstone stops being exit-driven, and that is the gain rather than the cost.** With the
+sink muted the manager never learns the child died, so it writes the `ProcessTombstone` from the
+process record at the moment it issues the kill. D177's record no longer has to win a race against
+whatever budget the drain has left. I52 is then satisfied by construction rather than by
+inspection — nothing reaches the sink, so nothing downstream *can* emit, resolve or append — which
+is the difference between an invariant that is checked and one that cannot be broken by the code
+below it.
+Rejected: **`Adapter.detach()`, silencing at the source.** Structurally the cleanest reading, and
+it leaves the manager with no mode at all. Rejected on cost and on blast radius: it is two public
+additions rather than one, because the manager surface is needed either way and `detach` is added
+to it rather than instead of it; and it is a public method whose only correct caller is shutdown,
+so any other caller silently blinds a live session with nothing in the type to say so.
+Rejected: **a kill from `server.ts` on the recorded `pid`/`pgid`**, the shape boot's reap uses,
+with no manager surface. Attractive because it needs no new public interface at all. Rejected
+because it does not reach the outcome: boot's reap emits nothing only for want of an adapter to
+notice, and at shutdown one exists and is still watching, so the forbidden path runs exactly as
+before — with no manager surface available to mute it.
+Reversibility: cheap. One method and one flag, both above `adapters/*`. Landing point: staged in
+`## Open` below, with D174–D177's. Owed elsewhere: the `SessionManager` method is a public-surface
+addition and is `/contract`'s to write into `20-contract.md`, which is also where `Unresolved` 14
+is closed.
+
 ## Open
 
 Staging only. Once an item becomes an issue it leaves this list.
 
-- **Build *Shutdown ordering* (D174–D177).** `server.ts` today closes the listener and races
+- **Build *Shutdown ordering* (D174–D178).** `server.ts` today closes the listener and races
   `releaseLock` against a timeout inside the close callback. Three gaps against the section:
   `server.close()` never settles while any client is subscribed, so the callback — and with it
   both `releaseLock` and the zero exit — is unreachable whenever an operator is watching (D176);
   no step kills the live turn's child tree (D177); and the release must stay last (D175). Needs a
   bounded drain then a forced close of what remains, then the tree kill and its tombstone, then
-  release, then exit. Tier one, small; `server.ts`, plus whatever reaches `Adapter.kill` for the
-  live turn. D174 is the argument the other three rest on and builds nothing of its own.
+  release, then exit. Tier one, small; `server.ts`, plus the one new `SessionManager` method
+  D178 names — which mutes the manager's own `notify` sink, kills each live turn's tree and
+  writes its `ProcessTombstone` directly, so nothing reaches the handler that would emit,
+  resolve or append during teardown. D174 is the argument the others rest on and builds
+  nothing of its own; D178's contract amendment is `/contract`'s, not this item's.
