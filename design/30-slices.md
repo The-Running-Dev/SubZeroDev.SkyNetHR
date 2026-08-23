@@ -1522,6 +1522,90 @@ while absent from `--help` — the probe records that, and what to do about an u
 permission path depends on is a decision, not a fix; inventing the shape of any surface a hook
 process would reach; and retiring the fixture CLI.
 
+## S27 — Stop the server without leaving an agent behind
+
+**Tier one**, and small. D174 to D178 decided it; this builds it. It exists because the stop path
+that ships today cannot finish while anyone is watching a session, and because a terminal's Ctrl-C
+reaches this server and not the agent it spawned.
+
+Delivers: An operator who stops the server — with Ctrl-C, or by stopping the deployment — gets a
+stop that actually finishes, even while they or a colleague have a session open and streaming,
+instead of one that hangs until something harder kills it. No agent is left running on their
+machine afterwards with nobody watching it and nothing reading what it does, and pressing stop a
+second time gets out at once rather than waiting again.
+
+Touches: `server.ts` (the five ordered steps), `session-manager` (one new method, and the mute on
+its own notification sink), `store` (`appendPid` for the tombstone, unchanged), `contract` (no new
+type).
+
+Depends on: S3 (a force-closed subscriber's reconnect is served from the spill), S5 (the kill
+mechanism, and the interrupt path this must not use), S7 (`pids.ndjson`, tombstones, and the tree
+kill this reuses), S22 (`releaseLock`, and the ordering this puts it last in).
+
+Acceptance:
+  - S27.1 A second `SIGTERM` or `SIGINT` arriving during a shutdown exits immediately with a
+    non-zero code and runs no step below the guard — asserted by sending it during a deliberately
+    stalled drain, then confirming `server.lock` is still present and the turn's child is still
+    running afterwards by process enumeration (D174).
+  - S27.2 After the first signal the listener is closed: a new connection is refused, so no session
+    and no turn can be created. A request already accepted when the signal arrived still completes
+    and returns its normal response.
+  - S27.3 With one event stream open and a subscriber that never disconnects, the process still
+    reaches exit `0` within the drain bound, and the server closes that stream. This is the
+    criterion the slice exists for: the same test against today's build hangs until the harness
+    times it out (I54, D176).
+  - S27.4 A subscriber force-closed by the drain loses nothing. After a restart, a reconnect
+    carrying the last `seq` it saw receives every envelope from that watermark to the spill's tail,
+    contiguous and with no `error / replay_gap` (D40).
+  - S27.5 **Every** live turn's child tree is dead after exit, not one of them — asserted with two
+    sessions each holding a live turn, each having spawned a grandchild, and process enumeration
+    finding all four gone (I4, D177).
+  - S27.6 Shutdown writes nothing to any spill and emits no envelope. Asserted with a live turn
+    holding at least two outstanding permission requests at signal time — the case that would
+    otherwise append one `permission.resolved` each and a `turn.ended` — by byte-comparing every
+    session's `events.ndjson` before the first signal and after exit and finding them identical
+    (I52, D177).
+  - S27.7 The mute is at the notification sink and not on the `exited` handler. With all four
+    `AdapterNotification` kinds instrumented, zero are delivered to a handler from the moment the
+    shutdown method is entered. The negative case is asserted too: the same suite run against a
+    mute placed in the `exited` handler fails, because the adapter's `turn.ended` follows `exited`
+    as a second notification inside the same synchronous callback (I55, D178).
+  - S27.8 One `ProcessTombstone` per child killed is appended at the moment the kill is issued, not
+    in response to an exit — asserted by driving shutdown with the child's exit notification
+    suppressed and finding the tombstone already written.
+  - S27.9 A `spawned` notification arriving after the mute is dropped, so that child gets no
+    `pids.ndjson` entry and is owed no tombstone — and it is killed all the same, asserted by
+    process enumeration after exit (D178).
+  - S27.10 `server.lock` is removed only after the kill step has completed — asserted by
+    instrumenting both and confirming every kill's completion precedes the removal. A release that
+    cannot finish within its bound leaves the file rather than holding the exit (I53, D175).
+  - S27.11 Past the guard, no step can prevent the exit: with the tombstone write forced to fail,
+    the failure is logged, the lock is still released, and the process still exits `0`. No error
+    union gains a variant.
+  - S27.12 S22.5's assertion now holds with an operator watching. A clean shutdown taken with a
+    subscriber attached removes the lock, and the next boot takes it with the reclaim path
+    instrumented and found uncalled — which S22.5 could only demonstrate when nobody was connected.
+  - S27.13 Shutdown never reads `pids.ndjson` to choose what to kill: an entry with no `exitedAt`
+    naming a live process this manager does not hold is untouched, and that process is still
+    running after exit. Collecting it stays boot's reap (D177).
+  - S27.14 The `shutdown` declaration lands in the tree, and the placeholder block carrying it in
+    `20-contract.md § Public surface § session-manager` is deleted in the same commit — the block
+    itself instructs this, since the pointer opening that section already names the file.
+
+Out of scope: **finalising anything.** No session is marked ended, no open turn is closed on disk,
+and no `session.notice / server_restart` is written — every one of those is boot's, and duplicating
+it here is the single thing D174 exists to refuse, made tempting by the fact that Ctrl-C is what a
+developer exercises and the crash path is not. Also out: routing the kill through
+`SessionManager.interrupt`, which would emit `turn.ended` under a stop reason D24 reserves for the
+operator's own act (D177); a clean-shutdown marker for boot to trust, rejected by D174 because it
+selects between two repair paths on a file that is absent exactly when it is most needed; promoting
+either the drain bound or the release bound to a `Config` field, which is a contract amendment and
+not this slice's (they are module constants beside the existing one); adding anything to `Adapter`,
+which gains nothing here on purpose (D178); liveness and readiness endpoints for a proxy to probe,
+which are their own issue; and doing anything about a `ckpt.git/index.lock` a dying process leaves
+behind — the next turn's checkpoint already fails it with a warning and proceeds, and nothing
+further is owed. Running this slice's suite on the second platform is **S19's**, not this one's.
+
 ---
 
 ## What no slice covers
@@ -1574,6 +1658,8 @@ worse of the two irregularities. See S19 for why the verticality rule's purpose 
   aggregation. S16 covers the part with a source — burn and idle over a session's own event log.
   Whether the rest is in scope, and from what data, is unanswered.
 
-Next: run `/track` in a fresh session to open the issues for S12 to S18 and for S26, to sync
-the existing ones, and to clear the `PermissionRequest` hook items from
-`design/90-decisions.md § Open` once S26's issue carries them. `/slices` does not write to GitHub.
+Next: run `/track` in a fresh session to open the issues for S12 to S18, for S26 and for S27, to
+sync the existing ones, to clear the `PermissionRequest` hook items from
+`design/90-decisions.md § Open` once S26's issue carries them, and to clear the
+*Build Shutdown ordering (D174–D178)* item from that same section once S27's issue carries it.
+`/slices` does not write to GitHub.
