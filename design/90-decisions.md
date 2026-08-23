@@ -3846,6 +3846,86 @@ Reversibility: not applicable — a factual correction, not a design choice. `an
 can be closed or narrowed to the tool-dependent behaviour actually observed; that is a report to
 the vendor, not an action this repository takes.
 
+### 2026-08-23 — D174 Shutdown repairs nothing; boot stays the only repair pass
+Context: `10-design.md § Boot ordering` has six steps, four of which repair durable state left by
+however the last process ended. The symmetric question — what a shutdown owes — had never been
+asked, so `server.ts` grew a signal handler with no design behind it and the document said nothing
+about a path every deployment takes on every restart. Every candidate answer is already boot's:
+marking a rehydrated session ended (D20), closing a turn the spill left open (D39), emitting the
+restart notice the payroll fold reads (D130), reaping an orphan under the reuse guard (D23).
+Chosen: shutdown establishes no durable state and holds no invariant. It stops accepting work,
+releases the lock, and exits; boot remains the sole repair pass, so the crash path and the clean
+path converge on one implementation of each repair. The bar shutdown is held to is "leave nothing
+boot does not already expect", which it clears by writing nothing.
+Rejected: **finalising at shutdown** — mark sessions ended, close the open turn, emit the notice.
+It cannot be complete, because `SIGKILL`, an OOM kill and a power cut produce no shutdown at all
+and boot must handle the unfinalised case regardless; so it is a second implementation of boot's
+repair whose only distinguishing property is running more often. Worse, it is the path a developer
+exercises with Ctrl-C, which makes the duplicate the tested one and leaves the path that matters
+untested — `agent.md`'s "a shortcut taken in the reference implementation gets copied", one level up.
+Rejected: **a `clean-shutdown` marker file boot trusts to skip repair.** It makes boot cheapest in
+exactly the case where nothing was wrong and unchanged in the case that matters, and it reintroduces
+two code paths selected by a file that is absent precisely when things went badly — so the rarely
+taken branch is chosen by the least trustworthy evidence available.
+Reversibility: cheap. It is an argument about where existing work lives, and no code moves.
+
+### 2026-08-23 — D175 The storage lock is claimed first and released last
+Context: D161 argued the *claim* side hard — the lock precedes boot's reap step, not merely
+`listen`, because a second server that got as far as reaping cannot tell the first server's live
+agents from its own dead ones. The *release* side was never argued at all. `server.ts` happens to
+release after `server.close()` settles, and "happens to" is what a design says out loud before
+someone tidies it into a signal handler.
+Chosen: release is the last act before exit, after the listener has closed and connections are
+gone. Read backwards this is D161's own argument: a release issued while this server still has
+children in `pids.ndjson` with no `exitedAt` lets a successor boot into a free lock, read those
+entries, and reap processes that are still working — the identical wrong kill, arrived at from the
+other end. A restart is the one moment a successor is certain to be starting.
+**Failing to release is safe, and by design rather than by luck.** A `ServerLock` carries no
+`exitedAt` because the file's absence *is* the first limb of D23's three-part test
+(`20-contract.md § Server lock`, D167), so a lock nobody removed is reclaimed by the next boot on
+the strength of the other two limbs.
+Rejected: **releasing on signal receipt**, before the drain. Fastest, and it shortens the window a
+restarting supervisor waits — and it opens exactly the window the lock exists to close, at exactly
+the moment it is most likely to be walked into.
+Rejected: **never releasing**, relying on the staleness reclaim every time. It works, and it makes
+the reclaim the ordinary path rather than the exception. A guard exercised on every boot has
+stopped being a guard, and `30-slices.md § S22.5` asserts the opposite by instrumenting the reclaim
+and finding it uncalled.
+Reversibility: cheap. One call's position in one handler.
+
+### 2026-08-23 — D176 The shutdown drain is bounded, and what is still connected is then closed
+Context: The clean shutdown path's own precondition is unreachable in the normal case. Closing an
+HTTP listener closes the connections that are idle and waits for the rest, and a subscribed client
+is by construction not idle — its response is open for the life of the stream. Probed rather than
+assumed: with one open event-stream response the close callback does not fire (Node v25.3.0 on the
+development host; the deployment image is `node:22`, where this was not re-run). Both `releaseLock`
+and the zero exit sit behind that callback, so **a server with any operator watching it never
+completes a clean shutdown on its own** — it waits out the supervisor's grace period, takes
+`SIGKILL`, and leaves the lock behind. D175's release is then code that runs only when nobody was
+connected, and D23's reclaim becomes the ordinary restart path rather than the exception S22.5
+asserts it stays.
+Chosen: bound the drain. Close the listener, allow a grace window for in-flight requests to finish,
+then close whatever connections remain, then release and exit. **Force-closing a subscriber loses
+nothing**: D40 already serves a reconnect from the spill when the ring cannot reach back far
+enough, for live and ended sessions alike, and a stream cut without warning is the case that path
+was built for.
+Rejected: **closing subscriptions through the session manager**, so a subscriber is told the server
+is going rather than discovering it. Politer, and it needs a shutdown surface on a `SessionManager`
+that has `boot` and deliberately no counterpart, plus a traversal of every session's subscriber
+set, to reach an outcome the HTTP server produces by itself.
+Rejected: **leaving the unbounded wait and treating `SIGKILL` as the shutdown.** Zero code, and it
+spends the supervisor's entire grace period on every ordinary stop while making the clean path dead
+code in the configuration that ships.
+Reversibility: cheap. Landing point: staged in `## Open` below, because this is a code change taken
+outside a slice and `agent.md` is explicit that a decision with no landing point does not land.
+
 ## Open
 
 Staging only. Once an item becomes an issue it leaves this list.
+
+- **Bound the shutdown drain so the clean path is reachable (D176).** `server.ts` waits on
+  `server.close()`, which never settles while any client is subscribed, so `releaseLock` and the
+  zero exit are unreachable whenever an operator is watching. Needs a grace window and a forced
+  close of what remains, then release, then exit. Tier one, small, `server.ts` only.
+- **Settle whether shutdown kills the turn’s child tree** — `10-design.md § Open questions` 15.
+  Owner decision, not an issue until it is answered.
