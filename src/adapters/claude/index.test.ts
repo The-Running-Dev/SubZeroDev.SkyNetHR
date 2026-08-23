@@ -249,6 +249,65 @@ test('S25.6 — the same scenario with streamDeltas: false emits no message.delt
   assert.match(messages[10]!.event.data.text, /🎉/);
 });
 
+// #202 — a known record variant whose required nested shape does not hold is a fatal
+// `adapter_schema_mismatch`, not an uncaught exception that crashes the server: the
+// offending turn ends (`turn.ended`/`error`) and the child is terminated, but the adapter
+// itself — and everything above it — keeps running, which this test proves by making a
+// second, unrelated `send()` call on a fresh adapter immediately afterward.
+test('#202 — a malformed assistant content (non-array) is a fatal schema mismatch, not a crash', async () => {
+  process.env['SKYNET_TEST_SCENARIO'] = 'malformed-content';
+  const { adapter, notifications } = makeAdapter('malformed-content');
+  await adapter.send('hello', [], null, 'turn-malformed-1' as never);
+  await waitUntil(() => eventsOf(notifications, 'turn.ended').length > 0);
+
+  const errors = eventsOf(notifications, 'error');
+  const mismatch = errors.find((e) => (e.event.data as { kind: string }).kind === 'adapter_schema_mismatch');
+  assert.ok(mismatch, 'expected a fatal adapter_schema_mismatch event');
+  assert.equal((mismatch!.event.data as { fatal: boolean }).fatal, true);
+  assert.equal((eventsOf(notifications, 'turn.ended')[0]!.event.data as { stopReason: string }).stopReason, 'error');
+
+  // The server (this process) and other sessions (a fresh adapter) are unaffected.
+  process.env['SKYNET_TEST_SCENARIO'] = 'error-result';
+  const other = makeAdapter('error-result');
+  const otherResult = await other.adapter.send('still alive', [], null, 'turn-other' as never);
+  assert.equal(otherResult.ok, true);
+  await waitUntil(() => eventsOf(other.notifications, 'turn.ended').length > 0);
+});
+
+// #202 — a tool_use block's id must be a string; it is the correlation key `tool.result`
+// and `permission.request` are keyed on.
+test('#202 — a tool_use block with a non-string id is a fatal schema mismatch', async () => {
+  process.env['SKYNET_TEST_SCENARIO'] = 'malformed-tool-id';
+  const { adapter, notifications } = makeAdapter('malformed-tool-id');
+  await adapter.send('hello', [], null, 'turn-malformed-2' as never);
+  await waitUntil(() => eventsOf(notifications, 'turn.ended').length > 0);
+  const errors = eventsOf(notifications, 'error');
+  assert.ok(errors.some((e) => (e.event.data as { kind: string }).kind === 'adapter_schema_mismatch'));
+});
+
+// #202 — a control_request's tool_use_id must be a string.
+test('#202 — a control_request with a non-string tool_use_id is a fatal schema mismatch', async () => {
+  process.env['SKYNET_TEST_SCENARIO'] = 'malformed-control-request';
+  const { adapter, notifications } = makeAdapter('malformed-control-request');
+  await adapter.send('hello', [], null, 'turn-malformed-3' as never);
+  await waitUntil(() => eventsOf(notifications, 'turn.ended').length > 0);
+  const errors = eventsOf(notifications, 'error');
+  assert.ok(errors.some((e) => (e.event.data as { kind: string }).kind === 'adapter_schema_mismatch'));
+});
+
+// #202 — a numeric usage field carrying a non-numeric value is a fatal schema mismatch
+// rather than silently coercing to NaN and corrupting `PayrollView.burn`.
+test('#202 — a non-numeric usage field is a fatal schema mismatch', async () => {
+  process.env['SKYNET_TEST_SCENARIO'] = 'malformed-usage';
+  const { adapter, notifications } = makeAdapter('malformed-usage');
+  await adapter.send('hello', [], null, 'turn-malformed-4' as never);
+  await waitUntil(() => eventsOf(notifications, 'turn.ended').length > 0);
+  const errors = eventsOf(notifications, 'error');
+  assert.ok(errors.some((e) => (e.event.data as { kind: string }).kind === 'adapter_schema_mismatch'));
+  // The usage event itself must never have been emitted with the malformed value.
+  assert.equal(eventsOf(notifications, 'usage').length, 0);
+});
+
 // S1.4 — an unrecognised record kind is non-fatal and the stream continues; a
 // malformed JSON line is likewise non-fatal and the stream continues.
 test('S1.4 — an unrecognised record kind, and a malformed JSON line, are both non-fatal', async () => {
