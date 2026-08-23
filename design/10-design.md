@@ -142,10 +142,10 @@ observed the field, populated, on every `control_request` for a state-mutating t
 (`design/findings/S26-real-permission-round-trip.md`) — the two probes D108 rested on were
 both the safe, no-prompt case, the same miscount `10-design.md § The hard problem` corrects
 (D173). This does not reopen D108's grammar choice, which is S10's and out of S26's scope;
-it is carried to `90-decisions.md § Open` as a question for whoever next touches
-`StandingRuleExpression`. The grammar remains the local one —
-`"<tool>:<pattern>"`, declared in `20-contract.md § Event payloads` (D108). The vendor's
-array is still forwarded verbatim and read by nothing (D104, I44).
+it is carried as #194, a question for whoever next touches `StandingRuleExpression`. The
+grammar remains the local one — `"<tool>:<pattern>"`, declared in
+`20-contract.md § Event payloads` (D108). The vendor's array is still forwarded verbatim and
+read by nothing (D104, I44).
 
 ### Leave
 
