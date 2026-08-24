@@ -18,6 +18,18 @@ import { BASH_COMMAND_FIELD, summariseToolCall } from './summarise.js';
 
 const isWindows = platform === 'win32';
 
+// (#201) With `shell: true` on Windows, Node launches `%ComSpec%` and the reported
+// `proc.pid` names *that* shell process, not the resolved executable — `tasklist` for
+// that pid reports the shell's own image (`cmd.exe` by default), never `executable`.
+// Recording anything else here is what makes the boot reaper's exact-image comparison
+// (`session-manager/index.ts`'s `imagesMatch`) reject the real process tree as a
+// mismatch after a crash. Mirrors `../codex/index.ts`'s identical need.
+function reportableImage(executable: string, usedShell: boolean): string {
+  if (!usedShell) return executable;
+  const comspec = process.env['ComSpec'] ?? process.env['COMSPEC'] ?? 'cmd.exe';
+  return comspec.replace(/^.*[\\/]/, '').replace(/\.exe$/i, '');
+}
+
 // SIGTERM-then-SIGKILL grace period for a POSIX process group (D38, `10-design.md §
 // Interrupt`). Windows has no equivalent staged termination — `taskkill /T /F` is
 // already forceful — so this applies to the POSIX branch of `kill` only.
@@ -449,7 +461,12 @@ export function createClaudeAdapter(opts: AdapterOptions & { readonly executable
         proc.once('spawn', () => {
           if (settled) return;
           settled = true;
-          notify({ kind: 'spawned', pid: proc.pid ?? -1, pgid: isWindows ? null : (proc.pid ?? null), image: executable });
+          notify({
+            kind: 'spawned',
+            pid: proc.pid ?? -1,
+            pgid: isWindows ? null : (proc.pid ?? null),
+            image: reportableImage(executable, needsShell),
+          });
           // (D160/S21.1) One `image` content block per attachment, ahead of the text —
           // the same `content` array shape the finding verified against a real CLI run.
           // `design/findings/S21-attachment-probe.md` only ever probed an image
