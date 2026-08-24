@@ -1062,17 +1062,9 @@ What the declarations cannot say:
   all of it** — see *`server`* below, and I52. So `server_restart` fires on an orderly stop
   exactly as it does after a power cut: boot cannot tell them apart and is not asked to.
 - **`boot` has exactly one counterpart, and it exists because shutdown's step 3 has nowhere
-  else to live** (D178; *`server`* below for the step it serves). Not yet declared — the slice
-  that adds it to `SessionManager` deletes this block, since the pointer opening this section
-  already names the file:
-
-  ```
-  shutdown(): Promise<void>;
-  ```
-
-  It takes no owner and no arguments, like `boot`, and **returns no `Result`**: shutdown is
-  best-effort throughout and no error union gains a variant for it. It does three things, in
-  this order:
+  else to live** (D178; *`server`* below for the step it serves). Declared as `shutdown(): Promise<void>` on `SessionManager` in `src/contract/index.ts` — no owner, no arguments, like
+  `boot`, and **returns no `Result`**: shutdown is best-effort throughout and no error union
+  gains a variant for it. It does three things, in this order:
 
   ```
   0. mute    the manager's own notify sink stops delivering, every kind      (D178, I55)

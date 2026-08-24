@@ -3612,3 +3612,239 @@ test('S21.8 — an adapter declaring acceptsAttachments: false refuses the whole
   assert.equal(received.some((e) => e.kind === 'turn.started'), false);
   assert.equal(existsSync(path.join(storageRoot, 'sessions', sessionId, 'attachments')), false);
 });
+
+// --- S27 — Stop the server without leaving an agent behind ------------------------
+
+test('S27.5 — shutdown kills every live turn\'s child tree, not one of them', async () => {
+  const { manager, workspaceRoot } = await makeManager('grandchild');
+  const owner = 'operator-1' as OperatorId;
+
+  async function startGrandchild(name: string): Promise<{ cliPid: number; grandchildPid: number }> {
+    const projectDir = path.join(workspaceRoot, name);
+    await mkdir(projectDir);
+    const markerDir = await mkdtemp(path.join(tmpdir(), 'skynet-marker-'));
+    const markerPath = path.join(markerDir, 'grandchild.json');
+    process.env['SKYNET_GRANDCHILD_MARKER'] = markerPath;
+
+    const created = await manager.create(owner, { vendor: 'claude', cwd: projectDir, model: null, sandbox: null, requisitionId: null });
+    assert.equal(created.ok, true);
+    if (!created.ok) throw new Error('unreachable');
+    const messaged = await manager.message(created.value.sessionId, owner, 'go', []);
+    assert.equal(messaged.ok, true);
+
+    let marker: { cliPid: number; grandchildPid: number } | null = null;
+    await waitUntil(async () => {
+      try {
+        marker = JSON.parse(await readFile(markerPath, 'utf8')) as { cliPid: number; grandchildPid: number };
+        return true;
+      } catch {
+        return false;
+      }
+    });
+    return marker!;
+  }
+
+  const first = await startGrandchild('proj-s275a');
+  const second = await startGrandchild('proj-s275b');
+
+  assert.equal(isAlive(first.cliPid), true, 'session 1 CLI is running before shutdown');
+  assert.equal(isAlive(first.grandchildPid), true, 'session 1 grandchild is running before shutdown');
+  assert.equal(isAlive(second.cliPid), true, 'session 2 CLI is running before shutdown');
+  assert.equal(isAlive(second.grandchildPid), true, 'session 2 grandchild is running before shutdown');
+
+  await manager.shutdown();
+
+  await waitUntil(
+    () => !isAlive(first.cliPid) && !isAlive(first.grandchildPid) && !isAlive(second.cliPid) && !isAlive(second.grandchildPid),
+    5000,
+  );
+});
+
+test('S27.6/S27.7 — shutdown writes nothing to any spill and emits no envelope, even with outstanding permission requests', async () => {
+  const { manager, workspaceRoot, storageRoot } = await makeManager('die-with-pending');
+  const owner = 'operator-1' as OperatorId;
+  const projectDir = path.join(workspaceRoot, 'proj-s276');
+  await mkdir(projectDir);
+
+  const created = await manager.create(owner, { vendor: 'claude', cwd: projectDir, model: null, sandbox: null, requisitionId: null });
+  assert.equal(created.ok, true);
+  if (!created.ok) return;
+  const { sessionId } = created.value;
+
+  let permissionRequests = 0;
+  let shutdownStarted: Promise<void> | null = null;
+  await manager.subscribe(sessionId, owner, 0, {
+    deliver: (e) => {
+      if (!('seq' in e)) return;
+      if (e.kind === 'permission.request') {
+        permissionRequests += 1;
+        // Fired synchronously from inside the same emit that delivered this envelope, so
+        // the mute (shutdown's first, synchronous act) is set before the adapter's own
+        // exit — already in flight in `die-with-pending` — is ever noticed by the parent.
+        if (permissionRequests === 2 && shutdownStarted === null) shutdownStarted = manager.shutdown();
+      }
+    },
+    close: () => {},
+  });
+
+  const messaged = await manager.message(sessionId, owner, 'go', []);
+  assert.equal(messaged.ok, true);
+
+  await waitUntil(() => shutdownStarted !== null, 5000);
+  await shutdownStarted;
+  // Give any spill write already queued *before* the mute a moment to flush, so the
+  // assertion below is about what shutdown did, not a false pass on a slow write.
+  await new Promise((r) => setTimeout(r, 300));
+
+  const raw = await readFile(path.join(storageRoot, 'sessions', sessionId, 'events.ndjson'), 'utf8');
+  const kinds = raw
+    .split('\n')
+    .filter((l) => l.trim().length > 0)
+    .map((l) => (JSON.parse(l) as { kind: string }).kind);
+  assert.equal(kinds.includes('permission.resolved'), false, 'shutdown resolved no pending permission');
+  assert.equal(kinds.includes('turn.ended'), false, 'shutdown closed no turn on disk — that stays boot\'s (D174)');
+
+  const audit = await readAudit(storageRoot);
+  assert.equal(audit.some((a) => a.reason === 'cancelled_process_exit'), false, 'no audit record for a cancellation shutdown never made');
+});
+
+test('S27.8 — the tombstone is written at kill time, not in response to an exit', async () => {
+  const { manager, workspaceRoot, store } = await makeManager('grandchild');
+  const owner = 'operator-1' as OperatorId;
+  const projectDir = path.join(workspaceRoot, 'proj-s278');
+  await mkdir(projectDir);
+  const markerDir = await mkdtemp(path.join(tmpdir(), 'skynet-marker-'));
+  const markerPath = path.join(markerDir, 'grandchild.json');
+  process.env['SKYNET_GRANDCHILD_MARKER'] = markerPath;
+
+  const created = await manager.create(owner, { vendor: 'claude', cwd: projectDir, model: null, sandbox: null, requisitionId: null });
+  assert.equal(created.ok, true);
+  if (!created.ok) return;
+  const messaged = await manager.message(created.value.sessionId, owner, 'go', []);
+  assert.equal(messaged.ok, true);
+
+  let marker: { cliPid: number; grandchildPid: number } | null = null;
+  await waitUntil(async () => {
+    try {
+      marker = JSON.parse(await readFile(markerPath, 'utf8')) as { cliPid: number; grandchildPid: number };
+      return true;
+    } catch {
+      return false;
+    }
+  });
+  const { cliPid } = marker!;
+  assert.equal((await store.readOpenPids()).some((r) => r.pid === cliPid), true, 'the pid is recorded open before shutdown');
+
+  await manager.shutdown();
+
+  // No wait for an exit here: the sink is muted, so an `exited` notification — if it ever
+  // arrives — is dropped, and a tombstone that depended on it would never land. This one
+  // is already there the instant `shutdown()` resolves.
+  assert.equal((await store.readOpenPids()).some((r) => r.pid === cliPid), false, 'shutdown tombstoned it without waiting on an exit that never arrives');
+});
+
+test('S27.9 — a spawned notification arriving after the mute gets no pids.ndjson entry and no tombstone', async () => {
+  const { manager, workspaceRoot, store } = await makeManager('grandchild');
+  const owner = 'operator-1' as OperatorId;
+  const projectDir = path.join(workspaceRoot, 'proj-s279');
+  await mkdir(projectDir);
+  const markerDir = await mkdtemp(path.join(tmpdir(), 'skynet-marker-'));
+  const markerPath = path.join(markerDir, 'grandchild.json');
+  process.env['SKYNET_GRANDCHILD_MARKER'] = markerPath;
+
+  const created = await manager.create(owner, { vendor: 'claude', cwd: projectDir, model: null, sandbox: null, requisitionId: null });
+  assert.equal(created.ok, true);
+  if (!created.ok) return;
+  const { sessionId } = created.value;
+
+  // Claims the turn slot synchronously and returns before `adapter.send()` — and
+  // therefore the real `spawn()` call and its `spawned` notification — has run: message()
+  // still has real async work ahead of it (attachment writes, a checkpoint commit) before
+  // it gets there. `shutdown`'s kill loop is a single pass taken here, before that child
+  // exists — the same shape as an ordinary in-flight request racing a signal (S27.2), and
+  // why this criterion is about the bookkeeping only: `entry.adapter!.kill()` no-ops
+  // against a child that has not spawned yet, and this manager does not sweep again for
+  // one that spawns later. What production adds on top is `server.ts`'s own `process.exit`
+  // right after this step, which tears the event loop down before a still-suspended
+  // `message()` can ever reach the real `spawn()` call — this test lets it run to
+  // completion instead, specifically to observe the notification side of the guarantee.
+  const messagePromise = manager.message(sessionId, owner, 'go', []);
+  await manager.shutdown();
+
+  const messaged = await messagePromise;
+  assert.equal(messaged.ok, true);
+
+  let marker: { cliPid: number; grandchildPid: number } | null = null;
+  await waitUntil(async () => {
+    try {
+      marker = JSON.parse(await readFile(markerPath, 'utf8')) as { cliPid: number; grandchildPid: number };
+      return true;
+    } catch {
+      return false;
+    }
+  }, 5000);
+  const { cliPid, grandchildPid } = marker!;
+  // Spawned behind the mute: never a live process this test's harness is tracking, so the
+  // module-level safety net at the top of this file would not reap it either.
+  strayPids.push(cliPid, grandchildPid);
+
+  assert.equal((await store.readOpenPids()).some((r) => r.pid === cliPid), false, 'a spawned arriving behind the mute gets no pids.ndjson entry');
+});
+
+test('S27.11 — past the guard, nothing prevents the exit: a failed tombstone write is logged and shutdown still resolves and still kills', async () => {
+  const wrapStore = (store: Store): Store => ({
+    ...store,
+    async tombstonePid() {
+      return { ok: false, error: { code: 'io', path: 'pids.ndjson', detail: 'forced failure for S27.11' } };
+    },
+  });
+  const { manager, workspaceRoot } = await makeManager('grandchild', {}, wrapStore);
+  const owner = 'operator-1' as OperatorId;
+  const projectDir = path.join(workspaceRoot, 'proj-s2711');
+  await mkdir(projectDir);
+  const markerDir = await mkdtemp(path.join(tmpdir(), 'skynet-marker-'));
+  const markerPath = path.join(markerDir, 'grandchild.json');
+  process.env['SKYNET_GRANDCHILD_MARKER'] = markerPath;
+
+  const created = await manager.create(owner, { vendor: 'claude', cwd: projectDir, model: null, sandbox: null, requisitionId: null });
+  assert.equal(created.ok, true);
+  if (!created.ok) return;
+  const messaged = await manager.message(created.value.sessionId, owner, 'go', []);
+  assert.equal(messaged.ok, true);
+
+  let marker: { cliPid: number; grandchildPid: number } | null = null;
+  await waitUntil(async () => {
+    try {
+      marker = JSON.parse(await readFile(markerPath, 'utf8')) as { cliPid: number; grandchildPid: number };
+      return true;
+    } catch {
+      return false;
+    }
+  });
+  const { cliPid, grandchildPid } = marker!;
+
+  await assert.doesNotReject(manager.shutdown());
+  await waitUntil(() => !isAlive(cliPid) && !isAlive(grandchildPid), 5000);
+});
+
+test('S27.13 — shutdown never reads pids.ndjson to choose what to kill: an untracked live entry is untouched', async () => {
+  const { manager, store } = await makeManager('full');
+
+  const stray = await spawnTrackedTree();
+  strayPids.push(stray.pid, stray.grandchildPid);
+  await store.appendPid({
+    pid: stray.pid,
+    pgid: stray.pgid,
+    sessionId: 'not-a-real-session' as never,
+    turnId: 'not-a-real-turn' as never,
+    startedAt: new Date().toISOString() as never,
+    image: 'test-stray',
+    exitedAt: null,
+  });
+  assert.equal(isAlive(stray.pid), true);
+
+  await manager.shutdown();
+
+  assert.equal(isAlive(stray.pid), true, 'a process this manager never held live is not touched by shutdown — collecting it stays boot\'s reap (D177)');
+  assert.equal((await store.readOpenPids()).some((r) => r.pid === stray.pid), true, 'and its pids.ndjson entry is untouched too');
+});

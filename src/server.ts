@@ -1,4 +1,5 @@
 import { createServer } from 'node:http';
+import type { Socket } from 'node:net';
 import { createSseEdge } from './edge/sse/index.js';
 import { createWsEdge } from './edge/ws/index.js';
 import { resolverFor } from './identity/index.js';
@@ -96,25 +97,73 @@ async function main(): Promise<void> {
   // A container stop is a signal, not a crash. `tini` is pid 1 in the deployment image
   // (see the Dockerfile) and forwards SIGTERM here; without a handler the process would
   // take the default terminate at whatever point the event loop happened to be, and
-  // `docker stop` would wait out its grace period first. Closing the listener stops new
-  // connections while in-flight ones drain; a second signal is the operator saying they
-  // are done waiting.
-  // Bounds `releaseLock` below so a stuck storage mount cannot hold the exit this handler
-  // exists to guarantee — the same shape as the adapters' own SIGTERM-then-SIGKILL grace.
+  // `docker stop` would wait out its grace period first.
+  //
+  // Five steps, in order, and the order is the point (`design/10-design.md` § *Shutdown
+  // ordering*, D174-D178):
+  //   0. guard    a second signal exits at once, non-zero, past every step below (D174)
+  //   1. quiesce  close the listener: no new connection, so no new session or turn
+  //   2. drain    bounded — `server.close()`'s own callback never fires while any SSE or
+  //               WS connection stays open (that is the whole of #197/D176), so whatever
+  //               is still connected when the window closes is force-closed instead
+  //   3. kill     `manager.shutdown()` — every live turn's child tree, then one
+  //               `ProcessTombstone` each (D177, D178)
+  //   4. release  remove `<storage>/server.lock`, bounded, then exit zero (D175)
+  // Neither bound is a `Config` field (module constants, beside each other, is the shape
+  // the design settles on) — promoting either to a deployment flag is a contract amendment.
+  const DRAIN_TIMEOUT_MS = 5000;
   const RELEASE_LOCK_TIMEOUT_MS = 2000;
+
+  // Every socket this server has ever accepted, tracked so step 2 can force-close whatever
+  // step 1 could not: `'connection'` fires once per underlying TCP connection, before HTTP
+  // routing and before a WebSocket upgrade takes the socket out of the HTTP layer, so this
+  // one registry reaches both edges without either needing a shutdown method of its own —
+  // `20-contract.md § server`, "subscriptions are not closed through `SessionManager`".
+  const sockets = new Set<Socket>();
+  server.on('connection', (socket) => {
+    sockets.add(socket);
+    socket.on('close', () => sockets.delete(socket));
+  });
 
   let stopping = false;
   const stop = (signal: NodeJS.Signals): void => {
-    if (stopping) process.exit(1);
+    if (stopping) process.exit(1); // guard (D174): past this, nothing below is retried
     stopping = true;
-    console.log(`${signal} received — closing the listener.`);
-    server.close(() => {
-      // D161: removes `server.lock` so the next boot on this storage root takes it
-      // without invoking the staleness path at all. Not fatal if it fails, or if it never
-      // settles — the next boot's reclaim is what recovers from a lock nobody removed.
-      const timeout = new Promise<void>((resolve) => setTimeout(resolve, RELEASE_LOCK_TIMEOUT_MS).unref());
-      void Promise.race([store.value.releaseLock().then(() => undefined), timeout]).then(() => process.exit(0));
-    });
+    console.log(`${signal} received — shutting down.`);
+    void (async () => {
+      // Step 1 (quiesce): stops accepting new connections the instant it is called: the
+      // callback is a courtesy this caller does not wait on past the drain bound below,
+      // because a subscribed client's response is open for the life of the stream and
+      // would otherwise hold this callback, and therefore the exit, forever (D176).
+      let closedNaturally = false;
+      const closed = new Promise<void>((resolve) => {
+        server.close(() => {
+          closedNaturally = true;
+          resolve();
+        });
+      });
+
+      // Step 2 (drain): bounded. Whatever is still connected when the window closes is
+      // closed — destroying the socket ends an SSE response or a WS connection the same
+      // way, and D40 already serves a reconnect from the spill for either, so nothing is
+      // lost (S27.4).
+      await Promise.race([closed, new Promise<void>((resolve) => setTimeout(resolve, DRAIN_TIMEOUT_MS).unref())]);
+      if (!closedNaturally) {
+        for (const socket of sockets) socket.destroy();
+      }
+
+      // Step 3 (kill): never routed through `interrupt` — see `manager.shutdown()`'s own
+      // contract for why. `server.ts` holds no adapter and kills nothing itself.
+      await manager.shutdown();
+
+      // Step 4 (release), last (D175, D161): removes `server.lock` so the next boot on
+      // this storage root takes it without invoking the staleness path at all. Not fatal
+      // if it fails, or if it never settles — the next boot's reclaim is what recovers
+      // from a lock nobody removed.
+      const releaseTimeout = new Promise<void>((resolve) => setTimeout(resolve, RELEASE_LOCK_TIMEOUT_MS).unref());
+      await Promise.race([store.value.releaseLock().then(() => undefined), releaseTimeout]);
+      process.exit(0);
+    })();
   };
   process.on('SIGTERM', () => stop('SIGTERM'));
   process.on('SIGINT', () => stop('SIGINT'));

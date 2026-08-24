@@ -814,6 +814,12 @@ export interface Subscription {
 export interface SessionManager {
   boot(): Promise<Result<void, StartupError>>; // reap → rehydrate → close open turns; before listen
 
+  // `server.ts`'s shutdown step 3 (D177, D178): mutes the manager's own notify sink, then
+  // kills every live turn's child tree and tombstones it. Takes no owner and no arguments,
+  // like `boot`, and returns no `Result` — best-effort throughout, no error union gains a
+  // variant for it (`20-contract.md § session-manager`).
+  shutdown(): Promise<void>;
+
   create(owner: OperatorId, input: CreateSessionInput): Promise<Result<{ sessionId: SessionId }, SessionError>>;
   list(owner: OperatorId): readonly SessionSummary[];
   get(sessionId: SessionId, owner: OperatorId): Result<SessionSummary, SessionError>;
