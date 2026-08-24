@@ -20,12 +20,19 @@ on:
     types: [completed]
   workflow_dispatch:
 
-# Serialised, never cancelled: two merges landing in quick succession would otherwise race
-# to push `:latest`, and the slower run pushing second leaves `:latest` resolving to the
-# older commit. Cancelling instead would drop the immutable `:<sha>` tag for a commit that
-# passed `verify`, so the queue waits rather than discards.
+# #199: scoped per commit, not shared across every run of this workflow — GitHub's own
+# concurrency-group guarantee is "at most one running and one pending" (not "every queued run
+# eventually runs"), so a single shared group here would let a third rapid commit silently
+# replace a second one still queued, and that second commit would never build or push its
+# immutable `:<sha>` tag at all. Never cancelled, so a re-run of the *same* commit (a manual
+# `workflow_dispatch` racing `verify`'s own `workflow_run` completion for that SHA) queues
+# rather than aborting a push partway. This scoping only ever serialises two runs of the
+# identical commit — different commits' runs always proceed independently and in parallel —
+# so it does nothing to guarantee run *order* between commits, which is why `:latest`'s own
+# correctness below no longer depends on it (see "Update latest, only if this commit is
+# still main's current tip").
 concurrency:
-  group: publish
+  group: publish-${{ github.event.workflow_run.head_sha || github.sha }}
   cancel-in-progress: false
 
 permissions:
@@ -140,18 +147,57 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Push the gated image to GHCR
+      # #199: pushed unconditionally, every run, regardless of what `main` has done since —
+      # this is the tag "three rapidly verified commits each receive their immutable image
+      # tag" is about, and it must never be skipped just because a later commit has since
+      # landed. No tag is announced until the push has succeeded and the tag resolves in the
+      # registry, the same read-back SubZeroDev.com's `publish-release` job makes.
+      - name: Push the immutable per-commit tag to GHCR
         run: |
           REPO_OWNER_LC=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          echo "IMAGE=ghcr.io/$REPO_OWNER_LC/skynet-hr" >> "$GITHUB_ENV"
           IMAGE="ghcr.io/$REPO_OWNER_LC/skynet-hr"
           docker tag "skynet-hr:${{ env.IMAGE_SHA }}" "$IMAGE:${{ env.IMAGE_SHA }}"
-          docker tag "skynet-hr:${{ env.IMAGE_SHA }}" "$IMAGE:latest"
           docker push "$IMAGE:${{ env.IMAGE_SHA }}"
-          docker push "$IMAGE:latest"
-          # No tag is announced until the push has succeeded and the tag resolves in the
-          # registry, the same read-back SubZeroDev.com's `publish-release` job makes.
           docker manifest inspect "$IMAGE:${{ env.IMAGE_SHA }}" > /dev/null
           {
             echo "### Image pushed";
             echo "\`$IMAGE:${{ env.IMAGE_SHA }}\`";
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # #199: `:latest` is the one thing here that must reflect an *order*, and neither this
+      # workflow's own concurrency group (scoped per-commit, above) nor `workflow_run`'s
+      # completion order actually guarantees one run for an older commit cannot finish this
+      # step after a newer commit's run already has — `verify.yml` for an older commit can
+      # simply take longer. So this asks the one thing that is never stale: `main`'s actual
+      # current tip, via the API, right before the push — not "newer than the last one I saw"
+      # (which a crashed/restarted runner could get wrong) but "still this commit, right now".
+      #
+      # Validation scenario (no automated workflow test exists for this — GitHub Actions
+      # itself is the thing under test, and this repository has no workflow-execution harness
+      # to run one against without a new CI dependency): push commit A, then immediately push
+      # commit B, with A's `verify` run made slower than B's (e.g. temporarily widen a test's
+      # sleep) — B's publish run reaches this step first and tags `:latest`; A's reaches it
+      # later, reads `main` at B's SHA, sees a mismatch against its own `IMAGE_SHA`, and skips.
+      # `docker manifest inspect ghcr.io/.../skynet-hr:latest` after both runs finish must
+      # resolve to B's digest, and A's own per-commit tag must still exist unchanged.
+      - name: Update latest, only if this commit is still main's current tip
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          CURRENT_MAIN_SHA=$(gh api "repos/${{ github.repository }}/commits/main" --jq .sha)
+          if [ "$CURRENT_MAIN_SHA" != "${{ env.IMAGE_SHA }}" ]; then
+            echo "main is now at $CURRENT_MAIN_SHA, not this run's ${{ env.IMAGE_SHA }} — leaving :latest alone" >&2
+            {
+              echo "### latest left unchanged";
+              echo "main has moved to \`$CURRENT_MAIN_SHA\` since this commit was verified — only its immutable \`:${{ env.IMAGE_SHA }}\` tag was pushed.";
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          docker tag "skynet-hr:${{ env.IMAGE_SHA }}" "${{ env.IMAGE }}:latest"
+          docker push "${{ env.IMAGE }}:latest"
+          docker manifest inspect "${{ env.IMAGE }}:latest" > /dev/null
+          {
+            echo "### latest updated";
+            echo "\`${{ env.IMAGE }}:latest\` now resolves to \`${{ env.IMAGE_SHA }}\`.";
           } >> "$GITHUB_STEP_SUMMARY"
