@@ -4009,15 +4009,3 @@ is closed.
 ## Open
 
 Staging only. Once an item becomes an issue it leaves this list.
-
-- **Build *Shutdown ordering* (D174–D178).** `server.ts` today closes the listener and races
-  `releaseLock` against a timeout inside the close callback. Three gaps against the section:
-  `server.close()` never settles while any client is subscribed, so the callback — and with it
-  both `releaseLock` and the zero exit — is unreachable whenever an operator is watching (D176);
-  no step kills the live turn's child tree (D177); and the release must stay last (D175). Needs a
-  bounded drain then a forced close of what remains, then the tree kill and its tombstone, then
-  release, then exit. Tier one, small; `server.ts`, plus the one new `SessionManager` method
-  D178 names — which mutes the manager's own `notify` sink, kills each live turn's tree and
-  writes its `ProcessTombstone` directly, so nothing reaches the handler that would emit,
-  resolve or append during teardown. D174 is the argument the others rest on and builds
-  nothing of its own; D178's contract amendment is `/contract`'s, not this item's.
