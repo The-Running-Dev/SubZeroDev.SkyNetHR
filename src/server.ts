@@ -182,6 +182,31 @@ async function main(): Promise<void> {
   process.on('SIGTERM', () => stop('SIGTERM'));
   process.on('SIGINT', () => stop('SIGINT'));
 
+  // #207: `listen()`'s own error path (e.g. `EADDRINUSE`) bypasses `stop()` entirely — the
+  // process never received a signal — so without this the lock `manager.boot()` already
+  // claimed above is left on disk and the next boot pays the reclaim path for a holder that
+  // is not actually running. `bound` scopes this to the startup failure this issue is about:
+  // an 'error' after a successful `listening` is a runtime fault outside this fix's contract
+  // and is only logged, never used to touch the lock.
+  let bound = false;
+  server.once('listening', () => {
+    bound = true;
+  });
+  server.on('error', (err) => {
+    if (bound) {
+      console.error(`[server] error after startup: ${(err as Error).message}`);
+      return;
+    }
+    console.error(`Refusing to start: ${(err as Error).message}`);
+    void (async () => {
+      const released = await store.value.releaseLock();
+      if (!released.ok) {
+        console.error(`[server] startup: failed to release lock — ${JSON.stringify(released.error)}`);
+      }
+      process.exit(1);
+    })();
+  });
+
   server.listen(config.value.bind.port, config.value.bind.host, () => {
     console.log(`SkyNet HR listening on http://${config.value.bind.host}:${config.value.bind.port}`);
     console.log(`auth mode: ${config.value.auth.mode}`);

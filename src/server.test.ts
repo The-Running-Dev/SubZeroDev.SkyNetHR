@@ -271,3 +271,44 @@ test('S27.1 — a second signal during a stalled drain exits at once, non-zero, 
   // never got there either, and the file this server claimed at boot is still on disk.
   assert.equal(existsSync(path.join(storageRoot, 'server.lock')), true, 'a guard exit leaves server.lock behind — nothing below it ran');
 });
+
+// Cross-platform: unlike SIGTERM (#28, Windows has no real signals), a plain TCP bind
+// conflict is a real `EADDRINUSE` on every platform, so this needs no `win32` skip.
+test('#207 — a listen failure after boot releases the lock this process claimed and exits non-zero', async () => {
+  const first = await startServer();
+  const storageRoot = await mkdtemp(path.join(tmpdir(), 'skynet-server-storage-'));
+  const workspaceRoot = await mkdtemp(path.join(tmpdir(), 'skynet-server-ws-'));
+
+  // Same port as `first` (already bound), a fresh storage root so this process's own boot
+  // claims a lock the listen failure below must clean up.
+  const child = spawn(process.execPath, [SERVER_ENTRY], {
+    env: {
+      ...process.env,
+      BIND_HOST: '127.0.0.1',
+      BIND_PORT: String(first.port),
+      AUTH_MODE: 'shared-secret',
+      AUTH_COOKIE_NAME: 'skynet_hr_session',
+      AUTH_SECRET: 'server-test-secret',
+      WORKSPACE_ROOTS: workspaceRoot,
+      STORAGE_ROOT: storageRoot,
+      ALLOWED_ORIGINS: 'http://skynet-hr.test',
+      SKYNET_CLAUDE_EXECUTABLE: FIXTURE,
+      SKYNET_TEST_SCENARIO: 'grandchild',
+      SKYNET_GRANDCHILD_MARKER: path.join(storageRoot, 'grandchild-marker.json'),
+    },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  liveServers.push(child);
+
+  const { code } = await waitForExit(child);
+  assert.notEqual(code, 0, 'a listen failure after a claimed lock exits non-zero');
+  assert.equal(
+    existsSync(path.join(storageRoot, 'server.lock')),
+    false,
+    'the lock this process claimed during boot is released on a startup failure',
+  );
+
+  const firstExit = waitForExit(first.child);
+  first.child.kill('SIGTERM');
+  await firstExit;
+});
