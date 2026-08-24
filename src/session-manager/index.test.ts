@@ -2632,6 +2632,72 @@ test('S9.5 — a blob the store cannot write does not undo the envelope\'s trunc
   assert.equal(data.bytes, 2000);
 });
 
+test('#200 — remove() drains an in-flight tool-output write before deleting storage, so a late write cannot recreate the session directory', async () => {
+  // The write is gated behind `release()`. `deleteSession` records the instant it starts
+  // and asserts the write had already settled by then — a controlled-promise ordering
+  // check, not a timer: the assertion fires (or not) purely off `writeSettled`, whichever
+  // wall-clock moment it happens to run at. The bounded wait below only proves the fixed
+  // code is genuinely blocked rather than having raced past `deleteSession` before this
+  // test got a chance to look — it is not what the pass/fail verdict is measured against.
+  let writeSettled = false;
+  let deleteSessionStarted = false;
+  let release = (): void => {};
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const { manager, workspaceRoot, storageRoot } = await makeManager('big-tool-result', { toolResultBytes: 100 }, (store) => ({
+    ...store,
+    async writeToolOutput(...args: Parameters<Store['writeToolOutput']>) {
+      await gate;
+      const result = await store.writeToolOutput(...args);
+      writeSettled = true;
+      return result;
+    },
+    async deleteSession(...args: Parameters<Store['deleteSession']>) {
+      deleteSessionStarted = true;
+      assert.equal(writeSettled, true, 'deleteSession ran before the tracked tool-output write settled');
+      return store.deleteSession(...args);
+    },
+  }));
+  const owner = 'operator-1' as OperatorId;
+  const projectDir = path.join(workspaceRoot, 'proj-200');
+  await mkdir(projectDir);
+  const created = await manager.create(owner, { vendor: 'claude', cwd: projectDir, model: null, sandbox: null, requisitionId: null });
+  assert.equal(created.ok, true);
+  if (!created.ok) return;
+  const { sessionId } = created.value;
+  const sessionDir = path.join(storageRoot, 'sessions', sessionId);
+
+  const received: Envelope[] = [];
+  await manager.subscribe(sessionId, owner, 0, { deliver: (e) => { if ('seq' in e) received.push(e); }, close: () => {} });
+
+  process.env['SKYNET_BIG_TOOL_RESULT_BYTES'] = '2000';
+  const messaged = await manager.message(sessionId, owner, 'go', []);
+  assert.equal(messaged.ok, true);
+  await waitUntil(() => received.some((e) => e.kind === 'permission.request'));
+  const requestId = (received.find((e) => e.kind === 'permission.request')!.data as { requestId: string }).requestId;
+  await manager.answerPermission(sessionId, owner, { requestId: requestId as never, decision: 'allow', scope: 'once', rule: null, reason: null });
+  // The turn ends with the tracked write still gated (open on `gate`): the fire-and-forget
+  // call already started, and `turn.ended` does not wait on it (I27), so by the time
+  // `remove()` is called below `entry.turn` is already null and cannot itself refuse it.
+  await waitUntil(() => received.some((e) => e.kind === 'turn.ended'));
+  assert.equal(writeSettled, false, 'setup: the write is still gated when the turn ends');
+
+  const removePromise = manager.remove(sessionId, owner);
+  // Generous relative to `checkpoints.destroy`'s own real git I/O — long enough that an
+  // implementation not tracking the write would have reached `deleteSession` well within
+  // it (observed in the pre-fix run at a few tens of ms), short enough to keep the suite
+  // fast. What decides the test is the flag, not this wait's own duration.
+  await new Promise((r) => setTimeout(r, 500));
+  assert.equal(deleteSessionStarted, false, 'deleteSession must not start while the tracked write is still gated');
+
+  release();
+  const removed = await removePromise;
+  assert.equal(removed.ok, true, `remove() failed: ${removed.ok ? '' : JSON.stringify(removed.error)}`);
+  assert.equal(deleteSessionStarted, true, 'deleteSession ran after the gate was released');
+  assert.equal(existsSync(sessionDir), false, 'the session directory is absent after the drained write settled');
+});
+
 test('S23.1/S23.2 — past the session tool-output budget the envelope is unaffected but the blob 404s', async () => {
   const { manager, workspaceRoot } = await makeManager('big-tool-result', { toolResultBytes: 100, sessionToolOutputBytes: 3000 });
   const owner = 'operator-1' as OperatorId;
