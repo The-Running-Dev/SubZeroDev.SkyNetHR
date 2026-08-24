@@ -870,22 +870,34 @@ export function createSessionManager(deps: {
       // `turn: null` and no adapter to kill. `adapter.kill()` reaches the real child through
       // the adapter's own closure state regardless of whether `spawned` ever recorded its pid
       // (S27.9), so this is never routed through `pids.ndjson` (S27.13).
+      //
+      // Each session is caught on its own, which is what "best-effort" has to mean once
+      // there is more than one of them: an unguarded `Promise.all` rejects on the first
+      // failure, so one session's throwing `kill()` would abandon every other session's
+      // tombstone *and* reject a method that carries no error union — and `server.ts` runs
+      // the lock release behind this await (D175). S27.11 covers a `tombstonePid` returning
+      // `{ ok: false }`; this covers the throw it cannot express.
       await Promise.all(
         [...sessions.values()]
           .filter((entry) => entry.turn !== null)
           .map(async (entry) => {
-            // D178: the pid this server recorded for the turn at `spawned` — `null` when no
-            // child had spawned yet, in which case `kill()` is a no-op and nothing is owed.
-            const pid = entry.livePid;
-            await entry.adapter!.kill();
-            if (pid === null) return;
-            // Best-effort like the lock release: a lost tombstone leaves `pids.ndjson`
-            // recording a dead pid as live, and D23's reuse guard tombstones it at the next
-            // boot instead (S27.11) — logged rather than raised, since shutdown gains no
-            // error union.
-            const tombstoned = await store.tombstonePid(pid, nowIso());
-            if (!tombstoned.ok) {
-              console.warn(`[session-manager] shutdown: failed to tombstone pid ${pid}: ${JSON.stringify(tombstoned.error)}`);
+            try {
+              // D178: the pid this server recorded for the turn at `spawned` — `null` when
+              // no child had spawned yet, in which case `kill()` is a no-op and nothing is
+              // owed.
+              const pid = entry.livePid;
+              await entry.adapter!.kill();
+              if (pid === null) return;
+              // Best-effort like the lock release: a lost tombstone leaves `pids.ndjson`
+              // recording a dead pid as live, and D23's reuse guard tombstones it at the next
+              // boot instead (S27.11) — logged rather than raised, since shutdown gains no
+              // error union.
+              const tombstoned = await store.tombstonePid(pid, nowIso());
+              if (!tombstoned.ok) {
+                console.warn(`[session-manager] shutdown: failed to tombstone pid ${pid}: ${JSON.stringify(tombstoned.error)}`);
+              }
+            } catch (err) {
+              console.warn(`[session-manager] shutdown: session ${entry.record.id} could not be torn down: ${String(err)}`);
             }
           }),
       );

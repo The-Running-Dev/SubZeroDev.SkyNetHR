@@ -39,19 +39,44 @@ function waitForOutput(child: ChildProcess, pattern: RegExp, timeoutMs = 10000):
         resolve(buf);
       }
     };
+    // A server that refuses to start (`refuseToStart`, a failed boot, a claimed lock) is
+    // gone in milliseconds and will never print this pattern. Without this the caller waits
+    // out the whole timeout and is handed an empty stdout buffer, while the one line saying
+    // why sits unread on stderr — `startServer` appends that buffer to this message.
+    const onExit = (code: number | null, signal: NodeJS.Signals | null): void => {
+      cleanup();
+      reject(new Error(`server exited (code ${code}, signal ${signal}) before ${pattern} was seen; stdout:\n${buf}`));
+    };
     function cleanup(): void {
       clearTimeout(timer);
       child.stdout?.off('data', onData);
+      child.off('exit', onExit);
     }
     child.stdout?.on('data', onData);
+    child.on('exit', onExit);
   });
 }
 
-function waitForExit(child: ChildProcess): Promise<{ code: number | null; signal: NodeJS.Signals | null }> {
-  return new Promise((resolve) => {
-    child.on('exit', (code, signal) => resolve({ code, signal }));
+// Bounded, and the bound is the point: every criterion here is about a process that exits,
+// so an unbounded wait turns the regression these tests exist to catch — a shutdown that
+// never reaches `process.exit` — into a hung suite rather than a failed assertion. `node
+// --test` applies no per-test timeout of its own. The default sits well above the server's
+// own worst case, DRAIN_TIMEOUT_MS (5s) + RELEASE_LOCK_TIMEOUT_MS (2s).
+function waitForExit(child: ChildProcess, timeoutMs = 15000): Promise<{ code: number | null; signal: NodeJS.Signals | null }> {
+  return new Promise((resolve, reject) => {
+    const onExit = (code: number | null, signal: NodeJS.Signals | null): void => {
+      clearTimeout(timer);
+      resolve({ code, signal });
+    };
+    const timer = setTimeout(() => {
+      child.off('exit', onExit);
+      reject(new Error(`server did not exit within ${timeoutMs}ms`));
+    }, timeoutMs);
+    child.on('exit', onExit);
   });
 }
+
+let nextPortOffset = 0;
 
 async function startServer(overrideEnv: Record<string, string> = {}): Promise<{
   child: ChildProcess;
@@ -91,11 +116,15 @@ async function startServer(overrideEnv: Record<string, string> = {}): Promise<{
   child.stderr?.on('data', (c: Buffer) => {
     stderrBuf += c.toString('utf8');
   });
-  await waitForOutput(child, /listening on/);
+  try {
+    await waitForOutput(child, /listening on/);
+  } catch (err) {
+    // `refuseToStart`, a failed boot and a refused lock claim all report on stderr and
+    // nowhere else, so a readiness failure without it names no cause at all.
+    throw new Error(`${(err as Error).message}\nstderr:\n${stderrBuf}`);
+  }
   return { child, port, storageRoot, workspaceRoot, stderr: () => stderrBuf };
 }
-
-let nextPortOffset = 0;
 
 function request(
   port: number,
@@ -182,6 +211,7 @@ test('S27.2/S27.3/S27.10/S27.12 — one signal, with a subscriber attached, stil
   });
 
   const exitPromise = waitForExit(child);
+  const killedAt = Date.now();
   child.kill('SIGTERM');
 
   // S27.2: the listener is closed at once — a new connection attempt fails rather than
@@ -194,7 +224,12 @@ test('S27.2/S27.3/S27.10/S27.12 — one signal, with a subscriber attached, stil
   // in this build closes the stream on its own — and the stream the server force-closed
   // ends from the client's side too.
   const [{ code }] = await Promise.all([exitPromise, streamClosed]);
+  const elapsedMs = Date.now() - killedAt;
   assert.equal(code, 0, 'a clean shutdown with a subscriber attached still exits zero (I54)');
+  // The bound this criterion names, asserted rather than only described: the server's own
+  // worst case is DRAIN_TIMEOUT_MS (5s) + RELEASE_LOCK_TIMEOUT_MS (2s), and nothing here
+  // closes the stream on its own, so the drain runs to its full window every time.
+  assert.ok(elapsedMs < 10000, `the exit lands inside the drain bound (took ${elapsedMs}ms)`);
 
   // S27.10: by the time exit has happened, release (step 4) has already run, so the lock
   // is gone — proxied here as "absent after a clean exit", the observable half of "only

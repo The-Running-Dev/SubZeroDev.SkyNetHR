@@ -142,6 +142,12 @@ async function main(): Promise<void> {
           resolve();
         });
       });
+      // `close()` on its own waits out an *idle* keep-alive socket as readily as a live
+      // stream, so one browser holding a spent connection would spend the whole window
+      // below achieving nothing. This is what makes step 1's "closes the connections that
+      // are idle and waits for the rest" (`10-design.md § Shutdown ordering`) true of the
+      // code and not only of the prose.
+      server.closeIdleConnections();
 
       // Step 2 (drain): bounded. Whatever is still connected when the window closes is
       // closed — destroying the socket ends an SSE response or a WS connection the same
@@ -154,7 +160,15 @@ async function main(): Promise<void> {
 
       // Step 3 (kill): never routed through `interrupt` — see `manager.shutdown()`'s own
       // contract for why. `server.ts` holds no adapter and kills nothing itself.
-      await manager.shutdown();
+      // Caught, and not as belt-and-braces: this chain is fired with `void`, so a rejection
+      // escaping here is an unhandled rejection that takes the process down *before* step 4
+      // — leaving `server.lock` on disk and exiting non-zero, which is D175's release and
+      // I54's exit-zero both lost to the one step the design calls best-effort.
+      try {
+        await manager.shutdown();
+      } catch (err) {
+        console.error(`[server] shutdown: killing live turns failed; releasing the lock anyway — ${String(err)}`);
+      }
 
       // Step 4 (release), last (D175, D161): removes `server.lock` so the next boot on
       // this storage root takes it without invoking the staleness path at all. Not fatal
