@@ -175,6 +175,11 @@ interface SessionEntry extends LiveSession {
   // assigned in — this chain is what keeps `events.ndjson` written in seq order despite
   // that.
   writeQueue: Promise<void>;
+  // D178: the pid `spawned` recorded for the turn currently held, non-null only while
+  // both a turn is live and its child has actually spawned. `shutdown` reads this to
+  // tombstone the child it kills without reading `pids.ndjson` (S27.13) — cleared
+  // everywhere `turn` is cleared, so the two stay in lockstep.
+  livePid: number | null;
 }
 
 const KINDS_CARRYING_TURN_ID = new Set<EventKind>([
@@ -218,6 +223,11 @@ export function createSessionManager(deps: {
 }): SessionManager {
   const { config, store, checkpoints, records } = deps;
   const sessions = new Map<SessionId, SessionEntry>();
+  // D178, I55: one-way, and `shutdown` is its only setter. Checked at `handleNotification`,
+  // the one function every `AdapterNotification` already passes through (it is what an
+  // adapter is handed as `notify` at create), so this covers all four kinds — `event`,
+  // `cli-session`, `spawned`, `exited` — with one conditional rather than one per kind.
+  let notifyMuted = false;
 
   function findLiveOverlap(candidate: ResolvedPath): SessionEntry | null {
     for (const entry of sessions.values()) {
@@ -323,6 +333,7 @@ export function createSessionManager(deps: {
       store.dropRing(entry.record.id);
       const turn = entry.turn;
       entry.turn = null;
+      entry.livePid = null;
       entry.record.state = 'ended';
       entry.record.endedAt = nowIso();
       console.error(
@@ -812,6 +823,7 @@ export function createSessionManager(deps: {
           completedChecklist: new Map(),
           subscribers: new Set(),
           writeQueue: Promise.resolve(),
+          livePid: null,
         };
         sessions.set(sessionId, entry);
         // One of the three occasions `store`'s table names: a `state` transition.
@@ -846,6 +858,49 @@ export function createSessionManager(deps: {
       }
 
       return { ok: true, value: undefined };
+    },
+
+    async shutdown(): Promise<void> {
+      // D178, I55: set before anything below runs — every notification `handleNotification`
+      // would otherwise dispatch, for every session, is dropped from this point on. One-way;
+      // nothing clears it, because this manager keeps running no longer than the process does.
+      notifyMuted = true;
+
+      // D177: every *live turn's* child tree, not every session — a rehydrated session has
+      // `turn: null` and no adapter to kill. `adapter.kill()` reaches the real child through
+      // the adapter's own closure state regardless of whether `spawned` ever recorded its pid
+      // (S27.9), so this is never routed through `pids.ndjson` (S27.13).
+      //
+      // Each session is caught on its own, which is what "best-effort" has to mean once
+      // there is more than one of them: an unguarded `Promise.all` rejects on the first
+      // failure, so one session's throwing `kill()` would abandon every other session's
+      // tombstone *and* reject a method that carries no error union — and `server.ts` runs
+      // the lock release behind this await (D175). S27.11 covers a `tombstonePid` returning
+      // `{ ok: false }`; this covers the throw it cannot express.
+      await Promise.all(
+        [...sessions.values()]
+          .filter((entry) => entry.turn !== null)
+          .map(async (entry) => {
+            try {
+              // D178: the pid this server recorded for the turn at `spawned` — `null` when
+              // no child had spawned yet, in which case `kill()` is a no-op and nothing is
+              // owed.
+              const pid = entry.livePid;
+              await entry.adapter!.kill();
+              if (pid === null) return;
+              // Best-effort like the lock release: a lost tombstone leaves `pids.ndjson`
+              // recording a dead pid as live, and D23's reuse guard tombstones it at the next
+              // boot instead (S27.11) — logged rather than raised, since shutdown gains no
+              // error union.
+              const tombstoned = await store.tombstonePid(pid, nowIso());
+              if (!tombstoned.ok) {
+                console.warn(`[session-manager] shutdown: failed to tombstone pid ${pid}: ${JSON.stringify(tombstoned.error)}`);
+              }
+            } catch (err) {
+              console.warn(`[session-manager] shutdown: session ${entry.record.id} could not be torn down: ${String(err)}`);
+            }
+          }),
+      );
     },
 
     async create(owner, input) {
@@ -920,6 +975,7 @@ export function createSessionManager(deps: {
         completedChecklist: new Map(),
         subscribers: new Set(),
         writeQueue: Promise.resolve(),
+        livePid: null,
       };
       sessions.set(sessionId, entry);
 
@@ -1030,6 +1086,7 @@ export function createSessionManager(deps: {
         // close — releasing the slot outright is what lets a retry proceed rather than
         // leaving a phantom claim behind.
         entry.turn = null;
+        entry.livePid = null;
         return { ok: false, error: { code: 'storage', cause: failedWrite.error } };
       }
 
@@ -1089,6 +1146,7 @@ export function createSessionManager(deps: {
         // freeing the slot, or the log carries an open turn no restart ever repairs.
         await emit(entry, 'turn.ended', { turnId, stopReason: 'error', usage: null });
         entry.turn = null;
+        entry.livePid = null;
         return { ok: false, error: { code: 'adapter', cause: sendResult.error } };
       }
       // Set only once the CLI actually spawned: a `send` failure never ran a process, so
@@ -1300,6 +1358,7 @@ export function createSessionManager(deps: {
         return { ok: true, value: undefined };
       } finally {
         entry.turn = null;
+        entry.livePid = null;
       }
     },
 
@@ -1598,6 +1657,7 @@ export function createSessionManager(deps: {
   }
 
   function handleNotification(sessionId: SessionId, n: AdapterNotification): void {
+    if (notifyMuted) return;
     const entry = sessions.get(sessionId);
     if (!entry) return;
     void handleNotificationAsync(entry, n);
@@ -1637,6 +1697,7 @@ export function createSessionManager(deps: {
           });
           return;
         }
+        entry.livePid = n.pid;
         await store.appendPid({
           pid: n.pid,
           pgid: n.pgid,
@@ -1805,7 +1866,10 @@ export function createSessionManager(deps: {
         // reacting to the delivered `turn.ended` (e.g. sending the next message) must
         // already see the slot free — clearing it after `await emit` leaves a window
         // where that caller races the still-pending spill append (S5.1).
-        if (kind === 'turn.ended') entry.turn = null;
+        if (kind === 'turn.ended') {
+          entry.turn = null;
+          entry.livePid = null;
+        }
         await emit(entry, kind, payload as never, raw);
         if (autoApprove && autoApproveRule && turn) await resolvePreapproved(entry, turn, autoApprove, autoApproveRule);
         return;
