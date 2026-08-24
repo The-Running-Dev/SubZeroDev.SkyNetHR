@@ -180,6 +180,13 @@ interface SessionEntry extends LiveSession {
   // tombstone the child it kills without reading `pids.ndjson` (S27.13) — cleared
   // everywhere `turn` is cleared, so the two stay in lockstep.
   livePid: number | null;
+  // #200: `writeToolOutput` below is fire-and-forget (I27 — it must not delay `emit`'s
+  // synchronous seq assignment), so a write can still be in flight after the turn that
+  // started it has already ended. `remove()` only refuses while a turn is live; it does
+  // not otherwise know a write is outstanding. Each entry removes itself once its own
+  // write settles, success or failure alike, so this set's size is exactly the count of
+  // writes `remove()` still needs to wait out before it may delete storage.
+  readonly pendingToolOutputWrites: Set<Promise<void>>;
 }
 
 const KINDS_CARRYING_TURN_ID = new Set<EventKind>([
@@ -824,6 +831,7 @@ export function createSessionManager(deps: {
           subscribers: new Set(),
           writeQueue: Promise.resolve(),
           livePid: null,
+          pendingToolOutputWrites: new Set(),
         };
         sessions.set(sessionId, entry);
         // One of the three occasions `store`'s table names: a `state` transition.
@@ -976,6 +984,7 @@ export function createSessionManager(deps: {
         subscribers: new Set(),
         writeQueue: Promise.resolve(),
         livePid: null,
+        pendingToolOutputWrites: new Set(),
       };
       sessions.set(sessionId, entry);
 
@@ -1267,6 +1276,15 @@ export function createSessionManager(deps: {
       const entry = sessions.get(sessionId);
       if (!entry || entry.record.owner !== owner) return { ok: false, error: { code: 'no_such_session', sessionId } };
       if (entry.turn) return { ok: false, error: { code: 'turn_in_flight', sessionId, turnId: entry.turn.turnId } };
+
+      // #200: a tool-output write started by a turn that has since ended can still be in
+      // flight — `entry.turn` being null (checked above) proves nothing about it. Draining
+      // here, before storage is torn down, is what keeps a late write from recreating the
+      // session directory `store.deleteSession` is about to remove (the store's own
+      // `writeToolOutput` recursively makes its parent directories, same as any other
+      // write). A failed write already logged itself at the call site and settles the same
+      // as a successful one, so this never hangs on one.
+      await Promise.all(entry.pendingToolOutputWrites);
 
       // S6.10: ckpt.git comes out alongside everything else `store.deleteSession`
       // already owns removing — see `destroySessionStorage`'s comment for the ordering.
@@ -1819,7 +1837,10 @@ export function createSessionManager(deps: {
           if (d.bytes > config.caps.toolResultBytes) {
             const outputBytes = Buffer.from(d.output, 'utf8');
             const { turnId } = turn;
-            void store.writeToolOutput(entry.record.id, turnId, d.callId, outputBytes).then((written) => {
+            // #200: tracked so `remove()` can drain it — see `pendingToolOutputWrites`'s own
+            // comment. Still fire-and-forget from the caller's perspective (I27): nothing here
+            // awaits `write`, only records it so a later drain can.
+            const write = store.writeToolOutput(entry.record.id, turnId, d.callId, outputBytes).then((written) => {
               if (!written.ok) {
                 console.warn(
                   `[session-manager] session ${entry.record.id}: failed to write the tool-output blob for ` +
@@ -1827,6 +1848,8 @@ export function createSessionManager(deps: {
                 );
               }
             });
+            const tracked = write.finally(() => entry.pendingToolOutputWrites.delete(tracked));
+            entry.pendingToolOutputWrites.add(tracked);
             eventData = { ...d, output: truncateUtf8(outputBytes, config.caps.toolResultBytes), truncated: true };
           }
         }
