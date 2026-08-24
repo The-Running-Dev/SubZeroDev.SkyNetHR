@@ -3846,6 +3846,166 @@ Reversibility: not applicable — a factual correction, not a design choice. `an
 can be closed or narrowed to the tool-dependent behaviour actually observed; that is a report to
 the vendor, not an action this repository takes.
 
+### 2026-08-23 — D174 Shutdown repairs nothing; boot stays the only repair pass
+Context: `10-design.md § Boot ordering` has six steps, four of which repair durable state left by
+however the last process ended. The symmetric question — what a shutdown owes — had never been
+asked, so `server.ts` grew a signal handler with no design behind it and the document said nothing
+about a path every deployment takes on every restart. Every candidate answer is already boot's:
+marking a rehydrated session ended (D20), closing a turn the spill left open (D39), emitting the
+restart notice the payroll fold reads (D130), reaping an orphan under the reuse guard (D23).
+Chosen: shutdown establishes no durable state and holds no invariant. It stops accepting work,
+releases the lock, and exits; boot remains the sole repair pass, so the crash path and the clean
+path converge on one implementation of each repair. The bar shutdown is held to is "leave nothing
+boot does not already expect", which it clears by writing nothing.
+Rejected: **finalising at shutdown** — mark sessions ended, close the open turn, emit the notice.
+It cannot be complete, because `SIGKILL`, an OOM kill and a power cut produce no shutdown at all
+and boot must handle the unfinalised case regardless; so it is a second implementation of boot's
+repair whose only distinguishing property is running more often. Worse, it is the path a developer
+exercises with Ctrl-C, which makes the duplicate the tested one and leaves the path that matters
+untested — `agent.md`'s "a shortcut taken in the reference implementation gets copied", one level up.
+Rejected: **a `clean-shutdown` marker file boot trusts to skip repair.** It makes boot cheapest in
+exactly the case where nothing was wrong and unchanged in the case that matters, and it reintroduces
+two code paths selected by a file that is absent precisely when things went badly — so the rarely
+taken branch is chosen by the least trustworthy evidence available.
+Reversibility: cheap. It is an argument about where existing work lives, and no code moves.
+
+### 2026-08-23 — D175 The storage lock is claimed first and released last
+Context: D161 argued the *claim* side hard — the lock precedes boot's reap step, not merely
+`listen`, because a second server that got as far as reaping cannot tell the first server's live
+agents from its own dead ones. The *release* side was never argued at all. `server.ts` happens to
+release after `server.close()` settles, and "happens to" is what a design says out loud before
+someone tidies it into a signal handler.
+Chosen: release is the last act before exit, after the listener has closed and connections are
+gone. Read backwards this is D161's own argument: a release issued while this server still has
+children in `pids.ndjson` with no `exitedAt` lets a successor boot into a free lock, read those
+entries, and reap processes that are still working — the identical wrong kill, arrived at from the
+other end. A restart is the one moment a successor is certain to be starting.
+**Failing to release is safe, and by design rather than by luck.** A `ServerLock` carries no
+`exitedAt` because the file's absence *is* the first limb of D23's three-part test
+(`20-contract.md § Server lock`, D167), so a lock nobody removed is reclaimed by the next boot on
+the strength of the other two limbs.
+Rejected: **releasing on signal receipt**, before the drain. Fastest, and it shortens the window a
+restarting supervisor waits — and it opens exactly the window the lock exists to close, at exactly
+the moment it is most likely to be walked into.
+Rejected: **never releasing**, relying on the staleness reclaim every time. It works, and it makes
+the reclaim the ordinary path rather than the exception. A guard exercised on every boot has
+stopped being a guard, and `30-slices.md § S22.5` asserts the opposite by instrumenting the reclaim
+and finding it uncalled.
+Reversibility: cheap. One call's position in one handler.
+
+### 2026-08-23 — D176 The shutdown drain is bounded, and what is still connected is then closed
+Context: The clean shutdown path's own precondition is unreachable in the normal case. Closing an
+HTTP listener closes the connections that are idle and waits for the rest, and a subscribed client
+is by construction not idle — its response is open for the life of the stream. Probed rather than
+assumed: with one open event-stream response the close callback does not fire (Node v25.3.0 on the
+development host; the deployment image is `node:22`, where this was not re-run). Both `releaseLock`
+and the zero exit sit behind that callback, so **a server with any operator watching it never
+completes a clean shutdown on its own** — it waits out the supervisor's grace period, takes
+`SIGKILL`, and leaves the lock behind. D175's release is then code that runs only when nobody was
+connected, and D23's reclaim becomes the ordinary restart path rather than the exception S22.5
+asserts it stays.
+Chosen: bound the drain. Close the listener, allow a grace window for in-flight requests to finish,
+then close whatever connections remain, then release and exit. **Force-closing a subscriber loses
+nothing**: D40 already serves a reconnect from the spill when the ring cannot reach back far
+enough, for live and ended sessions alike, and a stream cut without warning is the case that path
+was built for.
+Rejected: **closing subscriptions through the session manager**, so a subscriber is told the server
+is going rather than discovering it. Politer, and it needs a shutdown surface on a `SessionManager`
+that has `boot` and deliberately no counterpart, plus a traversal of every session's subscriber
+set, to reach an outcome the HTTP server produces by itself.
+Rejected: **leaving the unbounded wait and treating `SIGKILL` as the shutdown.** Zero code, and it
+spends the supervisor's entire grace period on every ordinary stop while making the clean path dead
+code in the configuration that ships.
+Reversibility: cheap. Landing point: staged in `## Open` below, because this is a code change taken
+outside a slice and `agent.md` is explicit that a decision with no landing point does not land.
+
+### 2026-08-23 — D177 Shutdown kills the turn's child tree, and leaves the turn's closure to boot
+Context: `10-design.md § Open questions` 15. Nothing killed the child at shutdown. The adapter
+spawns `detached` on POSIX because D38's process-group kill requires it, so a terminal's Ctrl-C
+reaches the server and not the agent: the CLI survives the console that was supervising it, keeps
+write access to the operator's work-tree, and is collected only if the server comes back on that
+host with a matching image. In the container the cgroup takes the tree and the question is moot;
+on a bare host a server that never comes back leaves an unsupervised agent writing to a repository
+indefinitely.
+Chosen: shutdown kills the live turn's process tree, between the drain and the lock release, by
+D38's mechanism — the one interrupt and boot's reap already share. **This is not D21's timer under
+another name.** D21 refused to end a turn on elapsed silence because a long compile and a hang are
+indistinguishable and only the operator can separate them; this step makes no judgement about the
+turn, it observes that there will shortly be no console at all. The cost is stated rather than
+hidden: **`docker stop` and Ctrl-C end a turn in flight**, and what is left behind is what
+interrupt leaves behind — files already written stay written, and the pre-turn checkpoint is what
+returns the workspace (D24).
+**The kill does not go through interrupt, and that boundary is what keeps D174 intact.** Routing it
+through the manager would emit `turn.ended`, resolve every pending permission and start the spill's
+append chain at the moment the process is trying to exit, all under a stop reason D24 reserves for
+the operator's own act. So the step is a tree kill and one `ProcessTombstone`, and nothing else;
+the turn is closed at the next boot by D39, under `server_restart`, which is both truthful and the
+reason D130's payroll marker already pairs with. Shutdown terminates what it started; boot repairs
+what it finds.
+The tombstone is the one durable write a shutdown makes, and it records something shutdown *did*
+rather than repairing something it *found*, which is why it does not reopen D174. It is
+best-effort and bounded like the release: a lost one leaves a dead pid recorded live, and D23's
+reuse guard tombstones it at the next boot rather than killing whatever now holds that pid — the
+case that guard exists for.
+Rejected: **leaving it to boot's reap, recorded as accepted risk.** Consistent with D174 read at
+its widest, and free in the container. Rejected because outside one it inverts the project's own
+premise, and because the whole of the orphan's cost is conditional on an assumption — that the
+server comes back, on this host, with a matching image — that nothing guarantees.
+Rejected: **killing only outside a container.** Cheapest in stated cost, and it puts the code path
+in the one configuration that never exercises it, so the shipped artifact would be the untested
+case. That is the shape D174 rejects for finalise-at-shutdown, arrived at from the other side.
+Rejected: **routing the kill through `SessionManager.interrupt`.** Reuses a tested path and needs
+no new call site, and it makes shutdown emit, append and resolve during teardown and reports a
+shutdown as an operator interruption — the misattribution `10-design.md § Interrupt` property 1
+exists to prevent.
+Reversibility: cheap. One step in one handler. Landing point: staged in `## Open` below, with
+D176's.
+
+### 2026-08-23 — D178 Shutdown's kill is silenced at the manager's own sink, not at the adapter
+Context: `20-contract.md § Unresolved` 14. D177 fixed step 3's *outcome* exactly — the tree dies,
+one `ProcessTombstone` per child, no envelope, no audit append, no spill write (I52) — and named
+no call site for it. The three candidates are not interchangeable, and the reason is that a tree
+kill by **any** route drives the adapter's `exited` notification. The manager's handler for that
+resolves every outstanding permission, emitting a `permission.resolved` and appending an
+`AuditRecord` for each as I11 requires, then reports the turn ended under `interrupted` — which is
+emission, resolution, an append, and precisely the misattribution D177 refuses. So the real
+question was never whether to silence that path but where the silence lives, and only two modules
+can hold it: `adapters/*` raises the notification, `session-manager` holds it. `server.ts` reaches
+neither without a new surface, so a manager counterpart was never optional.
+Chosen: **the manager's own `notify` closure carries the mute, and `SessionManager` gains one
+method for `server.ts` to call.** Every `AdapterNotification` already passes through that single
+function — it is what an adapter is handed at create, `AdapterOptions.notify` — so muting there
+covers `exited`, `event` and `cli-session` in one place and leaves no second path for a later
+change to forget. `Adapter` is untouched, which keeps server lifecycle out of `adapters/*` in the
+direction I20 fixes: a vendor adapter still knows nothing about the server stopping.
+**The sink rather than the `exited` handler is the load-bearing half, and the tree says why:**
+`turn.ended` is a *second, separate* notification the adapter sends immediately after `exited`
+and inside the same synchronous callback (`src/session-manager/index.ts`). A mute written into
+the handler would silence the cancellations and let the turn's closure through — an emission
+during teardown, which is the thing I52 forbids — so only a mute at the point every
+notification passes catches both.
+**The tombstone stops being exit-driven, and that is the gain rather than the cost.** With the
+sink muted the manager never learns the child died, so it writes the `ProcessTombstone` from the
+process record at the moment it issues the kill. D177's record no longer has to win a race against
+whatever budget the drain has left. I52 is then satisfied by construction rather than by
+inspection — nothing reaches the sink, so nothing downstream *can* emit, resolve or append — which
+is the difference between an invariant that is checked and one that cannot be broken by the code
+below it.
+Rejected: **`Adapter.detach()`, silencing at the source.** Structurally the cleanest reading, and
+it leaves the manager with no mode at all. Rejected on cost and on blast radius: it is two public
+additions rather than one, because the manager surface is needed either way and `detach` is added
+to it rather than instead of it; and it is a public method whose only correct caller is shutdown,
+so any other caller silently blinds a live session with nothing in the type to say so.
+Rejected: **a kill from `server.ts` on the recorded `pid`/`pgid`**, the shape boot's reap uses,
+with no manager surface. Attractive because it needs no new public interface at all. Rejected
+because it does not reach the outcome: boot's reap emits nothing only for want of an adapter to
+notice, and at shutdown one exists and is still watching, so the forbidden path runs exactly as
+before — with no manager surface available to mute it.
+Reversibility: cheap. One method and one flag, both above `adapters/*`. Landing point: staged in
+`## Open` below, with D174–D177's. Owed elsewhere: the `SessionManager` method is a public-surface
+addition and is `/contract`'s to write into `20-contract.md`, which is also where `Unresolved` 14
+is closed.
+
 ## Open
 
 Staging only. Once an item becomes an issue it leaves this list.
