@@ -558,6 +558,13 @@ function openSseStream(sessionId) {
   // so "connected" is true and is not the thing the operator needs told. Saying it anyway
   // would overwrite the one message explaining why they cannot type.
   stream.onopen = () => {
+    // #204: `state.stream` is reassigned synchronously by `openStream` the instant a new
+    // stream is created (SSE or WS), before any awaited work — so by the time this stream's
+    // own callback fires, `state.stream !== stream` reliably means a newer stream (a session
+    // switch, a gap-triggered reopen, or termination) has already superseded it. Closing an
+    // `EventSource` does not guarantee an event already queued for delivery never fires, so
+    // this is checked at every callback below rather than trusted to `close()` alone.
+    if (state.stream !== stream) return;
     // A browser-level auto-reconnect fires this too, not just the first connect — and a
     // reconnect never replays a delta (I51), so any entry left over from a turn that was
     // mid-stream when the connection dropped must not survive it either, or the `message`
@@ -566,7 +573,10 @@ function openSseStream(sessionId) {
     if (sessionIsEnded()) applySessionAvailability();
     else status('connected', 'ok');
   };
-  stream.onerror = () => status('reconnecting…', 'warn');
+  stream.onerror = () => {
+    if (state.stream !== stream) return;
+    status('reconnecting…', 'warn');
+  };
 
   for (const kind of [
     'session.started', 'session.ended', 'session.notice',
@@ -575,6 +585,10 @@ function openSseStream(sessionId) {
     'permission.request', 'permission.resolved', 'checkpoint.created', 'checklist.item.completed', 'error',
   ]) {
     stream.addEventListener(kind, (event) => {
+      // #204: rejected before parsing even runs, let alone before any render or state
+      // mutation — see `onopen`'s comment above for why this stream object itself is the
+      // generation check.
+      if (state.stream !== stream) return;
       let envelope;
       try {
         envelope = JSON.parse(event.data);
@@ -608,6 +622,11 @@ function openWsStream(sessionId) {
   let lastError = null;
 
   stream.onopen = () => {
+    // #204: same generation check as the SSE path's onopen — `state.stream` names the one
+    // live transport, reassigned synchronously by `openStream` before any await, so a
+    // callback firing on a `stream` object that is no longer that reference is superseded,
+    // whatever caused it to fire late.
+    if (state.stream !== stream) return;
     // Same reasoning as the SSE path's onopen: this fires on a reconnect too (the
     // `onclose` handler below calls `openWsStream` directly, not `openStream`), and a
     // reconnect never replays a delta (I51), so a stale entry from an interrupted turn
@@ -618,6 +637,9 @@ function openWsStream(sessionId) {
     else status('connected', 'ok');
   };
   stream.onmessage = (event) => {
+    // #204: rejected before parsing even runs — see the SSE path's own comment for why
+    // this stream object is the generation check.
+    if (state.stream !== stream) return;
     let envelope;
     try {
       envelope = JSON.parse(event.data);
@@ -630,7 +652,10 @@ function openWsStream(sessionId) {
     }
     handleEnvelope(sessionId, envelope);
   };
-  stream.onerror = () => status('reconnecting…', 'warn');
+  stream.onerror = () => {
+    if (state.stream !== stream) return;
+    status('reconnecting…', 'warn');
+  };
   stream.onclose = (event) => {
     if (state.stream !== stream || state.sessionId !== sessionId) return; // superseded by a newer stream
     if (WS_PERMANENT_FAILURE_CODES.has(event.code)) {
