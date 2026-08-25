@@ -61,6 +61,25 @@ const OPCODE_PONG = 0xa;
 // progress, and is closed rather than left to grow the process's memory without bound.
 const MAX_BUFFERED_FRAME_BYTES = 1024 * 1024;
 
+// (#205) `101 Switching Protocols` is sent, and identity is checked, only once the first
+// frame arrives (S11.3) — a socket that never sends one is upgraded but never identified,
+// with nothing above bounding how long it may sit that way. This is the deadline: a real
+// client sends its `{after}` frame immediately on open, so this only ever fires on a
+// socket that supplied an allowed `Origin` and then never spoke.
+const DEFAULT_FIRST_FRAME_DEADLINE_MS = 10_000;
+
+// Test seam only, never read from `Config`/`20-contract.md` (a real deadline this short
+// would be indistinguishable from ordinary network jitter for a genuine client) — read
+// per upgrade, not cached at module load, so a test can set it before its own request.
+// Mirrors the existing `SKYNET_CLAUDE_EXECUTABLE`/`SKYNET_CODEX_EXECUTABLE` pattern for
+// timing- or path-sensitive behavior under test without adding a public config surface.
+function firstFrameDeadlineMs(): number {
+  const override = process.env['SKYNET_WS_FIRST_FRAME_DEADLINE_MS'];
+  if (override === undefined) return DEFAULT_FIRST_FRAME_DEADLINE_MS;
+  const parsed = Number(override);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_FIRST_FRAME_DEADLINE_MS;
+}
+
 interface ParsedFrame {
   readonly fin: boolean;
   readonly opcode: number;
@@ -230,11 +249,26 @@ export function createWsEdge(deps: EdgeDeps): WsRequestListener {
     let buffered: Buffer = Buffer.alloc(0);
     let authed = false;
 
+    // (#205) Cleared the moment the first frame arrives (`onData`, below) or the socket
+    // closes/errors — whichever happens first. Left running past that would either fire
+    // on a socket already past the point it's guarding, or leak a handle past teardown.
+    let firstFrameDeadline: NodeJS.Timeout | null = setTimeout(() => {
+      firstFrameDeadline = null;
+      console.warn('[ws] closing an upgraded socket that sent no first frame within the authentication deadline');
+      teardown();
+      writeCloseFrame(socket, 4408, 'no first frame within the authentication deadline');
+    }, firstFrameDeadlineMs());
+    firstFrameDeadline.unref();
+
     const teardown = (): void => {
       open = false;
       if (keepalive !== null) {
         clearInterval(keepalive);
         keepalive = null;
+      }
+      if (firstFrameDeadline !== null) {
+        clearTimeout(firstFrameDeadline);
+        firstFrameDeadline = null;
       }
       if (subscription !== null) {
         subscription.close();
@@ -265,6 +299,12 @@ export function createWsEdge(deps: EdgeDeps): WsRequestListener {
 
     async function onFirstMessage(payload: Buffer): Promise<void> {
       authed = true;
+      // (#205) The deadline guards against no first frame ever arriving — one has now
+      // arrived, whatever it turns out to contain, so there is nothing left to bound.
+      if (firstFrameDeadline !== null) {
+        clearTimeout(firstFrameDeadline);
+        firstFrameDeadline = null;
+      }
       let request: { after?: unknown };
       try {
         request = JSON.parse(payload.toString('utf8')) as { after?: unknown };
