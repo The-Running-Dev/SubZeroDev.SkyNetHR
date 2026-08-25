@@ -30,13 +30,22 @@ An operator can, from a browser:
 3. Send a message and watch the agent's output stream in, including tool calls.
 4. Approve or deny a Claude tool-permission request, and have the agent continue.
 5. Refresh the page mid-turn and lose nothing.
-6. Roll the workspace back to its state before any earlier message.
+6. Roll the workspace back to its state before any earlier message, and be told what the
+   rollback could not reach.
 7. Read an audit record of every tool approval: who, what, when.
 
 Item 4 names Claude by decision, not by omission. A Codex session satisfies items 3 and 5
 to 7, and in place of per-call approval runs under a launch-time policy with a persistent
 banner naming its sandbox — see D5 and D27. Whether Codex's runtime approval is reachable
 over a programmatic transport is unverified, and tier one does not wait on that answer.
+
+Item 6 excludes what the workspace's own `.gitignore` excludes, and that is a decision
+rather than a shortfall. A rollback that reinstated `node_modules` and build output would
+force a dependency reinstall on every restore — the failure that makes operators stop using
+restores at all — so a checkpoint never captures an ignored path and a restore never removes
+one. The pair is symmetric and the reasoning is in `10-design.md`. What the operator is owed
+in exchange is honesty rather than reach: a restore names the ignored paths the rolled-back
+turns touched, so a surviving `.env` edit is reported rather than discovered later.
 
 Tier one is not done until both supported platforms are proven by an automated run rather
 than by assertion. See Constraints.

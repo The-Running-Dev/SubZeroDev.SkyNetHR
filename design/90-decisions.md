@@ -4048,6 +4048,119 @@ in `src/` changed, and none of `design/00-brief.md` or `design/20-contract.md` n
 altered — both already described two vendors, and this entry is the record that the deployment
 artifact has now caught up to what they already said.
 
+### 2026-08-25 — D182 A restore reports the ignored paths it did not roll back
+Context: A red-team pass on `main` at `984eae5` found that DoD #6 promised the workspace back at
+its state before an earlier message while `10-design.md` deliberately excluded every
+`.gitignore`d path from both the checkpoint and the clean. Both are defensible and they cannot
+both be unqualified, so this was ruled a brief conflict rather than a defect. The operator-facing
+consequence is the part neither document owned: an agent that edits `.env` or removes a generated
+artifact leaves that change standing across a restore the console reports as successful, and the
+operator has no way to learn it short of noticing.
+Chosen: qualify the brief and buy back the honesty rather than the reach. `00-brief.md` item 6
+gains "and be told what the rollback could not reach" plus a paragraph saying the exclusion is a
+decision and why; `10-design.md`'s symmetry bullet gains the reporting obligation. A checkpoint
+records a manifest of the ignored paths `git status --ignored=matching` names — never their
+content — and a restore diffs the target's manifest against the workspace and names what differs.
+`--ignored=matching` collapses an ignored directory into one entry, so the manifest is bounded by
+the matching ignore rules rather than by the files beneath them; the cost is that a collapsed
+directory is compared on its own metadata, which sees a child added or removed and not an edit
+deeper inside. That weakness is stated in the design because the report is a pointer for the
+operator and not evidence, and no security control may come to lean on it.
+Rejected: amending the brief and stopping there. Cheapest, and the design already carried the
+reasoning — but it leaves the console saying "restored" over a workspace that is not, which is the
+same class of silent partial success `read-tree`'s verification pass (D112) exists to refuse.
+Rejected: widening the checkpoint with `add -A -f` and `clean -fdx` so item 6 becomes literally
+true. It makes every restore force a dependency reinstall, which is the failure that makes
+operators stop using restores at all — the exact argument D31's symmetry was adopted for — and it
+grows a checkpoint with the workspace rather than with the diff. Expensive to reverse once
+checkpoints exist holding that content.
+Rejected: a manifest that walks the files inside an ignored directory. Precise, and it costs more
+per checkpoint than the checkpoint does on any workspace with a dependency tree.
+Reversibility: cheap for the two documents. The manifest itself is a new persisted artifact and a
+new field on the restore result, so it needs a `/contract` amendment before it is implemented;
+this entry does not authorise that edit.
+Note: D180 and D181 are reserved by the unmerged `design/180-storage-lock-lease` branch, which is
+why this entry is D182.
+
+
+### 2026-08-25 — D183 The pid reuse guard gains a creation-time limb, and fails closed
+Context: The guard reaps a `pids.ndjson` entry when it has no `exitedAt`, its `startedAt` is later
+than the host's last boot, and the live process's image matches. A red-team pass on `main` at
+`984eae5` found all three pass on same-boot reuse: the recorded child exits, the host hands pid
+4242 to another `claude`, and boot runs `taskkill /PID 4242 /T /F` against another operator's live
+agent and everything under it. The image limb is nearly free to satisfy by accident in a console
+whose every child is named `claude` or `codex`, and the boot-time limb was written against
+reboots when reuse is not confined to them. `src/session-manager/index.ts:509` implements exactly
+the three documented limbs, so this is a defect in the design and in the code together.
+Chosen: a fourth limb comparing the live process's own creation time against the recorded
+`startedAt`, and where creation time cannot be established the entry is tombstoned and logged
+rather than reaped. Node exposes creation time on no platform, so each is a shell-out of the shape
+`taskkill` already is — CIM `Win32_Process.CreationDate` on Windows, `/proc/<pid>/stat` field 22
+against `/proc/stat`'s `btime` on Linux. The same helper serves the `server.lock` staleness test,
+whose same-container PID/image reuse failure is #206's second bullet.
+Rejected: the same limb, failing open — falling back to the three existing limbs when creation
+time cannot be read. It reaps more genuine orphans automatically, and it leaves a live path to
+the exact incident the guard exists to prevent, on precisely the hosts where the check is least
+reliable. The cost of failing closed is one orphan an operator ends by hand, which the
+spawn-window paragraph already accepts as the price of not owning a pre-spawn handle.
+Rejected: abandoning pid identity for an OS-enforced ownership token — a Windows Job Object, a
+cgroup. Correct by construction, and it would also close the spawn-window exposure. It is the
+dependency D23 rejected, it is a far larger change, and it overlaps the unmerged
+`design/180-storage-lock-lease` work; nothing here is new evidence against D23.
+Reversibility: cheap. One limb, one helper, and the tombstone-and-log path already exists.
+
+### 2026-08-25 — D184 A turn owns every process it spawned, and ends all of them
+Context: `10-design.md § Process lifetime` claims checkpoint restore is safe by construction
+because no turn means no child and no child means nothing holds a handle on the workspace. A
+red-team pass found "no child" meant only "no CLI". A tool that starts a detached process — a dev
+server, a watcher — leaves it running when its CLI parent exits, and `close` in both adapters
+notifies and clears without calling `terminate` (`src/adapters/claude/index.ts:528`). Interrupt
+tree-kills and boot reaping tree-kills; ordinary completion, the overwhelmingly common way a turn
+ends, did not. So the workspace is reported idle, the claim released and the next session admitted
+while an untracked process is still writing — a Windows restore failure by the exact mechanism
+D16 claims to make impossible, and a silent cross-session race on POSIX.
+Chosen: run the tree kill on every path a turn can end by, normal exit included, using the
+mechanism interrupt and boot reaping already share (D38, D148). There is one way to end a process
+tree in this server and no path may grow a second. The consequence is stated in the design rather
+than discovered: an agent cannot leave a server running past the end of its turn.
+Rejected: leaving descendants alive and adding a liveness check before a restore and before the
+workspace claim is released. It preserves the deliberate dev-server case, at the cost of a new
+detection path on two platforms and a workspace claim that becomes conditional on something no
+component can observe — which is the complexity D30's blanket refusal was adopted to avoid.
+Rejected: accepting the leak and correcting only the prose, so the design stops claiming safety by
+construction. Cheapest and honest, and it leaves operators a Windows restore failure that this
+console exists to not have.
+Reversibility: cheap. One call on an existing helper, on a path that already runs.
+
+### 2026-08-25 — D185 The storage root may not overlap a workspace root
+Context: D30's overlap rule compares live sessions' `cwd` to each other. Nothing compared the
+server's own storage tree to the roots it admits sessions in, and `storageRoot` was a raw
+configuration string while `workspaceRoots` were jail-normalised (`src/config/index.ts:184`) — so
+the two could not have been compared even had anything tried. Storage at `D:\work\.skynethr`
+under a root at `D:\work` puts `meta.json`, the event spills, the audit log, the process records
+and every `ckpt.git` inside a checkpoint's work-tree: `add -A` ingests live server state and grows
+recursively, and a restore or `clean -fd` deletes evidence the server is mid-write on — including
+the audit log D25 exists to keep beyond the reach of the subject it indicts.
+Chosen: canonicalise `storageRoot` through the jail's own normalisation, then refuse to start when
+`pathsOverlap` says it meets any `workspaceRoot`. `pathsOverlap` is the one containment predicate
+in this server and no second is hand-rolled for this. The refusal reuses
+`ConfigError.invalid_field` with `field: 'STORAGE_ROOT'` and a `detail` naming the root it
+collides with, so no new public interface is minted and no contract amendment is owed. The shipped
+Compose deployment already separates `/workspaces` from `/data`, so nothing documented moves.
+Rejected: a dedicated `ConfigError` variant. More legible in a log, and it is a contract surface
+this decision has no standing to add; `invalid_field` with a naming `detail` is honest, since the
+field genuinely is invalid relative to `WORKSPACE_ROOTS`.
+Rejected: refusing at session creation instead, so a misconfigured deployment still serves the
+workspaces that do not collide. It trades a loud startup failure for a quiet partial one, and the
+thing at risk is server-wide evidence rather than one session's files.
+Rejected: permitting the overlap and pathspec-excluding the storage subtree from `add -A` and from
+restore. It supports the storage-inside-the-repo layout, and D30 already rejected pathspec-scoped
+checkpoints on the grounds that they make restore partial by design and hand the shared-workspace
+question to every downstream component.
+Reversibility: cheap. One predicate call at configuration load; deleting it restores today's
+behaviour exactly.
+
+
 ## Open
 
 Staging only. Once an item becomes an issue it leaves this list.
