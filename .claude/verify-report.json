@@ -3,17 +3,17 @@
     {
       "name": "Run tests",
       "status": "Passed",
-      "detail": "npm test — 437 tests, 435 pass, 0 fail, 2 skipped (Windows 8.3 short-name test, environment-dependent, not this change), 60 suites, duration 82734.7536ms."
+      "detail": "npm test (tsc build + node --test) — tests 437, suites 60, pass 435, fail 0, cancelled 0, skipped 2, todo 0, duration_ms 61673.7069"
     },
     {
       "name": "Parse-check PowerShell scripts",
       "status": "Passed",
-      "detail": "PASSED: all PowerShell files parsed cleanly (Get-ChildItem -Filter *.ps1 -Recurse, [System.Management.Automation.Language.Parser]::ParseFile against every file, 0 parse errors)."
+      "detail": "Parsed every *.ps1 under the repository with [System.Management.Automation.Language.Parser]::ParseFile — OK: all PowerShell files parsed, 0 failures"
     },
     {
       "name": "Run Pester tests",
       "status": "Passed",
-      "detail": "Invoke-Pester -Path tools -Output None -PassThru — Pester: FailedCount=0 PassedCount=153 TotalCount=153."
+      "detail": "Invoke-Pester -Path tools -Output Detailed -PassThru — Tests Passed: 153, Failed: 0, Skipped: 0, NotRun: 0. Tests completed in 26.07s"
     }
   ]
 }
