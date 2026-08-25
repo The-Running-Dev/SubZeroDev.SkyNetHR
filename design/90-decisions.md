@@ -4048,6 +4048,125 @@ in `src/` changed, and none of `design/00-brief.md` or `design/20-contract.md` n
 altered — both already described two vendors, and this entry is the record that the deployment
 artifact has now caught up to what they already said.
 
+### 2026-08-25 — D180 The storage lock is a renewed lease with an instance identity; pid and hostname stop being evidence
+Context: D161's mechanism cannot recover from either container restart path, and this was measured
+rather than argued — three runs of a faithful probe against `node:22-bookworm-slim` on a named
+volume, mirroring `docker-compose.yml`'s `skynet-hr-storage`. **`docker start`, the same container:**
+the hostname matches, the server is pid 7 on both runs, and `/proc/7/comm` reads `node` against a
+recorded `node` — so the booting process finds *itself*, calls the holder live, and refuses.
+**Recreating the container** — `docker compose pull && docker compose up -d`, the redeploy path that
+file documents — moves the hostname from `6bf2bd5b5b09` to `013b717150c0`, and `store.claimLock`
+refuses on `holder.hostname !== self.hostname` unconditionally and permanently. The remaining limb is
+inert besides: `os.uptime()` inside a container reports the **host kernel's** uptime (5418 s on all
+three runs), so "`startedAt` later than the host's last boot" — the limb whose whole job is catching
+pid reuse — is unconditionally true wherever the host has not rebooted, which in a container is
+always. **D161 rejected the hand-cleared lock because "every unclean shutdown then needs manual
+intervention before the service returns — including an ordinary container restart, which is not an
+incident and must not become one." Its own mechanism produces exactly that, and worse: the refusal
+names a live holder that does not exist.** Reopened on that premise. #207's `Done when` 4 — "cleanup
+can never remove a lock owned by another process or successor" — is unmet in the tree, since
+`releaseLock` is an unconditional remove, and is answered here rather than separately because one
+field answers both.
+Chosen: the lock is a **lease the holder renews**, and the evidence of liveness is a counter the
+holder increments rather than an assertion about a process. A `ServerLock` carries an `instanceId`
+minted randomly at boot and a monotonic renewal counter. `pid`, `hostname`, `startedAt` and `image`
+are **retained and demoted to informational**: they are what a refusal prints and they are never read
+to decide anything, which keeps D161's real insight — that naming the holder is most of a refusal's
+value — after the mechanism that carried it has gone.
+**Reclaim is decided by observing, never by comparing clocks.** A boot that finds a lock samples
+`(instanceId, renewals)`, waits one full observation window measured on **its own monotonic clock**,
+and samples again. Unchanged means the holder has not renewed across a whole window: reclaim, logged.
+Changed means refuse. **There is now one rule, and it does not care which host wrote the lock** —
+which is precisely why both container failures disappear, because both of them are artifacts of the
+two-rule split between "this host, probe it" and "another host, refuse forever".
+**Shared storage is supported to the limit of close-to-open visibility, and that limit is stated
+rather than implied.** No wall clock is compared across hosts, which is what makes any cross-host
+claim possible at all. Visibility is the other half and is a requirement, not an assumption: every
+renewal is a fresh open-write-fsync-close and every sample a fresh open-read-close, because
+close-to-open consistency is the only cross-client guarantee NFS and SMB actually offer, and the
+observation window must exceed the client attribute-cache window it is read through.
+**Ownership is checked on both sides of the file's life, and that is #207's `Done when` 4.** Release
+removes the lock only while it still carries this instance's `instanceId`, so a server that was
+reclaimed and later shuts down cleanly cannot delete its successor's lock. Renewal checks as it
+writes: a holder finding the lock absent, or carrying another id, has lost the root and stops. That
+converts "two servers are running over one storage root" from the silent state D161 correctly said an
+operator cannot diagnose from symptoms into a detected and logged one.
+**What this does not solve is named rather than buried.** A holder that is alive but whose renewals
+are invisible to the observer for a full window — a partition, a share that went read-only underneath
+it, a client cache longer than the window — is reclaimed, and both servers then run. No
+filesystem-only mechanism prevents that; preventing it needs a fencing token from a service outside
+the storage root, which is a dependency this deployment does not have and which `00-brief.md`'s "no
+database" posture (D7) would have to be reopened to acquire. The gate proves restart, recreate, live
+contention and two hosts; partition is the residual and is documented as one.
+The cost paid deliberately: a boot that finds any lock at all waits one observation window before it
+can start. Clean release is what keeps that off the ordinary restart, which is the same job D175 gave
+it and the same reason `30-slices.md § S22.5` instruments the reclaim and expects it uncalled.
+Rejected: **an OS advisory lock** (`flock`, `LockFileEx`), which is correct by construction rather
+than by timing — the kernel releases it when the process dies, so every crash-restart case is right
+with no window and no counter, and #207's `Done when` 4 becomes vacuous because there is nothing to
+delete. It loses on the very ground the owner chose to stand on: `flock` over NFS is advisory at best
+and silently client-local on many mounts, so it would deliver its guarantee everywhere **except** the
+storage class this decision was asked to support. D161's other two objections also still stand — a
+native dependency on a Windows-primary host, and platform divergence of the kind
+`10-design.md § Platform divergence` exists to catalogue.
+Rejected: **a wall-clock `expiresAt` the holder writes and a booter compares against its own clock.**
+The obvious lease, and shorter. It is the one shape that cannot cross hosts: two machines on one
+share disagree about the time by however much their clocks disagree, and the failure it produces is a
+boot declaring a live server dead and starting beside it. Observing a counter over a locally measured
+window takes the shared clock out of the decision entirely.
+Rejected: **pinning a stable `hostname:` in the compose file.** One line, and it does fix the
+recreate refusal. It makes the other path worse rather than better: with a stable hostname every
+recreate reaches the pid probe, which self-matches at pid 7 — proven in the same run that proved the
+recreate case. #206 says a stable hostname alone is insufficient, and the measurement agrees.
+Rejected: **refusing on any lock and having the operator clear it by hand**, which is D161's own
+first-rejected alternative and is now strictly better than what shipped, because it at least tells
+the truth instead of naming a holder that is not there. Rejected again for the reason D161 gave and
+this decision keeps: an ordinary redeploy must not need a human standing over it.
+Reversibility: expensive. It changes a persisted file's shape, the evidence a public error carries,
+two `store` signatures, boot's step 0 and shutdown's step 4, and it **deletes an invariant** — I50's
+foreign-host rule, which `20-contract.md` states and `30-slices.md § S22.4` asserts as an acceptance
+criterion. Landing point: #206.
+
+### 2026-08-25 — D181 A process record names the host that spawned it, and the reaper kills nothing it does not own
+Context: D180 deletes "a lock naming another host is never reclaimed", and that rule turned out to be
+load-bearing in a second place nobody had noticed. A `ProcessRecord` names a `pid`, a `pgid`, its
+session and turn, a `startedAt`, an `image` and an `exitedAt` — and **no host**. Boot's reap step
+looks each recorded pid up in *this* host's process table and kills the tree when the image matches.
+On a shared storage root that is a wrong kill waiting for a coincidence: another host's pid 4711
+running `node` satisfies a record another host wrote about *its* pid 4711 running `node`, and the
+reaper kills an unrelated local process — as root on some hosts, which is the exact scenario
+`Data model § Process record` says the record exists to avoid. Today it is unreachable only because a
+foreign-host lock is never reclaimed, so no server ever reads another host's records. D180 makes it
+reachable and the owner's decision to support shared storage makes it a supported configuration
+rather than a hypothetical, so it is answered in the same pass that creates it.
+Chosen: a `ProcessRecord` carries the `hostname` of the server that spawned it, and boot reaps only
+records whose `hostname` is this host's. A record from another host is left entirely alone — not
+reaped and **not tombstoned either**, because tombstoning it would be this server writing an exit
+record for a child it cannot see and did not kill, which is a lie in the one file boot trusts.
+**A record written before this field existed is treated as this host's**, which preserves today's
+behaviour exactly on the single-host deployments that are the only ones that have ever existed —
+shared storage was not supported until D180, so there are no foreign records in any current
+`pids.ndjson` to mistake.
+**The residual is stated: an orphan on a host that no longer holds the root is reaped by that host's
+own next successful boot, not by the current holder.** No host can safely kill another's processes,
+so the orphan outlives the failover. That is the honest consequence of supporting shared storage, and
+it is smaller than the alternative, which is killing the wrong thing.
+Rejected: **carrying the `instanceId` instead of the `hostname`.** More precise, and it would
+additionally attribute a child to a particular server *run* rather than a machine. It is not what the
+defect needs — the reaper's question is "could this pid possibly be mine to look up", which is a
+question about the process table it is about to read, not about which run wrote the line — and a
+field that is more precise than the decision it feeds is a field that will be read for something else
+later.
+Rejected: **skipping any record with no `hostname`**, the conservative reading of a missing field. It
+is safe in the sense that it never kills, and it silently strands one generation of real orphans
+across the upgrade on bare metal, where reaping is the only thing that clears them.
+Rejected: **leaving `ProcessRecord` alone and having the reaper compare the lock's holder instead.**
+Cheapest, no schema change. The lock names the *previous holder*, not the writer of any given line,
+and after a reclaim-and-restart cycle the two are not the same server — so it answers a different
+question than the one asked.
+Reversibility: expensive. One field on a persisted append-only line, in the file boot depends on.
+Landing point: #206, with D180.
+
 ## Open
 
 Staging only. Once an item becomes an issue it leaves this list.
