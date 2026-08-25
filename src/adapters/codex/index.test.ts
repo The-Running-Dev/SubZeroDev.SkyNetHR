@@ -1,9 +1,15 @@
 import assert from 'node:assert/strict';
+import { execFile } from 'node:child_process';
+import { mkdtemp, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
+import { promisify } from 'node:util';
 import { createCodexAdapter } from './index.js';
 import { createAdapter } from '../index.js';
 import type { AdapterNotification } from '../../contract/index.js';
+
+const execFileAsync = promisify(execFile);
 
 const FIXTURE = path.join(process.cwd(), 'src', 'adapters', 'codex', 'fixtures', 'fake-codex-cli.mjs');
 
@@ -273,4 +279,52 @@ test('createAdapter refuses a Codex session with sandbox: null', () => {
   assert.equal(result.ok, false);
   if (result.ok) return;
   assert.equal(result.error.code, 'unsupported_sandbox');
+});
+
+// #201 — mirrors the Claude adapter's identical fix (`../claude/index.test.ts`): on
+// Windows, a `.cmd` executable forces `shell: true` (`resolveSpawn`), so `proc.pid`
+// names the `%ComSpec%` shell Node actually launched, not the `.cmd` itself. The
+// `spawned` notification's `image` must match what `tasklist` reports for that pid.
+test('#201 — Windows: a .cmd executable is spawned via a shell, and `spawned` records the shell\'s own image', async (t) => {
+  if (process.platform !== 'win32') {
+    t.skip('Windows-only: shell-backed spawn (#201)');
+    return;
+  }
+  delete process.env['SKYNET_CODEX_NO_APP_SERVER'];
+  const dir = await mkdtemp(path.join(tmpdir(), 'skynet-codex-shell-'));
+  const cmdPath = path.join(dir, 'fake-codex.cmd');
+  await writeFile(cmdPath, `@echo off\r\n"${process.execPath}" "${FIXTURE}" %*\r\n`);
+
+  const notifications: AdapterNotification[] = [];
+  const result = createCodexAdapter({
+    executable: cmdPath,
+    cwd: process.cwd() as never,
+    model: null,
+    sandbox: 'workspace-write',
+    notify: (n) => notifications.push(n),
+    streamDeltas: false,
+  });
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+
+  void result.value.send('hello', [], null, 'turn-shell-1' as never);
+  await waitUntil(() => notifications.some((n) => n.kind === 'spawned'));
+  const spawned = notifications.find((n): n is Extract<AdapterNotification, { kind: 'spawned' }> => n.kind === 'spawned')!;
+
+  try {
+    assert.notEqual(
+      spawned.image.toLowerCase().replace(/\.cmd$/, ''),
+      'fake-codex',
+      'the recorded image must not be the requested .cmd shim name',
+    );
+
+    const { stdout } = await execFileAsync('tasklist', ['/FI', `PID eq ${spawned.pid}`, '/FO', 'CSV', '/NH']);
+    const firstLine = stdout.split(/\r?\n/).find((l) => l.trim().length > 0);
+    const match = firstLine ? /^"([^"]*)"/.exec(firstLine) : null;
+    const actualImage = (match ? match[1]! : '').replace(/\.exe$/i, '');
+
+    assert.equal(spawned.image.toLowerCase(), actualImage.toLowerCase(), 'the recorded image matches what tasklist reports for the stored pid');
+  } finally {
+    await execFileAsync('taskkill', ['/PID', String(spawned.pid), '/T', '/F']).catch(() => {});
+  }
 });
