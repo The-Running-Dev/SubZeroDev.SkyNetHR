@@ -343,7 +343,8 @@ the server (D23). Boot reaps orphaned children, and it cannot reap what it canno
 | `pid` | `number` | OS process id, at spawn |
 | `pgid` | `number \| null` | POSIX process group id; `null` on Windows, which has no equivalent to record |
 | `sessionId` / `turnId` | ids | Which turn owned it |
-| `startedAt` | ISO 8601 UTC | **Load-bearing** — see the reuse guard below |
+| `startedAt` | ISO 8601 UTC | This server's own wall clock at spawn. **Load-bearing** — see the reuse guard below |
+| `osCreatedAt` | ISO 8601 UTC \| `null` | The operating system's own reading of the child's creation time, taken at spawn. `null` where that read failed, and a `null` is never reaped (D186) |
 | `image` | string | Executable name the child was spawned as |
 | `exitedAt` | ISO 8601 UTC \| `null` | Set by folding in the tombstone line the child's close appends. That line is narrower than this record and the reader folds the two — shape and rule in `20-contract.md § Process record` (D95) |
 
@@ -355,10 +356,10 @@ otherwise have to walk every session directory before it is allowed to accept a 
 systems reuse process ids, so a pid recorded before a reboot may name something entirely
 unrelated afterwards — reaping it would kill an innocent process, as root on some hosts.
 Boot therefore reaps an entry only when it has no `exitedAt`, its `startedAt` is later than
-the host's last boot time, the live process's image matches, **and the live process's own
-creation time matches the recorded `startedAt`**. An entry failing any of those is not
-reaped; it is logged and tombstoned, because a stale record is a bookkeeping problem and a
-wrong kill is an incident.
+the host's last boot time, the live process's image matches, **and the live process's
+creation time, read from the platform, is exactly the recorded `osCreatedAt`**. An entry
+failing any of those is not reaped; it is logged and tombstoned, because a stale record is a
+bookkeeping problem and a wrong kill is an incident.
 
 **The fourth limb is the one that makes the other three mean anything** (D183). Reuse is not
 confined to reboots: an operating system reuses a pid within a single boot as freely as
@@ -369,10 +370,25 @@ operator's live agent and everything under it — the precise incident the recor
 prevent, reached through the guard rather than around it. Creation time is what distinguishes
 *that* process from *a* process with the same name and number.
 
+**The fourth limb compares like with like, which is why it needs a field of its own** (D186).
+`startedAt` cannot serve it. That is this server's wall-clock reading taken at spawn, while a
+platform derives creation time from the host's boot time plus elapsed ticks — two clocks,
+whose readings are never equal. Tested for equality against `startedAt` the limb would pass on
+nothing and the guard would reap nothing at all; tested within a tolerance, the window has to
+absorb clock-domain error and NTP steps, and a window wide enough to be reliable is wide
+enough to admit the same-second reuse the limb exists to catch. So the operating system's own
+reading is recorded at spawn, as `osCreatedAt`, and boot compares it for exact equality
+against the same platform source. There is no constant to tune and none to justify.
+`ServerLock` carries the field for the same reason: the `server.lock` staleness test shares
+this implementation, and same-container pid-and-image reuse defeats the other three limbs
+there identically.
+
 **It fails closed, and that is a deliberate asymmetry.** No platform exposes process creation
 time to Node, so each is a shell-out of the same shape `taskkill` already is, and each can
 fail — the process may exit between the read and the test, or the host may not answer at all.
-Where creation time cannot be established the entry is **tombstoned and logged, never
+That holds at both ends: a spawn whose read fails records `osCreatedAt` as `null`, and a boot
+that cannot read the live process's creation time has nothing to compare it with. Where
+creation time cannot be established at either end the entry is **tombstoned and logged, never
 reaped**. The cost is a real orphan an operator ends by hand, which is exactly the cost the
 spawn-window paragraph below already accepts and for the same reason: this design would
 rather leak a process than end the wrong one. The same helper serves the `server.lock`
@@ -1780,7 +1796,7 @@ a CI detail, because these are the places where one design compiles into two beh
 | Process group id | None to record; `pgid` is `null` | Recorded and load-bearing for the tree kill | *Data model § Process record* |
 | Checkpoint restore | An open handle blocks the write — which is why D16's per-turn child matters here and not on Linux | No equivalent block | *Concurrency § Process lifetime* |
 | Host boot time, for the pid reuse guard | Different source | Different source | *Data model § Process record* |
-| Process creation time, for the guard's fourth limb (D183) | CIM `Win32_Process.CreationDate` | `/proc/<pid>/stat` field 22, against `/proc/stat`'s `btime` | *Data model § Process record* |
+| Process creation time, for the guard's fourth limb (D183) — read at spawn to record `osCreatedAt`, and again at boot to compare against it (D186) | CIM `Win32_Process.CreationDate` | `/proc/<pid>/stat` field 22, against `/proc/stat`'s `btime` | *Data model § Process record* |
 
 **The gate exists and it does not cover this whole list.** The pair is a requirement of the
 brief and the design carries code paths for both; D64's objection was to a two-platform claim
@@ -1799,7 +1815,7 @@ used to describe and is not the same as being ungated.
 | Restart mid-turn — spill ends on an unpaired `turn.started` | Boot scan of the spill tail | **Close the turn on disk** (D39): `permission.resolved / cancelled_process_exit` for each outstanding request, then `turn.ended / stopReason: 'server_restart'` | A turn that ends, saying the server restarted | Ordering guarantees hold unconditionally; no renderer special case |
 | Message to a rehydrated session | `state == 'ended'` | `409 session_ended` | "This session ended when the server restarted" | Nothing started |
 | Restart with a child running | `pids.ndjson` entry with no `exitedAt` | Reap before accepting connections, after checking the reuse guard (D23) | — | Orphan killed, entry tombstoned |
-| Recorded pid predates the host's last boot, its image does not match, or its creation time is not the recorded `startedAt` | Reuse guard | **Do not kill.** Log it, tombstone the entry, continue | — | Whatever now owns that pid is left alone. A stale record is bookkeeping; a wrong kill is an incident |
+| Recorded pid predates the host's last boot, its image does not match, or its creation time is not exactly the recorded `osCreatedAt` (D186) | Reuse guard | **Do not kill.** Log it, tombstone the entry, continue | — | Whatever now owns that pid is left alone. A stale record is bookkeeping; a wrong kill is an incident |
 | Creation time cannot be read for a recorded pid | Reuse guard, fourth limb (D183) | **Do not kill.** Log it, tombstone the entry, continue | — | The guard fails closed. A genuine orphan survives to be ended by hand, which this design prefers to a wrong kill |
 | `meta.json` unreadable or corrupt | Parse failure at boot | Skip that session, log it; **boot continues** | One session missing | Its files untouched for inspection |
 | `meta.json` carries an unknown `schemaVersion` | Version check at boot (D49) | **Identical to a parse failure**: skip, log, continue. Never a migration attempt, never a partial read | One session missing, the log saying it is a newer format | Its files untouched. This is the whole reason the field exists |
@@ -2735,11 +2751,13 @@ these are cited by number elsewhere in this document and in the slices.
    before boot's first step and refusing with `StartupError.storage_locked` naming the holder. The
    deployment judgement this item deferred was whether an accidental double-start justifies a
    startup failure mode, and the answer turned on cost rather than principle: **the staleness
-   objection is answered by machinery that already exists.** D23's three-part liveness test —
-   no `exitedAt`, `startedAt` after the host's last boot, matching image — is reused verbatim
-   against the lock's own holder, so a crashed server's lock is reclaimed automatically and a
-   container restart is not an incident. A lock naming another `hostname` is never reclaimed,
-   because that test cannot see another machine's process table.
+   objection is answered by machinery that already exists.** The reuse guard's liveness test — no
+   `exitedAt`, `startedAt` after the host's last boot, matching image, and the platform's
+   creation-time reading exactly equal to the recorded `osCreatedAt` (D23, D183, D186) — is reused
+   verbatim against the lock's own holder, which is why `ServerLock` carries `osCreatedAt` too. A
+   crashed server's lock is therefore reclaimed automatically and a container restart is not an
+   incident. A lock naming another `hostname` is never reclaimed, because that test cannot see
+   another machine's process table.
 
 **Needing an experiment:**
 
