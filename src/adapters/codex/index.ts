@@ -65,6 +65,18 @@ function resolveSpawn(executable: string, extraArgs: string[]): ResolvedSpawn {
   return { command, args, shell: needsShell };
 }
 
+// (#201) With `shell: true` on Windows, Node launches `%ComSpec%` and the reported
+// `proc.pid` names *that* shell process, not the resolved executable — `tasklist` for
+// that pid reports the shell's own image (`cmd.exe` by default), never `executable`.
+// Recording anything else here is what makes the boot reaper's exact-image comparison
+// (`session-manager/index.ts`'s `imagesMatch`) reject the real process tree as a
+// mismatch after a crash. Mirrors `../claude/index.ts`'s identical need.
+function reportableImage(executable: string, usedShell: boolean): string {
+  if (!usedShell) return executable;
+  const comspec = process.env['ComSpec'] ?? process.env['COMSPEC'] ?? 'cmd.exe';
+  return comspec.replace(/^.*[\\/]/, '').replace(/\.exe$/i, '');
+}
+
 function probeOk(executable: string, cwd: string, subcommand: string): boolean {
   const resolved = resolveSpawn(executable, [subcommand, '--help']);
   const result = spawnSync(resolved.command, resolved.args, { cwd, shell: resolved.shell, timeout: PROBE_TIMEOUT_MS });
@@ -465,8 +477,8 @@ export function createCodexAdapter(
       }
 
       let proc: ChildProcess;
+      const resolved = resolveSpawn(executable, ['app-server']);
       try {
-        const resolved = resolveSpawn(executable, ['app-server']);
         proc = spawn(resolved.command, resolved.args, {
           cwd: opts.cwd,
           stdio: ['pipe', 'pipe', 'pipe'],
@@ -482,7 +494,12 @@ export function createCodexAdapter(
       killRequested = false;
 
       proc.once('spawn', () => {
-        notify({ kind: 'spawned', pid: proc.pid ?? -1, pgid: isWindows ? null : (proc.pid ?? null), image: executable });
+        notify({
+          kind: 'spawned',
+          pid: proc.pid ?? -1,
+          pgid: isWindows ? null : (proc.pid ?? null),
+          image: reportableImage(executable, resolved.shell),
+        });
       });
       proc.once('error', (err) => {
         if (!settled) {
@@ -649,8 +666,8 @@ export function createCodexAdapter(
       if (resume !== null) args.push('resume', resume);
 
       let proc: ChildProcess;
+      const resolved = resolveSpawn(executable, args);
       try {
-        const resolved = resolveSpawn(executable, args);
         proc = spawn(resolved.command, resolved.args, {
           cwd: opts.cwd,
           stdio: ['pipe', 'pipe', 'pipe'],
@@ -671,7 +688,12 @@ export function createCodexAdapter(
       proc.stdin?.end(text);
 
       proc.once('spawn', () => {
-        notify({ kind: 'spawned', pid: proc.pid ?? -1, pgid: isWindows ? null : (proc.pid ?? null), image: executable });
+        notify({
+          kind: 'spawned',
+          pid: proc.pid ?? -1,
+          pgid: isWindows ? null : (proc.pid ?? null),
+          image: reportableImage(executable, resolved.shell),
+        });
       });
       proc.once('error', (err) => {
         resultSeen = true;

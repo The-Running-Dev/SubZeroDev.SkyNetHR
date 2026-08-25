@@ -1,11 +1,15 @@
 import assert from 'node:assert/strict';
+import { execFile } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
-import { mkdtemp, readFile } from 'node:fs/promises';
+import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
+import { promisify } from 'node:util';
 import { createClaudeAdapter } from './index.js';
 import type { AdapterNotification } from '../../contract/index.js';
+
+const execFileAsync = promisify(execFile);
 
 const FIXTURE = path.join(process.cwd(), 'src', 'adapters', 'claude', 'fixtures', 'fake-claude-cli.mjs');
 
@@ -329,5 +333,53 @@ test('S1.4 — an unrecognised record kind, and a malformed JSON line, are both 
     const errors = eventsOf(notifications, 'error');
     assert.ok(errors.some((e) => (e.event.data as { kind: string }).kind === 'adapter_bad_line'));
     assert.ok(eventsOf(notifications, 'message').some((m) => (m.event.data as { text: string }).text === 'after the bad line'));
+  }
+});
+
+// #201 — on Windows, `executable` ending in `.cmd` forces `shell: true` (mirrors the
+// bare `claude` name PATH/PATHEXT resolves to a shim); `proc.pid` then names the
+// `%ComSpec%` shell Node actually launched, not the `.cmd` shim itself. The `spawned`
+// notification's `image` must match what `tasklist` reports for that pid — recording
+// the requested executable name instead is what let the boot reaper reject a live,
+// shell-backed process tree as a mismatch (`session-manager/index.ts`'s `imagesMatch`).
+test('#201 — Windows: a .cmd executable is spawned via a shell, and `spawned` records the shell\'s own image', async (t) => {
+  if (process.platform !== 'win32') {
+    t.skip('Windows-only: shell-backed spawn (#201)');
+    return;
+  }
+  const dir = await mkdtemp(path.join(tmpdir(), 'skynet-claude-shell-'));
+  const cmdPath = path.join(dir, 'fake-claude.cmd');
+  await writeFile(cmdPath, `@echo off\r\n"${process.execPath}" "${FIXTURE}" %*\r\n`);
+
+  process.env['SKYNET_TEST_SCENARIO'] = 'full';
+  const notifications: AdapterNotification[] = [];
+  const adapter = createClaudeAdapter({
+    executable: cmdPath,
+    cwd: process.cwd() as never,
+    model: null,
+    sandbox: null,
+    notify: (n) => notifications.push(n),
+    streamDeltas: false,
+  });
+
+  void adapter.send('hello', [], null, 'turn-shell-1' as never);
+  await waitUntil(() => notifications.some((n) => n.kind === 'spawned'));
+  const spawned = notifications.find((n): n is Extract<AdapterNotification, { kind: 'spawned' }> => n.kind === 'spawned')!;
+
+  try {
+    assert.notEqual(
+      spawned.image.toLowerCase().replace(/\.cmd$/, ''),
+      'fake-claude',
+      'the recorded image must not be the requested .cmd shim name',
+    );
+
+    const { stdout } = await execFileAsync('tasklist', ['/FI', `PID eq ${spawned.pid}`, '/FO', 'CSV', '/NH']);
+    const firstLine = stdout.split(/\r?\n/).find((l) => l.trim().length > 0);
+    const match = firstLine ? /^"([^"]*)"/.exec(firstLine) : null;
+    const actualImage = (match ? match[1]! : '').replace(/\.exe$/i, '');
+
+    assert.equal(spawned.image.toLowerCase(), actualImage.toLowerCase(), 'the recorded image matches what tasklist reports for the stored pid');
+  } finally {
+    await execFileAsync('taskkill', ['/PID', String(spawned.pid), '/T', '/F']).catch(() => {});
   }
 });

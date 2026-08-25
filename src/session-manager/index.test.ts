@@ -2219,6 +2219,77 @@ test('S7.6 — a live process whose image does not match the record is not reape
   assert.equal(open.some((r) => r.pid === pid), false, 'still tombstoned even though not killed, so this is a one-time bookkeeping event, not a permanent stall');
 });
 
+// A shell-backed tree, launched exactly the way `../adapters/claude/index.ts` and
+// `../adapters/codex/index.ts` launch a bare `claude`/`codex` name or an explicit
+// `.cmd`/`.bat` path on Windows (`shell: true`): the reported `proc.pid` names the
+// `%ComSpec%` shell (`cmd.exe` by default), not the `.cmd` shim, and that shell's own
+// child is the real work. `getProcessImage`'s ground truth comes from `tasklist` for
+// that pid, independent of any of this repo's own image-recording logic (#201).
+async function spawnTrackedShellTree(): Promise<{ pid: number; actualImage: string; grandchildPid: number }> {
+  const markerDir = await mkdtemp(path.join(tmpdir(), 'skynet-s7-shell-marker-'));
+  const markerPath = path.join(markerDir, 'gc.json');
+  const script =
+    "const { spawn } = require('node:child_process'); const fs = require('node:fs'); " +
+    "const gc = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 120000)'], { stdio: 'ignore' }); gc.unref(); " +
+    `fs.writeFileSync(${JSON.stringify(markerPath)}, JSON.stringify({ grandchildPid: gc.pid })); ` +
+    'setTimeout(() => {}, 120000);';
+  const scriptPath = path.join(markerDir, 'inner.js');
+  await writeFile(scriptPath, script);
+  const cmdPath = path.join(markerDir, 'fake-agent.cmd');
+  await writeFile(cmdPath, `@echo off\r\n"${process.execPath}" "${scriptPath}"\r\n`);
+
+  // Mirrors the adapters' own spawn call for the `.cmd`/bare-name branch: `shell: true`,
+  // not `detached` (Windows has no process-group concept to detach into — D38).
+  const proc = spawn(cmdPath, [], { shell: true, stdio: 'ignore' });
+  proc.unref();
+  const pid = proc.pid!;
+  await waitUntil(() => existsSync(markerPath));
+  const marker = JSON.parse(await readFile(markerPath, 'utf8')) as { grandchildPid: number };
+
+  const execFileAsync = promisify(execFile);
+  const { stdout } = await execFileAsync('tasklist', ['/FI', `PID eq ${pid}`, '/FO', 'CSV', '/NH']);
+  const firstLine = stdout.split(/\r?\n/).find((l) => l.trim().length > 0);
+  const match = firstLine ? /^"([^"]*)"/.exec(firstLine) : null;
+  const actualImage = match ? match[1]!.replace(/\.exe$/i, '') : '';
+
+  return { pid, actualImage, grandchildPid: marker.grandchildPid };
+}
+
+test('S7.11 — Windows: a shell-backed process tree is recorded under the shell\'s own image, and boot recovery reaps the whole tree', async (t) => {
+  if (process.platform !== 'win32') {
+    t.skip('Windows-only: shell-backed spawn (#201)');
+    return;
+  }
+  const { manager, store } = await makeManager('full');
+  const { pid, actualImage, grandchildPid } = await spawnTrackedShellTree();
+  strayPids.push(pid, grandchildPid);
+  assert.equal(isAlive(pid), true, 'the shell process is running before boot');
+  assert.equal(isAlive(grandchildPid), true, 'the grandchild is running before boot');
+  // The bug this test guards against: recording the requested executable name (e.g.
+  // `claude`/`fake-agent.cmd`) instead of what `tasklist` actually reports for the pid
+  // Node handed back — `cmd.exe` under a normal `%ComSpec%`.
+  assert.notEqual(actualImage.toLowerCase(), 'fake-agent', 'ground truth: the live image is the shell, not the requested executable');
+
+  const record: ProcessRecord = {
+    pid,
+    pgid: null,
+    sessionId: 'sess-reap-s711' as SessionId,
+    turnId: 'turn-reap-s711' as TurnId,
+    startedAt: new Date().toISOString() as IsoTimestamp,
+    image: actualImage,
+    exitedAt: null,
+  };
+  assert.equal((await store.appendPid(record)).ok, true);
+
+  const booted = await manager.boot();
+  assert.equal(booted.ok, true);
+
+  await waitUntil(() => !isAlive(pid) && !isAlive(grandchildPid), 5000);
+
+  const open = await store.readOpenPids();
+  assert.equal(open.some((r) => r.pid === pid), false, 'the reaped entry is tombstoned');
+});
+
 test('S7.10 — a storage root that cannot be written at boot refuses to start with StartupError.storage_unwritable', async () => {
   const { manager, storageRoot } = await makeManager('full');
   await rm(storageRoot, { recursive: true, force: true });
