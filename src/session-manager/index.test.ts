@@ -3719,6 +3719,95 @@ test('S21.5 — an attachment over the byte cap, or a message over the attachmen
   assert.equal(summary.ok, true);
 });
 
+// `mkdir(dir, { recursive: true })` inside `writeAttachment` leaves the parent
+// `attachments/` directory behind (an empty intermediate) even after every turn-specific
+// subdirectory under it is rolled back — checking the parent's mere existence would be
+// checking the wrong thing. What must be empty is its contents.
+async function attachmentTurnDirs(storageRoot: string, sessionId: string): Promise<readonly string[]> {
+  const dir = path.join(storageRoot, 'sessions', sessionId, 'attachments');
+  if (!existsSync(dir)) return [];
+  return readdir(dir);
+}
+
+// #203 — a partial multi-attachment write failure must not strand the sibling(s) that
+// already succeeded: the whole turn's attachment directory is rolled back, not just the
+// file whose own write failed (`store.writeAttachment`'s existing per-file cleanup).
+test('#203 — a multi-attachment message where one write fails leaves no attachment directory for that turn, and the slot is freed for a retry', async () => {
+  let failSecondWrite = false;
+  const { manager, workspaceRoot, storageRoot } = await makeManager('error-result', {}, (store) => ({
+    ...store,
+    async writeAttachment(sessionId, turnId, attachmentId, bytes, mediaType) {
+      if (failSecondWrite && (bytes.toString('utf8') === 'second')) {
+        return { ok: false, error: { code: 'io', path: 'attachments', detail: 'disk full' } };
+      }
+      return store.writeAttachment(sessionId, turnId, attachmentId, bytes, mediaType);
+    },
+  }));
+  const owner = 'operator-1' as OperatorId;
+  const projectDir = path.join(workspaceRoot, 'proj-203a');
+  await mkdir(projectDir);
+  const created = await manager.create(owner, { vendor: 'claude', cwd: projectDir, model: null, sandbox: null, requisitionId: null });
+  assert.equal(created.ok, true);
+  if (!created.ok) return;
+  const { sessionId } = created.value;
+
+  failSecondWrite = true;
+  const messaged = await manager.message(sessionId, owner, 'go', [
+    { filename: 'first.txt', mediaType: 'text/plain', dataBase64: Buffer.from('first').toString('base64') },
+    { filename: 'second.txt', mediaType: 'text/plain', dataBase64: Buffer.from('second').toString('base64') },
+  ]);
+  assert.equal(messaged.ok, false);
+  if (!messaged.ok) assert.equal(messaged.error.code, 'storage');
+
+  // No trace of the successful sibling write is left behind.
+  assert.deepEqual(await attachmentTurnDirs(storageRoot, sessionId), [], 'the whole turn\'s attachment directory is gone, including the sibling that wrote successfully');
+
+  // A refused write frees the turn slot; the session itself is untouched (this is not a
+  // spill failure, so it does not end the session) — a retry with no attachments succeeds.
+  failSecondWrite = false;
+  const retried = await manager.message(sessionId, owner, 'go again', []);
+  assert.equal(retried.ok, true, 'the slot was freed for a retry');
+});
+
+// #203 — the same rollback for each of the three durable-write boundaries a failure can
+// strike after blob writes succeed and before the message reference is durable: the
+// checkpoint, `turn.started`, and the `message` envelope itself.
+for (const boundary of ['checkpoint.created', 'turn.started', 'message'] as const) {
+  test(`#203 — a spill-append failure on ${boundary}, after attachments were written, rolls back the staged attachment files`, async () => {
+    let failOn = false;
+    const { manager, workspaceRoot, storageRoot } = await makeManager('error-result', {}, (store) => ({
+      ...store,
+      async appendEvent(sessionId, envelope) {
+        if (failOn && envelope.kind === boundary) {
+          return { ok: false, error: { code: 'io', path: 'events.ndjson', detail: 'disk full' } };
+        }
+        return store.appendEvent(sessionId, envelope);
+      },
+    }));
+    const owner = 'operator-1' as OperatorId;
+    const projectDir = path.join(workspaceRoot, `proj-203-${boundary.replace(/\W/g, '')}`);
+    await mkdir(projectDir);
+    const created = await manager.create(owner, { vendor: 'claude', cwd: projectDir, model: null, sandbox: null, requisitionId: null });
+    assert.equal(created.ok, true);
+    if (!created.ok) return;
+    const { sessionId } = created.value;
+
+    failOn = true;
+    const messaged = await manager.message(sessionId, owner, 'see attached', [
+      { filename: 'bug.png', mediaType: 'image/png', dataBase64: Buffer.from('x').toString('base64') },
+    ]);
+    assert.equal(messaged.ok, false);
+    if (!messaged.ok) assert.equal(messaged.error.code, 'session_ended');
+
+    // The session ended (a spill failure is fatal, D100/D41) — but the blob that was
+    // durably written before the failed append must not survive it as an orphan.
+    const summary = manager.get(sessionId, owner);
+    assert.equal(summary.ok, true);
+    if (summary.ok) assert.equal(summary.value.state, 'ended');
+    assert.deepEqual(await attachmentTurnDirs(storageRoot, sessionId), [], `the attachment written before the failed ${boundary} append is not left as an orphan`);
+  });
+}
+
 test('S21.8 — an adapter declaring acceptsAttachments: false refuses the whole message naming attachments, and no turn starts', async () => {
   process.env['SKYNET_CODEX_EXECUTABLE'] = CODEX_FIXTURE;
   delete process.env['SKYNET_CODEX_NO_APP_SERVER'];

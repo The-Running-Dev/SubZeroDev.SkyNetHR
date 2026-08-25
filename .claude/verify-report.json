@@ -3,7 +3,7 @@
     {
       "name": "Run tests",
       "status": "Passed",
-      "detail": "npm test — 430 tests, 428 pass, 0 fail, 2 skipped (Windows 8.3 short-name test skipped: environment-dependent, not this change), 59 suites, duration 77061.6119ms."
+      "detail": "npm test — 435 tests, 433 pass, 0 fail, 2 skipped (Windows 8.3 short-name test, environment-dependent, not this change), 59 suites, duration 68037.7331ms."
     },
     {
       "name": "Parse-check PowerShell scripts",
@@ -13,7 +13,7 @@
     {
       "name": "Run Pester tests",
       "status": "Passed",
-      "detail": "Invoke-Pester -Path tools -Output Detailed -PassThru — Tests completed in 36.15s. Tests Passed: 153, Failed: 0, Skipped: 0, NotRun: 0. FailedCount: 0 PassedCount: 153 TotalCount: 153."
+      "detail": "Invoke-Pester -Path tools -Output None -PassThru — Pester: FailedCount=0 PassedCount=153 TotalCount=153."
     }
   ]
 }

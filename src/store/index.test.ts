@@ -207,6 +207,41 @@ test('S21.4 — attachment ids that are not a single path segment are refused', 
   }
 });
 
+// #203 — removeAttachments rolls back an entire turn's staged attachments in one call
+// (session-manager calls this on a partial-write or spill-append failure, not knowing in
+// advance which siblings, if any, reached disk).
+test('#203 — removeAttachments removes every attachment staged under a turn, and is a no-op when the turn staged none', async () => {
+  const storageRoot = await mkdtemp(path.join(tmpdir(), 'skynet-store-'));
+  const storeResult = await createStore(baseConfig(storageRoot));
+  if (!storeResult.ok) return;
+  const store = storeResult.value;
+  const record = sessionRecord('sess-203');
+  await store.createSession(record);
+
+  await store.writeAttachment(record.id, 't1' as never, 'att-1' as never, Buffer.from('a'), 'text/plain');
+  await store.writeAttachment(record.id, 't1' as never, 'att-2' as never, Buffer.from('b'), 'text/plain');
+  await store.writeAttachment(record.id, 't2' as never, 'att-3' as never, Buffer.from('c'), 'text/plain');
+
+  const removed = await store.removeAttachments(record.id, 't1' as never);
+  assert.equal(removed.ok, true);
+
+  const gone1 = await store.openAttachment(record.id, 't1' as never, 'att-1' as never);
+  assert.equal(gone1.ok, false);
+  if (!gone1.ok) assert.equal(gone1.error.code, 'not_found');
+  const gone2 = await store.openAttachment(record.id, 't1' as never, 'att-2' as never);
+  assert.equal(gone2.ok, false);
+  if (!gone2.ok) assert.equal(gone2.error.code, 'not_found');
+
+  // A different turn's attachment is untouched.
+  const untouched = await store.openAttachment(record.id, 't2' as never, 'att-3' as never);
+  assert.equal(untouched.ok, true);
+  if (untouched.ok) for await (const _chunk of untouched.value.stream) void _chunk; // drain: closes the handle
+
+  // A turn that staged nothing at all is a no-op, not an error.
+  const noop = await store.removeAttachments(record.id, 'never-staged' as never);
+  assert.equal(noop.ok, true);
+});
+
 test('S1.8 — a torn trailing line in events.ndjson is dropped, not fatal, at read time', async () => {
   const storageRoot = await mkdtemp(path.join(tmpdir(), 'skynet-store-'));
   const storeResult = await createStore(baseConfig(storageRoot));

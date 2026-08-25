@@ -756,6 +756,25 @@ export async function createStore(config: Config): Promise<Result<Store, StoreEr
       }
     },
 
+    // (#203) Removes every attachment staged under this turn — the whole directory
+    // `writeAttachment` writes into, not one attachmentId at a time — so a partial
+    // multi-attachment write failure rolls back the sibling(s) that already succeeded,
+    // not just the one whose own write failed (that narrower case is `writeAttachment`'s
+    // own cleanup, above). A turn that staged nothing (the directory was never created)
+    // is a no-op, not a `not_found` error: the caller does not know in advance whether
+    // any write reached disk before the failure that triggered this call.
+    async removeAttachments(sessionId: SessionId, turnId: TurnId) {
+      const dir = path.join(sessionDir(storageRoot, sessionId), 'attachments', turnId);
+      if (!isSafePathSegment(turnId)) return ioError(dir, 'turnId is not a single path segment');
+      try {
+        await rm(dir, { recursive: true, force: true });
+      } catch (err) {
+        const nodeErr = err as NodeJS.ErrnoException;
+        return ioError(nodeErr.path ?? dir, nodeErr.message);
+      }
+      return { ok: true, value: undefined };
+    },
+
     async appendAudit(record: AuditRecord) {
       return appendLine(path.join(storageRoot, 'audit.ndjson'), JSON.stringify(record), true);
     },
