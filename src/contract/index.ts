@@ -943,6 +943,11 @@ export interface Store {
     turnId: TurnId,
     attachmentId: AttachmentId,
   ): Promise<Result<{ readonly stream: NodeJS.ReadableStream; readonly mediaType: string }, StoreError>>;
+  // (#203) Rolls back every attachment staged for a turn whose durable `message`
+  // reference will now never be constructed — a partial multi-attachment write failure,
+  // or a spill-append failure (checkpoint, `turn.started`, or `message` itself) after
+  // blob writes already succeeded. A no-op, not an error, when the turn wrote none.
+  removeAttachments(sessionId: SessionId, turnId: TurnId): Promise<Result<void, StoreError>>;
 
   appendAudit(record: AuditRecord): Promise<Result<void, StoreError>>; // durable: fsync before it returns
   readAuditPage(query: AuditQuery): Promise<Result<AuditPage, StoreError>>; // bounded; never a whole-file scan

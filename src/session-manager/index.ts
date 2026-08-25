@@ -1086,6 +1086,21 @@ export function createSessionManager(deps: {
         ref: { attachmentId: randomUUID() as AttachmentId, filename: upload.filename, mediaType: upload.mediaType, bytes: bytes.length },
         data: bytes,
       }));
+      // (#203) Staged, and rolled back on any failure before the `message` envelope
+      // naming them becomes durable — the emit below is that publication point, and
+      // once it succeeds these files are referenced and must never be removed here
+      // again. Best-effort: a failure to remove is logged, not surfaced, because the
+      // error already being returned is about the write/append that actually failed.
+      async function rollbackAttachments(): Promise<void> {
+        if (attachmentPayloads.length === 0) return;
+        const removed = await store.removeAttachments(sessionId, turnId);
+        if (!removed.ok) {
+          console.error(
+            `[session-manager] session ${sessionId}: failed to roll back staged attachments for turn ${turnId}: ${JSON.stringify(removed.error)}`,
+          );
+        }
+      }
+
       const writes = await Promise.all(
         attachmentPayloads.map((p) => store.writeAttachment(sessionId, turnId, p.ref.attachmentId, Buffer.from(p.data), p.ref.mediaType)),
       );
@@ -1093,7 +1108,10 @@ export function createSessionManager(deps: {
       if (failedWrite && !failedWrite.ok) {
         // No `turn.started` was ever emitted for this attempt, so there is nothing to
         // close — releasing the slot outright is what lets a retry proceed rather than
-        // leaving a phantom claim behind.
+        // leaving a phantom claim behind. A sibling attachment that wrote successfully
+        // before this one failed is rolled back too — this whole message is refused,
+        // not just the attachment whose own write failed.
+        await rollbackAttachments();
         entry.turn = null;
         entry.livePid = null;
         return { ok: false, error: { code: 'storage', cause: failedWrite.error } };
@@ -1120,16 +1138,29 @@ export function createSessionManager(deps: {
       // wrote — so the check is explicit, and it is `session_ended` rather than a throw:
       // that is a documented refusal on this route, and it is precisely what happened.
       // Returning here is also what keeps a child from being spawned into a dead session.
-      if (entry.turn === null) return { ok: false, error: { code: 'session_ended', sessionId } };
+      // (#203) The `message` envelope below is what publishes these attachments; a
+      // session-ending failure here means it never will, so the blobs are rolled back.
+      if (entry.turn === null) {
+        await rollbackAttachments();
+        return { ok: false, error: { code: 'session_ended', sessionId } };
+      }
 
       await emit(entry, 'turn.started', { turnId });
-      if (entry.turn === null) return { ok: false, error: { code: 'session_ended', sessionId } };
+      if (entry.turn === null) {
+        await rollbackAttachments();
+        return { ok: false, error: { code: 'session_ended', sessionId } };
+      }
       entry.turn.phase = 'running';
 
       // The operator's own message, refs only (D160) — this is the durable record S21.2
       // requires: no envelope in `events.ndjson` ever carries attachment bytes.
       await emit(entry, 'message', { turnId, role: 'user', text, attachments: attachmentPayloads.map((p) => p.ref) });
-      if (entry.turn === null) return { ok: false, error: { code: 'session_ended', sessionId } };
+      if (entry.turn === null) {
+        // The append itself is what failed here — the reference never became durable,
+        // so this is still a rollback case, not the "already published" case above.
+        await rollbackAttachments();
+        return { ok: false, error: { code: 'session_ended', sessionId } };
+      }
 
       // S4.15/D34: a turn that spawns with no `--resume` on a session that has already
       // run one — because the CLI died before ever reporting `system/init`, leaving
