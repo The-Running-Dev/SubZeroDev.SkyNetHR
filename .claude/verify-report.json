@@ -3,7 +3,7 @@
     {
       "name": "Run tests",
       "status": "Passed",
-      "detail": "npm test — 435 tests, 433 pass, 0 fail, 2 skipped (Windows 8.3 short-name test, environment-dependent, not this change), 59 suites, duration 68037.7331ms."
+      "detail": "npm test — 437 tests, 435 pass, 0 fail, 2 skipped (Windows 8.3 short-name test, environment-dependent, not this change), 60 suites, duration 82734.7536ms."
     },
     {
       "name": "Parse-check PowerShell scripts",

@@ -488,6 +488,59 @@ describe('S11.4 — a reconnect with `after` behaves exactly as Last-Event-ID do
   });
 });
 
+// #205 — bounds how long an upgraded-but-silent socket may sit unauthenticated. The
+// deadline is shortened via `SKYNET_WS_FIRST_FRAME_DEADLINE_MS`, a test-only seam read
+// fresh per upgrade (never part of `Config`), so this is a real, narrowly bounded
+// integration test rather than a 10-second one against the production default.
+describe('#205 — an unauthenticated socket that sends no first frame is closed within a bounded deadline', () => {
+  it('closes a silent socket once the deadline elapses', async () => {
+    process.env['SKYNET_WS_FIRST_FRAME_DEADLINE_MS'] = '200';
+    try {
+      const h = await makeSharedEdges();
+      const id = await newSession(h, 'w-205a');
+      const { status, client } = await handshake(h.wsBase, `/api/sessions/${id}/events`, {
+        origin: ALLOWED_ORIGIN,
+        'x-forwarded-user': 'ben',
+      });
+      assert.equal(status, 101);
+
+      // Deliberately silent — no client!.send(...) — the whole point under test.
+      const deadline = Date.now() + 5000;
+      while (!client!.closed && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      assert.equal(client!.closed, true, 'the socket was closed once the first-frame deadline elapsed');
+    } finally {
+      delete process.env['SKYNET_WS_FIRST_FRAME_DEADLINE_MS'];
+    }
+  });
+
+  it('clears the deadline once a first frame arrives — a socket that speaks is not later closed by it', async () => {
+    process.env['SKYNET_WS_FIRST_FRAME_DEADLINE_MS'] = '200';
+    try {
+      const h = await makeSharedEdges();
+      const id = await newSession(h, 'w-205b');
+      const { status, client } = await handshake(h.wsBase, `/api/sessions/${id}/events`, {
+        origin: ALLOWED_ORIGIN,
+        'x-forwarded-user': 'ben',
+      });
+      assert.equal(status, 101);
+
+      // Sent well before the (shortened) deadline elapses.
+      client!.send({ after: 0 });
+      await post(h.sseBase, `/api/sessions/${id}/message`, { text: 'go' });
+      await client!.collectEnvelopes(1, 5000);
+
+      // Outlast the original deadline; the connection must still be open.
+      await new Promise((resolve) => setTimeout(resolve, 400));
+      assert.equal(client!.closed, false, 'a socket that already authenticated is not closed by the first-frame deadline');
+      client!.close();
+    } finally {
+      delete process.env['SKYNET_WS_FIRST_FRAME_DEADLINE_MS'];
+    }
+  });
+});
+
 describe('S11.5 — the edge is chosen by configuration, and the client learns which from the served page', () => {
   it("serves index.html with <meta name=\"skynet-edge\" content=\"ws\">", async () => {
     const h = await makeSharedEdges();
