@@ -96,6 +96,18 @@ jobs:
           docker logs skynet-hr >&2
           exit 1
 
+      # #198: the image gate above only proves the server binds; it says nothing about
+      # whether the *other* half of the two-vendor contract (src/adapters/index.ts's
+      # `VENDORS`) is actually reachable in the published artifact. Both CLIs answer
+      # `--help`/`exec --help`/`app-server --help` with no credential mounted (that is what
+      # the Codex adapter's own transport probe, `probeOk` in src/adapters/codex/index.ts,
+      # relies on), so this proves the executable is on PATH and responsive without needing
+      # a real credential in CI.
+      - name: Verify the Codex CLI is present and reachable
+        run: |
+          docker exec skynet-hr codex --version
+          docker exec skynet-hr codex exec --help >/dev/null
+
       - name: Stop the container
         if: always()
         run: |
