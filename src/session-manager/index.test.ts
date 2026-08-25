@@ -2219,6 +2219,77 @@ test('S7.6 — a live process whose image does not match the record is not reape
   assert.equal(open.some((r) => r.pid === pid), false, 'still tombstoned even though not killed, so this is a one-time bookkeeping event, not a permanent stall');
 });
 
+// A shell-backed tree, launched exactly the way `../adapters/claude/index.ts` and
+// `../adapters/codex/index.ts` launch a bare `claude`/`codex` name or an explicit
+// `.cmd`/`.bat` path on Windows (`shell: true`): the reported `proc.pid` names the
+// `%ComSpec%` shell (`cmd.exe` by default), not the `.cmd` shim, and that shell's own
+// child is the real work. `getProcessImage`'s ground truth comes from `tasklist` for
+// that pid, independent of any of this repo's own image-recording logic (#201).
+async function spawnTrackedShellTree(): Promise<{ pid: number; actualImage: string; grandchildPid: number }> {
+  const markerDir = await mkdtemp(path.join(tmpdir(), 'skynet-s7-shell-marker-'));
+  const markerPath = path.join(markerDir, 'gc.json');
+  const script =
+    "const { spawn } = require('node:child_process'); const fs = require('node:fs'); " +
+    "const gc = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 120000)'], { stdio: 'ignore' }); gc.unref(); " +
+    `fs.writeFileSync(${JSON.stringify(markerPath)}, JSON.stringify({ grandchildPid: gc.pid })); ` +
+    'setTimeout(() => {}, 120000);';
+  const scriptPath = path.join(markerDir, 'inner.js');
+  await writeFile(scriptPath, script);
+  const cmdPath = path.join(markerDir, 'fake-agent.cmd');
+  await writeFile(cmdPath, `@echo off\r\n"${process.execPath}" "${scriptPath}"\r\n`);
+
+  // Mirrors the adapters' own spawn call for the `.cmd`/bare-name branch: `shell: true`,
+  // not `detached` (Windows has no process-group concept to detach into — D38).
+  const proc = spawn(cmdPath, [], { shell: true, stdio: 'ignore' });
+  proc.unref();
+  const pid = proc.pid!;
+  await waitUntil(() => existsSync(markerPath));
+  const marker = JSON.parse(await readFile(markerPath, 'utf8')) as { grandchildPid: number };
+
+  const execFileAsync = promisify(execFile);
+  const { stdout } = await execFileAsync('tasklist', ['/FI', `PID eq ${pid}`, '/FO', 'CSV', '/NH']);
+  const firstLine = stdout.split(/\r?\n/).find((l) => l.trim().length > 0);
+  const match = firstLine ? /^"([^"]*)"/.exec(firstLine) : null;
+  const actualImage = match ? match[1]!.replace(/\.exe$/i, '') : '';
+
+  return { pid, actualImage, grandchildPid: marker.grandchildPid };
+}
+
+test('S7.11 — Windows: a shell-backed process tree is recorded under the shell\'s own image, and boot recovery reaps the whole tree', async (t) => {
+  if (process.platform !== 'win32') {
+    t.skip('Windows-only: shell-backed spawn (#201)');
+    return;
+  }
+  const { manager, store } = await makeManager('full');
+  const { pid, actualImage, grandchildPid } = await spawnTrackedShellTree();
+  strayPids.push(pid, grandchildPid);
+  assert.equal(isAlive(pid), true, 'the shell process is running before boot');
+  assert.equal(isAlive(grandchildPid), true, 'the grandchild is running before boot');
+  // The bug this test guards against: recording the requested executable name (e.g.
+  // `claude`/`fake-agent.cmd`) instead of what `tasklist` actually reports for the pid
+  // Node handed back — `cmd.exe` under a normal `%ComSpec%`.
+  assert.notEqual(actualImage.toLowerCase(), 'fake-agent', 'ground truth: the live image is the shell, not the requested executable');
+
+  const record: ProcessRecord = {
+    pid,
+    pgid: null,
+    sessionId: 'sess-reap-s711' as SessionId,
+    turnId: 'turn-reap-s711' as TurnId,
+    startedAt: new Date().toISOString() as IsoTimestamp,
+    image: actualImage,
+    exitedAt: null,
+  };
+  assert.equal((await store.appendPid(record)).ok, true);
+
+  const booted = await manager.boot();
+  assert.equal(booted.ok, true);
+
+  await waitUntil(() => !isAlive(pid) && !isAlive(grandchildPid), 5000);
+
+  const open = await store.readOpenPids();
+  assert.equal(open.some((r) => r.pid === pid), false, 'the reaped entry is tombstoned');
+});
+
 test('S7.10 — a storage root that cannot be written at boot refuses to start with StartupError.storage_unwritable', async () => {
   const { manager, storageRoot } = await makeManager('full');
   await rm(storageRoot, { recursive: true, force: true });
@@ -3647,6 +3718,95 @@ test('S21.5 — an attachment over the byte cap, or a message over the attachmen
   const summary = manager.get(sessionId, owner);
   assert.equal(summary.ok, true);
 });
+
+// `mkdir(dir, { recursive: true })` inside `writeAttachment` leaves the parent
+// `attachments/` directory behind (an empty intermediate) even after every turn-specific
+// subdirectory under it is rolled back — checking the parent's mere existence would be
+// checking the wrong thing. What must be empty is its contents.
+async function attachmentTurnDirs(storageRoot: string, sessionId: string): Promise<readonly string[]> {
+  const dir = path.join(storageRoot, 'sessions', sessionId, 'attachments');
+  if (!existsSync(dir)) return [];
+  return readdir(dir);
+}
+
+// #203 — a partial multi-attachment write failure must not strand the sibling(s) that
+// already succeeded: the whole turn's attachment directory is rolled back, not just the
+// file whose own write failed (`store.writeAttachment`'s existing per-file cleanup).
+test('#203 — a multi-attachment message where one write fails leaves no attachment directory for that turn, and the slot is freed for a retry', async () => {
+  let failSecondWrite = false;
+  const { manager, workspaceRoot, storageRoot } = await makeManager('error-result', {}, (store) => ({
+    ...store,
+    async writeAttachment(sessionId, turnId, attachmentId, bytes, mediaType) {
+      if (failSecondWrite && (bytes.toString('utf8') === 'second')) {
+        return { ok: false, error: { code: 'io', path: 'attachments', detail: 'disk full' } };
+      }
+      return store.writeAttachment(sessionId, turnId, attachmentId, bytes, mediaType);
+    },
+  }));
+  const owner = 'operator-1' as OperatorId;
+  const projectDir = path.join(workspaceRoot, 'proj-203a');
+  await mkdir(projectDir);
+  const created = await manager.create(owner, { vendor: 'claude', cwd: projectDir, model: null, sandbox: null, requisitionId: null });
+  assert.equal(created.ok, true);
+  if (!created.ok) return;
+  const { sessionId } = created.value;
+
+  failSecondWrite = true;
+  const messaged = await manager.message(sessionId, owner, 'go', [
+    { filename: 'first.txt', mediaType: 'text/plain', dataBase64: Buffer.from('first').toString('base64') },
+    { filename: 'second.txt', mediaType: 'text/plain', dataBase64: Buffer.from('second').toString('base64') },
+  ]);
+  assert.equal(messaged.ok, false);
+  if (!messaged.ok) assert.equal(messaged.error.code, 'storage');
+
+  // No trace of the successful sibling write is left behind.
+  assert.deepEqual(await attachmentTurnDirs(storageRoot, sessionId), [], 'the whole turn\'s attachment directory is gone, including the sibling that wrote successfully');
+
+  // A refused write frees the turn slot; the session itself is untouched (this is not a
+  // spill failure, so it does not end the session) — a retry with no attachments succeeds.
+  failSecondWrite = false;
+  const retried = await manager.message(sessionId, owner, 'go again', []);
+  assert.equal(retried.ok, true, 'the slot was freed for a retry');
+});
+
+// #203 — the same rollback for each of the three durable-write boundaries a failure can
+// strike after blob writes succeed and before the message reference is durable: the
+// checkpoint, `turn.started`, and the `message` envelope itself.
+for (const boundary of ['checkpoint.created', 'turn.started', 'message'] as const) {
+  test(`#203 — a spill-append failure on ${boundary}, after attachments were written, rolls back the staged attachment files`, async () => {
+    let failOn = false;
+    const { manager, workspaceRoot, storageRoot } = await makeManager('error-result', {}, (store) => ({
+      ...store,
+      async appendEvent(sessionId, envelope) {
+        if (failOn && envelope.kind === boundary) {
+          return { ok: false, error: { code: 'io', path: 'events.ndjson', detail: 'disk full' } };
+        }
+        return store.appendEvent(sessionId, envelope);
+      },
+    }));
+    const owner = 'operator-1' as OperatorId;
+    const projectDir = path.join(workspaceRoot, `proj-203-${boundary.replace(/\W/g, '')}`);
+    await mkdir(projectDir);
+    const created = await manager.create(owner, { vendor: 'claude', cwd: projectDir, model: null, sandbox: null, requisitionId: null });
+    assert.equal(created.ok, true);
+    if (!created.ok) return;
+    const { sessionId } = created.value;
+
+    failOn = true;
+    const messaged = await manager.message(sessionId, owner, 'see attached', [
+      { filename: 'bug.png', mediaType: 'image/png', dataBase64: Buffer.from('x').toString('base64') },
+    ]);
+    assert.equal(messaged.ok, false);
+    if (!messaged.ok) assert.equal(messaged.error.code, 'session_ended');
+
+    // The session ended (a spill failure is fatal, D100/D41) — but the blob that was
+    // durably written before the failed append must not survive it as an orphan.
+    const summary = manager.get(sessionId, owner);
+    assert.equal(summary.ok, true);
+    if (summary.ok) assert.equal(summary.value.state, 'ended');
+    assert.deepEqual(await attachmentTurnDirs(storageRoot, sessionId), [], `the attachment written before the failed ${boundary} append is not left as an orphan`);
+  });
+}
 
 test('S21.8 — an adapter declaring acceptsAttachments: false refuses the whole message naming attachments, and no turn starts', async () => {
   process.env['SKYNET_CODEX_EXECUTABLE'] = CODEX_FIXTURE;
