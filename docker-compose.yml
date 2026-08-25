@@ -1,5 +1,6 @@
 # The deployment artifact (design/90-decisions.md, 2026-08-19 — "The deployment artifact
-# borrows the host's authenticated Claude CLI"). Pulls the image `.github/workflows/
+# borrows the host's authenticated Claude CLI"; corrected 2026-08-25, D179, to cover both
+# vendors). Pulls the image `.github/workflows/
 # publish.yml` already built and pushed to GHCR — never builds. docker-compose.dev.yml is
 # the local-development counterpart; it has `build:` and a deliberately different image
 # name so a local `up --build` there can never tag something as this deployable image.
@@ -30,11 +31,15 @@
 #     SubZeroDev.Adventures/docker-compose.yml and SubZeroDev.Blog/docker-compose.yml both
 #     record). Running this file by hand instead, copy a `.env` file next to it; Compose
 #     loads that automatically for the same interpolation.
-#   - `WORKSPACE_ROOTS_HOST_DIR` and `CLAUDE_CREDENTIALS_DIR`, the two host paths bind-
-#     mounted below. There is no sensible default for either — they are this specific
-#     host's project tree and this specific operator's already-authenticated `claude` CLI
-#     state (design/00-brief.md's "Hosting the model" non-goal: no vendor credential lives
-#     in the image itself).
+#   - `WORKSPACE_ROOTS_HOST_DIR`, `CLAUDE_CREDENTIALS_DIR` and `CODEX_CREDENTIALS_DIR`, the
+#     three host paths bind-mounted below. There is no sensible default for any of them —
+#     they are this specific host's project tree and this specific operator's already-
+#     authenticated `claude`/`codex` CLI state (design/00-brief.md's "Hosting the model"
+#     non-goal: no vendor credential lives in the image itself). Both vendor credential
+#     mounts are required, symmetric with each other, even for an operator who only ever
+#     opens one vendor's sessions — `src/adapters/index.ts`'s `VENDORS` advertises both from
+#     this one image, and an empty bind mount is a clean, documented way to leave a vendor
+#     unauthenticated (its sessions then fail per-turn auth, not container startup).
 #   - Pick an `AUTH_MODE` (design/90-decisions.md D3) and set the variables it needs.
 #     `proxy-header` needs `AUTH_USER_HEADER` and `TRUST_PROXY`; `open-webui` needs those
 #     plus `AUTH_SESSION_HEADER`; `shared-secret` needs `AUTH_COOKIE_NAME` and
@@ -44,10 +49,11 @@
 #     matched by exact peer-IP equality (src/identity/index.ts): if the reverse proxy is
 #     itself a container on `proxy-net`, pin it a static IP on that network, or recreating
 #     it can hand it a new address and silently lock every operator out.
-#   - `CLAUDE_CREDENTIALS_DIR` is bind-mounted read-write over `/home/node/.claude` below,
-#     and this container runs as the image's non-root `node` user (uid 1000), not root — if
-#     the host directory is owned by a different uid, `chown -R 1000:1000` it (or match the
-#     container's uid to the host owner) before the CLI can read or refresh its credentials.
+#   - `CLAUDE_CREDENTIALS_DIR` and `CODEX_CREDENTIALS_DIR` are bind-mounted read-write over
+#     `/home/node/.claude` and `/home/node/.codex` below, and this container runs as the
+#     image's non-root `node` user (uid 1000), not root — if either host directory is owned
+#     by a different uid, `chown -R 1000:1000` it (or match the container's uid to the host
+#     owner) before the corresponding CLI can read or refresh its credentials.
 #   - The published image is pushed with the workflow's own `GITHUB_TOKEN`
 #     (`.github/workflows/publish.yml`), so GHCR creates the `skynet-hr` package **private**
 #     on its first push. Either make it public in the repository's Packages settings, or
@@ -98,6 +104,7 @@ services:
       - "${WORKSPACE_ROOTS_HOST_DIR:?Set WORKSPACE_ROOTS_HOST_DIR to the project tree this deployment is allowed to open sessions against}:/workspaces"
       - "skynet-hr-storage:/data"
       - "${CLAUDE_CREDENTIALS_DIR:?Set CLAUDE_CREDENTIALS_DIR to this host's already-authenticated claude CLI credential directory, e.g. ~/.claude}:/home/node/.claude"
+      - "${CODEX_CREDENTIALS_DIR:?Set CODEX_CREDENTIALS_DIR to this host's already-authenticated codex CLI credential directory, e.g. ~/.codex}:/home/node/.codex"
     networks:
       - proxy-net
 

@@ -55,16 +55,19 @@ cd spike && WORKSPACE_ROOTS=/path/to/a/repo node server.mjs
 
 ## Running it
 
-The real server ships as a Docker image that installs the `claude` CLI but holds no
-credential of its own (`design/00-brief.md`'s "Hosting the model" non-goal) — every
-deployment bind-mounts an already-authenticated `claude` CLI credential directory
-(typically `~/.claude`) in from the host.
+The real server ships as a Docker image that installs both the `claude` and `codex` CLIs
+but holds no credential of its own for either (`design/00-brief.md`'s "Hosting the model"
+non-goal) — every deployment bind-mounts each operator's own already-authenticated CLI
+credential directory (typically `~/.claude` and `~/.codex`) in from the host. A vendor an
+operator does not use can point its mount at an empty directory; its sessions then fail
+per-turn auth, not container startup.
 
 Locally, building from source:
 
 ```bash
 WORKSPACE_ROOTS_HOST_DIR=/path/to/a/repo \
 CLAUDE_CREDENTIALS_DIR=~/.claude \
+CODEX_CREDENTIALS_DIR=~/.codex \
 AUTH_SECRET=dev-secret \
 docker compose -f docker-compose.dev.yml up -d --build
 ```

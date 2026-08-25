@@ -4006,6 +4006,48 @@ Reversibility: cheap. One method and one flag, both above `adapters/*`. Landing 
 addition and is `/contract`'s to write into `20-contract.md`, which is also where `Unresolved` 14
 is closed.
 
+### 2026-08-25 — D179 The published image installs both vendors' CLIs, and the 2026-08-19 entry's claim is corrected
+Context: issue #198. The 2026-08-19 entry above ("The deployment artifact borrows the host's
+authenticated Claude CLI") documented the Dockerfile and both Compose files as they stood the day
+this repository first shipped a container — `npm install -g @anthropic-ai/claude-code` in the
+image, the operator's own `~/.claude` bind-mounted over it, no baked-in credential. That was
+accurate then and is not now: `src/adapters/index.ts`'s `VENDORS` has advertised `['claude',
+'codex']` since Codex's own adapter landed, `design/00-brief.md` names both vendors, but the image
+never installed a `codex` executable and neither Compose file mounted a Codex credential
+directory. A clean, documented deployment built from either file could not open a Codex session —
+`createAdapter`'s `codex` case constructs successfully, but the adapter's own transport probe
+(`detectTransport` in `src/adapters/codex/index.ts`) finds no `codex` on `PATH` and returns
+`agent_unavailable` the first time a session tries to start one. Reproduced against a clean build
+of `main` at the commit issue #198 was filed against: `docker run --rm skynet-hr:<sha> codex
+--version` exits 127, `exec codex failed: No such file or directory`.
+Chosen: install `@openai/codex` in the runtime stage the same way the Claude CLI already is —
+pinned (`ARG CODEX_VERSION=0.146.0`, the exact build `design/findings/S8-codex-adapter.md` probed
+and the adapter's own tests were written against), globally, with a `codex --version` build step
+so a broken or renamed package fails the build rather than surfacing as a runtime
+`agent_unavailable` nobody sees until a session is opened. Both Compose files gain a
+`CODEX_CREDENTIALS_DIR` bind mount over `/home/node/.codex`, required (`:?...`) the same way
+`CLAUDE_CREDENTIALS_DIR` already is — symmetric with the existing Claude mount rather than
+optional, on the reasoning that this one image advertises both vendors and an operator using only
+one can still point the other vendor's mount at an empty directory: that vendor's sessions then
+fail per-turn auth, not container startup, which is a cheap, already-documented failure mode
+(`agent_unavailable`) rather than a new one. `.github/workflows/publish.yml`'s image gate adds one
+step verifying `codex --version` and `codex exec --help` both answer inside the built container
+with no credential mounted — the same no-credential-needed property the adapter's own transport
+probe already relies on — so a future regression that silently drops the Codex install from the
+image fails the gate instead of only surfacing the next time an operator opens a Codex session.
+`src/adapters/index.ts`'s `VENDORS` list needed no change: it already declared both vendors before
+this fix, and "runtime capabilities advertise only vendors actually installed" (issue #198's fourth
+`Done when` item) is satisfied by the image now matching what that list already said, not by
+changing what the list says.
+Rejected: amending the brief to a Claude-only product and dropping the Codex vendor entirely — the
+brief, contract and a working, tested adapter all already commit to two vendors; #198's own
+"Suggested direction" names this as the fallback only if the two-vendor contract were not the
+intended product, and nothing surfaced here suggests it is not.
+Reversibility: cheap. Two Dockerfile lines, two Compose mount lines apiece, one CI step; nothing
+in `src/` changed, and none of `design/00-brief.md` or `design/20-contract.md` needed a word
+altered — both already described two vendors, and this entry is the record that the deployment
+artifact has now caught up to what they already said.
+
 ## Open
 
 Staging only. Once an item becomes an issue it leaves this list.

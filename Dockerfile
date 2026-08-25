@@ -1,8 +1,9 @@
 # The deployment artifact (design/90-decisions.md, 2026-08-19 — "The deployment artifact
-# borrows the host's authenticated Claude CLI"). Ships this server plus the `claude` CLI it
-# spawns per turn (src/adapters/claude/index.ts) — no model credential is baked in here
-# (design/00-brief.md's "Hosting the model" non-goal): the container expects the operator's
-# own `claude` auth state bind-mounted in at run time.
+# borrows the host's authenticated Claude CLI"; corrected 2026-08-25, D179, to cover both
+# vendors). Ships this server plus the `claude` and `codex` CLIs it spawns per turn
+# (src/adapters/claude/index.ts, src/adapters/codex/index.ts) — no model credential is
+# baked in here (design/00-brief.md's "Hosting the model" non-goal): the container expects
+# each operator's own already-authenticated CLI state bind-mounted in at run time.
 #
 # `client/` is not compiled by tsc (tsconfig.json's `include` is `src/**/*.ts` only) and is
 # read at runtime relative to the compiled file's own location
@@ -49,6 +50,17 @@ RUN apt-get update \
 # of $HOME, which is left free for the credential bind mount below.
 RUN npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" && npm cache clean --force
 
+# The other half of the two-vendor contract (src/adapters/index.ts's `VENDORS`). Pinned to
+# the exact build `design/findings/S8-codex-adapter.md` probed and the Codex adapter's own
+# tests were written against ("installed `codex-cli 0.146.0`", src/adapters/codex/index.ts) —
+# a floating version could change `codex exec --json`/`codex app-server`'s record shapes out
+# from under the adapter with nothing to catch it, the same reasoning as the pin above.
+# `codex --version` after install turns a broken/renamed package into a build failure instead
+# of a runtime `agent_unavailable` nobody sees until a session is opened.
+ARG CODEX_VERSION=0.146.0
+RUN npm install -g "@openai/codex@${CODEX_VERSION}" && npm cache clean --force \
+ && codex --version
+
 WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
@@ -65,9 +77,9 @@ RUN mkdir -p /data && chown node:node /data
 
 # The base image's existing uid-1000 `node` user, not root — the workspace roots this
 # process is jailed to (src/jail) are bind-mounted from the host, and the CLI credential
-# directory below is read-write. `HOME` is where `claude` itself looks for its auth state
-# (e.g. `~/.claude`); the compose files bind-mount the host operator's own credential
-# directory over it rather than baking one in.
+# directories below are read-write. `HOME` is where each CLI looks for its own auth state
+# (`~/.claude`, `~/.codex`); the compose files bind-mount each operator's own credential
+# directory over the matching path rather than baking either in.
 USER node
 ENV HOME=/home/node
 
