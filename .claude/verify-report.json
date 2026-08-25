@@ -3,17 +3,17 @@
     {
       "name": "Run tests",
       "status": "Passed",
-      "detail": "npm test: 423 tests, 59 suites, 421 passed, 0 failed, 2 skipped (S27.1 and S27.2/S27.3/S27.10/S27.12 in src/server.test.ts, both skipped on this Windows authoring host with reason \"Linux-only: SIGTERM cannot be delivered to a child process on Windows (#28)\" — Node emulates child.kill('SIGTERM') on Windows as an unconditional process termination rather than a delivered signal, so they cannot exercise server.ts's real SIGTERM handler here), duration 59655.5539ms."
+      "detail": "npm test — 429 tests, 427 pass, 0 fail, 2 skipped (Windows 8.3 short-name test, environment-dependent, not this change), 60 suites, duration 63326.9488ms."
     },
     {
       "name": "Parse-check PowerShell scripts",
       "status": "Passed",
-      "detail": "Every *.ps1 file parsed via [System.Management.Automation.Language.Parser]::ParseFile with zero parse errors. Output: \"Checked. Failures: 0\"."
+      "detail": "PASSED: all PowerShell files parsed cleanly (Get-ChildItem -Filter *.ps1 -Recurse, [System.Management.Automation.Language.Parser]::ParseFile against every file, 0 parse errors)."
     },
     {
       "name": "Run Pester tests",
       "status": "Passed",
-      "detail": "Invoke-Pester -Path tools -Output Detailed -PassThru: Result Passed, TotalCount 153, PassedCount 153, FailedCount 0, SkippedCount 0, NotRunCount 0, Duration 00:00:34.6596290."
+      "detail": "Invoke-Pester -Path tools -Output None -PassThru — Pester: FailedCount=0 PassedCount=153 TotalCount=153."
     }
   ]
 }
