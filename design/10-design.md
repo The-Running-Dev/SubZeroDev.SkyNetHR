@@ -538,7 +538,8 @@ the correction; this section is the last place that still described the broken s
 target exactly — additions, edits and removals alike — **without moving `HEAD`**, so the
 shadow history stays linear and `list`'s `git log` still walks it. Creating files is the
 common case for a coding agent, and the brief's DoD #6 says "roll the workspace back to its
-state before any earlier message"; half a rollback is not that.
+state before any earlier message, and be told what the rollback could not reach"; half a
+rollback is not that, and a half-rollback reported as whole is worse.
 
 Three properties make this safe enough to do without a confirmation dialog carrying a
 warning:
@@ -553,6 +554,24 @@ warning:
   could have restored, so it never forces a dependency reinstall — the failure that would
   make operators stop using restores. D31's symmetry argument survives the change of
   mechanism unaltered.
+
+  **The exclusion is reported rather than silent** (D182). Symmetry keeps a restore from
+  forcing a reinstall; it does not make the operator's belief about what was rolled back
+  true. An agent that edits `.env`, or deletes a generated artifact, leaves that change
+  standing across a restore reported as successful — and the brief's item 6 was unqualified
+  about it until this was ruled on. So a checkpoint records a manifest of the ignored paths
+  `status --ignored=matching` names, and a restore diffs the target checkpoint's manifest
+  against the workspace and names what differs. Three properties, each of which is why it is
+  affordable: `--ignored=matching` collapses an ignored *directory* into one entry, so the
+  manifest is bounded by the ignore rules that match rather than by the file count beneath
+  them — a 60 000-file `node_modules` contributes one line; a collapsed directory is
+  therefore compared on its own metadata alone, which sees a child added or removed and does
+  not see an edit deeper inside, so this report is a pointer for the operator and **not
+  evidence**, and nothing in *Security controls* leans on it; and **content is never
+  recorded**, because storing it would be the widening the brief declined, arriving by the
+  back door and paid for on every checkpoint. The manifest's shape and where it lives are
+  `20-contract.md`'s, as is the field the restore result grows to carry the list — an
+  amendment `/contract` owns, which this document does not pre-empt.
 - **Success is verified rather than inferred from an exit code.** `read-tree` exits 0 with
   only a warning when it cannot remove a directory an embedded repository occupies, and
   `clean` declines such a directory unless forced twice, which this deliberately never does.

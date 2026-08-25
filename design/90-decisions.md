@@ -4048,6 +4048,41 @@ in `src/` changed, and none of `design/00-brief.md` or `design/20-contract.md` n
 altered — both already described two vendors, and this entry is the record that the deployment
 artifact has now caught up to what they already said.
 
+### 2026-08-25 — D182 A restore reports the ignored paths it did not roll back
+Context: A red-team pass on `main` at `984eae5` found that DoD #6 promised the workspace back at
+its state before an earlier message while `10-design.md` deliberately excluded every
+`.gitignore`d path from both the checkpoint and the clean. Both are defensible and they cannot
+both be unqualified, so this was ruled a brief conflict rather than a defect. The operator-facing
+consequence is the part neither document owned: an agent that edits `.env` or removes a generated
+artifact leaves that change standing across a restore the console reports as successful, and the
+operator has no way to learn it short of noticing.
+Chosen: qualify the brief and buy back the honesty rather than the reach. `00-brief.md` item 6
+gains "and be told what the rollback could not reach" plus a paragraph saying the exclusion is a
+decision and why; `10-design.md`'s symmetry bullet gains the reporting obligation. A checkpoint
+records a manifest of the ignored paths `git status --ignored=matching` names — never their
+content — and a restore diffs the target's manifest against the workspace and names what differs.
+`--ignored=matching` collapses an ignored directory into one entry, so the manifest is bounded by
+the matching ignore rules rather than by the files beneath them; the cost is that a collapsed
+directory is compared on its own metadata, which sees a child added or removed and not an edit
+deeper inside. That weakness is stated in the design because the report is a pointer for the
+operator and not evidence, and no security control may come to lean on it.
+Rejected: amending the brief and stopping there. Cheapest, and the design already carried the
+reasoning — but it leaves the console saying "restored" over a workspace that is not, which is the
+same class of silent partial success `read-tree`'s verification pass (D112) exists to refuse.
+Rejected: widening the checkpoint with `add -A -f` and `clean -fdx` so item 6 becomes literally
+true. It makes every restore force a dependency reinstall, which is the failure that makes
+operators stop using restores at all — the exact argument D31's symmetry was adopted for — and it
+grows a checkpoint with the workspace rather than with the diff. Expensive to reverse once
+checkpoints exist holding that content.
+Rejected: a manifest that walks the files inside an ignored directory. Precise, and it costs more
+per checkpoint than the checkpoint does on any workspace with a dependency tree.
+Reversibility: cheap for the two documents. The manifest itself is a new persisted artifact and a
+new field on the restore result, so it needs a `/contract` amendment before it is implemented;
+this entry does not authorise that edit.
+Note: D180 and D181 are reserved by the unmerged `design/180-storage-lock-lease` branch, which is
+why this entry is D182.
+
+
 ## Open
 
 Staging only. Once an item becomes an issue it leaves this list.
