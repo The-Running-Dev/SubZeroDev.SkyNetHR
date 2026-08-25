@@ -4161,6 +4161,68 @@ Reversibility: cheap. One predicate call at configuration load; deleting it rest
 behaviour exactly.
 
 
+### 2026-08-25 — D186 The pid-reuse guard's fourth limb compares a recorded OS reading, not `startedAt`
+Context: D183 added a fourth limb reading "the live process's own creation time matches the
+recorded `startedAt`". Deriving the contract from it exposed that those two values come from
+different clocks and are never equal: `startedAt` is this server's wall-clock reading taken at
+spawn, while a platform derives creation time from boot time plus ticks — on Linux from
+`/proc/stat`'s `btime`, which is second-granularity, plus `/proc/<pid>/stat` field 22. Compared
+for equality the limb never passes and the guard reaps nothing; compared within a tolerance, the
+window has to absorb clock-domain error and NTP steps, and a window wide enough to be reliable is
+wide enough to admit same-second pid reuse — which is the case D183 exists to close. D183 did not
+determine the rule, so this settles it rather than reopening it.
+Chosen: record the operating system's own reading at spawn, as `ProcessRecord.osCreatedAt`
+(`IsoTimestamp | null`), and have the guard compare it for exact equality against the same
+platform source at boot. Like is compared with like, there is no tolerance to pick or justify, and
+the shell-out at spawn is the shape `taskkill` already is. `ServerLock` gains the same field for
+the same reason — the `server.lock` staleness test shares the implementation, and same-container
+pid-and-image reuse defeats three limbs there identically. Where the spawn-time read fails the
+field is `null`, and a `null` is tombstoned and never reaped, which is the fail-closed posture
+D183 already chose at the other end.
+Rejected: a tolerance window against `startedAt`, D183's literal wording. No new field and no
+spawn-time cost, and it turns a security limb into a tuned constant whose safe value is smaller
+than its reliable value. The two requirements have no overlap, which is the whole finding.
+Rejected: deriving `startedAt` itself from the OS reading, so one field serves both limbs. It
+collapses the new field away, and it retypes an existing field two other limbs and every log line
+already depend on; a spawn whose OS read failed would then have no `startedAt` at all, which the
+boot-time limb needs.
+Reversibility: cheap while nothing has been written. One additive nullable field on two records,
+and readers already ignore unknown fields.
+
+### 2026-08-25 — D187 The ignored-path manifest is a per-checkpoint sidecar written by `checkpoints`
+Context: D182 ruled that a restore reports the ignored paths it did not roll back, and delegated
+the manifest's shape and home to `20-contract.md` without settling either. Two constraints shaped
+the answer. The manifest is keyed by a checkpoint sha that does not exist until the commit
+returns, so it cannot be part of the commit it describes. And `20-contract.md § Types §
+Checkpoint` claims no mirror is persisted because git is the store — a claim this artifact has to
+either break or work around.
+Chosen: one JSON file per checkpoint at `<storage>/sessions/<sessionId>/ignored/<sha>.json`,
+written by `checkpoints` rather than by `store`. `checkpoints` already derives that directory from
+`config.storageRoot` and already runs the `git status --ignored=matching` the manifest is built
+from, so no module edge is added — which `store` ownership would have required, since
+`checkpoints` depends on `store` nowhere. The "git is the store" claim is stated as an exception
+rather than softened: ignored paths are the one thing git holds no record of, so there is nothing
+for a second copy to disagree with. What a sidecar can be is *absent*, and that is answered by
+I58 — `unreached === null` is unknown and never "nothing differs", covering an absent file, an
+unparseable one, and a `status` that fails at either end.
+Rejected: a git note on a dedicated ref inside `ckpt.git`. Keeps the no-mirror claim literally
+true, travels with the history, and dies with `destroy` for free. It costs notes plumbing on every
+read and write and a second ref to reason about, and it does not remove the missing-manifest case
+that forced I58 anyway — a note is as absent as a file. The claim it preserves is one sentence in
+a document; the plumbing is permanent.
+Rejected: storing the manifest inside `meta.json`. One file fewer, and it puts per-checkpoint data
+under the one file with a `schemaVersion` gating rehydration (D49) — a corrupt manifest would then
+cost the whole session at boot, which is the opposite of the degrade-to-unknown behaviour this
+needs.
+Rejected: recording content or a hash per ignored path, making `'modified'` exact. It is the
+widening the brief declined arriving by the back door, paid on every checkpoint rather than on the
+one restore that reads it, and on a workspace with a dependency tree it costs more than the
+checkpoint does. Size and mtime are what make `'modified'` detectable without it; the
+collapsed-directory blindness that leaves is stated in the contract and in I58 precisely so no
+control comes to lean on the report.
+Reversibility: cheap while no checkpoints carry one. The file is additive, nothing rehydrates from
+it, and deleting the mechanism degrades every restore to today's silence.
+
 ## Open
 
 Staging only. Once an item becomes an issue it leaves this list.
