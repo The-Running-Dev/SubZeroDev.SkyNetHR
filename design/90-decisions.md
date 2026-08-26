@@ -4283,6 +4283,42 @@ concrete reason (a real bug fix, a closed gate gap, or a stated kit-internal bou
 being simple staleness, so each is worth a citable record now.
 Reversibility: cheap. All wording and tooling; no product code or contract shape changed.
 
+### 2026-08-26 — D189 `Test-DesignReferences.ps1` learns a conditional citation; adopting the record mechanism is judged by its five non-work directories, not `design/state/` as a whole
+Context: `/pr`'s gate phase on D188's branch found `tools/Test-DesignReferences.ps1` (issue #210,
+PR #225) failing with all 5 of this repository's `design/10-design.md` § citations broken —
+`contract.md`, `design.md`, `fix.md`, `reconcile.md` and `slice.md` each cite `§ Record` or
+`§ Orient`, and neither heading exists in this repository's `10-design.md`. Confirmed pre-existing
+on `main` (`git show main:.claude/commands/contract.md` carries the identical line; none of the
+five files are touched by D188), and out of `/pr`'s gate-phase scope by its own rule against
+fixing a failure there — put to the user as a decision (fix here vs. file an issue), who chose to
+widen this PR's scope and fix it now. Each citation's own text is already conditional — "Where
+this repository's own `design/state/` exists, ... `§ Record`/`§ Orient` ..." — but the checker
+enforced every citation unconditionally. A first fix (checking bare `Test-Path design/state`) was
+wrong: this repository's `design/state/` already exists, holding only `work/` — `/track`'s WorkRef
+mirror (`Update-WorkMirror.ps1`), a separate mechanism this repository already runs, unrelated to
+`§ Record` (the decision-writing sequence) or `§ Orient` (unit-closure orientation). Those sections
+describe the other five record kinds the kit's own contract defines
+(`units`/`invariants`/`contracts`/`decisions`/`questions`), none of which this repository has ever
+populated — consistent with D188 skipping `Read-DesignState.ps1`/`Test-DesignState.ps1`/
+`Update-DesignProjection.ps1`, the tools that would create or read them.
+Chosen: a citation on a line matching `design/state/`?\s*exists` (case-insensitive) is conditional;
+a conditional citation is checked against `10-design.md`'s headings only when at least one of
+`design/state/{units,invariants,contracts,decisions,questions}` exists — never `design/state/work/`
+alone, and never bare `design/state/`. An unconditional citation is checked exactly as before.
+Added four Pester cases: a conditional citation skipped absent any record-kind directory, the same
+citation enforced once one is added, a populated `work/`-only mirror still not counting as
+adoption, and an unconditional citation still failing regardless. `Run and passed:` in this PR's
+`Verified` section replaces the earlier `Run and failed:` entry for this gate — the same tree this
+paragraph describes, not two different results reported.
+Rejected: dropping the conditional prose from the five command files instead — they are kit cores
+this repository does not own reconciling by hand (`.claude/COMPANIONS.md`); an edit there would be
+a local fork with no companion, `Unmigrated-Blocked` on the next `/kit-sync`. Rejected treating
+bare `design/state/` presence as adoption — correct only by accident today (this repository's sole
+subdirectory happens to be `work/`), and wrong the moment any repository runs `/track`'s WorkRef
+mirror without ever adopting the record mechanism, which is this repository's actual shape.
+Reversibility: cheap. `tools/Test-DesignReferences.ps1` and its tests only; no product code, no
+contract shape, and no command-core file changed.
+
 ## Open
 
 Staging only. Once an item becomes an issue it leaves this list.

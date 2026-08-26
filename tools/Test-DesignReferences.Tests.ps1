@@ -101,18 +101,68 @@ Describe 'Test-DesignReferences' {
         (Get-DesignReferenceExitCode -State $result.State) | Should -Be 1
     }
 
-    It 'reports this repository''s current five dangling citations - the exact regression from issue #210' {
-        # Not a fixture: the real repository root, one level up from tools/. If /design
-        # later writes § Record and § Orient, this test starts failing - which is correct,
-        # since it would mean the fix landed and this expectation is stale.
+    It 'is Valid for this repository''s current five citations - each is conditional on design/state/''s record mechanism, which this repository has not adopted (D188)' {
+        # Not a fixture: the real repository root, one level up from tools/. This repository's
+        # design/state/work/ is /track's WorkRef mirror only - no units/invariants/contracts/
+        # decisions/questions directory exists - so all five citations are skipped rather than
+        # required to resolve. If this repository later adopts the record mechanism, or if
+        # /design writes § Record and § Orient outright, this test starts failing - which is
+        # correct, since it would mean the shape this test describes is stale.
         $repoRoot = Resolve-Path (Join-Path $PSScriptRoot '..')
 
         $result = Invoke-DesignReferenceCheck -TargetRepo $repoRoot
 
+        $result.State | Should -Be 'Valid'
+        $result.Findings.Count | Should -Be 0
+        $result.CitationCount | Should -Be 5
+    }
+
+    It 'skips a conditional citation when design/state/ has no adopted record-kind directory' {
+        $repo = New-Fixture 'conditional-citation-no-state'
+        Write-Fixture $repo 'design/10-design.md' $script:DesignDocNoSections
+        Write-Fixture $repo '.claude/commands/fix.md' 'Where this repository''s own `design/state/` exists, see `design/10-design.md` § *Orient* for the closure.'
+
+        $result = Invoke-DesignReferenceCheck -TargetRepo $repo
+
+        $result.State | Should -Be 'Valid'
+        $result.Findings.Count | Should -Be 0
+        $result.CitationCount | Should -Be 1
+    }
+
+    It 'still enforces a conditional citation once a record-kind directory is present' {
+        $repo = New-Fixture 'conditional-citation-with-state'
+        Write-Fixture $repo 'design/10-design.md' $script:DesignDocNoSections
+        Write-Fixture $repo '.claude/commands/fix.md' 'Where this repository''s own `design/state/` exists, see `design/10-design.md` § *Orient* for the closure.'
+        New-Item -ItemType Directory -Path (Join-Path $repo 'design/state/units') -Force | Out-Null
+
+        $result = Invoke-DesignReferenceCheck -TargetRepo $repo
+
         $result.State | Should -Be 'Invalid'
-        $result.Findings.Count | Should -Be 5
-        ($result.Findings | Where-Object Name -eq 'Record').Count | Should -Be 3
-        ($result.Findings | Where-Object Name -eq 'Orient').Count | Should -Be 2
+        $result.Findings.Count | Should -Be 1
+        $result.Findings[0].Name | Should -Be 'Orient'
+    }
+
+    It 'does not let a populated work/ mirror alone count as the record mechanism being adopted' {
+        $repo = New-Fixture 'work-mirror-only'
+        Write-Fixture $repo 'design/10-design.md' $script:DesignDocNoSections
+        Write-Fixture $repo '.claude/commands/fix.md' 'Where this repository''s own `design/state/` exists, see `design/10-design.md` § *Orient* for the closure.'
+        Write-Fixture $repo 'design/state/work/1.md' "# work/1`nIssue: 1`n"
+
+        $result = Invoke-DesignReferenceCheck -TargetRepo $repo
+
+        $result.State | Should -Be 'Valid'
+        $result.Findings.Count | Should -Be 0
+    }
+
+    It 'still fails an unconditional citation regardless of design/state/''s adoption' {
+        $repo = New-Fixture 'unconditional-still-fails'
+        Write-Fixture $repo 'design/10-design.md' $script:DesignDocNoSections
+        Write-Fixture $repo '.claude/commands/slice.md' 'See `design/10-design.md` § *Orient* for how to orient.'
+
+        $result = Invoke-DesignReferenceCheck -TargetRepo $repo
+
+        $result.State | Should -Be 'Invalid'
+        $result.Findings.Count | Should -Be 1
     }
 
     It 'is NotEvaluated when .claude/commands/ is missing' {
