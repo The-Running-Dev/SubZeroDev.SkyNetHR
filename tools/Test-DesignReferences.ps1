@@ -16,6 +16,22 @@
     and resolve each Name against the `##`/`###` headings design/10-design.md actually has.
     A citation whose Name is not a heading is a finding.
 
+    A citation guarded by the phrase "design/state/` exists" (case-insensitive, backtick
+    optional) on the same line is conditional - it names a section that only needs to exist
+    where this repository has adopted the design/state/ record mechanism (design/90-decisions.md
+    D188), and is otherwise inert prose describing kit-internal behaviour this repository does
+    not use. Adoption is judged by the presence of any of the five non-work record-kind
+    directories the kit's own contract defines - `design/state/{units,invariants,contracts,
+    decisions,questions}` - never by `design/state/` itself. `design/state/work/` is /track's
+    WorkRef mirror (Update-WorkMirror.ps1), a separate, already-installed mechanism unrelated to
+    `§ Record` (the decision-writing sequence) or `§ Orient` (unit-closure orientation); a
+    repository can have a populated work mirror and no adopted record mechanism at all, which is
+    this repository's actual shape. A conditional citation is checked against the heading list
+    only when adoption is detected; where it is not, the citation is counted but never a
+    finding. An unconditional citation is always checked, exactly as before - this does not
+    weaken the check issue #210 exists to run, it only stops requiring a heading that a
+    citation itself says is not required here.
+
     Exit codes: 0 every citation resolves, 1 at least one does not, 2 could not evaluate
     (commands directory or the design doc is missing). 2 takes precedence over 1, same as
     Test-DesignDrift.ps1 - an incomplete run is not a clean run. Never prompts.
@@ -53,10 +69,12 @@ function Get-DesignReferenceCitation {
     $citations = [System.Collections.Generic.List[object]]::new()
 
     for ($i = 0; $i -lt $lines.Count; $i++) {
+        $conditional = [regex]::IsMatch($lines[$i], 'design/state/`?\s*exists', 'IgnoreCase')
         foreach ($m in [regex]::Matches($lines[$i], '`design/10-design\.md`\s*§\s*\*([^*]+)\*')) {
             $citations.Add([pscustomobject]@{
-                    Name = $m.Groups[1].Value.Trim()
-                    Line = $i + 1
+                    Name        = $m.Groups[1].Value.Trim()
+                    Line        = $i + 1
+                    Conditional = $conditional
                 })
         }
     }
@@ -108,6 +126,13 @@ function Invoke-DesignReferenceCheck {
     }
 
     $headings = Get-DesignHeading -DesignDoc $designDoc
+    # `work/` is /track's WorkRef mirror, a separate mechanism that can be populated on its own
+    # (Update-WorkMirror.ps1) - only the five record kinds the § Record/§ Orient citations
+    # actually describe count as this repository having adopted design/state/.
+    $recordKindDirs = 'units', 'invariants', 'contracts', 'decisions', 'questions'
+    $stateAdopted = [bool](@($recordKindDirs | Where-Object {
+                Test-Path -LiteralPath (Join-Path $TargetRepo "design/state/$_") -PathType Container
+            }))
     $findings = [System.Collections.Generic.List[object]]::new()
     $citationCount = 0
 
@@ -116,6 +141,7 @@ function Invoke-DesignReferenceCheck {
         $rel = ".claude/commands/$($file.Name)"
         foreach ($citation in (Get-DesignReferenceCitation -Path $file.FullName)) {
             $citationCount++
+            if ($citation.Conditional -and -not $stateAdopted) { continue }
             if ($headings -notcontains $citation.Name) {
                 $findings.Add((New-DesignReferenceFinding $rel $citation.Line $citation.Name))
             }
