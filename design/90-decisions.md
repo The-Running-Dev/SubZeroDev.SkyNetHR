@@ -4223,6 +4223,66 @@ control comes to lean on the report.
 Reversibility: cheap while no checkpoints carry one. The file is additive, nothing rehydrates from
 it, and deleting the mechanism degrades every restore to today's silence.
 
+### 2026-08-26 — D188 Kit re-install: /done renamed to /clean, delivery delegation widened to all work, Codex tier resolution moved to configuration
+Context: `/kit-sync` against `SubZeroDev.AgentKit` at `de6ae8f` (previously synced at `80a19bdd`,
+30 commits behind). `Sync-Kit.ps1` found `.claude/commands/done.md` removed upstream (renamed to
+`clean.md`, #122) and `.claude/commands/install-all.md`/`kit-help.md`/`kit-sync.md` updated
+outright; two non-core tools (`Test-DesignDrift.ps1`, `Update-WorkMirror.ps1`) had diverged in
+both directions; six files present in the kit since before the last sync
+(`Read-DesignState.ps1`, its `.Tests.ps1`, `Test-DesignState.ps1`, its `.Tests.ps1`,
+`Update-DesignProjection.ps1`, its `.Tests.ps1`, and `Test-CIWorkflow.Tests.ps1`) had never been
+installed here; and `AGENTS.md` had drifted from the kit's content on several points beyond what
+`Sync-Kit.ps1` covers, since it only diffs kit-owned command/tool files.
+Chosen, one per fork:
+- **Adopted the `/done` → `/clean` rename.** The new `/clean` always hands off to `/track`
+  (#111/#121), unlike this repository's non-pipelined `/done`. Deleted `done.md`, took `clean.md`
+  outright, and updated the 2 `AGENTS.md` references and the Command routing row.
+- **Took the kit's `Invoke-GhRaw` UTF-8 fix** for `Test-DesignDrift.ps1` and `Update-WorkMirror.ps1`
+  (native `& gh` capture decodes non-ASCII via the OEM code page on Windows, corrupting section
+  marks and em dashes in issue text) — a real bug this repository's copies had not received — and
+  **re-applied this repository's own `(?!\.)` regex fix** on top of `Test-DesignDrift.ps1` (without
+  it, `^S5\b` also matches a bug issue titled `"S5.1's interrupt test is flaky..."` as if it were
+  slice S5's own tracking issue), which has no upstream equivalent and would otherwise have been
+  silently dropped by taking the kit's file verbatim.
+- **Skipped the six design-state/projection files**, matching `D164`'s precedent for
+  `Start-AgentSession.ps1`. Each file's own docstring says it targets `design/state/`, a
+  structured per-record Markdown schema (`design/20-contract.md § Persisted schemas` — the kit's
+  own contract, not this repository's) that is explicitly documented as absent "in every installed
+  target, where design/state/ does not exist by design." This repository's `design/` uses the
+  prose-plus-append-only-decision-log methodology instead; the two are alternatives, not layers.
+- **Added `/install-code-review-agent`** (writes only `.github/workflows/claude-code-review.yml`;
+  GitHub App consent and the API secret stay manual by the command's own design) and
+  `tools/Invoke-CodexCommand.ps1` (a `codex --profile` launcher keyed off `AGENTS.md`'s Command
+  routing table) — both new, no local conflict.
+- **Added the missing `## Marked regions` section to `AGENTS.md`.** `.claude/COMPANIONS.md`
+  (already installed) names it as the section defining what a "declared" region is; this
+  repository's `AGENTS.md` had no such section, a dangling cross-reference rather than a fork.
+  Installed the kit's text, dropping its `design/20-contract.md § Marked regions` pointer (that
+  section does not exist in this repository's contract).
+- **Adopted retiring the "High volume"/`haiku`/`Luna` tier.** The kit merged that tier's work
+  (summaries, formatting, changelogs, commit messages, PR descriptions, mechanical triage) into
+  Implementation (`sonnet`, medium/high) and dropped haiku and `Luna` everywhere. Retargeted
+  `/kit-help` and `/clean` (formerly `/done`) from `haiku`/`low` to `sonnet`/`medium` to match.
+- **Adopted widening delivery delegation to all work, not just the named commands.** The kit's
+  *Git and delivery* now requires every session to branch off the default branch before its first
+  edit and delegates commit/push/PR-open uniformly, rather than scoping delegation to `/slice`,
+  `/fix`, `/pr` and `/install` by name. This session had already branched before editing, which is
+  what surfaced the gap.
+- **Adopted `/code-review` running `high` effort by default, always applying fixes, and
+  auto-committing/pushing the result** — consistent with the delivery-delegation widening above;
+  once a fix is being applied on a branch, committing it is no longer a separate ask.
+- **Adopted resolving a Codex session's tier from its configured `model`/`model_reasoning_effort`
+  (via `codex/PROFILES.md`, layering any `--profile` overlay) rather than from its self-reported
+  name.** Replaced the `Vendor model aliases` table and its surrounding text with the kit's
+  configuration-based version, dropped the stale `Luna` row, and made a bare `GPT-5` self-report an
+  explicit unresolved-mismatch rather than a match for Implementation tier — closing a real gate
+  gap, since every model in that family answers `GPT-5` regardless of which tier it is actually
+  running at.
+Rejected: leaving any of the above as a silent gap for the next sync to re-raise — each has a
+concrete reason (a real bug fix, a closed gate gap, or a stated kit-internal boundary) rather than
+being simple staleness, so each is worth a citable record now.
+Reversibility: cheap. All wording and tooling; no product code or contract shape changed.
+
 ## Open
 
 Staging only. Once an item becomes an issue it leaves this list.

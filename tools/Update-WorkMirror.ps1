@@ -76,7 +76,7 @@ function New-WorkMirrorResult {
 #>
 function Get-IssueCriteriaIds {
     param([string] $Body)
-    if ([string]::IsNullOrWhiteSpace($Body)) { return ,@() }
+    if ([string]::IsNullOrWhiteSpace($Body)) { return @() }
 
     $ids = [System.Collections.Generic.List[string]]::new()
     foreach ($line in ($Body -split "`r?`n")) {
@@ -84,7 +84,33 @@ function Get-IssueCriteriaIds {
             $ids.Add($Matches[1].Trim())
         }
     }
-    ,@($ids)
+    @($ids)
+}
+
+function Invoke-GhRaw {
+    <#
+        gh writes UTF-8. PowerShell's native-command capture (`& gh @args`) decodes that
+        stdout using [Console]::OutputEncoding, which on a Windows host - this CI runner
+        included - defaults to the OEM code page (ibm437) rather than UTF-8. A non-ASCII
+        byte in an issue title (an em dash, a section mark) then decodes to the wrong
+        character and gets baked into the WorkRef record on disk - the same class of bug
+        Sync-Kit.ps1's Invoke-GitRaw fixed for git's output (#20), never applied to gh.
+        Routing through ProcessStartInfo with an explicit UTF-8 StandardOutputEncoding
+        sidesteps the console entirely.
+    #>
+    param([string[]] $GhArgs)
+    $psi = [System.Diagnostics.ProcessStartInfo]::new()
+    $psi.FileName = 'gh'
+    foreach ($a in $GhArgs) { $psi.ArgumentList.Add($a) }
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.UseShellExecute = $false
+    $psi.StandardOutputEncoding = [System.Text.UTF8Encoding]::new($false)
+    $proc = [System.Diagnostics.Process]::Start($psi)
+    $stdout = $proc.StandardOutput.ReadToEnd()
+    $proc.StandardError.ReadToEnd() | Out-Null
+    $proc.WaitForExit()
+    [pscustomobject]@{ Output = $stdout; ExitCode = $proc.ExitCode }
 }
 
 function Get-OpenIssueList {
@@ -94,20 +120,21 @@ function Get-OpenIssueList {
     if ($Repository) { $ghArgs += @('-R', $Repository) }
 
     try {
-        $json = & gh @ghArgs 2>$null
-        if ($LASTEXITCODE -ne 0) {
-            return [pscustomobject]@{ Issues = @(); Failure = (New-WorkMirrorFailure -Reason 'GhUnavailable' -Detail "gh exited $LASTEXITCODE") }
+        $result = Invoke-GhRaw -GhArgs $ghArgs
+        if ($result.ExitCode -ne 0) {
+            return [pscustomobject]@{ Issues = @(); Failure = (New-WorkMirrorFailure -Reason 'GhUnavailable' -Detail "gh exited $($result.ExitCode)") }
         }
+        $json = $result.Output
     } catch {
         return [pscustomobject]@{ Issues = @(); Failure = (New-WorkMirrorFailure -Reason 'GhUnavailable' -Detail $_.Exception.Message) }
     }
 
-    if ([string]::IsNullOrWhiteSpace(($json -join ''))) {
+    if ([string]::IsNullOrWhiteSpace($json)) {
         return [pscustomobject]@{ Issues = @(); Failure = $null }
     }
 
     try {
-        $parsed = ($json -join "`n") | ConvertFrom-Json
+        $parsed = $json | ConvertFrom-Json
     } catch {
         return [pscustomobject]@{ Issues = @(); Failure = (New-WorkMirrorFailure -Reason 'TrackerUnreadable' -Detail $_.Exception.Message) }
     }
@@ -126,9 +153,9 @@ function Get-ProjectItemPositions {
     param([Parameter(Mandatory)][string] $Owner, [Parameter(Mandatory)][string] $RepoName)
 
     try {
-        $projJson = & gh project list --owner $Owner --format json 2>$null
-        if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace(($projJson -join ''))) { return $null }
-        $projects = ($projJson -join "`n") | ConvertFrom-Json
+        $projResult = Invoke-GhRaw -GhArgs @('project', 'list', '--owner', $Owner, '--format', 'json')
+        if ($projResult.ExitCode -ne 0 -or [string]::IsNullOrWhiteSpace($projResult.Output)) { return $null }
+        $projects = $projResult.Output | ConvertFrom-Json
     } catch {
         return $null
     }
@@ -137,9 +164,9 @@ function Get-ProjectItemPositions {
     if (-not $project) { return $null }
 
     try {
-        $itemsJson = & gh project item-list $project.number --owner $Owner --format json 2>$null
-        if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace(($itemsJson -join ''))) { return $null }
-        $items = ($itemsJson -join "`n") | ConvertFrom-Json
+        $itemsResult = Invoke-GhRaw -GhArgs @('project', 'item-list', "$($project.number)", '--owner', $Owner, '--format', 'json')
+        if ($itemsResult.ExitCode -ne 0 -or [string]::IsNullOrWhiteSpace($itemsResult.Output)) { return $null }
+        $items = $itemsResult.Output | ConvertFrom-Json
     } catch {
         return $null
     }
@@ -164,9 +191,9 @@ function Get-CurrentRepoOwnerName {
     }
 
     try {
-        $json = & gh repo view --json owner,name 2>$null
-        if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace(($json -join ''))) { return $null }
-        $parsed = ($json -join "`n") | ConvertFrom-Json
+        $result = Invoke-GhRaw -GhArgs @('repo', 'view', '--json', 'owner,name')
+        if ($result.ExitCode -ne 0 -or [string]::IsNullOrWhiteSpace($result.Output)) { return $null }
+        $parsed = $result.Output | ConvertFrom-Json
     } catch {
         return $null
     }
@@ -209,7 +236,7 @@ function ConvertTo-WorkRefLines {
     $lines.Add("State: $($Issue.state)")
     $lines.Add("Rank: $Rank")
     $lines.Add("MirroredAt: $Sha")
-    $lines.Add("Criteria:$(if ($criteria.Count) { ' ' + ($criteria -join ', ') })")
+    $lines.Add("Criteria: $($criteria -join ', ')")
     ,@($lines)
 }
 
