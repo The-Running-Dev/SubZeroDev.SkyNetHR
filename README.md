@@ -109,18 +109,20 @@ doing so non-interactively would put a password on a command line, so it prints 
 block — which holds `AUTH_SECRET` under `shared-secret` — straight to the service's registry
 key rather than passing it as an `nssm set` argument.
 
-**Verify the stop path once, before trusting the deployment.** `nssm stop` sends a console
-Ctrl event first, which should reach the same `SIGINT` handler `src/server.ts` installs for
-local Ctrl+C. That is unproven here: a console-less service may not receive it at all, in
-which case NSSM escalates to `TerminateProcess` and children are orphaned while the service
-manager still reports a clean stop. The check is one line:
+**Verify the stop path once, before trusting the deployment.** `nssm stop` attaches to the
+child's console and raises a Ctrl+C event, which Node delivers as `SIGINT` — the same
+handler `src/server.ts` installs for a local Ctrl+C, on the same path as the container's
+`SIGTERM`. That route works, but it depends on the child having a console, and NSSM 2.24 is
+documented as unable to launch services on newer Windows without `AppNoConsole=1` — a
+setting that removes exactly that console and turns every stop into a hard kill which still
+reports success. So confirm it once, on your build:
 
 ```powershell
 nssm stop SkyNetHR
 Test-Path "$env:STORAGE_ROOT\server.lock"   # must be False
 ```
 
-`False` means the stop reached the server's own shutdown path. `True` means it did not —
-children were orphaned and the next boot will log a stale-lock reclaim. Report that on
-issue #28, which tracks this repository's Windows/Linux parity gap, rather than working
-around it.
+`False` means the stop reached the server's own shutdown path. `True` means it did not: the
+graceful path was skipped and the next boot will log a stale-lock reclaim. Check whether
+`AppNoConsole` is set before anything else, then record the result on issue #232, which
+tracks this observation.

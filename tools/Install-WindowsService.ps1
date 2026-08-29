@@ -31,18 +31,20 @@
     control event first, before escalating through WM_CLOSE, WM_QUIT and finally
     TerminateProcess. -StopTimeoutMs sets how long it waits at that first step.
 
-    THIS IS NOT VERIFIED, AND ITS FAILURE IS SILENT. `GenerateConsoleCtrlEvent` requires the
-    target process to be attached to a console, and a service started by the SCM has none by
-    default; Node's Windows SIGINT is synthesised from console Ctrl events, so no console
-    means no SIGINT. If the console step cannot reach the process, NSSM falls through to
-    TerminateProcess - a hard kill with no drain, no `manager.shutdown()`, and no child reap -
-    and the SCM still reports a clean stop. Whether NSSM's own console handling avoids this
-    was not established when this script was written (issue #28, #72).
+    That route works: NSSM gives the child a console (2.24 allocates one for inheritance,
+    newer builds use CREATE_NEW_CONSOLE) and on stop attaches to it and raises CTRL_C_EVENT.
+    This script does not disable any of that, and never sets AppNoConsole.
 
-    So verify it once per host rather than assuming it: stop the service, then check whether
-    `<STORAGE_ROOT>\server.lock` still exists. A shutdown that reached `stop()` removes it
-    (D175, asserted by src/server.test.ts's S27.12); a hard kill leaves it behind and the
-    next boot logs a stale-lock reclaim (S22.3). Invoke-Install prints this check on success.
+    It is still worth confirming once per host, because the route is configuration-dependent
+    in a way that fails silently. NSSM 2.24 is documented as unable to launch services on
+    newer Windows without AppNoConsole=1, and that setting removes the console the Ctrl+C
+    route needs - every stop then escalates to TerminateProcess, skipping `stop()`'s drain,
+    `manager.shutdown()` and the lock release, while the SCM still reports a clean stop.
+
+    The check: stop the service, then look for `<STORAGE_ROOT>\server.lock`. A shutdown that
+    reached `stop()` removes it (D175, asserted by src/server.test.ts's S27.12); a hard kill
+    leaves it and the next boot logs a stale-lock reclaim (S22.3). Invoke-Install prints this
+    on success. The observation is tracked as issue #232.
 
     Required settings are validated against the same fields src/config/index.ts's
     `loadConfig` refuses to start without (AUTH_MODE and its per-mode fields, WORKSPACE_ROOTS,
@@ -261,7 +263,7 @@ function Invoke-Install {
     Write-Host "Before trusting this deployment, verify the stop path once (see README, 'Running it on Windows'):"
     Write-Host "  1. nssm start $ServiceName, open a session, then nssm stop $ServiceName"
     Write-Host "  2. Test-Path '$(Join-Path $vars['STORAGE_ROOT'] 'server.lock')'  ->  must be False"
-    Write-Host "A True there means the stop did NOT reach src/server.ts's handler: children are orphaned and the next boot will log a stale-lock reclaim. Report it on issue #28 rather than working around it."
+    Write-Host "A True there means the stop did NOT reach src/server.ts's handler - the graceful path was skipped and the next boot will log a stale-lock reclaim. Check whether AppNoConsole is set on this service first, then record the result on issue #232."
 }
 
 # Same dot-source guard as tools/Wait-PullRequestCheck.ps1: lets this script's tests

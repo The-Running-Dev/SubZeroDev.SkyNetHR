@@ -3195,16 +3195,21 @@ why that constraint bites here specifically: `child.kill('SIGTERM')` on Windows 
 unconditional kill, not a real signal delivery, so the container's own shutdown path
 (`ENTRYPOINT ["/usr/bin/tini", "--"]`, ↦ `SIGTERM` ↦ `server.ts`'s `stop()`) is untestable on Windows
 by construction — the S27.2/S27.3 tests already skip there, citing #28.
-The decisive evidence is in the tree rather than in the reasoning above: `src/jail/index.ts` resolves
-Windows 8.3 short names through `realpath.native`, strips `\\?\` extended-length prefixes, and
-compares paths case-insensitively with separator normalisation, and `process.platform`/`win32`
-branches appear across eleven source files. Under a Windows story that only ever runs the Linux
-container, every one of those branches is unreachable on the host the brief calls primary — dead code
-guarding a platform nothing exercises.
-Chosen: Windows does not run the Linux container under Docker Desktop's WSL2 layer, even though that
-would work mechanically. Doing so would validate Linux's termination and path handling a second time
-on a Windows host and leave the `win32` branches above permanently untested, which is exactly the
-parity gap the brief's constraint and #28 both name. Instead the compiled server runs directly on the
+The reason that decides it is deployment reach, not code shape: **Docker Desktop is not supported on
+Windows Server.** A container-only Windows story therefore does not run on the class of host this is
+most likely deployed to, which is not a parity argument but an availability one.
+`src/jail/index.ts`'s Windows handling — 8.3 short names through `realpath.native`, `\\?\`
+extended-length prefixes, case-insensitive comparison with separator normalisation — is consistent
+with native execution and would go unexercised in production under a container-only story, but it is
+**not** on its own decisive: `win32`/`process.platform` branches appear in four non-test source files
+(not the eleven an earlier draft of this entry claimed, a count that wrongly included test files), and
+`.github/workflows/verify.yml`'s `windows-latest` job already exercises them on every push. Supported
+native behaviour is not the same as a requirement to deploy natively, and this entry originally
+conflated the two.
+Chosen: Windows does not run the Linux container under Docker Desktop, even though bind-mounting
+Windows paths into a Linux container works on supported desktop Windows and would be the cheaper
+option there. It is unavailable on Windows Server, and a deployment story that silently excludes the
+server SKUs of the brief's primary platform is not one. Instead the compiled server runs directly on the
 host, registered as a Windows Service by a new script, `tools/Install-WindowsService.ps1`, via NSSM
 (an operator-installed tool, not a project dependency — the Windows analogue to Docker itself, which
 is likewise never installed by this repository's own tooling). Credential parity with the Linux
@@ -3226,22 +3231,34 @@ the comparison nor its failure message ever echoes a value. `-ServiceAccount` is
 reason and deliberately sets nothing — configuring it non-interactively would put a password on a
 command line, the very exposure this avoids.
 
-**The shutdown path is stated as unproven, because it is.** NSSM's stop sequence tries a console
-control event first, and `server.ts` already handles `SIGINT` identically to the container's `SIGTERM`
-path. But `GenerateConsoleCtrlEvent` requires the target to be attached to a console, an SCM-started
-service has none by default, and Node's Windows `SIGINT` is synthesised from console Ctrl events — so
-if that step cannot reach the process, NSSM falls through to `TerminateProcess`: no drain, no
-`manager.shutdown()`, no child reap, and the SCM still reports a clean stop. Whether NSSM's own
-console handling avoids this was not established. Rather than assert either way, the deployment ships
-a one-line check that makes the answer observable per host: after a stop, `<STORAGE_ROOT>\server.lock`
-must be absent — a shutdown that reached `stop()` removes it (D175, asserted by `server.test.ts`'s
-S27.12), a hard kill leaves it and the next boot logs a stale-lock reclaim (S22.3). `Invoke-Install`
-prints the check on success and names the symptom.
+**The graceful shutdown route works, and an earlier draft of this entry wrongly hedged it.** That
+draft reasoned that `GenerateConsoleCtrlEvent` needs a console, that an SCM-started service has none,
+and therefore that the console step might never reach the process. The first two premises are true of
+services in general and false of NSSM in particular: NSSM gives the child a console — 2.24 allocates
+one for inheritance, newer builds use `CREATE_NEW_CONSOLE` — and on stop it attaches to that console
+and raises `CTRL_C_EVENT`. Node converts that to `SIGINT`, which `src/server.ts` already handles on
+the same path as the container's `SIGTERM`. The installer does not disable any of it. The hedge was
+reasoning from the general case to a specific tool without reading the tool, and it is withdrawn.
+Two corrections travel with it: NSSM walks the process tree during stop escalation, so even the
+`TerminateProcess` fallback does not inherently orphan children — what it costs is the graceful path
+(`manager.shutdown()`, the tombstones, the lock release), not the children; and #28 was never the
+right tracker for any of this, being the two-platform CI gate and closed on 2026-08-17.
+
+**The post-stop check survives, on a different justification.** It is no longer needed to answer
+whether NSSM *can* deliver the event — it can. It is needed because the delivery is
+configuration-dependent in a way an operator can trip without noticing: NSSM 2.24 is documented as
+unable to launch services on newer Windows without `AppNoConsole=1`, and that setting removes the very
+console the Ctrl+C route depends on, converting every stop into a hard kill that still reports
+success. So after a stop, `<STORAGE_ROOT>\server.lock` must be absent — a shutdown that reached
+`stop()` removes it (D175, asserted by `server.test.ts`'s S27.12); a hard kill leaves it and the next
+boot logs a stale-lock reclaim (S22.3). `Invoke-Install` prints the check on success and names the
+symptom. The observation itself is tracked as #232, which is what #72 item 5 needs and what this
+change does not supply.
 `tools/Install-WindowsService.Tests.ps1` covers all of the above in 15 Pester cases, including the
 read-back guard's own negative case and an assertion that its failure message names `AUTH_SECRET`
 without echoing its value.
 Rejected: the same container via Docker Desktop. Mechanically simplest, but it tests nothing about
-Windows' own process model — the entire reason #28 and the brief's constraint exist — and would leave
+Windows' own process model — the reason the brief's constraint exists — and would leave
 the primary host's actual termination behaviour as unverified as it is today, just hidden behind a
 green checkmark that measured Linux instead.
 Rejected: `node-windows` (an npm dependency that self-installs a service wrapper) over NSSM. It would
@@ -3258,8 +3275,9 @@ Rejected: closing #72's Windows item as fully verified. Item 5's shutdown-reapin
 for Linux (`src/server.test.ts`'s S27.2/S27.3/S27.10/S27.12, passing, plus S27.5–S27.13 in
 `session-manager/index.test.ts` covering the reap logic `stop()` calls into) but not exercised end to
 end on Windows in this pass — building an unverified end-to-end claim into the record would be exactly
-the assertion `AGENTS.md § Verification` rules out. Stated here instead as the open half of #28's own
-gap, not silently closed.
+the assertion `AGENTS.md § Verification` rules out. Tracked as #232 instead, and the pull request
+carries no closing keyword — GitHub honours no partial exception, so `Closes #72 except item 5` would
+have closed the whole issue on merge with that item unobserved.
 Rejected: holding the Windows half back entirely until a real NSSM stop had been observed. The
 artifact is useful before that check runs, and the check is one command an operator runs on their own
 host — withholding a documented deployment path to wait for evidence only a deployment can produce is
