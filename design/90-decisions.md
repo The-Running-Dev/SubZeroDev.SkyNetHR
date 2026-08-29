@@ -4319,6 +4319,19 @@ mirror without ever adopting the record mechanism, which is this repository's ac
 Reversibility: cheap. `tools/Test-DesignReferences.ps1` and its tests only; no product code, no
 contract shape, and no command-core file changed.
 
+### 2026-08-29 — D190 S3.3's remaining divergence is transcribed, closing #66
+Context: D40 (2026-08-08) already decided S3.3's assertion should read "a gap is reported only
+when the spill cannot serve", recorded as a slice change, but the edit to `30-slices.md` was
+never made — the same as D111 found for D105's freeze marker. D155 transcribed #66's other
+divergence into `20-contract.md § Streaming` already; this is the second half of the same issue,
+adjudicated and unlanded rather than undecided.
+Chosen: S3.3 now reads "a healthy spill produces one only for a resume point outside the
+session's history; a truncated or unwritable spill produces one for any range" — matching
+`20-contract.md:1694-1697`'s wording for the same rule. The criterion id is unchanged.
+Rejected: reopening the question. D40 already settled it; nothing found while checking the tree
+against the criterion counts as new evidence (`AGENTS.md § Budget discipline`).
+Reversibility: cheap. One sentence in one slice criterion; no behaviour moves.
+
 ## Open
 
 Staging only. Once an item becomes an issue it leaves this list.
