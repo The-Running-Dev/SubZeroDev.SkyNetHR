@@ -276,8 +276,9 @@ Acceptance:
     for a **live** session mid-turn, with no `replay_gap` — asserted with `ringCapacity` set
     to 10 against a turn emitting at least 100 envelopes (D40).
   - S3.3 `error / replay_gap` is emitted **only** where the spill cannot serve the range.
-    A healthy spill never produces one; a truncated or unwritable spill produces exactly
-    one, after which the client refetches.
+    A healthy spill produces one only for a resume point outside the session's history; a
+    truncated or unwritable spill produces one for any range, after which the client
+    refetches.
   - S3.4 The same spill-served replay works for a session in state `ended`.
   - S3.5 The ring buffer is a strict suffix of the spill: over a run of at least 500
     envelopes with `ringCapacity` 100, the ring's contents equal the spill's last 100 lines,
