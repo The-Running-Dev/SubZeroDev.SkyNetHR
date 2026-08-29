@@ -3185,6 +3185,50 @@ must follow, discoverable only by reading `session-manager`, is one the second c
 gets wrong; and I1 as it stood read as forbidding what the tree does.
 Reversibility: cheap. Prose plus one invariant clause; the behaviour is unchanged.
 
+### 2026-08-29 — D191 Windows runs the server natively, supervised by NSSM, not the same container
+Context: issue #72. The Linux delivery mechanism was already decided (2026-08-19 entry above,
+corrected by D179) and ships as `Dockerfile`/`docker-compose.yml` — a runnable artifact `README.md`
+already documents. No decision existed for Windows, the brief's own primary host
+(`design/00-brief.md` Constraints: "Must run on Windows and Linux servers... path handling, process
+termination and workspace rollback all differ between them"). `src/server.test.ts` already documents
+why that constraint bites here specifically: `child.kill('SIGTERM')` on Windows is Node emulating an
+unconditional kill, not a real signal delivery, so the container's own shutdown path
+(`ENTRYPOINT ["/usr/bin/tini", "--"]`, ↦ `SIGTERM` ↦ `server.ts`'s `stop()`) is untestable on Windows
+by construction — the S27.2/S27.3 tests already skip there, citing #28.
+Chosen: Windows does not run the Linux container under Docker Desktop's WSL2 layer, even though that
+would work mechanically — doing so would validate Linux's termination path a second time on a
+Windows host, not Windows' own, which is exactly the parity gap the brief's constraint and #28 both
+name. Instead the compiled server runs directly on the host, registered as a Windows Service by a new
+script, `tools/Install-WindowsService.ps1`, via NSSM (an operator-installed tool, not a project
+dependency — the Windows analogue to Docker itself, which is likewise never installed by this
+repository's own tooling). Credential parity with the Linux bind-mount comes for free rather than
+needing one: `-ServiceAccount` names the operator's own Windows account, so `claude`/`codex` resolve
+`%USERPROFILE%\.claude`/`.codex` exactly as interactive use would, with no container boundary to
+cross. Graceful shutdown uses NSSM's default console-stop-event method, which Node receives reliably
+as `SIGINT` on Windows (unlike `SIGTERM`) and `server.ts` already handles identically to the
+container's `SIGTERM` path (`process.on('SIGINT', ...)`, added for local Ctrl+C). The script validates
+every field `src/config/index.ts`'s `loadConfig` refuses to boot without, plus `ALLOWED_ORIGINS` (a
+deployment-level requirement `docker-compose.yml` also imposes with no default, though the app itself
+falls back to an empty list), and refuses to touch NSSM at all if any is missing from its `-EnvFile` —
+the same fail-closed shape the compose files get from `${VAR:?...}` interpolation. Both scripts have a
+matching Pester test file (`tools/Install-WindowsService.Tests.ps1`, 9 cases, all passing).
+Rejected: the same container via Docker Desktop. Mechanically simplest, but it tests nothing about
+Windows' own process model — the entire reason #28 and the brief's constraint exist — and would leave
+the primary host's actual termination behaviour as unverified as it is today, just hidden behind a
+green checkmark that measured Linux instead.
+Rejected: `node-windows` (an npm dependency that self-installs a service wrapper) over NSSM. It would
+be a new project dependency needing its own decision-log entry under "no new dependencies", for a
+capability an already-external, already-documented tool (NSSM) provides with no addition to
+`package.json` at all — the same reasoning that keeps `tini` and `git` as `apt-get install` lines in
+the Dockerfile rather than npm packages.
+Rejected: closing #72's Windows item as fully verified. Item 5's shutdown-reaping check is confirmed
+for Linux (`src/server.test.ts`'s S27.2/S27.3/S27.10/S27.12, passing, plus S27.5–S27.13 in
+`session-manager/index.test.ts` covering the reap logic `stop()` calls into) but not exercised end to
+end on Windows in this pass — building an unverified end-to-end claim into the record would be exactly
+the assertion `AGENTS.md § Verification` rules out. Stated here instead as the open half of #28's own
+gap, not silently closed.
+Reversibility: cheap. Two new files under `tools/`, one README section, no product code touched.
+
 ### 2026-08-19 — D157 The audit read is `session-manager`'s, and the design's module table is corrected
 Context: `10-design.md § Module boundaries` credited `records` with "the incident read". `records`
 has no such method, in the tree or in `20-contract.md`'s `Records` interface; the read is

@@ -78,3 +78,34 @@ The repository root's `docker-compose.yml` is the deployment counterpart: it pul
 image `.github/workflows/publish.yml` publishes to `ghcr.io/the-running-dev/skynet-hr`
 rather than building, joins the pre-existing `proxy-net` and publishes no port — see that
 file's header for the full set of environment variables a deployment needs to set.
+
+### Running it on Windows
+
+The container above is Linux-only by construction — its `tini`/SIGTERM shutdown path
+validates the Linux process model, which `design/00-brief.md`'s Constraints already name as
+one of the things that differs between the two platforms Windows is the primary one of.
+Running the same image under Docker Desktop's WSL2 layer would exercise Linux's termination
+path a second time, not Windows'. So Windows runs the compiled server natively instead, no
+container, supervised as a Windows Service via [NSSM](https://nssm.cc) (an operator-installed
+tool, the Windows analogue to Docker itself):
+
+```powershell
+npm run build
+# Write your own deploy.env — KEY=VALUE lines, not committed — with at least AUTH_MODE, its
+# per-mode fields, ALLOWED_ORIGINS, WORKSPACE_ROOTS and STORAGE_ROOT (see
+# tools/Install-WindowsService.ps1's own comment-based help for the full list; it refuses to
+# install with any of them left to a default).
+./tools/Install-WindowsService.ps1 -EnvFile C:\skynet-hr\deploy.env -ServiceAccount .\skynet-operator
+nssm start SkyNetHR
+```
+
+Name `-ServiceAccount` as the operator's own Windows account (or a dedicated one whose
+profile already holds `.claude`/`.codex`) so the CLIs resolve `%USERPROFILE%\.claude` and
+`%USERPROFILE%\.codex` exactly as they would running interactively — no bind mount needed,
+because there is no container boundary to cross. `nssm stop SkyNetHR` sends a console Ctrl
+event first, which reaches the same `SIGINT` handler `src/server.ts` installs for a local
+Ctrl+C; unlike `SIGTERM`, Node receives that reliably on Windows (see `src/server.test.ts`'s
+own platform note on why its SIGTERM-shutdown tests are Linux-only). Whether that signal
+path in fact drains and reaps a live turn's children on Windows the way the container's
+`S27.*` tests verify it does on Linux is unverified here — the same platform gap issue #28
+already tracks for the rest of this repository's Windows/Linux parity.
