@@ -23,15 +23,26 @@
     interactively (design/00-brief.md's "Hosting the model" non-goal: no vendor credential is
     held by anything this script writes).
 
-    Graceful shutdown reaches the same code path as the container's SIGTERM handling
-    (src/server.ts's `stop()`), but through a different signal: Node does not reliably
-    receive SIGTERM from the Windows service manager (a delivered SIGTERM there bypasses any
-    handler and hard-kills), but it does receive SIGINT from a console Ctrl+C event, which
-    `server.ts` already listens for (`process.on('SIGINT', ...)`, added for the same local
-    Ctrl+C case). NSSM's default stop sequence tries exactly that first - a console control
-    event - before escalating, so no extra configuration is needed for the signal to arrive;
-    -StopTimeoutMs only sets how long NSSM waits for `stop()`'s drain-then-kill sequence to
-    finish before it escalates to a harder stop.
+    Graceful shutdown is INTENDED to reach the same code path as the container's SIGTERM
+    handling (src/server.ts's `stop()`), through a different signal: Node does not reliably
+    receive SIGTERM from the Windows service manager, but it does receive SIGINT from a
+    console Ctrl event, which `server.ts` already listens for (`process.on('SIGINT', ...)`,
+    added for the same local Ctrl+C case). NSSM's default stop sequence tries a console
+    control event first, before escalating through WM_CLOSE, WM_QUIT and finally
+    TerminateProcess. -StopTimeoutMs sets how long it waits at that first step.
+
+    THIS IS NOT VERIFIED, AND ITS FAILURE IS SILENT. `GenerateConsoleCtrlEvent` requires the
+    target process to be attached to a console, and a service started by the SCM has none by
+    default; Node's Windows SIGINT is synthesised from console Ctrl events, so no console
+    means no SIGINT. If the console step cannot reach the process, NSSM falls through to
+    TerminateProcess - a hard kill with no drain, no `manager.shutdown()`, and no child reap -
+    and the SCM still reports a clean stop. Whether NSSM's own console handling avoids this
+    was not established when this script was written (issue #28, #72).
+
+    So verify it once per host rather than assuming it: stop the service, then check whether
+    `<STORAGE_ROOT>\server.lock` still exists. A shutdown that reached `stop()` removes it
+    (D175, asserted by src/server.test.ts's S27.12); a hard kill leaves it behind and the
+    next boot logs a stale-lock reclaim (S22.3). Invoke-Install prints this check on success.
 
     Required settings are validated against the same fields src/config/index.ts's
     `loadConfig` refuses to start without (AUTH_MODE and its per-mode fields, WORKSPACE_ROOTS,
@@ -51,10 +62,13 @@
     Windows service name. Default `SkyNetHR`.
 
 .PARAMETER ServiceAccount
-    Windows account NSSM runs the service as, `DOMAIN\User` or `.\User` form. Defaults to
-    LocalSystem when omitted, which has no `.claude`/`.codex` profile of its own - name the
-    operator's own account (or a dedicated service account whose profile already holds both
-    CLIs' credential state) unless you intend to configure HOME explicitly in EnvFile instead.
+    ADVISORY ONLY - this script does not set the service account, and naming one here changes
+    nothing but the instructions printed on success. Setting it non-interactively means
+    passing a password on a command line, which is the one exposure this script exists to
+    avoid (see Set-ServiceEnvironment). Run `sc.exe config` or Services.msc yourself.
+
+    Given a value, the printed instructions name that account. Omitted, they explain that the
+    service will run as LocalSystem, which has no `.claude`/`.codex` profile of its own.
 
 .PARAMETER RepoRoot
     Repository root containing the built `dist/server.js`. Defaults to the current directory.
@@ -145,6 +159,57 @@ function Test-RequiredEnv {
     return [pscustomobject]@{ Ok = $true; MissingFields = @() }
 }
 
+function Get-ServiceParametersKey {
+    <# Where NSSM keeps its per-service settings. Separated so the tests can exercise
+       Set-ServiceEnvironment against a writable HKCU key instead of HKLM. #>
+    param([Parameter(Mandatory)] [string] $ServiceName)
+    "HKLM:\SYSTEM\CurrentControlSet\Services\$ServiceName\Parameters"
+}
+
+function Set-ServiceEnvironment {
+    <# Writes AppEnvironmentExtra directly to the registry rather than through
+       `nssm set <svc> AppEnvironmentExtra ...`.
+
+       The block contains AUTH_SECRET under shared-secret mode - the credential that
+       authenticates every operator (src/config/index.ts's parseAuth). A command line is not
+       a private channel on Windows: it is readable through Win32_Process.CommandLine, and
+       captured by Sysmon Event ID 1 and PowerShell script-block logging. That is the same
+       exposure this script refuses to accept for the service account's password, and the
+       secret deserves the same treatment.
+
+       The write is read back and compared before returning, so a wrong assumption about
+       NSSM's registry layout fails loudly here rather than leaving a service that starts
+       with no configuration and refuses every request at boot. Neither the comparison nor
+       its failure message ever echoes a value. #>
+    param(
+        [Parameter(Mandatory)] [hashtable] $Vars,
+        [Parameter(Mandatory)] [string]    $ParametersKey
+    )
+
+    if (-not (Test-Path -LiteralPath $ParametersKey)) {
+        throw "Expected NSSM's parameters key at '$ParametersKey' and it does not exist. Either 'nssm install' did not run, or this NSSM version stores its settings elsewhere - do not assume the environment was written."
+    }
+
+    $lines = [string[]]@(foreach ($key in ($Vars.Keys | Sort-Object)) { "$key=$($Vars[$key])" })
+    Set-ItemProperty -LiteralPath $ParametersKey -Name 'AppEnvironmentExtra' -Value $lines -Type MultiString
+
+    $readBack = [string[]]@((Get-ItemProperty -LiteralPath $ParametersKey -Name 'AppEnvironmentExtra' -ErrorAction Stop).AppEnvironmentExtra)
+
+    # Never `$matches` - that is PowerShell's automatic regex variable, and this repository
+    # has already fixed two defects caused by reading it when it held something else (#227,
+    # #228). A local of that name shadows it for every later reader in the same scope.
+    $isMatch = $readBack.Count -eq $lines.Count
+    if ($isMatch) {
+        for ($i = 0; $i -lt $lines.Count; $i++) {
+            if ($readBack[$i] -ne $lines[$i]) { $isMatch = $false; break }
+        }
+    }
+    if (-not $isMatch) {
+        $names = (($lines | ForEach-Object { ($_ -split '=', 2)[0] }) -join ', ')
+        throw "Read-back of AppEnvironmentExtra at '$ParametersKey' does not match what was written (fields: $names). The service is left holding whatever the registry now contains - remove it and retry."
+    }
+}
+
 function Invoke-Install {
     param(
         [Parameter(Mandatory)] [string] $EnvFile,
@@ -182,19 +247,21 @@ function Invoke-Install {
     & $nssm.Source set $ServiceName AppStopMethodConsole $StopTimeoutMs
     & $nssm.Source set $ServiceName Start SERVICE_AUTO_START
 
-    $envLines = @()
-    foreach ($key in $vars.Keys) { $envLines += "$key=$($vars[$key])" }
-    & $nssm.Source set $ServiceName AppEnvironmentExtra ($envLines -join "`r`n")
+    Set-ServiceEnvironment -Vars $vars -ParametersKey (Get-ServiceParametersKey -ServiceName $ServiceName)
 
     if ($ServiceAccount) {
-        Write-Host "Set the service's Log On As account to '$ServiceAccount' via Services.msc or 'sc.exe config $ServiceName obj= $ServiceAccount', then supply its password once through the same dialog - nssm cannot set a password non-interactively without it appearing in this process's argument list."
+        Write-Host "This script does not set the service account - run: sc.exe config $ServiceName obj= $ServiceAccount password= <password>, or set it through Services.msc. Passing the password here would put it in this process's argument list, which is the exact exposure Set-ServiceEnvironment above exists to avoid for AUTH_SECRET."
     }
     else {
         Write-Host "No -ServiceAccount given: the service runs as LocalSystem, which has no '.claude'/'.codex' profile of its own. Either rerun with -ServiceAccount naming an account whose profile already holds both CLIs' credential state, or set HOME/USERPROFILE in $EnvFile to point at a directory that does."
     }
 
     Write-Host "Installed '$ServiceName'. Start with: nssm start $ServiceName  (or Start-Service $ServiceName)"
-    Write-Host "Stop with:  nssm stop $ServiceName  (or Stop-Service $ServiceName) - sends a console Ctrl event first, which src/server.ts's SIGINT handler drains and reaps children on before NSSM would escalate."
+    Write-Host ''
+    Write-Host "Before trusting this deployment, verify the stop path once (see README, 'Running it on Windows'):"
+    Write-Host "  1. nssm start $ServiceName, open a session, then nssm stop $ServiceName"
+    Write-Host "  2. Test-Path '$(Join-Path $vars['STORAGE_ROOT'] 'server.lock')'  ->  must be False"
+    Write-Host "A True there means the stop did NOT reach src/server.ts's handler: children are orphaned and the next boot will log a stale-lock reclaim. Report it on issue #28 rather than working around it."
 }
 
 # Same dot-source guard as tools/Wait-PullRequestCheck.ps1: lets this script's tests

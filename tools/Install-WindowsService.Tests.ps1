@@ -111,6 +111,79 @@ Describe 'Test-RequiredEnv' {
     }
 }
 
+Describe 'Set-ServiceEnvironment' {
+
+    # HKCU, not the real HKLM service key: writable without elevation and disposable. The
+    # function takes the key path precisely so this test never touches a real service.
+    BeforeEach {
+        $script:TestKey = "HKCU:\Software\SkyNetHRTests\$(New-Guid)"
+        New-Item -Path $script:TestKey -Force | Out-Null
+    }
+
+    AfterEach {
+        if (Test-Path -LiteralPath $script:TestKey) {
+            Remove-Item -LiteralPath $script:TestKey -Recurse -Force
+        }
+    }
+
+    It 'writes every KEY=VALUE as REG_MULTI_SZ and round-trips them' {
+        $vars = @{ AUTH_MODE = 'shared-secret'; AUTH_SECRET = 'sekrit'; STORAGE_ROOT = 'C:\data' }
+
+        Set-ServiceEnvironment -Vars $vars -ParametersKey $script:TestKey
+
+        $written = (Get-ItemProperty -LiteralPath $script:TestKey -Name 'AppEnvironmentExtra').AppEnvironmentExtra
+        $written | Should -Contain 'AUTH_MODE=shared-secret'
+        $written | Should -Contain 'AUTH_SECRET=sekrit'
+        $written | Should -Contain 'STORAGE_ROOT=C:\data'
+        $written.Count | Should -Be 3
+    }
+
+    It 'stores the value as MultiString, not as a single joined string' {
+        Set-ServiceEnvironment -Vars @{ A = '1'; B = '2' } -ParametersKey $script:TestKey
+
+        $kind = (Get-Item -LiteralPath $script:TestKey).GetValueKind('AppEnvironmentExtra')
+        $kind | Should -Be ([Microsoft.Win32.RegistryValueKind]::MultiString)
+    }
+
+    It 'throws, rather than silently skipping the write, when the parameters key is absent' {
+        { Set-ServiceEnvironment -Vars @{ A = '1' } -ParametersKey "HKCU:\Software\SkyNetHRTests\$(New-Guid)" } |
+            Should -Throw '*does not exist*'
+    }
+
+    It 'throws when the read-back does not match, and names only field names - never a value' {
+        # The guard's own negative case. Set-ItemProperty is mocked to a no-op and the key
+        # pre-seeded with something else, so the read-back legitimately disagrees with what
+        # the function believes it wrote - the silent-misconfiguration case this exists for.
+        Set-ItemProperty -LiteralPath $script:TestKey -Name 'AppEnvironmentExtra' `
+            -Value ([string[]]@('SOMETHING=else')) -Type MultiString
+        Mock Set-ItemProperty { }
+
+        { Set-ServiceEnvironment -Vars @{ AUTH_SECRET = 'sekrit' } -ParametersKey $script:TestKey } |
+            Should -Throw '*does not match*'
+
+        # The secret must not reach the operator's console via the failure path either.
+        $err = { Set-ServiceEnvironment -Vars @{ AUTH_SECRET = 'sekrit' } -ParametersKey $script:TestKey } |
+            Should -Throw -PassThru
+        "$err" | Should -Not -Match 'sekrit'
+        "$err" | Should -Match 'AUTH_SECRET'
+    }
+
+    It 'a value containing = survives: only the first = separates key from value' {
+        Set-ServiceEnvironment -Vars @{ TOKEN_RATES_JSON = '{"a":1}'; PADDED = 'x=y=z' } -ParametersKey $script:TestKey
+
+        $written = (Get-ItemProperty -LiteralPath $script:TestKey -Name 'AppEnvironmentExtra').AppEnvironmentExtra
+        $written | Should -Contain 'PADDED=x=y=z'
+    }
+}
+
+Describe 'Get-ServiceParametersKey' {
+
+    It 'points at the named service''s own NSSM parameters key' {
+        Get-ServiceParametersKey -ServiceName 'SkyNetHR' |
+            Should -Be 'HKLM:\SYSTEM\CurrentControlSet\Services\SkyNetHR\Parameters'
+    }
+}
+
 Describe 'Invoke-Install' {
 
     It 'refuses when nssm.exe cannot be resolved, before anything is installed' {

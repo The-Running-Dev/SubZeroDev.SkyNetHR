@@ -96,16 +96,31 @@ npm run build
 # tools/Install-WindowsService.ps1's own comment-based help for the full list; it refuses to
 # install with any of them left to a default).
 ./tools/Install-WindowsService.ps1 -EnvFile C:\skynet-hr\deploy.env -ServiceAccount .\skynet-operator
+# then run the sc.exe line it prints to set the service account, and:
 nssm start SkyNetHR
 ```
 
-Name `-ServiceAccount` as the operator's own Windows account (or a dedicated one whose
+The service should run as the operator's own Windows account (or a dedicated one whose
 profile already holds `.claude`/`.codex`) so the CLIs resolve `%USERPROFILE%\.claude` and
 `%USERPROFILE%\.codex` exactly as they would running interactively — no bind mount needed,
-because there is no container boundary to cross. `nssm stop SkyNetHR` sends a console Ctrl
-event first, which reaches the same `SIGINT` handler `src/server.ts` installs for a local
-Ctrl+C; unlike `SIGTERM`, Node receives that reliably on Windows (see `src/server.test.ts`'s
-own platform note on why its SIGTERM-shutdown tests are Linux-only). Whether that signal
-path in fact drains and reaps a live turn's children on Windows the way the container's
-`S27.*` tests verify it does on Linux is unverified here — the same platform gap issue #28
-already tracks for the rest of this repository's Windows/Linux parity.
+because there is no container boundary to cross. The script does not set that account:
+doing so non-interactively would put a password on a command line, so it prints the
+`sc.exe config` line for you to run instead. For the same reason it writes the environment
+block — which holds `AUTH_SECRET` under `shared-secret` — straight to the service's registry
+key rather than passing it as an `nssm set` argument.
+
+**Verify the stop path once, before trusting the deployment.** `nssm stop` sends a console
+Ctrl event first, which should reach the same `SIGINT` handler `src/server.ts` installs for
+local Ctrl+C. That is unproven here: a console-less service may not receive it at all, in
+which case NSSM escalates to `TerminateProcess` and children are orphaned while the service
+manager still reports a clean stop. The check is one line:
+
+```powershell
+nssm stop SkyNetHR
+Test-Path "$env:STORAGE_ROOT\server.lock"   # must be False
+```
+
+`False` means the stop reached the server's own shutdown path. `True` means it did not —
+children were orphaned and the next boot will log a stale-lock reclaim. Report that on
+issue #28, which tracks this repository's Windows/Linux parity gap, rather than working
+around it.

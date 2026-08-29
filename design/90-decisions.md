@@ -3195,23 +3195,51 @@ why that constraint bites here specifically: `child.kill('SIGTERM')` on Windows 
 unconditional kill, not a real signal delivery, so the container's own shutdown path
 (`ENTRYPOINT ["/usr/bin/tini", "--"]`, ↦ `SIGTERM` ↦ `server.ts`'s `stop()`) is untestable on Windows
 by construction — the S27.2/S27.3 tests already skip there, citing #28.
+The decisive evidence is in the tree rather than in the reasoning above: `src/jail/index.ts` resolves
+Windows 8.3 short names through `realpath.native`, strips `\\?\` extended-length prefixes, and
+compares paths case-insensitively with separator normalisation, and `process.platform`/`win32`
+branches appear across eleven source files. Under a Windows story that only ever runs the Linux
+container, every one of those branches is unreachable on the host the brief calls primary — dead code
+guarding a platform nothing exercises.
 Chosen: Windows does not run the Linux container under Docker Desktop's WSL2 layer, even though that
-would work mechanically — doing so would validate Linux's termination path a second time on a
-Windows host, not Windows' own, which is exactly the parity gap the brief's constraint and #28 both
-name. Instead the compiled server runs directly on the host, registered as a Windows Service by a new
-script, `tools/Install-WindowsService.ps1`, via NSSM (an operator-installed tool, not a project
-dependency — the Windows analogue to Docker itself, which is likewise never installed by this
-repository's own tooling). Credential parity with the Linux bind-mount comes for free rather than
-needing one: `-ServiceAccount` names the operator's own Windows account, so `claude`/`codex` resolve
-`%USERPROFILE%\.claude`/`.codex` exactly as interactive use would, with no container boundary to
-cross. Graceful shutdown uses NSSM's default console-stop-event method, which Node receives reliably
-as `SIGINT` on Windows (unlike `SIGTERM`) and `server.ts` already handles identically to the
-container's `SIGTERM` path (`process.on('SIGINT', ...)`, added for local Ctrl+C). The script validates
-every field `src/config/index.ts`'s `loadConfig` refuses to boot without, plus `ALLOWED_ORIGINS` (a
-deployment-level requirement `docker-compose.yml` also imposes with no default, though the app itself
-falls back to an empty list), and refuses to touch NSSM at all if any is missing from its `-EnvFile` —
-the same fail-closed shape the compose files get from `${VAR:?...}` interpolation. Both scripts have a
-matching Pester test file (`tools/Install-WindowsService.Tests.ps1`, 9 cases, all passing).
+would work mechanically. Doing so would validate Linux's termination and path handling a second time
+on a Windows host and leave the `win32` branches above permanently untested, which is exactly the
+parity gap the brief's constraint and #28 both name. Instead the compiled server runs directly on the
+host, registered as a Windows Service by a new script, `tools/Install-WindowsService.ps1`, via NSSM
+(an operator-installed tool, not a project dependency — the Windows analogue to Docker itself, which
+is likewise never installed by this repository's own tooling). Credential parity with the Linux
+bind-mount comes for free rather than needing one: the service runs under the operator's own Windows
+account, so `claude`/`codex` resolve `%USERPROFILE%\.claude`/`.codex` exactly as interactive use
+would, with no container boundary to cross. The script validates every field `src/config/index.ts`'s
+`loadConfig` refuses to boot without, plus `ALLOWED_ORIGINS` (a deployment-level requirement
+`docker-compose.yml` also imposes with no default, though the app itself falls back to an empty
+list), and refuses to touch NSSM at all if any is missing from its `-EnvFile` — the same fail-closed
+shape the compose files get from `${VAR:?...}` interpolation.
+
+**The environment block is written to the registry, not passed to `nssm set`.** Under `shared-secret`
+it contains `AUTH_SECRET`, the credential authenticating every operator, and a Windows command line
+is not a private channel: it is readable through `Win32_Process.CommandLine` and captured by Sysmon
+Event ID 1 and PowerShell script-block logging. `Set-ServiceEnvironment` writes `AppEnvironmentExtra`
+directly as `REG_MULTI_SZ` and reads it back before returning, so a wrong assumption about NSSM's
+registry layout fails loudly instead of leaving a service that boots with no configuration; neither
+the comparison nor its failure message ever echoes a value. `-ServiceAccount` is advisory for the same
+reason and deliberately sets nothing — configuring it non-interactively would put a password on a
+command line, the very exposure this avoids.
+
+**The shutdown path is stated as unproven, because it is.** NSSM's stop sequence tries a console
+control event first, and `server.ts` already handles `SIGINT` identically to the container's `SIGTERM`
+path. But `GenerateConsoleCtrlEvent` requires the target to be attached to a console, an SCM-started
+service has none by default, and Node's Windows `SIGINT` is synthesised from console Ctrl events — so
+if that step cannot reach the process, NSSM falls through to `TerminateProcess`: no drain, no
+`manager.shutdown()`, no child reap, and the SCM still reports a clean stop. Whether NSSM's own
+console handling avoids this was not established. Rather than assert either way, the deployment ships
+a one-line check that makes the answer observable per host: after a stop, `<STORAGE_ROOT>\server.lock`
+must be absent — a shutdown that reached `stop()` removes it (D175, asserted by `server.test.ts`'s
+S27.12), a hard kill leaves it and the next boot logs a stale-lock reclaim (S22.3). `Invoke-Install`
+prints the check on success and names the symptom.
+`tools/Install-WindowsService.Tests.ps1` covers all of the above in 15 Pester cases, including the
+read-back guard's own negative case and an assertion that its failure message names `AUTH_SECRET`
+without echoing its value.
 Rejected: the same container via Docker Desktop. Mechanically simplest, but it tests nothing about
 Windows' own process model — the entire reason #28 and the brief's constraint exist — and would leave
 the primary host's actual termination behaviour as unverified as it is today, just hidden behind a
@@ -3221,12 +3249,21 @@ be a new project dependency needing its own decision-log entry under "no new dep
 capability an already-external, already-documented tool (NSSM) provides with no addition to
 `package.json` at all — the same reasoning that keeps `tini` and `git` as `apt-get install` lines in
 the Dockerfile rather than npm packages.
+Rejected: passing the environment through `nssm set` because it is the documented interface and the
+argv exposure is "only local". The exposure is to any process enumerating command lines plus every
+log sink that records them, for the one value in the block that is a credential — and this same script
+already refuses that trade for the service password, so accepting it for `AUTH_SECRET` would be
+inconsistent within a single file.
 Rejected: closing #72's Windows item as fully verified. Item 5's shutdown-reaping check is confirmed
 for Linux (`src/server.test.ts`'s S27.2/S27.3/S27.10/S27.12, passing, plus S27.5–S27.13 in
 `session-manager/index.test.ts` covering the reap logic `stop()` calls into) but not exercised end to
 end on Windows in this pass — building an unverified end-to-end claim into the record would be exactly
 the assertion `AGENTS.md § Verification` rules out. Stated here instead as the open half of #28's own
 gap, not silently closed.
+Rejected: holding the Windows half back entirely until a real NSSM stop had been observed. The
+artifact is useful before that check runs, and the check is one command an operator runs on their own
+host — withholding a documented deployment path to wait for evidence only a deployment can produce is
+circular.
 Reversibility: cheap. Two new files under `tools/`, one README section, no product code touched.
 
 ### 2026-08-19 — D157 The audit read is `session-manager`'s, and the design's module table is corrected
