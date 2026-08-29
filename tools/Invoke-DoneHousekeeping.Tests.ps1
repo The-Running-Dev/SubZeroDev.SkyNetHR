@@ -80,4 +80,45 @@ Describe 'Invoke-DoneHousekeeping' {
             @($result.Refused | Where-Object Branch -eq 'feature/foo') | Should -BeNullOrEmpty
         }
     }
+
+    Context 'resolving the default branch from git remote show origin' {
+
+        It 'resolves the first HEAD branch line, not whichever one a collection -match happens to leave in $Matches' {
+            # A single matching line collapses to a scalar via PowerShell's own pipeline
+            # unwrapping, so -match on it sets $Matches correctly even with the bug present -
+            # that edge case alone would not catch the regression. The real failure needs
+            # $headLine to stay a genuine array (2+ matching lines): `-match` against a
+            # collection only filters, it never sets $Matches, so the buggy resolver reads
+            # whatever $Matches was last left holding by Where-Object's OWN internal -match
+            # calls while filtering - the LAST matching line, not deterministically the real
+            # HEAD branch line. `git remote show origin` never emits two "HEAD branch:" lines
+            # on its own, so shim `git` for that one subcommand to force the array, and pass
+            # every other invocation straight through to the real binary so the rest of the
+            # script still exercises a real repo.
+            function git {
+                # Invoke-Git always prepends '-C', $WorkingDir ahead of the real
+                # subcommand, so match on the trailing args rather than a fixed index.
+                if (($args -join ' ') -match 'remote show origin$') {
+                    "* remote origin"
+                    "  HEAD branch: main"
+                    "  HEAD branch: stale-old-branch"
+                    return
+                }
+                & git.exe @args
+            }
+
+            $repo = New-GitRepo -Path (Join-Path $TestDrive 'repo-defaultbranch')
+
+            # Seed $Matches with stale data from an unrelated regex match, mimicking a match
+            # that ran earlier in the same process - e.g. Get-WorktreeBlockingPath's own
+            # "used by worktree at '...'" pattern, or a PowerShell profile's git-branch prompt.
+            # (Where-Object's own filtering overwrites this before the buggy line even runs -
+            # the two distinct HEAD-branch lines above are what actually exposes the defect.)
+            $null = "used by worktree at '/some/unrelated/path'" -match "used by worktree at '([^']+)'"
+
+            $result = & $script:ScriptPath -RepoRoot $repo -SkipPull
+
+            $result.DefaultBranch | Should -Be 'main'
+        }
+    }
 }
