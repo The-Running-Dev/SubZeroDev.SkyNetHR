@@ -76,7 +76,7 @@ function New-WorkMirrorResult {
 #>
 function Get-IssueCriteriaIds {
     param([string] $Body)
-    if ([string]::IsNullOrWhiteSpace($Body)) { return @() }
+    if ([string]::IsNullOrWhiteSpace($Body)) { return ,@() }
 
     $ids = [System.Collections.Generic.List[string]]::new()
     foreach ($line in ($Body -split "`r?`n")) {
@@ -84,7 +84,7 @@ function Get-IssueCriteriaIds {
             $ids.Add($Matches[1].Trim())
         }
     }
-    @($ids)
+    ,@($ids)
 }
 
 function Invoke-GhRaw {
@@ -236,7 +236,7 @@ function ConvertTo-WorkRefLines {
     $lines.Add("State: $($Issue.state)")
     $lines.Add("Rank: $Rank")
     $lines.Add("MirroredAt: $Sha")
-    $lines.Add("Criteria: $($criteria -join ', ')")
+    $lines.Add("Criteria:$(if ($criteria.Count) { ' ' + ($criteria -join ', ') })")
     ,@($lines)
 }
 
