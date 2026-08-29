@@ -80,4 +80,26 @@ Describe 'Invoke-DoneHousekeeping' {
             @($result.Refused | Where-Object Branch -eq 'feature/foo') | Should -BeNullOrEmpty
         }
     }
+
+    Context 'resolving the default branch from git remote show origin' {
+
+        It 'resolves the real HEAD branch even when $Matches already holds stale data from an unrelated regex match' {
+            $repo = New-GitRepo -Path (Join-Path $TestDrive 'repo-defaultbranch')
+            $bareOrigin = Join-Path $TestDrive 'origin-bare-defaultbranch'
+            & git init --quiet --bare -b main $bareOrigin | Out-Null
+            & git -C $repo remote add origin $bareOrigin | Out-Null
+            & git -C $repo push --quiet -u origin main | Out-Null
+
+            # `-match` against a collection (rather than a scalar string) never populates
+            # $Matches, so a buggy resolver silently falls through to whatever $Matches
+            # already held - e.g. from an unrelated match earlier in the same process, such
+            # as Get-WorktreeBlockingPath's "used by worktree at '...'" pattern. Seed that
+            # exact stale state here to prove the fix reads the real match, not the leftover.
+            $null = "used by worktree at '/some/unrelated/path'" -match "used by worktree at '([^']+)'"
+
+            $result = & $script:ScriptPath -RepoRoot $repo -SkipPull
+
+            $result.DefaultBranch | Should -Be 'main'
+        }
+    }
 }

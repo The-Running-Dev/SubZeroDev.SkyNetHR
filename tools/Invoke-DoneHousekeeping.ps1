@@ -128,8 +128,8 @@ if ($statusResult.Output.Trim()) {
 
 if (-not $DefaultBranch) {
     $remoteInfo = Invoke-Git -GitArgs @('remote', 'show', 'origin') -WorkingDir $repoRootResolved
-    $headLine = ($remoteInfo.Output -split "`n") | Where-Object { $_ -match 'HEAD branch:\s*(\S+)' }
-    if ($headLine -and $headLine -match 'HEAD branch:\s*(\S+)' -and $Matches[1] -ne '(unknown)') {
+    $headLine = ($remoteInfo.Output -split "`n") | Where-Object { $_ -match 'HEAD branch:\s*(\S+)' } | Select-Object -First 1
+    if ($headLine -match 'HEAD branch:\s*(\S+)' -and $Matches[1] -ne '(unknown)') {
         $DefaultBranch = $Matches[1]
     } else {
         # '(unknown)' is a real git state, not merely an absent line - it means the
