@@ -6,6 +6,7 @@ import { sendError } from '../error-envelope/index.js';
 import {
   type EdgeDeps,
   apiErrorFor,
+  createBackpressureGuard,
   createHttpHandlers,
   failWith,
   headerValue,
@@ -282,14 +283,37 @@ export function createWsEdge(deps: EdgeDeps): WsRequestListener {
 
     // `id` is never written back to a `WebSocket` — unlike `EventSource`, it carries no
     // implicit resume header, so the client's `after` is the only source of the resume
-    // point on any given connection (S11.4).
+    // point on any given connection (S11.4). `lastSeqWritten` exists only to give a dropped
+    // subscriber's gap envelope (#133) an honest `through`; set from `after` once
+    // `onFirstMessage` knows it, below.
+    let lastSeqWritten = 0;
+
+    // (#133) A subscriber that stops draining its socket is dropped once the backlog passes
+    // `caps.subscriberQueueHighWater`, with the same `replay_gap` shape
+    // `session-manager.subscribe`'s own catch-up buffering already reports — the live half
+    // that guard never covered. The gap frame itself bypasses the guard: the connection is
+    // closing regardless of whether this last write flushes.
+    const guardedWrite = createBackpressureGuard(socket, config.caps.subscriberQueueHighWater, () => {
+      if (!open) return;
+      const gap: Envelope = {
+        seq: lastSeqWritten as Seq,
+        sessionId,
+        ts: new Date().toISOString() as never,
+        kind: 'error',
+        data: { kind: 'replay_gap', message: 'the subscriber fell too far behind to keep delivering live', fatal: false },
+      } as Envelope;
+      writeTextFrame(socket, JSON.stringify(gap));
+      teardown();
+      writeCloseFrame(socket, 1000, 'dropped: too far behind');
+    });
     const sink = {
       // (D168, I51) A frame carries no `seq`, so it is distinguishable on the wire by
       // that field's absence rather than a wrapper of its own — the same JSON.stringify
       // as any envelope.
       deliver(envelope: Envelope | Frame): void {
         if (!open) return;
-        writeTextFrame(socket, JSON.stringify(envelope));
+        if ('seq' in envelope) lastSeqWritten = envelope.seq;
+        guardedWrite(encodeFrame(OPCODE_TEXT, Buffer.from(JSON.stringify(envelope), 'utf8')));
       },
       close(): void {
         if (!open) return;

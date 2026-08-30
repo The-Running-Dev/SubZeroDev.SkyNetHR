@@ -565,3 +565,85 @@ describe('S11.5 — the edge is chosen by configuration, and the client learns w
     assert.equal(((await res.json()) as { error: { code: string } }).error.code, 'bad_request');
   });
 });
+
+describe('#133 — a slow live subscriber is dropped past caps.subscriberQueueHighWater', () => {
+  it('a client that never reads is dropped with a replay_gap frame, and the server closes the connection', async () => {
+    const h = await makeSharedEdges(
+      undefined,
+      {
+        caps: {
+          ringCapacity: 500,
+          toolResultBytes: 65536,
+          subscriberQueueHighWater: 2, // low enough that a megabyte-scale undrained burst reliably crosses it
+          keepaliveMs: 15000,
+          auditPageMax: 200,
+          reviewBodyBytes: 1024,
+          requisitionTextBytes: 1024,
+          standingRuleBytes: 1024,
+          attachmentBytes: 10485760,
+          attachmentCount: 5,
+          sessionToolOutputBytes: 10485760,
+        },
+      },
+      'many-big',
+    );
+    const id = await newSession(h, 'w133-ws');
+
+    // The handshake by hand, deliberately never wrapped in `TestWsClient` — its constructor
+    // attaches a `'data'` listener immediately, which would drain the socket and defeat the
+    // whole point of this test. This socket is left paused until the assertions below.
+    // `head` is the first packet of the upgraded stream (Node's own client hands it back
+    // separately from the socket's later `'data'` events) — a live envelope can arrive in
+    // the same TCP segment as the 101 response itself, and losing those bytes desyncs
+    // every WS frame boundary parsed after them.
+    const { socket, head } = await new Promise<{ socket: Socket; head: Buffer }>((resolve, reject) => {
+      const url = new URL(`${h.wsBase}/api/sessions/${id}/events`);
+      const req = request({
+        host: url.hostname,
+        port: url.port,
+        path: url.pathname,
+        method: 'GET',
+        headers: {
+          connection: 'Upgrade',
+          upgrade: 'websocket',
+          origin: ALLOWED_ORIGIN,
+          'x-forwarded-user': 'ben',
+          'sec-websocket-version': '13',
+          'sec-websocket-key': randomBytes(16).toString('base64'),
+        },
+      });
+      req.on('upgrade', (_res, sock, upgradeHead: Buffer) => {
+        sockets.push(sock);
+        resolve({ socket: sock, head: upgradeHead });
+      });
+      req.on('error', reject);
+      req.end();
+    });
+    socket.write(encodeClientFrame(0x1, Buffer.from(JSON.stringify({ after: 0 }), 'utf8')));
+
+    await post(h.sseBase, `/api/sessions/${id}/message`, { text: 'go' });
+
+    // Same shape as the SSE half of this fix: the client has read nothing at all, so the
+    // server's own final write (the gap frame, then the WS close frame) cannot flush until
+    // draining starts — waiting for `'close'` first would deadlock against that.
+    const raw: Buffer[] = head.length > 0 ? [head] : [];
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error(`timed out waiting for the drop; saw ${raw.length} chunks`)), 20000);
+      timer.unref();
+      socket.on('data', (c: Buffer) => raw.push(c));
+      socket.on('close', () => {
+        clearTimeout(timer);
+        resolve();
+      });
+      socket.on('error', (err) => {
+        clearTimeout(timer);
+        reject(err);
+      });
+    });
+    const { frames } = parseServerFrames(Buffer.concat(raw));
+    const texts = frames.filter((f) => f.opcode === 0x1).map((f) => f.payload.toString('utf8'));
+    const gapFrame = texts.find((t) => t.includes('"kind":"replay_gap"'));
+    assert.ok(gapFrame, `a replay_gap envelope was delivered before the drop; saw ${texts.length} text frames`);
+    assert.match(gapFrame!, /"fatal":false/, 'the gap is reported non-fatal, same shape session-manager.subscribe mints');
+  });
+});
