@@ -89,10 +89,34 @@ function probeOk(executable: string, cwd: string, subcommand: string): boolean {
 // falls through to the next; if neither responds, the caller reports `agent_unavailable`
 // exactly as it would for a missing binary, because from here the two cases are
 // indistinguishable and D107 says they should be treated the same.
-function detectTransport(executable: string, cwd: string): Transport | null {
+function detectTransportUncached(executable: string, cwd: string): Transport | null {
   if (probeOk(executable, cwd, 'app-server')) return 'app-server';
   if (probeOk(executable, cwd, 'exec')) return 'exec';
   return null;
+}
+
+// (#134) A real deployment names one executable for its whole life, so a result probed
+// once is valid for every session after it — re-probing inside every `manager.create`
+// (up to two 2-second `spawnSync` calls) stalled the single-threaded server for every
+// other operator waiting on an unrelated session. Keyed on `(executable, cwd)`, the same
+// two inputs `detectTransportUncached` already takes, so this changes nothing about what
+// is detected — only how many times.
+const transportCache = new Map<string, Transport | null>();
+
+function detectTransport(executable: string, cwd: string): Transport | null {
+  const key = JSON.stringify([executable, cwd]);
+  if (transportCache.has(key)) return transportCache.get(key)!;
+  const detected = detectTransportUncached(executable, cwd);
+  transportCache.set(key, detected);
+  return detected;
+}
+
+// Test seam only: a real deployment never needs this, because its executable's transport
+// never changes mid-process — but a test that toggles the fixture's own behaviour (e.g.
+// `SKYNET_CODEX_NO_APP_SERVER`) against the *same* executable path needs a fresh probe per
+// case, not the first case's cached answer.
+export function resetCodexTransportCacheForTests(): void {
+  transportCache.clear();
 }
 
 // Notification methods observed on a real `codex app-server 0.146.0` session

@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { appendFileSync } from 'node:fs';
 // A deterministic stand-in for the real `codex` binary. Speaks both transports this
 // adapter drives — `app-server`'s JSON-RPC 2.0 over stdio, and `exec --json`'s
 // NDJSON-on-stdout one-shot — with shapes verified against the installed
@@ -15,6 +16,11 @@ const subcommand = args[0];
 const scenario = process.env.SKYNET_CODEX_SCENARIO ?? 'full';
 
 if (args[1] === '--help') {
+  // (#134) A caching regression can only be told apart from a correct re-probe-every-time
+  // by counting how many times this actually ran — an external, append-only log rather
+  // than an in-process counter, since each probe is its own child process with no memory
+  // of the last one.
+  if (process.env.SKYNET_CODEX_PROBE_LOG) appendFileSync(process.env.SKYNET_CODEX_PROBE_LOG, subcommand + '\n');
   if (subcommand === 'app-server' && process.env.SKYNET_CODEX_NO_APP_SERVER === '1') process.exit(1);
   process.exit(0);
 }

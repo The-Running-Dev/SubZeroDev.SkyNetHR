@@ -1,11 +1,11 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { mkdtemp, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
 import { promisify } from 'node:util';
-import { createCodexAdapter } from './index.js';
+import { createCodexAdapter, resetCodexTransportCacheForTests } from './index.js';
 import { createAdapter } from '../index.js';
 import type { AdapterNotification } from '../../contract/index.js';
 
@@ -14,6 +14,12 @@ const execFileAsync = promisify(execFile);
 const FIXTURE = path.join(process.cwd(), 'src', 'adapters', 'codex', 'fixtures', 'fake-codex-cli.mjs');
 
 function makeAdapter(sandbox: 'read-only' | 'workspace-write' | 'unrestricted' = 'workspace-write') {
+  // (#134) Transport detection is now cached per (executable, cwd) for the life of the
+  // process — every test here reuses the same FIXTURE path, and several toggle
+  // SKYNET_CODEX_NO_APP_SERVER between cases to force a different transport out of that
+  // same fixture. Without a fresh probe per call, the first test's cached result would
+  // silently answer every test after it.
+  resetCodexTransportCacheForTests();
   const notifications: AdapterNotification[] = [];
   const result = createCodexAdapter({
     executable: FIXTURE,
@@ -24,6 +30,14 @@ function makeAdapter(sandbox: 'read-only' | 'workspace-write' | 'unrestricted' =
     streamDeltas: false,
   });
   return { result, notifications };
+}
+
+async function readFileOrEmpty(filePath: string): Promise<string> {
+  try {
+    return await readFile(filePath, 'utf8');
+  } catch {
+    return '';
+  }
 }
 
 async function waitUntil(predicate: () => boolean, timeoutMs = 5000): Promise<void> {
@@ -249,6 +263,59 @@ test('S8.5 — exec fallback: an unrecognised record type is a fatal schema mism
   if (sendResult.ok) return;
   assert.equal(sendResult.error.code, 'schema_mismatch');
   delete process.env['SKYNET_CODEX_NO_APP_SERVER'];
+});
+
+// #134: transport detection is probed once per (executable, cwd) and cached, not re-run
+// inside every createCodexAdapter call — a real deployment names one executable for its
+// whole life, and the pre-fix probe (up to two 2s spawnSync calls) stalled the
+// single-threaded server for every other operator on every session create.
+test('#134 — detectTransport is probed once for a given (executable, cwd), not once per createCodexAdapter call', async () => {
+  delete process.env['SKYNET_CODEX_NO_APP_SERVER'];
+  const dir = await mkdtemp(path.join(tmpdir(), 'skynet-codex-probe-'));
+  const probeLog = path.join(dir, 'probes.log');
+  process.env['SKYNET_CODEX_PROBE_LOG'] = probeLog;
+  resetCodexTransportCacheForTests();
+
+  const first = createCodexAdapter({
+    executable: FIXTURE,
+    cwd: process.cwd() as never,
+    model: null,
+    sandbox: 'workspace-write',
+    notify: () => {},
+    streamDeltas: false,
+  });
+  assert.equal(first.ok, true);
+  const afterFirst = (await readFileOrEmpty(probeLog)).split('\n').filter((l) => l.length > 0);
+  assert.ok(afterFirst.length >= 1, 'the first call actually probed');
+
+  const second = createCodexAdapter({
+    executable: FIXTURE,
+    cwd: process.cwd() as never,
+    model: null,
+    sandbox: 'workspace-write',
+    notify: () => {},
+    streamDeltas: false,
+  });
+  assert.equal(second.ok, true);
+  const afterSecond = (await readFileOrEmpty(probeLog)).split('\n').filter((l) => l.length > 0);
+  assert.deepEqual(afterSecond, afterFirst, 'a second call against the same (executable, cwd) probed nothing new');
+
+  // A different cwd is a different cache key — detection runs again, proving this is a
+  // real cache keyed on the inputs, not a probe that has simply stopped running at all.
+  const otherDir = await mkdtemp(path.join(tmpdir(), 'skynet-codex-probe-other-'));
+  const third = createCodexAdapter({
+    executable: FIXTURE,
+    cwd: otherDir as never,
+    model: null,
+    sandbox: 'workspace-write',
+    notify: () => {},
+    streamDeltas: false,
+  });
+  assert.equal(third.ok, true);
+  const afterThird = (await readFileOrEmpty(probeLog)).split('\n').filter((l) => l.length > 0);
+  assert.ok(afterThird.length > afterSecond.length, 'a different cwd is probed fresh, not served from the first cwd\'s cache');
+
+  delete process.env['SKYNET_CODEX_PROBE_LOG'];
 });
 
 test('createCodexAdapter refuses when neither transport responds', () => {
