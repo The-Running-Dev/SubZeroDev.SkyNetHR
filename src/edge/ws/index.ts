@@ -71,8 +71,9 @@ const DEFAULT_FIRST_FRAME_DEADLINE_MS = 10_000;
 // Test seam only, never read from `Config`/`20-contract.md` (a real deadline this short
 // would be indistinguishable from ordinary network jitter for a genuine client) — read
 // per upgrade, not cached at module load, so a test can set it before its own request.
-// Mirrors the existing `SKYNET_CLAUDE_EXECUTABLE`/`SKYNET_CODEX_EXECUTABLE` pattern for
-// timing- or path-sensitive behavior under test without adding a public config surface.
+// Mirrors the per-adapter executable-override env vars in `adapters/*` (I20 keeps their
+// names out of this comment) for timing- or path-sensitive behavior under test without
+// adding a public config surface.
 function firstFrameDeadlineMs(): number {
   const override = process.env['SKYNET_WS_FIRST_FRAME_DEADLINE_MS'];
   if (override === undefined) return DEFAULT_FIRST_FRAME_DEADLINE_MS;

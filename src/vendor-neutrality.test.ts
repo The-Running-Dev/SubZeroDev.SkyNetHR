@@ -3,11 +3,12 @@ import { readFile, readdir } from 'node:fs/promises';
 import path from 'node:path';
 import { test } from 'node:test';
 
-// S1.10 (I20) — no module above `adapters/*` may branch on a vendor string. The
-// restricted set is exactly the five named in the criterion; `adapters/*` itself is
-// exempt (it is the one module allowed to know a vendor exists). Test sources are
-// excluded: the criterion is about the shipped modules' control flow, not fixtures.
-const RESTRICTED_DIRS = ['config', 'jail', 'store', 'session-manager', 'contract'];
+// S1.10/I20 says "no module above `adapters/*`" — not just the five S1.10 happened to
+// name; `edge/*` sits above `adapters/*` too and is scanned for the same reason (#238).
+// `adapters/*` itself is exempt (it is the one module allowed to know a vendor exists).
+// Test sources are excluded: the criterion is about the shipped modules' control flow,
+// not fixtures.
+const RESTRICTED_DIRS = ['config', 'jail', 'store', 'session-manager', 'contract', 'edge'];
 
 async function tsFilesUnder(dir: string): Promise<string[]> {
   const entries = await readdir(dir, { withFileTypes: true });
