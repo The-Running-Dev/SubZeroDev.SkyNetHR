@@ -4431,6 +4431,63 @@ Rejected: reopening the question. D40 already settled it; nothing found while ch
 against the criterion counts as new evidence (`AGENTS.md § Budget discipline`).
 Reversibility: cheap. One sentence in one slice criterion; no behaviour moves.
 
+### 2026-08-30 — D192 Kit sync (d57880d→5095a55): design-state mechanism un-skipped, two tool divergences resolved kit's-way
+Context: `/kit-sync` against `SubZeroDev.AgentKit` (previously synced tools/commands at `d57880d`,
+12 commits behind at `5095a55`). The kit's current `track.md` core now unconditionally runs
+`tools/Update-DesignProjection.ps1` after the work-mirror refresh and commits mirror+projection
+straight to `main` under a new `AGENTS.md` carve-out — but `D188`/`D189` had deliberately skipped
+that script (and `Read-DesignState.ps1`, `Test-DesignState.ps1`, `Test-CIWorkflow.Tests.ps1`),
+matching `D164`'s precedent for `Start-AgentSession.ps1`. Taking `track.md`'s core outright, as
+`.claude/COMPANIONS.md` requires with no per-repo reconciliation, would have made `/track` invoke
+a script this repository does not have. Separately, `Sync-Kit.ps1` found two non-core tools had
+diverged in both directions: `tools/Invoke-DoneHousekeeping.ps1` (kit added a
+`TipAheadOfMergedPr` safety check verifying a branch's local tip against the merged PR's
+`headRefOid` before force-delete, with tests; this repository independently fixed a stale
+`$Matches` bug, #228, with its own regression test) and `tools/Update-WorkMirror.ps1` (kit added
+re-fetching closed issues individually so their `WorkRef` never sticks at `OPEN`, plus a
+write-only-if-changed optimization; this repository independently added two small correctness
+fixes — a single-element array unwrap via the comma operator in `Get-IssueCriteriaIds`, and no
+trailing space on an empty `Criteria:` line).
+Chosen, one per fork:
+- **Reversed `D188`/`D189`'s scope decision and adopted the full design-state mechanism**, on new
+  evidence: the kit's own `/track` now structurally depends on `Update-DesignProjection.ps1` to
+  satisfy the direct-to-main carve-out, and this repository already carries the exact PR-churn
+  loop that carve-out exists to break (`Refresh work mirror after /track run`, #234). Installed
+  `Read-DesignState.ps1`, `Test-DesignState.ps1`, `Update-DesignProjection.ps1` (+ their `.Tests.ps1`),
+  `Test-CIWorkflow.Tests.ps1`, `Test-RecordWritingSequenceCitation.Tests.ps1` and
+  `Test-TrackCommand.Tests.ps1`; added `AGENTS.md § Writing a design-state record` and the
+  direct-to-main exception clause in *Git and delivery* the new tests and `track.md`'s core both
+  assume. `design/state/{units,invariants,contracts,decisions,questions}` remain unpopulated and
+  `design/20-contract.md` still has no `§ Marked regions` section defining the schema — the
+  tooling is adopted, not the record set itself. That population, and the contract schema section,
+  is `/contract`'s or `/design`'s to do, not a routine sync's.
+- **Took the kit's `Invoke-DoneHousekeeping.ps1` and `Update-WorkMirror.ps1` verbatim**, against my
+  recommendation to merge — the user chose simplicity over preserving both sides. This discards
+  #228's stale-`$Matches` fix (reintroducing that bug) and the two `Update-WorkMirror.ps1`
+  correctness fixes. Adopted the matching `AGENTS.md` paragraph widening force-delete delegation
+  to squash-merged branches on the `TipAheadOfMergedPr` evidence, consistent with taking the tool
+  outright.
+- **Adopted `AGENTS.md`'s `AGENTKIT_TIER` stamp-first tier resolution, the `/next` row and command,
+  and the `Hard rules` section's reordering** (moved earlier, right after *Model, effort, and
+  review budget*, matching the kit) — pure additions/reorg, no local content lost.
+- **Left the dropped `design/20-contract.md § Marked regions` cross-reference dropped**, per
+  `D188` — that section still does not exist in this repository's contract, and adopting the
+  design-state tooling above does not by itself write it.
+- **Noted a `Sync-Kit.ps1` defect**: a kit-owned file present unchanged in the kit since the
+  target's recorded sync sha, but that the target never had on disk, is invisible to the script's
+  report — it falls into the `NoUpstreamChange` branch without ever checking target existence.
+  Affected `Read-DesignState.ps1`, `Read-DesignState.Tests.ps1`, `Update-DesignProjection.ps1` and
+  `Test-CIWorkflow.Tests.ps1` this run; copied by hand instead of relying on the script. Not filed
+  as an issue here — it is a defect in `SubZeroDev.AgentKit`, a repository this entry does not
+  own reporting into.
+Rejected: keeping `D188`/`D189`'s skip (my recommendation) — would have shipped a `/track` whose
+core calls a missing script. Merging both tool files instead of taking the kit's version outright
+(my recommendation) — declined in favour of the simpler, kit-verbatim option.
+Reversibility: mixed. The design-state adoption is cheap to reverse — tooling and prose only, no
+product code, and no `design/state/` records depend on it yet. The tool-file choice is the more
+expensive one to notice going wrong: #228's bug and the two `Update-WorkMirror.ps1` fixes are gone
+silently until someone rediscovers them.
+
 ## Open
 
 Staging only. Once an item becomes an issue it leaves this list.

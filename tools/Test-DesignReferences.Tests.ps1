@@ -101,20 +101,24 @@ Describe 'Test-DesignReferences' {
         (Get-DesignReferenceExitCode -State $result.State) | Should -Be 1
     }
 
-    It 'is Valid for this repository''s current five citations - each is conditional on design/state/''s record mechanism, which this repository has not adopted (D188)' {
-        # Not a fixture: the real repository root, one level up from tools/. This repository's
-        # design/state/work/ is /track's WorkRef mirror only - no units/invariants/contracts/
-        # decisions/questions directory exists - so all five citations are skipped rather than
-        # required to resolve. If this repository later adopts the record mechanism, or if
-        # /design writes § Record and § Orient outright, this test starts failing - which is
-        # correct, since it would mean the shape this test describes is stale.
+    It 'is Valid for this repository''s current two citations - each is conditional on design/state/''s record mechanism, which carries no units/invariants/contracts/decisions/questions directory yet (D192)' {
+        # Not a fixture: the real repository root, one level up from tools/. D192 (kit sync,
+        # 2026-08-30) took contract.md, design.md and reconcile.md as cores outright from the
+        # kit, which now cite `AGENTS.md § Writing a design-state record` directly (upstream
+        # issue #44) instead of `design/10-design.md` § *Record*/*Orient* - the fix
+        # Test-RecordWritingSequenceCitation.Tests.ps1 checks for. Only fix.md and slice.md
+        # still carry the old `design/10-design.md` § *Orient* citation this script parses;
+        # both are skipped rather than required to resolve, since design/state/'s record-kind
+        # directories remain unpopulated. If this repository later populates one, or if these
+        # two files are also rewritten to cite AGENTS.md directly, this test starts failing -
+        # which is correct, since it would mean the shape this test describes is stale.
         $repoRoot = Resolve-Path (Join-Path $PSScriptRoot '..')
 
         $result = Invoke-DesignReferenceCheck -TargetRepo $repoRoot
 
         $result.State | Should -Be 'Valid'
         $result.Findings.Count | Should -Be 0
-        $result.CitationCount | Should -Be 5
+        $result.CitationCount | Should -Be 2
     }
 
     It 'skips a conditional citation when design/state/ has no adopted record-kind directory' {
