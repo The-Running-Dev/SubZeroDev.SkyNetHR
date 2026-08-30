@@ -1011,6 +1011,15 @@ describe('#133 — a slow live subscriber is dropped past caps.subscriberQueueHi
 
     await post(h, `/api/sessions/${id}/message`, { text: 'go' });
 
+    // #246: withhold reading for a fixed real-time window before draining at all.
+    // Production speed is not reliable across environments — CI's Windows runner has been
+    // observed delivering the burst as a slow trickle an actively-draining client can keep
+    // pace with indefinitely, regardless of total volume. TCP flow control only closes the
+    // window when nothing reads it, whatever the peer's write rate; a fixed real delay with
+    // zero consumption forces genuine backpressure everywhere the fast-burst assumption
+    // this scenario used to rely on alone did not.
+    await new Promise((resolve) => setTimeout(resolve, 3000).unref());
+
     // The burst is megabytes and the client has read nothing at all yet, so by the time
     // this resolves the server has already forced real backpressure and, past a
     // high-water mark of 2, dropped the subscriber — writing the gap frame and calling
