@@ -322,7 +322,7 @@ export function createHttpHandlers(deps: EdgeDeps) {
     // ahead of the jail, the workspace claim and the requisition claim instead of behind
     // all three.
     if (typeof body['vendor'] !== 'string' || !VENDORS.includes(body['vendor'] as Vendor)) {
-      return sendError(res, 'bad_request', 'vendor must be one of claude, codex', { field: 'vendor' });
+      return sendError(res, 'bad_request', `vendor must be one of ${VENDORS.join(', ')}`, { field: 'vendor' });
     }
     const model = body['model'] ?? null;
     if (model !== null && typeof model !== 'string') {
@@ -614,7 +614,7 @@ export function createHttpHandlers(deps: EdgeDeps) {
       return sendError(res, 'bad_request', 'workspace is required', { field: 'workspace' });
     }
     if (typeof body['vendor'] !== 'string' || !VENDORS.includes(body['vendor'] as Vendor)) {
-      return sendError(res, 'bad_request', 'vendor must be one of claude, codex', { field: 'vendor' });
+      return sendError(res, 'bad_request', `vendor must be one of ${VENDORS.join(', ')}`, { field: 'vendor' });
     }
 
     const raised = await deps.records.raise(owner, {
