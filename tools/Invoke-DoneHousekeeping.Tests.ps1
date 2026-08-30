@@ -32,6 +32,42 @@ BeforeAll {
         & git -C $RepoPath -c user.email='test@example.com' -c user.name='Test' merge --no-ff --quiet feature/foo -m 'merge feature/foo' | Out-Null
         & git -C $RepoPath worktree add --quiet $WorktreePath feature/foo *>$null
     }
+
+    function New-UnmergedBranch {
+        # A branch with a commit that never lands on main, so `git branch --merged` cannot
+        # confirm it and it falls through to the squash-merge cross-check - the only path
+        # where the headRefOid comparison runs.
+        param([Parameter(Mandatory)][string] $RepoPath, [Parameter(Mandatory)][string] $Branch)
+        & git -C $RepoPath checkout --quiet -b $Branch | Out-Null
+        & git -C $RepoPath -c user.email='test@example.com' -c user.name='Test' commit --allow-empty --quiet -m 'squashed work' | Out-Null
+        & git -C $RepoPath checkout --quiet main | Out-Null
+        (& git -C $RepoPath rev-parse $Branch).Trim()
+    }
+
+    function New-FakeGh {
+        # Invoke-DoneHousekeeping.ps1 shells out to `gh` directly, so there is no seam to
+        # Mock - it is invoked end-to-end via `&`. Put a stub named `gh` first on PATH
+        # instead: PowerShell resolves a bare `gh` through PATH and will run a .ps1 found
+        # there. The stub answers only the merged-PR query the script makes, from two
+        # environment variables the test sets.
+        param([Parameter(Mandatory)][string] $BinDir)
+        New-Item -ItemType Directory -Path $BinDir -Force | Out-Null
+        $stub = @'
+param()
+$argv = $args
+$headIdx = [array]::IndexOf($argv, '--head')
+$branch = if ($headIdx -ge 0) { $argv[$headIdx + 1] } else { $null }
+if ($branch -and $branch -eq $env:FAKE_GH_BRANCH) {
+    $oid = $env:FAKE_GH_HEAD_OID
+    Write-Output "[{""number"":1,""url"":""https://example.invalid/pr/1"",""mergeCommit"":{""oid"":""abc123""},""headRefOid"":""$oid""}]"
+} else {
+    Write-Output '[]'
+}
+exit 0
+'@
+        Set-Content -LiteralPath (Join-Path $BinDir 'gh.ps1') -Value $stub -Encoding utf8NoBOM
+        $BinDir
+    }
 }
 
 Describe 'Invoke-DoneHousekeeping' {
@@ -81,44 +117,63 @@ Describe 'Invoke-DoneHousekeeping' {
         }
     }
 
-    Context 'resolving the default branch from git remote show origin' {
+    Context 'a squash-merged branch, cross-checked against the merged PR head' {
 
-        It 'resolves the first HEAD branch line, not whichever one a collection -match happens to leave in $Matches' {
-            # A single matching line collapses to a scalar via PowerShell's own pipeline
-            # unwrapping, so -match on it sets $Matches correctly even with the bug present -
-            # that edge case alone would not catch the regression. The real failure needs
-            # $headLine to stay a genuine array (2+ matching lines): `-match` against a
-            # collection only filters, it never sets $Matches, so the buggy resolver reads
-            # whatever $Matches was last left holding by Where-Object's OWN internal -match
-            # calls while filtering - the LAST matching line, not deterministically the real
-            # HEAD branch line. `git remote show origin` never emits two "HEAD branch:" lines
-            # on its own, so shim `git` for that one subcommand to force the array, and pass
-            # every other invocation straight through to the real binary so the rest of the
-            # script still exercises a real repo.
-            function git {
-                # Invoke-Git always prepends '-C', $WorkingDir ahead of the real
-                # subcommand, so match on the trailing args rather than a fixed index.
-                if (($args -join ' ') -match 'remote show origin$') {
-                    "* remote origin"
-                    "  HEAD branch: main"
-                    "  HEAD branch: stale-old-branch"
-                    return
-                }
-                & git.exe @args
-            }
+        BeforeEach {
+            $script:SavedPath = $env:PATH
+            $script:Bin = New-FakeGh -BinDir (Join-Path $TestDrive ([guid]::NewGuid().ToString('n')))
+            $env:PATH = "$script:Bin$([IO.Path]::PathSeparator)$env:PATH"
+            $env:FAKE_GH_BRANCH = 'fix/squashed'
+        }
 
-            $repo = New-GitRepo -Path (Join-Path $TestDrive 'repo-defaultbranch')
+        AfterEach {
+            $env:PATH = $script:SavedPath
+            Remove-Item Env:FAKE_GH_BRANCH -ErrorAction SilentlyContinue
+            Remove-Item Env:FAKE_GH_HEAD_OID -ErrorAction SilentlyContinue
+        }
 
-            # Seed $Matches with stale data from an unrelated regex match, mimicking a match
-            # that ran earlier in the same process - e.g. Get-WorktreeBlockingPath's own
-            # "used by worktree at '...'" pattern, or a PowerShell profile's git-branch prompt.
-            # (Where-Object's own filtering overwrites this before the buggy line even runs -
-            # the two distinct HEAD-branch lines above are what actually exposes the defect.)
-            $null = "used by worktree at '/some/unrelated/path'" -match "used by worktree at '([^']+)'"
+        It 'is a force-delete candidate when the local tip is exactly the head that merged' {
+            $repo = New-GitRepo -Path (Join-Path $TestDrive 'repo-tip-match')
+            $env:FAKE_GH_HEAD_OID = New-UnmergedBranch -RepoPath $repo -Branch 'fix/squashed'
 
-            $result = & $script:ScriptPath -RepoRoot $repo -SkipPull
+            $result = & $script:ScriptPath -RepoRoot $repo -DefaultBranch main -SkipPull
 
-            $result.DefaultBranch | Should -Be 'main'
+            @($result.SquashMergeCandidates | ForEach-Object Branch) | Should -Contain 'fix/squashed'
+            @($result.TipAheadOfMergedPr | ForEach-Object Branch) | Should -Not -Contain 'fix/squashed'
+        }
+
+        It 'is NOT a force-delete candidate when commits sit on top of the merged head' {
+            $repo = New-GitRepo -Path (Join-Path $TestDrive 'repo-tip-ahead')
+            $mergedHead = New-UnmergedBranch -RepoPath $repo -Branch 'fix/squashed'
+            $env:FAKE_GH_HEAD_OID = $mergedHead
+            # One more commit after the PR merged - the exact case `gh pr list --head` still
+            # reports as merged and `-D` would silently discard.
+            & git -C $repo checkout --quiet 'fix/squashed' | Out-Null
+            & git -C $repo -c user.email='test@example.com' -c user.name='Test' commit --allow-empty --quiet -m 'after the merge' | Out-Null
+            & git -C $repo checkout --quiet main | Out-Null
+
+            $result = & $script:ScriptPath -RepoRoot $repo -DefaultBranch main -SkipPull
+
+            @($result.SquashMergeCandidates | ForEach-Object Branch) | Should -Not -Contain 'fix/squashed'
+            $ahead = $result.TipAheadOfMergedPr | Where-Object Branch -eq 'fix/squashed'
+            $ahead | Should -Not -BeNullOrEmpty
+            $ahead.MergedHead | Should -Be $mergedHead
+            $ahead.Reason | Should -Match 'no merged PR accounts for'
+        }
+
+        It 'refuses -ForceDeleteBranches for a branch whose tip is ahead of the merged head' {
+            $repo = New-GitRepo -Path (Join-Path $TestDrive 'repo-tip-ahead-force')
+            $env:FAKE_GH_HEAD_OID = New-UnmergedBranch -RepoPath $repo -Branch 'fix/squashed'
+            & git -C $repo checkout --quiet 'fix/squashed' | Out-Null
+            & git -C $repo -c user.email='test@example.com' -c user.name='Test' commit --allow-empty --quiet -m 'after the merge' | Out-Null
+            & git -C $repo checkout --quiet main | Out-Null
+
+            $result = & $script:ScriptPath -RepoRoot $repo -DefaultBranch main -SkipPull -ForceDeleteBranches 'fix/squashed'
+
+            $result.Deleted | Should -Not -Contain 'fix/squashed'
+            (& git -C $repo rev-parse --verify 'fix/squashed' 2>$null) | Should -Not -BeNullOrEmpty
+            $refusal = $result.Refused | Where-Object Branch -eq 'fix/squashed'
+            $refusal | Should -Not -BeNullOrEmpty
         }
     }
 }
