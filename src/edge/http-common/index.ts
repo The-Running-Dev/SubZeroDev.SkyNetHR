@@ -53,6 +53,41 @@ export const STATIC: ReadonlyMap<string, { readonly file: string; readonly type:
 
 export const CLIENT_DIR = new URL('../../../client/', import.meta.url);
 
+// (#133) A subscriber that never drains its write buffer today just backs this process up
+// in memory forever, with no signal to either side that anything is wrong. `write`'s return
+// value is the transport-agnostic backpressure signal both `ServerResponse` and `Socket`
+// share (Node's `Writable` contract): `false` means the chunk queued rather than flushed,
+// and `'drain'` is the only event that means the queue is actually empty again — resetting
+// the counter on every `write()` that happens to return `true` would undercount a buffer
+// that dips below its high-water mark without ever fully draining. `highWater` is the same
+// `caps.subscriberQueueHighWater` `session-manager.subscribe`'s own catch-up buffering
+// already enforces; this is the live-delivery half neither edge previously had.
+export interface BackpressureGuardedStream {
+  write(chunk: string | Uint8Array): boolean;
+  on(event: 'drain', listener: () => void): unknown;
+}
+
+export function createBackpressureGuard(
+  stream: BackpressureGuardedStream,
+  highWater: number,
+  onDrop: () => void,
+): (chunk: string | Uint8Array) => void {
+  let queuedSinceDrain = 0;
+  let dropped = false;
+  stream.on('drain', () => {
+    queuedSinceDrain = 0;
+  });
+  return (chunk: string | Uint8Array): void => {
+    if (dropped) return;
+    if (stream.write(chunk)) return;
+    queuedSinceDrain += 1;
+    if (queuedSinceDrain > highWater) {
+      dropped = true;
+      onDrop();
+    }
+  };
+}
+
 export function sendJson(res: ServerResponse, status: number, body: unknown): void {
   res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'x-content-type-options': 'nosniff' });
   res.end(JSON.stringify(body));

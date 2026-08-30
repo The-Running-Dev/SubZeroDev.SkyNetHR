@@ -4,6 +4,7 @@ import { isFrame } from '../../contract/index.js';
 import { sendError } from '../error-envelope/index.js';
 import {
   type EdgeDeps,
+  createBackpressureGuard,
   createHttpHandlers,
   failWith,
   headerValue,
@@ -135,6 +136,25 @@ export function createSseEdge(deps: EdgeDeps): RequestListener {
     // anything would otherwise stamp the gap's seq as the resume point, and the next
     // reconnect would start past the history this one failed to serve.
     let lastIdWritten = after as number;
+
+    // (#133) A subscriber that stops draining its socket is dropped once the backlog
+    // passes `caps.subscriberQueueHighWater`, with the same `replay_gap` shape
+    // `session-manager.subscribe`'s own catch-up buffering already reports — the live half
+    // that guard never covered. The gap frame itself bypasses the guard: the connection is
+    // closing regardless of whether this last write flushes.
+    const guardedWrite = createBackpressureGuard(res, config.caps.subscriberQueueHighWater, () => {
+      if (!open) return;
+      const gap: Envelope = {
+        seq: lastIdWritten as Seq,
+        sessionId,
+        ts: new Date().toISOString() as never,
+        kind: 'error',
+        data: { kind: 'replay_gap', message: 'the subscriber fell too far behind to keep delivering live', fatal: false },
+      } as Envelope;
+      res.write(`id: ${lastIdWritten}\nevent: error\ndata: ${JSON.stringify(gap)}\n\n`);
+      teardown();
+      if (!res.writableEnded) res.end();
+    });
     const sink = {
       deliver(envelope: Envelope | Frame): void {
         if (!open) return;
@@ -146,13 +166,13 @@ export function createSseEdge(deps: EdgeDeps): RequestListener {
         // client's resume point must be unchanged by receiving one, since no store holds
         // it to resume from.
         if (isFrame(envelope)) {
-          res.write(`event: ${envelope.kind}\ndata: ${JSON.stringify(envelope)}\n\n`);
+          guardedWrite(`event: ${envelope.kind}\ndata: ${JSON.stringify(envelope)}\n\n`);
           return;
         }
         const advances = envelope.seq > lastIdWritten;
         if (advances) lastIdWritten = envelope.seq;
         const id = advances ? `id: ${envelope.seq}\n` : '';
-        res.write(`${id}event: ${envelope.kind}\ndata: ${JSON.stringify(envelope)}\n\n`);
+        guardedWrite(`${id}event: ${envelope.kind}\ndata: ${JSON.stringify(envelope)}\n\n`);
       },
       close(): void {
         if (!open) return;
