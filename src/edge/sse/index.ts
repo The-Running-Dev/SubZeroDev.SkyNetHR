@@ -217,7 +217,7 @@ export function createSseEdge(deps: EdgeDeps): RequestListener {
         }
 
         // The login exchange is what mints the credential, so it cannot require one.
-        if (method === 'POST' && pathname === '/api/login') return handleLogin(req, res);
+        if (method === 'POST' && pathname === '/api/login') return await handleLogin(req, res);
 
         const owner = resolveOperator(req, res, identity);
         if (owner === null) return;
@@ -226,45 +226,45 @@ export function createSseEdge(deps: EdgeDeps): RequestListener {
           return sendJson(res, 200, { sessions: manager.list(owner) });
         }
         if (method === 'POST' && pathname === '/api/sessions') {
-          return handleCreate(req, res, owner);
+          return await handleCreate(req, res, owner);
         }
         if (method === 'GET' && pathname === '/api/audit') {
-          return handleAudit(req, res);
+          return await handleAudit(req, res);
         }
         if (method === 'GET' && pathname === '/api/requisitions') {
-          return handleListRequisitions(req, res);
+          return await handleListRequisitions(req, res);
         }
         if (method === 'POST' && pathname === '/api/requisitions') {
-          return handleRaiseRequisition(req, res, owner);
+          return await handleRaiseRequisition(req, res, owner);
         }
 
         const requisitionRoute = /^\/api\/requisitions\/([^/]+)\/decision$/.exec(pathname);
         if (method === 'POST' && requisitionRoute !== null) {
           const decoded = decodeSegment(res, requisitionRoute[1]!, 'requisition id', 'requisitionId');
           if (decoded === null) return;
-          return handleDecideRequisition(req, res, owner, decoded as RequisitionId);
+          return await handleDecideRequisition(req, res, owner, decoded as RequisitionId);
         }
 
         if (method === 'GET' && pathname === '/api/reviews') {
-          return handleListReviews(req, res);
+          return await handleListReviews(req, res);
         }
         if (method === 'POST' && pathname === '/api/reviews') {
-          return handleCreateReview(req, res, owner);
+          return await handleCreateReview(req, res, owner);
         }
 
         const reviewFinaliseRoute = /^\/api\/reviews\/([^/]+)\/finalise$/.exec(pathname);
         if (method === 'POST' && reviewFinaliseRoute !== null) {
           const decoded = decodeSegment(res, reviewFinaliseRoute[1]!, 'review id', 'reviewId');
           if (decoded === null) return;
-          return handleFinaliseReview(req, res, owner, decoded as ReviewId);
+          return await handleFinaliseReview(req, res, owner, decoded as ReviewId);
         }
 
         const reviewRoute = /^\/api\/reviews\/([^/]+)$/.exec(pathname);
         if (reviewRoute !== null) {
           const decoded = decodeSegment(res, reviewRoute[1]!, 'review id', 'reviewId');
           if (decoded === null) return;
-          if (method === 'POST') return handleAppendReview(req, res, owner, decoded as ReviewId);
-          if (method === 'GET') return handleGetReview(req, res, owner, decoded as ReviewId);
+          if (method === 'POST') return await handleAppendReview(req, res, owner, decoded as ReviewId);
+          if (method === 'GET') return await handleGetReview(req, res, owner, decoded as ReviewId);
         }
 
         const sessionRoute = /^\/api\/sessions\/([^/]+)(\/[^?]*)?$/.exec(pathname);
@@ -273,29 +273,29 @@ export function createSseEdge(deps: EdgeDeps): RequestListener {
           if (decoded === null) return;
           const sessionId = decoded as SessionId;
           const rest = sessionRoute[2] ?? '';
-          if (method === 'POST' && rest === '/message') return handleMessage(req, res, owner, sessionId);
-          if (method === 'POST' && rest === '/permission') return handlePermission(req, res, owner, sessionId);
-          if (method === 'POST' && rest === '/interrupt') return handleInterrupt(req, res, owner, sessionId);
-          if (method === 'POST' && rest === '/end') return handleEnd(req, res, owner, sessionId);
-          if (method === 'POST' && rest === '/checkpoint/restore') return handleCheckpointRestore(req, res, owner, sessionId);
-          if (method === 'DELETE' && rest === '') return handleDelete(req, res, owner, sessionId);
-          if (method === 'GET' && rest === '/events') return handleEvents(req, res, owner, sessionId);
-          if (method === 'GET' && rest === '/checkpoints') return handleListCheckpoints(req, res, owner, sessionId);
-          if (method === 'GET' && rest === '/checklist') return handleChecklist(req, res, owner, sessionId);
+          if (method === 'POST' && rest === '/message') return await handleMessage(req, res, owner, sessionId);
+          if (method === 'POST' && rest === '/permission') return await handlePermission(req, res, owner, sessionId);
+          if (method === 'POST' && rest === '/interrupt') return await handleInterrupt(req, res, owner, sessionId);
+          if (method === 'POST' && rest === '/end') return await handleEnd(req, res, owner, sessionId);
+          if (method === 'POST' && rest === '/checkpoint/restore') return await handleCheckpointRestore(req, res, owner, sessionId);
+          if (method === 'DELETE' && rest === '') return await handleDelete(req, res, owner, sessionId);
+          if (method === 'GET' && rest === '/events') return await handleEvents(req, res, owner, sessionId);
+          if (method === 'GET' && rest === '/checkpoints') return await handleListCheckpoints(req, res, owner, sessionId);
+          if (method === 'GET' && rest === '/checklist') return await handleChecklist(req, res, owner, sessionId);
           const checklistTickMatch = /^\/checklist\/([^/]+)$/.exec(rest);
           if (method === 'POST' && checklistTickMatch !== null) {
             const decodedItemId = decodeSegment(res, checklistTickMatch[1]!, 'itemId', 'itemId');
             if (decodedItemId === null) return;
-            return handleTickChecklistItem(req, res, owner, sessionId, decodedItemId as ChecklistItemId);
+            return await handleTickChecklistItem(req, res, owner, sessionId, decodedItemId as ChecklistItemId);
           }
-          if (method === 'GET' && rest === '/payroll') return handlePayroll(req, res, owner, sessionId);
+          if (method === 'GET' && rest === '/payroll') return await handlePayroll(req, res, owner, sessionId);
           const toolOutputMatch = /^\/tool-output\/([^/]+)\/([^/]+)$/.exec(rest);
           if (method === 'GET' && toolOutputMatch) {
             const decodedTurnId = decodeSegment(res, toolOutputMatch[1]!, 'turnId', 'turnId');
             if (decodedTurnId === null) return;
             const decodedCallId = decodeSegment(res, toolOutputMatch[2]!, 'callId', 'callId');
             if (decodedCallId === null) return;
-            return handleToolOutput(req, res, owner, sessionId, decodedTurnId as TurnId, decodedCallId as CallId);
+            return await handleToolOutput(req, res, owner, sessionId, decodedTurnId as TurnId, decodedCallId as CallId);
           }
           const attachmentMatch = /^\/attachments\/([^/]+)\/([^/]+)$/.exec(rest);
           if (method === 'GET' && attachmentMatch) {
@@ -303,7 +303,7 @@ export function createSseEdge(deps: EdgeDeps): RequestListener {
             if (decodedTurnId === null) return;
             const decodedAttachmentId = decodeSegment(res, attachmentMatch[2]!, 'attachmentId', 'attachmentId');
             if (decodedAttachmentId === null) return;
-            return handleAttachment(req, res, owner, sessionId, decodedTurnId as TurnId, decodedAttachmentId as AttachmentId);
+            return await handleAttachment(req, res, owner, sessionId, decodedTurnId as TurnId, decodedAttachmentId as AttachmentId);
           }
           if (method === 'GET' && rest === '') {
             const got = manager.get(sessionId, owner);

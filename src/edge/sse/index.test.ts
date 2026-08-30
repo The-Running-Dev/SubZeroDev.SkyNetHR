@@ -952,6 +952,28 @@ describe('S25.3 — message.delta over the real SSE wire', () => {
   });
 });
 
+describe('#178 — a route handler that throws answers 503, rather than hanging the request', () => {
+  it('a records collaborator that throws on the append-review route still gets a response', async () => {
+    // No `recordsOverride`: `makeEdge` wires `notImplementedProxy<Records>('records')` by
+    // default, which throws synchronously on any property access — the same shape the
+    // issue's own repro names ("a Proxy that throws on any property access"). Reaching
+    // `deps.records.appendReview` inside the async route handler turns that throw into a
+    // rejected promise; pre-fix, `return handleAppendReview(...)` (no `await`) inside the
+    // listener's outer `try` never routes that rejection through its `catch`, so no
+    // response is ever written and the request hangs forever.
+    const h = await makeEdge();
+    const id = 'does-not-matter-records-throws-first';
+
+    const res = await Promise.race([
+      post(h, `/api/reviews/${id}`, {}),
+      new Promise<Response>((_resolve, reject) => setTimeout(() => reject(new Error('request hung: no response within 15s')), 15000).unref()),
+    ]);
+    assert.equal(res.status, 503);
+    const body = (await res.json()) as { error: { code: string } };
+    assert.equal(body.error.code, 'agent_unavailable');
+  });
+});
+
 describe('#133 — a slow live subscriber is dropped past caps.subscriberQueueHighWater', () => {
   it('a client that never reads is dropped with a replay_gap frame, and the server closes the connection', async () => {
     const h = await makeEdge(

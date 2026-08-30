@@ -449,7 +449,7 @@ export function createWsEdge(deps: EdgeDeps): WsRequestListener {
           return sendError(res, 'bad_origin', 'origin is not allowed');
         }
 
-        if (method === 'POST' && pathname === '/api/login') return handleLogin(req, res);
+        if (method === 'POST' && pathname === '/api/login') return await handleLogin(req, res);
 
         const owner = resolveOperator(req, res, identity);
         if (owner === null) return;
@@ -458,16 +458,16 @@ export function createWsEdge(deps: EdgeDeps): WsRequestListener {
           return sendJson(res, 200, { sessions: manager.list(owner) });
         }
         if (method === 'POST' && pathname === '/api/sessions') {
-          return handleCreate(req, res, owner);
+          return await handleCreate(req, res, owner);
         }
         if (method === 'GET' && pathname === '/api/audit') {
-          return handleAudit(req, res);
+          return await handleAudit(req, res);
         }
         if (method === 'GET' && pathname === '/api/requisitions') {
-          return handleListRequisitions(req, res);
+          return await handleListRequisitions(req, res);
         }
         if (method === 'POST' && pathname === '/api/requisitions') {
-          return handleRaiseRequisition(req, res, owner);
+          return await handleRaiseRequisition(req, res, owner);
         }
 
         const requisitionRoute = /^\/api\/requisitions\/([^/]+)\/decision$/.exec(pathname);
@@ -478,14 +478,14 @@ export function createWsEdge(deps: EdgeDeps): WsRequestListener {
           } catch {
             return sendError(res, 'bad_request', 'requisition id is not a valid path segment', { field: 'requisitionId' });
           }
-          return handleDecideRequisition(req, res, owner, decodedRequisitionId as RequisitionId);
+          return await handleDecideRequisition(req, res, owner, decodedRequisitionId as RequisitionId);
         }
 
         if (method === 'GET' && pathname === '/api/reviews') {
-          return handleListReviews(req, res);
+          return await handleListReviews(req, res);
         }
         if (method === 'POST' && pathname === '/api/reviews') {
-          return handleCreateReview(req, res, owner);
+          return await handleCreateReview(req, res, owner);
         }
 
         const reviewFinaliseRoute = /^\/api\/reviews\/([^/]+)\/finalise$/.exec(pathname);
@@ -496,7 +496,7 @@ export function createWsEdge(deps: EdgeDeps): WsRequestListener {
           } catch {
             return sendError(res, 'bad_request', 'review id is not a valid path segment', { field: 'reviewId' });
           }
-          return handleFinaliseReview(req, res, owner, decodedReviewId as ReviewId);
+          return await handleFinaliseReview(req, res, owner, decodedReviewId as ReviewId);
         }
 
         const reviewRoute = /^\/api\/reviews\/([^/]+)$/.exec(pathname);
@@ -507,8 +507,8 @@ export function createWsEdge(deps: EdgeDeps): WsRequestListener {
           } catch {
             return sendError(res, 'bad_request', 'review id is not a valid path segment', { field: 'reviewId' });
           }
-          if (method === 'POST') return handleAppendReview(req, res, owner, decodedReviewId as ReviewId);
-          if (method === 'GET') return handleGetReview(req, res, owner, decodedReviewId as ReviewId);
+          if (method === 'POST') return await handleAppendReview(req, res, owner, decodedReviewId as ReviewId);
+          if (method === 'GET') return await handleGetReview(req, res, owner, decodedReviewId as ReviewId);
         }
 
         const sessionRoute = /^\/api\/sessions\/([^/]+)(\/[^?]*)?$/.exec(pathname);
@@ -521,19 +521,19 @@ export function createWsEdge(deps: EdgeDeps): WsRequestListener {
           }
           const sessionId = decoded as SessionId;
           const rest = sessionRoute[2] ?? '';
-          if (method === 'POST' && rest === '/message') return handleMessage(req, res, owner, sessionId);
-          if (method === 'POST' && rest === '/permission') return handlePermission(req, res, owner, sessionId);
-          if (method === 'POST' && rest === '/interrupt') return handleInterrupt(req, res, owner, sessionId);
-          if (method === 'POST' && rest === '/end') return handleEnd(req, res, owner, sessionId);
-          if (method === 'POST' && rest === '/checkpoint/restore') return handleCheckpointRestore(req, res, owner, sessionId);
-          if (method === 'DELETE' && rest === '') return handleDelete(req, res, owner, sessionId);
+          if (method === 'POST' && rest === '/message') return await handleMessage(req, res, owner, sessionId);
+          if (method === 'POST' && rest === '/permission') return await handlePermission(req, res, owner, sessionId);
+          if (method === 'POST' && rest === '/interrupt') return await handleInterrupt(req, res, owner, sessionId);
+          if (method === 'POST' && rest === '/end') return await handleEnd(req, res, owner, sessionId);
+          if (method === 'POST' && rest === '/checkpoint/restore') return await handleCheckpointRestore(req, res, owner, sessionId);
+          if (method === 'DELETE' && rest === '') return await handleDelete(req, res, owner, sessionId);
           // This edge's `/events` runs on the `'upgrade'` event, not the request path —
           // a plain GET here is a client that failed to upgrade, not a route that exists.
           if (method === 'GET' && rest === '/events') {
             return sendError(res, 'bad_request', 'this edge serves events over a WebSocket upgrade, not a plain GET', { field: 'upgrade' });
           }
-          if (method === 'GET' && rest === '/checkpoints') return handleListCheckpoints(req, res, owner, sessionId);
-          if (method === 'GET' && rest === '/checklist') return handleChecklist(req, res, owner, sessionId);
+          if (method === 'GET' && rest === '/checkpoints') return await handleListCheckpoints(req, res, owner, sessionId);
+          if (method === 'GET' && rest === '/checklist') return await handleChecklist(req, res, owner, sessionId);
           const checklistTickMatch = /^\/checklist\/([^/]+)$/.exec(rest);
           if (method === 'POST' && checklistTickMatch !== null) {
             let decodedItemId: string;
@@ -542,9 +542,9 @@ export function createWsEdge(deps: EdgeDeps): WsRequestListener {
             } catch {
               return sendError(res, 'bad_request', 'itemId is not a valid path segment', { field: 'itemId' });
             }
-            return handleTickChecklistItem(req, res, owner, sessionId, decodedItemId as ChecklistItemId);
+            return await handleTickChecklistItem(req, res, owner, sessionId, decodedItemId as ChecklistItemId);
           }
-          if (method === 'GET' && rest === '/payroll') return handlePayroll(req, res, owner, sessionId);
+          if (method === 'GET' && rest === '/payroll') return await handlePayroll(req, res, owner, sessionId);
           const toolOutputMatch = /^\/tool-output\/([^/]+)\/([^/]+)$/.exec(rest);
           if (method === 'GET' && toolOutputMatch) {
             let decodedTurnId: string;
@@ -559,7 +559,7 @@ export function createWsEdge(deps: EdgeDeps): WsRequestListener {
             } catch {
               return sendError(res, 'bad_request', 'callId is not a valid path segment', { field: 'callId' });
             }
-            return handleToolOutput(req, res, owner, sessionId, decodedTurnId as TurnId, decodedCallId as CallId);
+            return await handleToolOutput(req, res, owner, sessionId, decodedTurnId as TurnId, decodedCallId as CallId);
           }
           const attachmentMatch = /^\/attachments\/([^/]+)\/([^/]+)$/.exec(rest);
           if (method === 'GET' && attachmentMatch) {
@@ -575,7 +575,7 @@ export function createWsEdge(deps: EdgeDeps): WsRequestListener {
             } catch {
               return sendError(res, 'bad_request', 'attachmentId is not a valid path segment', { field: 'attachmentId' });
             }
-            return handleAttachment(req, res, owner, sessionId, decodedTurnId as TurnId, decodedAttachmentId as AttachmentId);
+            return await handleAttachment(req, res, owner, sessionId, decodedTurnId as TurnId, decodedAttachmentId as AttachmentId);
           }
           if (method === 'GET' && rest === '') {
             const got = manager.get(sessionId, owner);
