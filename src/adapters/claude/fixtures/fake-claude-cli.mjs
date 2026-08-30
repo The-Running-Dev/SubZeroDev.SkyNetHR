@@ -17,11 +17,15 @@ import { spawn } from 'node:child_process';
 //   unknown-kind  — one record of a type outside the vocabulary, then a valid record.
 //   many          — a long run of `assistant` text records with contiguous usage, for
 //                   volume assertions.
-//   many-big      — SKYNET_MANY_BIG_COUNT (default 50) `assistant` text records, each
+//   many-big      — SKYNET_MANY_BIG_COUNT (default 1000) `assistant` text records, each
 //                   SKYNET_MANY_BIG_BYTES (default 20000) bytes, emitted back to back —
-//                   megabytes in well under a second, for forcing genuine socket
+//                   tens of megabytes in well under a second, for forcing genuine socket
 //                   backpressure on a subscriber that never reads (#133), where `many`'s
-//                   volume is too small to reliably cross an OS receive buffer.
+//                   volume is too small to reliably cross an OS receive buffer. #246: 1MB
+//                   (the original default, 50 records) reliably crossed a dev machine's
+//                   receive buffer but not CI's — autotuned loopback buffers there grow
+//                   large enough to absorb the whole burst before backpressure ever
+//                   builds, so the drop this scenario exists to exercise never fires.
 //   many-permissions — three sequential control_request/control_response round trips
 //                   in one turn, before a final result (S4.3).
 //   die-with-pending — emits two control_requests and exits without ever reading a
@@ -282,7 +286,7 @@ function runScenario() {
       return;
     }
     case 'many-big': {
-      const count = Number(process.env.SKYNET_MANY_BIG_COUNT || 50);
+      const count = Number(process.env.SKYNET_MANY_BIG_COUNT || 1000);
       const size = Number(process.env.SKYNET_MANY_BIG_BYTES || 20000);
       for (let i = 0; i < count; i++) assistantText('x'.repeat(size), 'msg-many-big-' + i);
       line({ type: 'result', subtype: 'success' });
