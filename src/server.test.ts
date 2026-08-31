@@ -8,7 +8,7 @@ import path from 'node:path';
 import { after, test } from 'node:test';
 
 // Black-box, subprocess-level coverage of `server.ts`'s own shutdown ordering (S27.1,
-// S27.2, S27.3, S27.10, S27.12 — `design/30-slices.md` § S27) — the criteria that live in
+// S27.2, S27.3, S27.4, S27.10, S27.12 — `design/30-slices.md` § S27) — the criteria that live in
 // the composition root itself, not in `session-manager`, and so cannot be exercised by
 // calling `SessionManager.shutdown()` directly the way `session-manager/index.test.ts`'s
 // own S27.5/S27.6/S27.8/S27.9/S27.11/S27.13 tests do. `main()` is never imported in-process
@@ -151,7 +151,13 @@ function request(
 
 // Logs in, creates one session and opens its `/events` stream, leaving the connection open
 // (the SSE request is never ended) — the "subscriber that never disconnects" S27.3 names.
-async function openSubscribedSession(port: number, workspaceRoot: string): Promise<{ cookie: string; sseReq: http.ClientRequest; sseRes: http.IncomingMessage }> {
+// `discard` defaults to true (S27.2/S27.3/S27.1's own use, where the bytes are irrelevant);
+// S27.4 passes false so it can inspect what actually reached the client before force-close.
+async function openSubscribedSession(
+  port: number,
+  workspaceRoot: string,
+  discard = true,
+): Promise<{ cookie: string; sessionId: string; sseReq: http.ClientRequest; sseRes: http.IncomingMessage }> {
   const login = await request(port, 'POST', '/api/login', { body: { secret: 'server-test-secret' }, origin: 'http://skynet-hr.test' });
   assert.equal(login.status, 200, `login: ${login.body}`);
   const setCookie = login.headers['set-cookie']?.[0];
@@ -181,13 +187,32 @@ async function openSubscribedSession(port: number, workspaceRoot: string): Promi
     req.on('error', reject);
     req.end();
   });
-  // Drain (and discard) the stream's data so the underlying socket empties its buffer, the
-  // same as a real `EventSource` reading continuously — resolved once the first byte
-  // arrives, which proves the stream is actually open rather than merely requested.
+  // Drain the stream's data so the underlying socket empties its buffer, the same as a
+  // real `EventSource` reading continuously — resolved once the first byte arrives, which
+  // proves the stream is actually open rather than merely requested.
   await new Promise<void>((resolve) => sseRes.once('data', () => resolve()));
-  sseRes.on('data', () => {});
+  if (discard) sseRes.on('data', () => {});
 
-  return { cookie, sseReq, sseRes };
+  return { cookie, sessionId, sseReq, sseRes };
+}
+
+// Splits accumulated SSE bytes into complete `\n\n`-delimited frames and reads `seq` back
+// out of each one's `data:` line — the same shape `edge/sse/index.test.ts`'s own frame
+// helpers use, duplicated rather than imported because that file's harness is in-process
+// and this one is a real subprocess reached over a real socket.
+function dataFrames(raw: string): string[] {
+  return raw
+    .split('\n\n')
+    .filter((f) => f.trim().length > 0)
+    .filter((f) => f.split('\n').some((l) => l.startsWith('data: ')));
+}
+function seqOf(frame: string): number {
+  const dataLine = frame.split('\n').find((l) => l.startsWith('data: '))!;
+  return (JSON.parse(dataLine.slice('data: '.length)) as { seq: number }).seq;
+}
+function kindOf(frame: string): string {
+  const eventLine = frame.split('\n').find((l) => l.startsWith('event: '))!;
+  return eventLine.slice('event: '.length);
 }
 
 // `child.kill('SIGTERM')` cannot exercise `process.on('SIGTERM', ...)` on this platform:
@@ -270,6 +295,78 @@ test('S27.1 — a second signal during a stalled drain exits at once, non-zero, 
   // Past the guard nothing below it ran: the kill step never reached the lock, so release
   // never got there either, and the file this server claimed at boot is still on disk.
   assert.equal(existsSync(path.join(storageRoot, 'server.lock')), true, 'a guard exit leaves server.lock behind — nothing below it ran');
+});
+
+test('S27.4 — a subscriber force-closed by the drain loses nothing: after a restart, a reconnect from the last seq it saw replays contiguously with no error/replay_gap', async (t) => {
+  if (process.platform === 'win32') {
+    t.skip('Linux-only: SIGTERM cannot be delivered to a child process on Windows (#28)');
+    return;
+  }
+  const { child, port, storageRoot, workspaceRoot } = await startServer();
+  const { sessionId, sseRes } = await openSubscribedSession(port, workspaceRoot, false);
+
+  let raw = '';
+  sseRes.on('data', (c: Buffer) => {
+    raw += c.toString('utf8');
+  });
+  const streamClosed = new Promise<void>((resolve) => {
+    sseRes.on('close', () => resolve());
+    sseRes.on('end', () => resolve());
+  });
+
+  // The same shape as S27.2/S27.3: nothing in this build closes the stream on its own, so
+  // the drain runs out its window and force-closes it — the case this criterion is about.
+  const exitPromise = waitForExit(child);
+  child.kill('SIGTERM');
+  const [{ code }] = await Promise.all([exitPromise, streamClosed]);
+  assert.equal(code, 0, 'a clean shutdown with a subscriber attached still exits zero');
+
+  const beforeFrames = dataFrames(raw);
+  assert.ok(beforeFrames.length > 0, 'at least one envelope reached the client before the force-close');
+  const lastSeqSeen = seqOf(beforeFrames[beforeFrames.length - 1]!);
+
+  // Same storage root, same workspace root: the restarted process rehydrates the same
+  // session and its spill, which is what "after a restart" means for this criterion.
+  const restarted = await startServer({ STORAGE_ROOT: storageRoot, WORKSPACE_ROOTS: workspaceRoot });
+  const login = await request(restarted.port, 'POST', '/api/login', { body: { secret: 'server-test-secret' }, origin: 'http://skynet-hr.test' });
+  assert.equal(login.status, 200, `login: ${login.body}`);
+  const cookie = login.headers['set-cookie']![0]!.split(';')[0]!;
+
+  const { res: reconnRes } = await new Promise<{ req: http.ClientRequest; res: http.IncomingMessage }>((resolve, reject) => {
+    const req = http.request(
+      {
+        host: '127.0.0.1',
+        port: restarted.port,
+        method: 'GET',
+        path: `/api/sessions/${sessionId}/events`,
+        headers: { cookie, 'last-event-id': String(lastSeqSeen) },
+      },
+      (res) => resolve({ req, res }),
+    );
+    req.on('error', reject);
+    req.end();
+  });
+
+  let reconnRaw = '';
+  const gotFrame = new Promise<void>((resolve) => {
+    reconnRes.on('data', (c: Buffer) => {
+      reconnRaw += c.toString('utf8');
+      if (dataFrames(reconnRaw).length >= 1) resolve();
+    });
+  });
+  // Boot's own close-open-turn step (`server_restart`) is what guarantees this reconnect
+  // sees at least one envelope even though nothing new was sent — the turn the drain
+  // interrupted is exactly the one boot finalises.
+  await Promise.race([gotFrame, new Promise((_, reject) => setTimeout(() => reject(new Error(`timed out waiting for a reconnect frame; saw:\n${reconnRaw}`)), 10000))]);
+  reconnRes.destroy();
+
+  const afterFrames = dataFrames(reconnRaw);
+  assert.equal(seqOf(afterFrames[0]!), lastSeqSeen + 1, 'the reconnect resumes at exactly the watermark this client last saw, plus one');
+  for (const frame of afterFrames) assert.notEqual(kindOf(frame), 'error', `no error/replay_gap in the replay (${frame})`);
+
+  const restartedExit = waitForExit(restarted.child);
+  restarted.child.kill('SIGTERM');
+  await restartedExit;
 });
 
 // Cross-platform: unlike SIGTERM (#28, Windows has no real signals), a plain TCP bind
