@@ -15,6 +15,10 @@ import { spawn } from 'node:child_process';
 //   no-result     — exits after some output with no `result` at all.
 //   bad-line      — one malformed JSON line, then a valid record.
 //   unknown-kind  — one record of a type outside the vocabulary, then a valid record.
+//   unknown-control-request-subtype — a control_request whose subtype is neither
+//                   can_use_tool nor on IGNORED_CONTROL_REQUEST_SUBTYPES (#189).
+//   unknown-content-block-delta-type — a stream_event/content_block_delta whose delta.type
+//                   is neither text_delta nor on IGNORED_CONTENT_BLOCK_DELTA_TYPES (#189).
 //   many          — a long run of `assistant` text records with contiguous usage, for
 //                   volume assertions.
 //   many-big      — SKYNET_MANY_BIG_COUNT (default 1000) `assistant` text records, each
@@ -245,6 +249,28 @@ function runScenario() {
     case 'unknown-kind':
       line({ type: 'totally_unknown_record_kind', payload: 1 });
       assistantText('after the unknown kind', 'msg-u1');
+      line({ type: 'result', subtype: 'success' });
+      return;
+    // #189/D172 — a control_request subtype outside IGNORED_CONTROL_REQUEST_SUBTYPES
+    // (empty today) must surface as adapter_unknown_record, not vanish silently.
+    case 'unknown-control-request-subtype':
+      line({
+        type: 'control_request',
+        request_id: 'req-unknown-1',
+        request: { subtype: 'totally_unknown_subtype', foo: 'bar' },
+      });
+      assistantText('after the unknown control_request subtype', 'msg-ucr-1');
+      line({ type: 'result', subtype: 'success' });
+      return;
+    // #189/D172 — a content_block_delta whose delta.type is outside both text_delta and
+    // IGNORED_CONTENT_BLOCK_DELTA_TYPES must surface as adapter_unknown_record.
+    case 'unknown-content-block-delta-type':
+      line({ type: 'stream_event', event: { type: 'message_start', message: { id: 'msg-ucd-1', usage: { input_tokens: 1, output_tokens: 1 } } } });
+      line({ type: 'stream_event', event: { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } } });
+      line({ type: 'stream_event', event: { type: 'content_block_delta', index: 0, delta: { type: 'totally_unknown_delta_type', foo: 'bar' } } });
+      line({ type: 'stream_event', event: { type: 'content_block_stop', index: 0 } });
+      line({ type: 'stream_event', event: { type: 'message_stop' } });
+      assistantText('after the unknown delta type', 'msg-ucd-2');
       line({ type: 'result', subtype: 'success' });
       return;
     case 'malformed-content':

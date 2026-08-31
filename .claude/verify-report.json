@@ -3,7 +3,7 @@
     {
       "name": "Run tests",
       "status": "Passed",
-      "detail": "npm test: 446 tests, 444 pass, 0 fail, 2 skipped, 64 suites."
+      "detail": "npm test: 448 tests, 446 pass, 0 fail, 2 skipped, 64 suites."
     },
     {
       "name": "Parse-check PowerShell scripts",
@@ -13,7 +13,7 @@
     {
       "name": "Run Pester tests",
       "status": "Passed",
-      "detail": "Tests completed in 61.12s. Tests Passed: 327, Failed: 0, Skipped: 22, NotRun: 0."
+      "detail": "Tests completed in 38.36s. Tests Passed: 327, Failed: 0, Skipped: 22, NotRun: 0."
     },
     {
       "name": "Check design/10-design.md references resolve",
