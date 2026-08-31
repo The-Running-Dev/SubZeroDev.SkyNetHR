@@ -15,8 +15,24 @@ import { spawn } from 'node:child_process';
 //   no-result     — exits after some output with no `result` at all.
 //   bad-line      — one malformed JSON line, then a valid record.
 //   unknown-kind  — one record of a type outside the vocabulary, then a valid record.
+//   unknown-control-request-subtype — a control_request whose subtype is neither
+//                   can_use_tool nor on IGNORED_CONTROL_REQUEST_SUBTYPES (#189).
+//   unknown-content-block-delta-type — a stream_event/content_block_delta whose delta.type
+//                   is neither text_delta nor on IGNORED_CONTENT_BLOCK_DELTA_TYPES (#189).
 //   many          — a long run of `assistant` text records with contiguous usage, for
 //                   volume assertions.
+//   many-big      — SKYNET_MANY_BIG_COUNT (default 1000) `assistant` text records, each
+//                   SKYNET_MANY_BIG_BYTES (default 20000) bytes, emitted back to back —
+//                   tens of megabytes in well under a second, for forcing genuine socket
+//                   backpressure on a subscriber that never reads (#133), where `many`'s
+//                   volume is too small to reliably cross an OS receive buffer. #246: two
+//                   distinct CI-only failure modes, neither reproducible on a dev machine.
+//                   ubuntu-latest: the original 50-record/1MB default is not enough volume
+//                   once production is under way — bumped to 1000 records (~20MB) here.
+//                   windows-latest: production itself trickles slowly enough that a client
+//                   that starts draining immediately keeps pace regardless of volume — the
+//                   corresponding fix (withholding reads with a fixed delay) lives in the
+//                   two `#133` tests themselves, not this fixture.
 //   many-permissions — three sequential control_request/control_response round trips
 //                   in one turn, before a final result (S4.3).
 //   die-with-pending — emits two control_requests and exits without ever reading a
@@ -235,6 +251,28 @@ function runScenario() {
       assistantText('after the unknown kind', 'msg-u1');
       line({ type: 'result', subtype: 'success' });
       return;
+    // #189/D172 — a control_request subtype outside IGNORED_CONTROL_REQUEST_SUBTYPES
+    // (empty today) must surface as adapter_unknown_record, not vanish silently.
+    case 'unknown-control-request-subtype':
+      line({
+        type: 'control_request',
+        request_id: 'req-unknown-1',
+        request: { subtype: 'totally_unknown_subtype', foo: 'bar' },
+      });
+      assistantText('after the unknown control_request subtype', 'msg-ucr-1');
+      line({ type: 'result', subtype: 'success' });
+      return;
+    // #189/D172 — a content_block_delta whose delta.type is outside both text_delta and
+    // IGNORED_CONTENT_BLOCK_DELTA_TYPES must surface as adapter_unknown_record.
+    case 'unknown-content-block-delta-type':
+      line({ type: 'stream_event', event: { type: 'message_start', message: { id: 'msg-ucd-1', usage: { input_tokens: 1, output_tokens: 1 } } } });
+      line({ type: 'stream_event', event: { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } } });
+      line({ type: 'stream_event', event: { type: 'content_block_delta', index: 0, delta: { type: 'totally_unknown_delta_type', foo: 'bar' } } });
+      line({ type: 'stream_event', event: { type: 'content_block_stop', index: 0 } });
+      line({ type: 'stream_event', event: { type: 'message_stop' } });
+      assistantText('after the unknown delta type', 'msg-ucd-2');
+      line({ type: 'result', subtype: 'success' });
+      return;
     case 'malformed-content':
       line({ type: 'assistant', message: { id: 'msg-malformed-1', content: {} } });
       return;
@@ -273,6 +311,13 @@ function runScenario() {
       return;
     case 'many': {
       for (let i = 0; i < 200; i++) assistantText('message ' + i, 'msg-many-' + i);
+      line({ type: 'result', subtype: 'success' });
+      return;
+    }
+    case 'many-big': {
+      const count = Number(process.env.SKYNET_MANY_BIG_COUNT || 1000);
+      const size = Number(process.env.SKYNET_MANY_BIG_BYTES || 20000);
+      for (let i = 0; i < count; i++) assistantText('x'.repeat(size), 'msg-many-big-' + i);
       line({ type: 'result', subtype: 'success' });
       return;
     }

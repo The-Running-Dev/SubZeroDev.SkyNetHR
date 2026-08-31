@@ -206,11 +206,35 @@ record for a child this server never saw is a lie in the file boot trusts most. 
 deployments that are the only ones that have existed — shared storage was unsupported before D180,
 so no current `pids.ndjson` holds a foreign record to mistake.
 
+**The guard's fourth limb reads a value the server recorded, not one it computes** (D183, D186).
+An amendment owed to the declaration: `ProcessRecord` gains `osCreatedAt: IsoTimestamp | null`,
+the operating system's *own* reading of when that process was created, taken at spawn. The three
+original limbs — no `exitedAt`, a `startedAt` later than the host's last boot, a matching `image`
+— all pass when the host reuses a pid within a single boot for another child of the same name,
+which in a console whose every child is `claude` or `codex` is not a remote case. What separates
+*that* process from *a* process with the same number and name is when it was created. **The
+comparison is exact equality, and it is against `osCreatedAt` rather than `startedAt` because
+only one of those is from the same clock**: `startedAt` is this server's wall-clock reading at
+spawn, while a platform derives creation time from boot time plus ticks against a coarse
+`btime`, so no tolerance between the two is at once wide enough to be reliable and narrow enough
+to exclude same-second reuse. `startedAt` keeps the boot-time limb and stops being what the
+fourth limb reads.
+
+**`osCreatedAt` is nullable, and a null is never reapable.** No platform exposes creation time to
+Node, so the read at spawn is a shell-out of the same shape `taskkill` already is and it can
+fail; where it does the field is `null`. An entry carrying `null` — and an entry whose *live*
+counterpart cannot be read at boot — is tombstoned and logged rather than reaped, so the guard
+fails closed at both ends. The cost is a genuine orphan an operator ends by hand, which is the
+price the spawn-window reasoning already accepts and for the same reason: this design would
+rather leak a process than end the wrong one. **This is the only field here whose absence changes
+what boot is permitted to do**, which is why it is `null` and not an empty string: a reader must
+be unable to mistake "not recorded" for a value that could match.
+
 **A reader must never hand back a tombstone as an open record.** Liveness comes from the
-latest line for a `pid`; `startedAt` and `image` must come from that pid's most recent
-**spawn** line, because the reuse guard reads all three of `exitedAt`, `startedAt` and `image`
-(I19) and a reader taking them off the tombstone would find two missing and reap on a guard
-that never ran. That is the requirement. Folding the two shapes meets it; so does filtering
+latest line for a `pid`; `startedAt`, `image` and `osCreatedAt` must come from that pid's most recent
+**spawn** line, because the reuse guard reads all four of `exitedAt`, `startedAt`, `image` and
+`osCreatedAt` (I19) and a reader taking them off the tombstone would find three missing and reap
+on a guard that never ran. That is the requirement. Folding the two shapes meets it; so does filtering
 the latest line on `exitedAt === null`, because a tombstone always carries a non-null
 `exitedAt` and so never survives the filter — which is what `store` does.
 
@@ -238,9 +262,12 @@ removes the file at clean shutdown, so an absent lock is an unheld root and a bo
 no wait. A lock nobody removed is evidence of nothing by itself; it is reclaimed only after its
 counter has been observed not moving (*Public surface § `store`*).
 
-**`LivenessProbe` is no longer part of this surface.** D23's three-part test survives unchanged
-for the file it was written for — `pids.ndjson`'s reap guard (I19) — as `session-manager`'s own,
-no longer shared with a second file and no longer handed to `store`.
+**`LivenessProbe` is no longer part of this surface.** D23's test survives for the file it was
+written for — `pids.ndjson`'s reap guard (I19) — as `session-manager`'s own, no longer shared with
+a second file and no longer handed to `store`. It is no longer the three-limb test D161 borrowed
+either: D183 and D186 gave it a fourth limb reading `osCreatedAt`, and D181 a hostname gate ahead
+of all four. Sharing it is what made growing it a change to two files at once; it now grows for
+one (D193).
 
 ### Event envelope
 
@@ -466,6 +493,59 @@ Declared in `src/contract/index.ts`: `Checkpoint`.
 persisted, because git is the store and a second copy would be a second thing to fall out of
 sync. `ts` is the git commit time, not a server clock reading.
 
+**The ignored-path manifest is the one exception to that, and it is an exception rather than a
+softening** (D182, D187). Ignored paths are neither checkpointed nor cleaned, so git holds no
+record of them at all and there is nothing for a second copy to disagree *with*. What the
+manifest can be is absent, and the whole of the rule below exists so that absence cannot be read
+as a clean result. These four are not yet in the tree and are written here as scaffolds:
+
+```ts
+// One line of `git status --ignored=matching`, which collapses an ignored *directory* into a
+// single entry rather than walking the files beneath it.
+export interface IgnoredEntry {
+  readonly path: string;               // workspace-relative, POSIX separators, never absolute
+  readonly kind: 'file' | 'dir';       // 'dir' is a collapsed directory
+  readonly sizeBytes: number | null;   // null exactly when kind === 'dir'
+  readonly mtimeMs: number;            // the entry's own mtime, not its subtree's
+}
+
+export interface IgnoredManifest {
+  readonly sha: GitSha;                // the checkpoint this was captured alongside
+  readonly capturedAt: IsoTimestamp;
+  readonly entries: readonly IgnoredEntry[];
+}
+
+// One difference between a target checkpoint's manifest and the workspace as restore found it.
+export interface IgnoredDelta {
+  readonly path: string;
+  readonly change: 'added' | 'removed' | 'modified';
+}
+
+// What `restore` returns. `safety` is the checkpoint taken on the way in, never the target.
+export interface RestoreResult {
+  readonly safety: Checkpoint;
+  readonly unreached: readonly IgnoredDelta[] | null;
+}
+```
+
+**No entry carries content, and that is a constraint rather than an omission** (I58). Storing the
+bytes of ignored paths is the widening the brief declined, and it would arrive by the back door
+and be paid for on every checkpoint rather than on the one restore that reads it. `sizeBytes` and
+`mtimeMs` are what make `'modified'` detectable without them.
+
+**A `'dir'` entry is compared on its own metadata, so this report is a pointer and not
+evidence.** A collapsed directory's mtime moves when a child is added or removed and does not
+move for an edit deeper inside, so a manifest can call a `node_modules` unchanged while a file
+within it differs. That is the price of a manifest bounded by the ignore rules that match rather
+than by the file count beneath them — a 60 000-file dependency tree contributes one line. It is
+stated here because **no security control may come to lean on this**, and the difference between
+a pointer and evidence is invisible at the call site.
+
+**`unreached === null` means the comparison could not be made. It never means nothing differs**
+(I58). A checkpoint predating this mechanism has no manifest, a manifest write can fail, and a
+manifest read at restore can fail; all three land on `null`, and a client renders it as unknown.
+An empty array is a real answer and says the ignored paths match.
+
 ### Audit record
 
 Declared in `src/contract/index.ts`: `AuditRecord`, `AuditQuery`, `AuditPage`.
@@ -635,6 +715,13 @@ Declared in `src/contract/index.ts`: `AuthConfig`, `Caps`, `TokenRates`, `Config
 **This document declares the fields and sets none of the values** (D84). The values are a
 deployment's.
 
+**`storageRoot` is a `ResolvedPath`, not a raw string** (D185) — an amendment owed to the
+declaration. It was the one path in this configuration that reached the server unnormalised while
+`workspaceRoots` beside it were already jail-resolved, which is D94's argument arriving one field
+short: two spellings of one directory are two values to every comparison, and the comparison this
+field now has to survive is the overlap check under *Public surface § `config`*. Canonicalising it
+is what makes that check possible at all rather than merely stricter.
+
 **A cap is a threshold, not a truncation**, for every text field that names one: a review body,
 a requisition title or justification, a standing rule or an attachment over its cap is refused
 with `422 bad_request`, never silently shortened. `Caps.toolResultBytes` is the one exception
@@ -666,6 +753,7 @@ bytes one session may store, enforced at the `writeToolOutput` call site.
   tool-output/<turnId>/<callId>               untruncated bytes, one file per call
   attachments/<turnId>/<attachmentId>         operator uploads, one file each
   ckpt.git/                                   shadow GIT_DIR, work-tree = the session's cwd
+  ignored/<sha>.json                          one IgnoredManifest per checkpoint       (D182)
 <storage>/audit.ndjson                        one AuditRecord per line, append-only
 <storage>/pids.ndjson                         ProcessRecord and ProcessTombstone lines
 <storage>/server.lock                         one ServerLock object; a renewed lease   (D180)
@@ -689,7 +777,8 @@ though it were new is silent wrong state rather than a parse error.
 | `server.lock` | — | — | Server-wide, one `ServerLock` object, written before boot's first step and removed as shutdown's last act, after the children are gone (D161, D175). A shutdown that does not get that far leaves it. **Not append-only, and alone among these files rewritten repeatedly while the server runs**: every renewal is a whole-file write (D180). Reclaimed only on a holder whose `renewals` did not move across one observation window, whichever host wrote it. Every renewal is a fresh open-write-fsync-close and every sample a fresh open-read-close, because close-to-open consistency is the only cross-client guarantee a network share actually offers and the lease's whole cross-host claim rests on it |
 | `reviews.ndjson` *(tier two)* | `reviewId` | append order; the latest line for an id wins | Server-wide. Never rewritten. Survives deletion of the session it names (D67). Durable per line (D128). A `final` line is terminal — no later line for that id is written |
 | `requisitions.ndjson` *(tier two)* | `requisitionId` | append order; the latest line for an id wins | Server-wide. Never rewritten. **Not durable per line**, which is why a lost consumption line reverts an approval to spendable — D68's written exception |
-| `ckpt.git/` | git object ids | git history | Git is the store. `add -A` honours the workspace's own `.gitignore`, and neither `read-tree` nor `clean -fd` takes `-x`, so exactly the same set is left alone |
+| `ckpt.git/` | git object ids | git history | Git is the store. `add -A` honours the workspace's own `.gitignore`, and neither `read-tree` nor `clean -fd` takes `-x`, so exactly the same set is left alone — which is what `ignored/<sha>.json` exists to report on |
+| `ignored/<sha>.json` | the checkpoint `sha` | — | **Written by `checkpoints`, not by `store`** — it is the only artifact in this directory that is, because it is derived from the same `git status` the checkpoint is built from and is meaningless apart from a sha (D187). Written once after the commit that names it, never appended, never rewritten. Not durable: a lost manifest degrades a later restore's report to unknown and costs nothing else. **A checkpoint whose manifest is absent is still a valid checkpoint** — capture failure never fails the commit. Removed with the session directory (D25) |
 
 **The four server-wide append files are the design's only shared mutable state on disk**, and
 the claim that no lock is needed rests on each being opened once, as a single append stream
@@ -735,6 +824,7 @@ shape:
 | `events.ndjson`, `audit.ndjson`, `pids.ndjson` | none | Readers ignore unknown fields and drop an unparseable trailing line. Added fields must be optional; a removed or retyped field is a new `schemaVersion` on `meta.json` and a refusal to rehydrate older sessions |
 | `reviews.ndjson`, `requisitions.ndjson` | none | Readers ignore unknown fields; added fields must be optional. A dropped trailing line does not shorten the record, it reverts it to the previous line for that id. **A removed or retyped field has no discriminator to gate on in these two files**; see `## Unresolved` 11 |
 | `server.lock` | none | Rewritten whole at every claim **and at every renewal**, and removed at every clean release. Nothing reads a lock it did not just find, so there is nothing to migrate. A lock left by a build predating the lease carries neither `instanceId` nor `renewals`, which is a counter that can never be observed moving — the reclaim path, reached by the ordinary rule and not by a special case |
+| `ignored/<sha>.json` | none | Readers ignore unknown fields; added fields must be optional. **A file that fails to parse is treated exactly as an absent one**: the restore reports unknown rather than reading a partial manifest as a complete one (I58). There is no discriminator and none is needed — nothing rehydrates from it and a wrong answer here is a degraded report, not wrong state |
 | `tool-output/*`, `attachments/*` | none | Opaque bytes; no schema to migrate |
 | `ckpt.git/` | none | Git's own format; not ours to migrate |
 
@@ -774,6 +864,23 @@ jail applies to a candidate, or a legitimate `cwd` is refused for spelling — a
 short name, a `\\?\` prefix, a case variation. That is why `workspaceRoots` is
 `readonly ResolvedPath[]` and why `jail` exports `stripExtendedPrefix`.
 
+**`storageRoot` goes through the same normalisation, and then the server refuses to start if it
+overlaps any workspace root** (D185). `loadConfig` calls `pathsOverlap` — the jail's, never a
+second predicate — against every declared root and returns
+`ConfigError.invalid_field { field: 'STORAGE_ROOT' }` naming the root it collides with. Storage
+inside a workspace puts `meta.json`, the spills, `audit.ndjson`, `pids.ndjson` and every
+`ckpt.git` inside a checkpoint's own work-tree: `add -A` would ingest live server state and grow
+recursively, and a restore or `clean -fd` would delete evidence this server is mid-write on,
+including the audit log that exists to be beyond the reach of the subject it indicts (I13).
+
+**The refusal is at startup and not at session creation**, and that is the decision rather than
+an implementation convenience. Refusing per session would let a misconfigured deployment serve
+the workspaces that happen not to collide, trading one loud failure for a quiet partial one —
+the same argument `insecure_bind` makes, and sharper here because what is at risk is server-wide
+evidence rather than one session's files. **No new error variant is minted for this**: the field
+genuinely is invalid relative to `WORKSPACE_ROOTS`, and a variant whose only caller is this one
+check is a contract surface this refusal has no standing to add.
+
 ### `identity`
 
 `IdentityRequest`, `IdentityResolver` and `resolverFor` are declared in
@@ -803,7 +910,11 @@ refusal**: the server does not decline to start under `shared-secret`.
 - **`pathsOverlap` is the one containment predicate in this server**, and no module may
   hand-roll a second. It is true when the two paths are equal **or either contains the other**,
   under the same normalisation `resolveInsideRoot` applies. Both arguments must already be
-  jail-resolved. `session-manager`'s workspace busy check calls this (D30, I6).
+  jail-resolved. It has two callers and no others: `session-manager`'s workspace busy check
+  (D30, I6), and `config`'s startup check that storage does not sit inside a workspace root
+  (D185, I57). **The second is why "both arguments must already be jail-resolved" is a
+  requirement on `config` and not only on this module** — a raw `storageRoot` string could not
+  have been compared at all, whatever the predicate.
 - `stripExtendedPrefix` normalises away the `\\?\` extended-length prefix a native realpath
   returns on Windows. It is exported for `config`'s use, above.
 
@@ -899,15 +1010,22 @@ invent either.
 adapters**, which is what let the shadow-git mechanism survive the move to two backends
 unchanged.
 
-**`restore` returns the safety checkpoint, never the target**, and its sequence is four
-operations of which the middle one is not D31's (D112):
+**`restore` returns the safety checkpoint, never the target** — as `RestoreResult.safety`,
+since the return type grows to carry the report as well (D182), an amendment owed to the
+declaration. Its sequence is five operations of which the second is not D31's (D112):
 
 ```
 commit    --allow-empty -m "before restore to <sha>"    a way back
 read-tree --reset -u <sha>                              make the work-tree match, exactly
 clean     -fd                                           remove directories read-tree emptied
 verify    diff --quiet <sha>, ls-files --others         prove it, do not infer it
+report    <sha>'s manifest vs status --ignored=matching say what was not reached
 ```
+
+**The report runs last and would give the same answer first**, which is worth stating because it
+is the symmetry claim restated as an ordering fact: no step between touches an ignored path, so
+the ignored set restore finds at the end is the set it would have found at the start. Running it
+last means it never delays the restore and never has a way to prevent one.
 
 **D31 specified `checkout <sha> -- .` and that sequence cannot do what D31 says it does.** The
 argument was that `clean -fd` removes what the agent created since the target. It does not,
@@ -924,6 +1042,27 @@ it.
 left alone. The pair is deliberate and symmetric: a restore can only remove things a checkpoint
 could have restored, so it never forces a dependency reinstall — the failure that would make
 operators stop using restores.
+
+**The exclusion is reported rather than silent, and reporting it is what the manifest is for**
+(D182). Symmetry keeps a restore from forcing a reinstall; it does nothing to make the operator's
+belief about what was rolled back true. An agent that edits `.env` or deletes a generated
+artifact leaves that change standing across a restore this console reports as successful. So
+`commit` captures an `IgnoredManifest` alongside every checkpoint and writes it to
+`ignored/<sha>.json`, and `restore` diffs the target's manifest against the workspace and returns
+what differs as `RestoreResult.unreached`.
+
+Three obligations follow, and none of them is optional:
+
+- **A capture failure never fails the commit.** A checkpoint is worth more than its manifest, and
+  a `status` that cannot run must not cost an operator their way back. The checkpoint returns
+  normally and no manifest is written — which a later restore reports as unknown.
+- **`unreached === null` is unknown and never "nothing differs"** (I58). Absent manifest,
+  unparseable manifest, failed `status` at restore time: all three are `null`. An empty array is
+  the positive answer.
+- **A manifest is never consulted for anything but this report.** Nothing gates on it, nothing in
+  *Error semantics* branches on it, and no security control may come to lean on it — the
+  collapsed-directory weakness under *Types § Checkpoint* is why, and it is invisible at the call
+  site, so the constraint is written where the call site is.
 
 **Success is verified, not inferred from an exit code.** `read-tree` exits 0 with only a warning
 when it cannot remove a directory an embedded repository occupies, and `clean` declines such a
@@ -1125,6 +1264,24 @@ What the declarations cannot say:
   **Every step here repairs state some earlier process left, and shutdown deliberately leaves
   all of it** — see *`server`* below, and I52. So `server_restart` fires on an orderly stop
   exactly as it does after a power cut: boot cannot tell them apart and is not asked to.
+- **A turn ends by ending everything it spawned, on every path it can end by** (D184, I56).
+  The tree kill is not the interrupt path's and boot reaping's alone: normal completion — a
+  `result` followed by `close(0)`, which is the overwhelmingly common way a turn ends — kills the
+  tree too, before `turn.ended` is emitted and before the turn slot is cleared. **There is one
+  way to end a process tree in this server (D38's) and no path may grow a second.**
+
+  **What a caller may rely on is the whole point**: when `turn.ended` is observable, no process
+  that turn started is still running. Without that, "no turn means no child" meant only "no CLI"
+  — a tool that starts a detached dev server, watcher or daemonised runner left it holding the
+  workspace while the session reported idle, the workspace claim was released and the next
+  session admitted. That is a restore failure on Windows by the exact mechanism the per-turn
+  child is supposed to make impossible, and a silent cross-session race on POSIX.
+
+  **The capability this costs is stated rather than discovered: an agent cannot leave a server
+  running past the end of its turn.** Asked to start a dev server and report the URL, it starts
+  one that dies with the turn. That is a real loss, accepted because the alternative is a
+  workspace exclusivity claim and a restore guarantee both conditional on something no component
+  can observe.
 - **`boot` has exactly one counterpart, and it exists because shutdown's step 3 has nowhere
   else to live** (D178; *`server`* below for the step it serves). Declared as `shutdown(): Promise<void>` on `SessionManager` in `src/contract/index.ts` — no owner, no arguments, like
   `boot`, and **returns no `Result`**: shutdown is best-effort throughout and no error union
@@ -1456,7 +1613,7 @@ The `404` is `no_such_session` because `ApiErrorCode` carries no route-level not
 | `POST` | `/api/sessions/:id/permission` | `PermissionAnswer` | `200 { accepted: boolean }` | `403 bad_origin`, `404 no_such_session`, `422 bad_request` |
 | `POST` | `/api/sessions/:id/interrupt` | `{ turnId: TurnId }` | `200 { ok: true }` | `403 bad_origin`, `404 no_such_session`, `422 bad_request` |
 | `POST` | `/api/sessions/:id/end` | `{}` | `200 { ok: true }` | `403 bad_origin`, `404 no_such_session`, `409 turn_in_flight` |
-| `POST` | `/api/sessions/:id/checkpoint/restore` | `{ sha: GitSha }` | `200 { ok: true }` | `403 bad_origin`, `404 no_such_session`, `404 no_such_checkpoint`, `409 session_ended`, `409 turn_in_flight`, `422 bad_request`, `500 checkpoint_failed` |
+| `POST` | `/api/sessions/:id/checkpoint/restore` | `{ sha: GitSha }` | `200 { ok: true, safety, unreached }` | `403 bad_origin`, `404 no_such_session`, `404 no_such_checkpoint`, `409 session_ended`, `409 turn_in_flight`, `422 bad_request`, `500 checkpoint_failed` |
 | `DELETE` | `/api/sessions/:id` | — | `200 { ok: true }` | `403 bad_origin`, `404 no_such_session`, `409 turn_in_flight` |
 | `GET` | `/api/sessions` | — | `200 { sessions: SessionSummary[] }`, caller's own only | `401 unauthenticated` |
 | `GET` | `/api/sessions/:id` | — | `200 { session: SessionSummary }` | `401 unauthenticated`, `404 no_such_session` |
@@ -1479,6 +1636,14 @@ The permission route resolves identity and the ownership check like every other 
 
 `POST /interrupt` returns `{ ok: true }` when the session has no live turn, or when `turnId` does
 not name the live turn.
+
+**The restore response carries the whole of `RestoreResult`** (D182): `safety` is the `Checkpoint`
+taken on the way in, and `unreached` is `IgnoredDelta[]` or `null`. **A client must render `null`
+as unknown and an empty array as "nothing differs", and must not collapse the two** — that
+distinction is the entire reason item 6 of the brief is qualified rather than unqualified, and a
+renderer that shows both as a clean restore puts back exactly the silence this route exists to
+break. `ok: true` continues to mean the restore itself succeeded; a dirty verification pass is
+`500 checkpoint_failed` and carries no `RestoreResult`.
 
 **The tool-output route serves `Content-Type: text/plain; charset=utf-8` with
 `X-Content-Type-Options: nosniff` and `Content-Disposition: attachment`**, so a tool result that
@@ -1719,7 +1884,7 @@ control rather than concealment (D50, D70).
 | Variant | Raised when | Retryable | Caller does |
 |---|---|---|---|
 | `ConfigError.insecure_bind` | A routable bind that no `trustProxy` allow-list covers, **under `proxy-header` or `open-webui` only** (D154) — those are the modes that trust a header the client could otherwise set. Under `shared-secret` the same bind is legitimate and this is never raised: a credential the caller must present is not a claim about who the peer is. **Not** a missing auth mode either: D93 makes one mandatory in every configuration, so that case is `missing_field` at parse time and never reaches here | No | Refuse to start, naming the fix |
-| `ConfigError.missing_field` / `invalid_field` | Validation of the environment | No | Refuse to start |
+| `ConfigError.missing_field` / `invalid_field` | Validation of the environment. `invalid_field` additionally covers **`STORAGE_ROOT` overlapping any `WORKSPACE_ROOTS` entry** under `pathsOverlap`, once both are jail-normalised (D185, I57) — `detail` names the root it collides with. No variant is added for it: the field is genuinely invalid relative to another field | No | Refuse to start. On the overlap, naming both paths and which to move; nothing is written and the storage tree is untouched |
 | `StartupError.storage_unwritable` | The storage root cannot be written at boot | No | Refuse to start |
 | `StartupError.storage_locked` | Another server process holds this storage root: the lock's `renewals` moved across one observation window measured on this process's own monotonic clock (D180). **Never raised on a host comparison**, which no longer happens | No | Refuse to start with a non-zero exit, naming the holding `pid`, `hostname` and `startedAt`. **Nothing server-wide has been written**, because the claim precedes the reap step |
 | `IdentityError.no_identity` | No header, no cookie, or an empty one | No | `401 unauthenticated` |
@@ -1734,6 +1899,7 @@ control rather than concealment (D50, D70).
 | `CheckpointError.git_unavailable` / `init_failed` | `ckpt.git` cannot be created | No | `session.notice / warn` (`checkpoints_unavailable`); the session proceeds without checkpoints |
 | `CheckpointError.locked` | `ckpt.git/index.lock` exists | Yes, after the lock clears | Pre-turn: `session.notice / warn` (`checkpoint_skipped`); the turn proceeds with no restore point |
 | `CheckpointError.commit_failed` | A commit fails for any other reason | Sometimes | As above |
+| *(no variant)* | **The ignored-path manifest could not be captured at commit, written, read, or parsed at restore** (D182) | — | **Not an error at all, at either end.** The commit succeeds with no manifest; the restore succeeds with `unreached: null`. A manifest is a report and never a gate, so no path may fail on its absence — and `null` is the one thing that must never be rendered as "nothing differs" (I58) |
 | `CheckpointError.no_such_checkpoint` | Restore names an unknown `sha` | No | `404 no_such_checkpoint`; the workspace is untouched |
 | `CheckpointError.restore_incomplete` | `read-tree` or `clean` fails, **or the verification pass comes back dirty** — `diff --quiet <sha>` for tracked content, `ls-files --others --exclude-standard` for what was left behind. Never an exit code alone: `read-tree` exits 0 with a warning on the embedded-repository case (D112) | No | `error / checkpoint_restore_failed`, non-fatal, plus `500 checkpoint_failed`. **The workspace is partially restored**; the safety checkpoint is the way back |
 | `AdapterError.agent_unavailable` | `spawn` returns `ENOENT`, or no supported transport is available | Yes, once installed | `503 agent_unavailable`; `error / agent_unavailable`, fatal to the turn; clear the turn. The session stays live |
@@ -1806,7 +1972,7 @@ highest-value section in this document.
 | I16 | `meta.json` is written only by temp-file-then-atomic-rename, and only on create, a `state` transition, or a `cliSessionId` change | `store` |
 | I17 | `lastSeq` used at boot is derived from the spill's tail, never read from `meta.json` | `session-manager`, `store` |
 | I18 | No connection is accepted until the storage lock, reaping, rehydration, open-turn closure, and record-log loading have all completed | `session-manager`, `records` |
-| I19 | A `ProcessRecord` is reaped only when its `hostname` is this host's — or absent, which reads as this host's (D181) — and it has no `exitedAt`, and its `startedAt` is later than the host's last boot, and the live process's image matches. A record naming another host is neither reaped nor tombstoned. Reaping kills the tree, never the bare pid | `session-manager` |
+| I19 | A `ProcessRecord` is reaped only when its `hostname` is this host's — or absent, which reads as this host's (D181) — and it has no `exitedAt`, its `startedAt` is later than the host's last boot, the live process's image matches, **and the live process's creation time is exactly the recorded `osCreatedAt`** (D183, D186). A record naming another host is neither reaped nor tombstoned. The guard **fails closed**: a record whose `osCreatedAt` is `null`, or whose live counterpart cannot be read, is tombstoned and logged, never reaped. Reaping kills the tree, never the bare pid. **It governs `pids.ndjson` alone** — `<storage>/server.lock` is reclaimed by observation and shares nothing with this guard (D180, I50) | `session-manager` |
 | I20 | No module above `adapters/*` branches on a vendor string. `vendor` is carried as data on `SessionRecord`, `SessionSummary`, `SessionStarted`, `AuditRecord`, `SessionSnapshot` and `Requisition`, and is display or evidence in every one of them | all |
 | I21 | `CliSessionId`, `CallId`, and `RequestId` are only ever compared for equality above the adapter layer | `session-manager` |
 | I22 | A blob path contains both `turnId` and `callId`; no blob is addressable by `callId` alone | `store` |
@@ -1842,6 +2008,10 @@ highest-value section in this document.
 | I55 | From the moment `SessionManager`'s shutdown method is entered, no `AdapterNotification` of any kind reaches a handler. The mute sits on the manager's own `notify` sink, which every notification already passes through, and **not** on the `exited` handler: `turn.ended` arrives as a second, separate notification after `exited` inside the same synchronous callback, so a mute on the handler would silence the cancellations and let the turn's closure through. The mute is one-way — nothing clears it, and shutdown is its only caller (D178) | `session-manager` |
 | I56 | `<storage>/server.lock` is written or removed only by the instance that holds it. `releaseLock` and every renewal read the file first and act only while it still carries this process's `instanceId`; an absent file or a foreign one means this server has been displaced — it removes nothing, and stops rather than going on writing server-wide state it no longer owns (D180) | `store`, `server` |
 | I57 | `pid`, `hostname`, `startedAt` and `image` on a `ServerLock` are informational. No decision reads them: not the reclaim decision, not the release check, not the renewal check. Their only consumer is the text of a `StartupError.storage_locked` (D180) | `store`, `session-manager` |
+
+| I56 | A turn ends by ending the process tree its child rooted, on **every** path a turn can end by — normal exit, interrupt, adapter failure, shutdown — using D38's one mechanism and no other. When `turn.ended` is observable for a turn, no process that turn started is still running, so a released workspace claim and a subsequent restore are never conditional on an untracked descendant (D184) | `session-manager`, `adapters/*` |
+| I57 | `Config.storageRoot` is jail-normalised, and `pathsOverlap` is false between it and every entry of `Config.workspaceRoots`. A configuration failing this is refused at startup and the server does not listen; no session is ever served from it (D185) | `config` |
+| I58 | An `IgnoredManifest` records path, kind, size and mtime and **never content**. `RestoreResult.unreached === null` means the comparison could not be made and never that nothing differs; an empty array is the positive answer. No gate, control, or refusal anywhere in this contract reads a manifest — it is a report to an operator and its collapsed-directory blindness makes it unusable as evidence (D182, D187) | `checkpoints`, `client` |
 
 **I40, I41 and I42 were never allocated, and the gap is left open rather than closed.** The
 numbering jumps from I39 to I43 and nothing is missing. Ids here are cited by number in

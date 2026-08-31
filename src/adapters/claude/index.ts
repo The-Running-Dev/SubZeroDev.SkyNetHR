@@ -64,6 +64,21 @@ const IGNORED_SYSTEM_SUBTYPES = new Set([
 // as `IGNORED_TOP_LEVEL_TYPES` above.
 const IGNORED_STREAM_EVENT_TYPES = new Set(['message_start', 'content_block_start', 'content_block_stop', 'message_delta', 'message_stop']);
 
+// `content_block_delta`'s own `delta.type` — only `text_delta` maps to anything (a
+// `message.delta` frame, I51). `thinking_delta` and `input_json_delta` are a different
+// content-block kind each and out of S25's scope (`design/30-slices.md § S25`); ignored
+// rather than mapped, the same reasoning as `IGNORED_STREAM_EVENT_TYPES` above (D172 — this
+// was previously an inline silent drop, not on a named list).
+const IGNORED_CONTENT_BLOCK_DELTA_TYPES = new Set(['thinking_delta', 'input_json_delta']);
+
+// `control_request`'s own `subtype` — only `can_use_tool` maps to anything
+// (`permission.request`). No other subtype has ever been observed across the probes
+// `design/findings/S1-claude-adapter.md` and `S26-real-permission-round-trip.md` record,
+// so this starts empty: D172 put the check on a named list (this one) rather than an
+// inline silent drop specifically so a subtype nobody has seen yet surfaces as
+// `adapter_unknown_record` instead of vanishing without a trace.
+const IGNORED_CONTROL_REQUEST_SUBTYPES = new Set<string>([]);
+
 // `PermissionRequest.matchTarget`'s projection table (D109) — the only place tool-shape
 // knowledge is permitted to live (I46). Four rows, because four are what
 // `design/findings/S1-claude-adapter.md` names; every other tool, including every
@@ -305,7 +320,12 @@ export function createClaudeAdapter(opts: AdapterOptions & { readonly executable
           return failSchemaMismatch('control_request carried a non-object request', rec);
         }
         const request = rawRequest as Record<string, unknown> | undefined;
-        if (request?.['subtype'] !== 'can_use_tool') return;
+        if (request?.['subtype'] !== 'can_use_tool') {
+          const subtype = request?.['subtype'];
+          if (typeof subtype === 'string' && IGNORED_CONTROL_REQUEST_SUBTYPES.has(subtype)) return;
+          emitEvent('error', { kind: 'adapter_unknown_record', message: `unrecognised control_request subtype: ${String(subtype)}`, fatal: false }, rec);
+          return;
+        }
         const requestId = rec['request_id'];
         if (typeof requestId !== 'string') {
           return failSchemaMismatch('control_request carried a non-string request_id', rec);
@@ -342,17 +362,22 @@ export function createClaudeAdapter(opts: AdapterOptions & { readonly executable
       // (S25.3, D168) Only present with `--include-partial-messages` on. Wraps the raw
       // Anthropic Messages API streaming event shapes; only `content_block_delta` carrying
       // a `text_delta` maps to anything — a `message.delta` frame, never an envelope
-      // (I51). `thinking_delta` and `input_json_delta` are a different content-block kind
-      // each and out of this slice's scope (`design/30-slices.md § S25`); ignored rather
-      // than mapped, the same as the subtypes in `IGNORED_STREAM_EVENT_TYPES`.
+      // (I51). A `delta.type` outside that is `IGNORED_CONTENT_BLOCK_DELTA_TYPES`'s, not an
+      // inline drop (D172).
       case 'stream_event': {
         const event = rec['event'] as Record<string, unknown> | undefined;
         const eventType = event?.['type'];
         if (eventType === 'content_block_delta') {
           const delta = event?.['delta'] as Record<string, unknown> | undefined;
-          if (delta?.['type'] === 'text_delta' && typeof delta['text'] === 'string' && delta['text'].length > 0) {
-            emitEvent('message.delta', { role: 'assistant', text: delta['text'] }, rec);
+          const deltaType = delta?.['type'];
+          if (deltaType === 'text_delta') {
+            if (typeof delta?.['text'] === 'string' && delta['text'].length > 0) {
+              emitEvent('message.delta', { role: 'assistant', text: delta['text'] }, rec);
+            }
+            return;
           }
+          if (typeof deltaType === 'string' && IGNORED_CONTENT_BLOCK_DELTA_TYPES.has(deltaType)) return;
+          emitEvent('error', { kind: 'adapter_unknown_record', message: `unrecognised content_block_delta delta type: ${String(deltaType)}`, fatal: false }, rec);
           return;
         }
         if (typeof eventType === 'string' && IGNORED_STREAM_EVENT_TYPES.has(eventType)) return;

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { createServer, type Server } from 'node:http';
+import { createServer, request, type IncomingMessage, type Server } from 'node:http';
 import { existsSync, realpathSync } from 'node:fs';
 import { mkdtemp, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -949,6 +949,103 @@ describe('S25.3 — message.delta over the real SSE wire', () => {
     const deltaFrame = frames.find((f) => f.includes('"kind":"message.delta"'))!;
     assert.match(deltaFrame, /^event: message\.delta$/m, 'dispatched under its own event name');
     assert.doesNotMatch(deltaFrame, /^id:/m, 'a frame carries no seq and is written with no id: line');
+  });
+});
+
+describe('#178 — a route handler that throws answers 503, rather than hanging the request', () => {
+  it('a records collaborator that throws on the append-review route still gets a response', async () => {
+    // No `recordsOverride`: `makeEdge` wires `notImplementedProxy<Records>('records')` by
+    // default, which throws synchronously on any property access — the same shape the
+    // issue's own repro names ("a Proxy that throws on any property access"). Reaching
+    // `deps.records.appendReview` inside the async route handler turns that throw into a
+    // rejected promise; pre-fix, `return handleAppendReview(...)` (no `await`) inside the
+    // listener's outer `try` never routes that rejection through its `catch`, so no
+    // response is ever written and the request hangs forever.
+    const h = await makeEdge();
+    const id = 'does-not-matter-records-throws-first';
+
+    const res = await Promise.race([
+      post(h, `/api/reviews/${id}`, {}),
+      new Promise<Response>((_resolve, reject) => setTimeout(() => reject(new Error('request hung: no response within 15s')), 15000).unref()),
+    ]);
+    assert.equal(res.status, 503);
+    const body = (await res.json()) as { error: { code: string } };
+    assert.equal(body.error.code, 'agent_unavailable');
+  });
+});
+
+describe('#133 — a slow live subscriber is dropped past caps.subscriberQueueHighWater', () => {
+  it('a client that never reads is dropped with a replay_gap frame, and the server closes the connection', async () => {
+    const h = await makeEdge(
+      undefined,
+      {
+        caps: {
+          ringCapacity: 500,
+          toolResultBytes: 65536,
+          subscriberQueueHighWater: 2, // low enough that a megabyte-scale undrained burst reliably crosses it
+          keepaliveMs: 15000,
+          auditPageMax: 200,
+          reviewBodyBytes: 1024,
+          requisitionTextBytes: 1024,
+          standingRuleBytes: 1024,
+          attachmentBytes: 10485760,
+          attachmentCount: 5,
+          sessionToolOutputBytes: 10485760,
+        },
+      },
+      'many-big',
+    );
+    const id = await newSession(h, 'w133-sse');
+
+    // A raw request whose response is left paused — no `data` listener, no `.resume()` —
+    // so Node's own backpressure holds the OS receive window shut, the same as a browser
+    // tab that has stopped reading. `fetch`'s reader would risk reading ahead internally;
+    // the raw client here is what actually withholds every byte.
+    const rawRes = await new Promise<IncomingMessage>((resolve, reject) => {
+      const req = request(`${h.base}/api/sessions/${id}/events`, { headers: { 'x-forwarded-user': 'ben' } });
+      req.on('response', resolve);
+      req.on('error', reject);
+      req.end();
+    });
+    assert.equal(rawRes.statusCode, 200);
+
+    await post(h, `/api/sessions/${id}/message`, { text: 'go' });
+
+    // #246: withhold reading for a fixed real-time window before draining at all.
+    // Production speed is not reliable across environments — CI's Windows runner has been
+    // observed delivering the burst as a slow trickle an actively-draining client can keep
+    // pace with indefinitely, regardless of total volume. TCP flow control only closes the
+    // window when nothing reads it, whatever the peer's write rate; a fixed real delay with
+    // zero consumption forces genuine backpressure everywhere the fast-burst assumption
+    // this scenario used to rely on alone did not.
+    await new Promise((resolve) => setTimeout(resolve, 3000).unref());
+
+    // The burst is megabytes and the client has read nothing at all yet, so by the time
+    // this resolves the server has already forced real backpressure and, past a
+    // high-water mark of 2, dropped the subscriber — writing the gap frame and calling
+    // `res.end()`. That final write cannot itself flush to a peer that never reads, so
+    // waiting for a `'close'` event *before* reading would deadlock: draining is what
+    // unblocks the server's own pending end-of-response write, not something that can wait
+    // for it. One persistent `'data'` listener (switching the stream to flowing mode once,
+    // not per-chunk) avoids the gap a `.once`-per-iteration loop would have between an
+    // event firing and the next listener being attached.
+    const raw: Buffer[] = [];
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error(`timed out waiting for the drop; saw ${raw.length} chunks`)), 20000);
+      timer.unref();
+      rawRes.on('data', (c: Buffer) => raw.push(c));
+      rawRes.on('end', () => {
+        clearTimeout(timer);
+        resolve();
+      });
+      rawRes.on('error', (err) => {
+        clearTimeout(timer);
+        reject(err);
+      });
+    });
+    const text = Buffer.concat(raw).toString('utf8');
+    assert.match(text, /"kind":"replay_gap"/, 'a replay_gap envelope was delivered before the drop');
+    assert.match(text, /"fatal":false/, 'the gap is reported non-fatal, same shape session-manager.subscribe mints');
   });
 });
 

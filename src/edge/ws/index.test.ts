@@ -565,3 +565,117 @@ describe('S11.5 — the edge is chosen by configuration, and the client learns w
     assert.equal(((await res.json()) as { error: { code: string } }).error.code, 'bad_request');
   });
 });
+
+describe('#178 — a route handler that throws answers 503, rather than hanging the request', () => {
+  it('a records collaborator that throws on the append-review route still gets a response', async () => {
+    // `makeSharedEdges` always wires `notImplementedProxy<Records>('records')`, which
+    // throws synchronously on any property access — the same shape the issue's own repro
+    // names. Reaching `deps.records.appendReview` inside the async route handler turns
+    // that throw into a rejected promise; pre-fix, `return handleAppendReview(...)` (no
+    // `await`) inside the listener's outer `try` never routes that rejection through its
+    // `catch`, so no response is ever written and the request hangs forever. This exercises
+    // edge/ws's own plain-HTTP dispatch, not edge/sse's — the two are separate listeners
+    // with the identical bug pattern, fixed identically.
+    const h = await makeSharedEdges();
+    const id = 'does-not-matter-records-throws-first';
+
+    const res = await Promise.race([
+      post(h.wsBase, `/api/reviews/${id}`, {}),
+      new Promise<Response>((_resolve, reject) => setTimeout(() => reject(new Error('request hung: no response within 15s')), 15000).unref()),
+    ]);
+    assert.equal(res.status, 503);
+    const body = (await res.json()) as { error: { code: string } };
+    assert.equal(body.error.code, 'agent_unavailable');
+  });
+});
+
+describe('#133 — a slow live subscriber is dropped past caps.subscriberQueueHighWater', () => {
+  it('a client that never reads is dropped with a replay_gap frame, and the server closes the connection', async () => {
+    const h = await makeSharedEdges(
+      undefined,
+      {
+        caps: {
+          ringCapacity: 500,
+          toolResultBytes: 65536,
+          subscriberQueueHighWater: 2, // low enough that a megabyte-scale undrained burst reliably crosses it
+          keepaliveMs: 15000,
+          auditPageMax: 200,
+          reviewBodyBytes: 1024,
+          requisitionTextBytes: 1024,
+          standingRuleBytes: 1024,
+          attachmentBytes: 10485760,
+          attachmentCount: 5,
+          sessionToolOutputBytes: 10485760,
+        },
+      },
+      'many-big',
+    );
+    const id = await newSession(h, 'w133-ws');
+
+    // The handshake by hand, deliberately never wrapped in `TestWsClient` — its constructor
+    // attaches a `'data'` listener immediately, which would drain the socket and defeat the
+    // whole point of this test. This socket is left paused until the assertions below.
+    // `head` is the first packet of the upgraded stream (Node's own client hands it back
+    // separately from the socket's later `'data'` events) — a live envelope can arrive in
+    // the same TCP segment as the 101 response itself, and losing those bytes desyncs
+    // every WS frame boundary parsed after them.
+    const { socket, head } = await new Promise<{ socket: Socket; head: Buffer }>((resolve, reject) => {
+      const url = new URL(`${h.wsBase}/api/sessions/${id}/events`);
+      const req = request({
+        host: url.hostname,
+        port: url.port,
+        path: url.pathname,
+        method: 'GET',
+        headers: {
+          connection: 'Upgrade',
+          upgrade: 'websocket',
+          origin: ALLOWED_ORIGIN,
+          'x-forwarded-user': 'ben',
+          'sec-websocket-version': '13',
+          'sec-websocket-key': randomBytes(16).toString('base64'),
+        },
+      });
+      req.on('upgrade', (_res, sock, upgradeHead: Buffer) => {
+        sockets.push(sock);
+        resolve({ socket: sock, head: upgradeHead });
+      });
+      req.on('error', reject);
+      req.end();
+    });
+    socket.write(encodeClientFrame(0x1, Buffer.from(JSON.stringify({ after: 0 }), 'utf8')));
+
+    await post(h.sseBase, `/api/sessions/${id}/message`, { text: 'go' });
+
+    // #246: withhold reading for a fixed real-time window before draining at all.
+    // Production speed is not reliable across environments — CI's Windows runner has been
+    // observed delivering the burst as a slow trickle an actively-draining client can keep
+    // pace with indefinitely, regardless of total volume. TCP flow control only closes the
+    // window when nothing reads it, whatever the peer's write rate; a fixed real delay with
+    // zero consumption forces genuine backpressure everywhere the fast-burst assumption
+    // this scenario used to rely on alone did not.
+    await new Promise((resolve) => setTimeout(resolve, 3000).unref());
+
+    // Same shape as the SSE half of this fix: the client has read nothing at all, so the
+    // server's own final write (the gap frame, then the WS close frame) cannot flush until
+    // draining starts — waiting for `'close'` first would deadlock against that.
+    const raw: Buffer[] = head.length > 0 ? [head] : [];
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error(`timed out waiting for the drop; saw ${raw.length} chunks`)), 20000);
+      timer.unref();
+      socket.on('data', (c: Buffer) => raw.push(c));
+      socket.on('close', () => {
+        clearTimeout(timer);
+        resolve();
+      });
+      socket.on('error', (err) => {
+        clearTimeout(timer);
+        reject(err);
+      });
+    });
+    const { frames } = parseServerFrames(Buffer.concat(raw));
+    const texts = frames.filter((f) => f.opcode === 0x1).map((f) => f.payload.toString('utf8'));
+    const gapFrame = texts.find((t) => t.includes('"kind":"replay_gap"'));
+    assert.ok(gapFrame, `a replay_gap envelope was delivered before the drop; saw ${texts.length} text frames`);
+    assert.match(gapFrame!, /"fatal":false/, 'the gap is reported non-fatal, same shape session-manager.subscribe mints');
+  });
+});

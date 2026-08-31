@@ -336,6 +336,35 @@ test('S1.4 — an unrecognised record kind, and a malformed JSON line, are both 
   }
 });
 
+// #189/D172 — the two inline drops the Codex adapter never had: a control_request whose
+// subtype isn't can_use_tool, and a content_block_delta whose delta.type isn't text_delta.
+// Both now route through a named ignore list (empty for the first — no other subtype has
+// ever been observed) rather than vanishing silently; anything not on the list surfaces as
+// adapter_unknown_record, same as every other unrecognised shape this adapter sees.
+test('#189 — a control_request subtype other than can_use_tool surfaces as adapter_unknown_record', async () => {
+  process.env['SKYNET_TEST_SCENARIO'] = 'unknown-control-request-subtype';
+  const { adapter, notifications } = makeAdapter('unknown-control-request-subtype');
+  await adapter.send('hello', [], null, 'turn-ucr' as never);
+  await waitUntil(() => eventsOf(notifications, 'turn.ended').length > 0);
+  const errors = eventsOf(notifications, 'error');
+  assert.ok(errors.some((e) => (e.event.data as { kind: string; message: string }).kind === 'adapter_unknown_record' && (e.event.data as { message: string }).message.includes('totally_unknown_subtype')));
+  // No permission.request was raised for the unrecognised subtype.
+  assert.equal(eventsOf(notifications, 'permission.request').length, 0);
+  assert.ok(eventsOf(notifications, 'message').some((m) => (m.event.data as { text: string }).text === 'after the unknown control_request subtype'));
+});
+
+test('#189 — a content_block_delta delta.type other than text_delta surfaces as adapter_unknown_record', async () => {
+  process.env['SKYNET_TEST_SCENARIO'] = 'unknown-content-block-delta-type';
+  const { adapter, notifications } = makeAdapter('unknown-content-block-delta-type', { streamDeltas: true });
+  await adapter.send('hello', [], null, 'turn-ucd' as never);
+  await waitUntil(() => eventsOf(notifications, 'turn.ended').length > 0);
+  const errors = eventsOf(notifications, 'error');
+  assert.ok(errors.some((e) => (e.event.data as { kind: string; message: string }).kind === 'adapter_unknown_record' && (e.event.data as { message: string }).message.includes('totally_unknown_delta_type')));
+  // No message.delta was raised for the unrecognised delta type.
+  assert.equal(eventsOf(notifications, 'message.delta').length, 0);
+  assert.ok(eventsOf(notifications, 'message').some((m) => (m.event.data as { text: string }).text === 'after the unknown delta type'));
+});
+
 // #201 — on Windows, `executable` ending in `.cmd` forces `shell: true` (mirrors the
 // bare `claude` name PATH/PATHEXT resolves to a shim); `proc.pid` then names the
 // `%ComSpec%` shell Node actually launched, not the `.cmd` shim itself. The `spawned`

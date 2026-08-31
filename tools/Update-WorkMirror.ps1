@@ -9,15 +9,20 @@
     label, never a milestone, never git (S14.1). `/track`'s alone; no other command invokes it
     and no other command writes a WorkRef.
 
-    One WorkRef per currently-open issue. `Rank` degrades rather than failing: the issue's
+    One WorkRef per issue this repository has ever mirrored: a currently-open issue is written
+    from the tracker listing, and an issue whose on-disk record predates its closing is
+    re-fetched individually, by issue number, and rewritten with its closed State - never left
+    stuck at OPEN. `Rank` degrades rather than failing: the issue's
     position in the per-repository GitHub Project when one places it, otherwise its milestone
     number, otherwise the issue number itself - falling through is not a finding, and an
     emitted WorkRef never lacks a Rank (S14.3). `Criteria` is read from `- [ ] **<id>**`
     checkbox lines in the issue body, the same shape every issue template in this kit uses; an
     issue with none yields an empty list, not an absent field.
 
-    `MirroredAt` is stamped with the current commit on every write, including a write that
-    changed no other field (S14.2) - that stamp is the mirror's only claim to currency, and
+    A record is written only when a mirrored field - `Title`, `State`, `Rank`, or `Criteria` -
+    changed since the last write; `MirroredAt` is not itself a mirrored field and never triggers
+    a write by itself (S14.2). `MirroredAt` is stamped with the current commit on every write
+    that does happen - that stamp is the mirror's only claim to currency, and
     Test-DesignState.ps1's MirrorStale class is what a stale one costs (S14.7).
 
     Two ways this run does not touch the mirror at all: `design/FROZEN.md` present (S14.5,
@@ -76,7 +81,7 @@ function New-WorkMirrorResult {
 #>
 function Get-IssueCriteriaIds {
     param([string] $Body)
-    if ([string]::IsNullOrWhiteSpace($Body)) { return ,@() }
+    if ([string]::IsNullOrWhiteSpace($Body)) { return @() }
 
     $ids = [System.Collections.Generic.List[string]]::new()
     foreach ($line in ($Body -split "`r?`n")) {
@@ -84,7 +89,33 @@ function Get-IssueCriteriaIds {
             $ids.Add($Matches[1].Trim())
         }
     }
-    ,@($ids)
+    @($ids)
+}
+
+function Invoke-GhRaw {
+    <#
+        gh writes UTF-8. PowerShell's native-command capture (`& gh @args`) decodes that
+        stdout using [Console]::OutputEncoding, which on a Windows host - this CI runner
+        included - defaults to the OEM code page (ibm437) rather than UTF-8. A non-ASCII
+        byte in an issue title (an em dash, a section mark) then decodes to the wrong
+        character and gets baked into the WorkRef record on disk - the same class of bug
+        Sync-Kit.ps1's Invoke-GitRaw fixed for git's output (#20), never applied to gh.
+        Routing through ProcessStartInfo with an explicit UTF-8 StandardOutputEncoding
+        sidesteps the console entirely.
+    #>
+    param([string[]] $GhArgs)
+    $psi = [System.Diagnostics.ProcessStartInfo]::new()
+    $psi.FileName = 'gh'
+    foreach ($a in $GhArgs) { $psi.ArgumentList.Add($a) }
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.UseShellExecute = $false
+    $psi.StandardOutputEncoding = [System.Text.UTF8Encoding]::new($false)
+    $proc = [System.Diagnostics.Process]::Start($psi)
+    $stdout = $proc.StandardOutput.ReadToEnd()
+    $proc.StandardError.ReadToEnd() | Out-Null
+    $proc.WaitForExit()
+    [pscustomobject]@{ Output = $stdout; ExitCode = $proc.ExitCode }
 }
 
 function Get-OpenIssueList {
@@ -94,20 +125,21 @@ function Get-OpenIssueList {
     if ($Repository) { $ghArgs += @('-R', $Repository) }
 
     try {
-        $json = & gh @ghArgs 2>$null
-        if ($LASTEXITCODE -ne 0) {
-            return [pscustomobject]@{ Issues = @(); Failure = (New-WorkMirrorFailure -Reason 'GhUnavailable' -Detail "gh exited $LASTEXITCODE") }
+        $result = Invoke-GhRaw -GhArgs $ghArgs
+        if ($result.ExitCode -ne 0) {
+            return [pscustomobject]@{ Issues = @(); Failure = (New-WorkMirrorFailure -Reason 'GhUnavailable' -Detail "gh exited $($result.ExitCode)") }
         }
+        $json = $result.Output
     } catch {
         return [pscustomobject]@{ Issues = @(); Failure = (New-WorkMirrorFailure -Reason 'GhUnavailable' -Detail $_.Exception.Message) }
     }
 
-    if ([string]::IsNullOrWhiteSpace(($json -join ''))) {
+    if ([string]::IsNullOrWhiteSpace($json)) {
         return [pscustomobject]@{ Issues = @(); Failure = $null }
     }
 
     try {
-        $parsed = ($json -join "`n") | ConvertFrom-Json
+        $parsed = $json | ConvertFrom-Json
     } catch {
         return [pscustomobject]@{ Issues = @(); Failure = (New-WorkMirrorFailure -Reason 'TrackerUnreadable' -Detail $_.Exception.Message) }
     }
@@ -126,9 +158,9 @@ function Get-ProjectItemPositions {
     param([Parameter(Mandatory)][string] $Owner, [Parameter(Mandatory)][string] $RepoName)
 
     try {
-        $projJson = & gh project list --owner $Owner --format json 2>$null
-        if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace(($projJson -join ''))) { return $null }
-        $projects = ($projJson -join "`n") | ConvertFrom-Json
+        $projResult = Invoke-GhRaw -GhArgs @('project', 'list', '--owner', $Owner, '--format', 'json')
+        if ($projResult.ExitCode -ne 0 -or [string]::IsNullOrWhiteSpace($projResult.Output)) { return $null }
+        $projects = $projResult.Output | ConvertFrom-Json
     } catch {
         return $null
     }
@@ -137,9 +169,9 @@ function Get-ProjectItemPositions {
     if (-not $project) { return $null }
 
     try {
-        $itemsJson = & gh project item-list $project.number --owner $Owner --format json 2>$null
-        if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace(($itemsJson -join ''))) { return $null }
-        $items = ($itemsJson -join "`n") | ConvertFrom-Json
+        $itemsResult = Invoke-GhRaw -GhArgs @('project', 'item-list', "$($project.number)", '--owner', $Owner, '--format', 'json')
+        if ($itemsResult.ExitCode -ne 0 -or [string]::IsNullOrWhiteSpace($itemsResult.Output)) { return $null }
+        $items = $itemsResult.Output | ConvertFrom-Json
     } catch {
         return $null
     }
@@ -155,6 +187,32 @@ function Get-ProjectItemPositions {
     $positions
 }
 
+#
+# Re-fetches individual issues already mirrored on disk that Get-OpenIssueList no longer
+# returns - the only way a closed issue's WorkRef is ever revisited. Best-effort per issue: one
+# that cannot be read (deleted, network blip) is silently skipped and its existing record is
+# left untouched rather than treated as a could-not-evaluate for the whole run.
+function Get-IssuesByNumber {
+    param([int[]] $Numbers, [string] $Repository)
+
+    $results = [System.Collections.Generic.List[object]]::new()
+    foreach ($number in @($Numbers)) {
+        $ghArgs = @('issue', 'view', "$number", '--json', 'number,title,state,body,milestone')
+        if ($Repository) { $ghArgs += @('-R', $Repository) }
+
+        try {
+            $result = Invoke-GhRaw -GhArgs $ghArgs
+            if ($result.ExitCode -ne 0) { continue }
+        } catch { continue }
+        if ([string]::IsNullOrWhiteSpace($result.Output)) { continue }
+
+        try {
+            $results.Add(($result.Output | ConvertFrom-Json))
+        } catch { continue }
+    }
+    @($results)
+}
+
 function Get-CurrentRepoOwnerName {
     param([string] $Repository)
 
@@ -164,9 +222,9 @@ function Get-CurrentRepoOwnerName {
     }
 
     try {
-        $json = & gh repo view --json owner,name 2>$null
-        if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace(($json -join ''))) { return $null }
-        $parsed = ($json -join "`n") | ConvertFrom-Json
+        $result = Invoke-GhRaw -GhArgs @('repo', 'view', '--json', 'owner,name')
+        if ($result.ExitCode -ne 0 -or [string]::IsNullOrWhiteSpace($result.Output)) { return $null }
+        $parsed = $result.Output | ConvertFrom-Json
     } catch {
         return $null
     }
@@ -209,8 +267,39 @@ function ConvertTo-WorkRefLines {
     $lines.Add("State: $($Issue.state)")
     $lines.Add("Rank: $Rank")
     $lines.Add("MirroredAt: $Sha")
-    $lines.Add("Criteria:$(if ($criteria.Count) { ' ' + ($criteria -join ', ') })")
+    $criteriaJoined = $criteria -join ', '
+    $lines.Add(("Criteria:" + $(if ($criteriaJoined) { " $criteriaJoined" } else { '' })))
     ,@($lines)
+}
+
+<#
+    Title, State, Rank and Criteria are the mirrored fields (contract/update-workmirror §
+    Semantics) - MirroredAt is deliberately excluded, since it is what this comparison decides
+    whether to restamp in the first place. Returns $null for a record that does not exist yet,
+    which never compares equal to a real one.
+#>
+function Read-ExistingWorkRefFields {
+    param([Parameter(Mandatory)][string] $Path)
+    if (-not (Test-Path -LiteralPath $Path)) { return $null }
+
+    $fields = @{}
+    foreach ($line in (Get-Content -LiteralPath $Path)) {
+        if ($line -match '^(Title|State|Rank|Criteria):\s?(.*)$') {
+            $fields[$Matches[1]] = $Matches[2]
+        }
+    }
+    $fields
+}
+
+function Test-WorkRefFieldsChanged {
+    param([hashtable] $Existing, [Parameter(Mandatory)] $Issue, [Parameter(Mandatory)][string] $Rank, [Parameter(Mandatory)][AllowEmptyCollection()][string[]] $Criteria)
+
+    if (-not $Existing) { return $true }
+    if ($Existing['Title'] -ne $Issue.title) { return $true }
+    if ($Existing['State'] -ne $Issue.state) { return $true }
+    if ($Existing['Rank'] -ne $Rank) { return $true }
+    if ($Existing['Criteria'] -ne ($Criteria -join ', ')) { return $true }
+    return $false
 }
 
 <#
@@ -240,15 +329,35 @@ function Invoke-WorkMirrorUpdate {
     $projectPositions = if ($repoInfo) { Get-ProjectItemPositions -Owner $repoInfo.Owner -RepoName $repoInfo.Name } else { $null }
 
     $workDir = Join-Path $RepoPath 'design/state/work'
-    if ($issueList.Issues.Count -gt 0 -and -not (Test-Path -LiteralPath $workDir)) {
-        New-Item -ItemType Directory -Path $workDir -Force | Out-Null
+
+    $openNumbers = [System.Collections.Generic.HashSet[int]]::new()
+    foreach ($issue in $issueList.Issues) { [void]$openNumbers.Add([int]$issue.number) }
+
+    $staleNumbers = [System.Collections.Generic.List[int]]::new()
+    if (Test-Path -LiteralPath $workDir) {
+        foreach ($file in Get-ChildItem -LiteralPath $workDir -Filter '*.md' -File) {
+            $number = 0
+            if ([int]::TryParse($file.BaseName, [ref] $number) -and -not $openNumbers.Contains($number)) {
+                $staleNumbers.Add($number)
+            }
+        }
     }
+    $closedIssues = if ($staleNumbers.Count -gt 0) { Get-IssuesByNumber -Numbers @($staleNumbers) -Repository $Repository } else { @() }
 
     $written = [System.Collections.Generic.List[object]]::new()
-    foreach ($issue in $issueList.Issues) {
+    foreach ($issue in (@($issueList.Issues) + @($closedIssues))) {
         $rank = Get-IssueRank -Issue $issue -ProjectPositions $projectPositions
-        $lines = ConvertTo-WorkRefLines -Issue $issue -Rank $rank -Sha $sha
+        $criteria = Get-IssueCriteriaIds -Body $issue.body
         $file = Join-Path $workDir "$($issue.number).md"
+        $existing = Read-ExistingWorkRefFields -Path $file
+        if (-not (Test-WorkRefFieldsChanged -Existing $existing -Issue $issue -Rank $rank -Criteria @($criteria))) {
+            continue
+        }
+
+        if (-not (Test-Path -LiteralPath $workDir)) {
+            New-Item -ItemType Directory -Path $workDir -Force | Out-Null
+        }
+        $lines = ConvertTo-WorkRefLines -Issue $issue -Rank $rank -Sha $sha
         $text = (($lines -join "`n") + "`n")
         Set-Content -LiteralPath $file -Value $text -NoNewline -Encoding utf8NoBOM
         $written.Add([pscustomobject]@{ Id = "work/$($issue.number)"; Path = $file })

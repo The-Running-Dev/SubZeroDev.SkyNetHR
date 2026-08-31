@@ -3185,6 +3185,105 @@ must follow, discoverable only by reading `session-manager`, is one the second c
 gets wrong; and I1 as it stood read as forbidding what the tree does.
 Reversibility: cheap. Prose plus one invariant clause; the behaviour is unchanged.
 
+### 2026-08-29 — D191 Windows runs the server natively, supervised by NSSM, not the same container
+Context: issue #72. The Linux delivery mechanism was already decided (2026-08-19 entry above,
+corrected by D179) and ships as `Dockerfile`/`docker-compose.yml` — a runnable artifact `README.md`
+already documents. No decision existed for Windows, the brief's own primary host
+(`design/00-brief.md` Constraints: "Must run on Windows and Linux servers... path handling, process
+termination and workspace rollback all differ between them"). `src/server.test.ts` already documents
+why that constraint bites here specifically: `child.kill('SIGTERM')` on Windows is Node emulating an
+unconditional kill, not a real signal delivery, so the container's own shutdown path
+(`ENTRYPOINT ["/usr/bin/tini", "--"]`, ↦ `SIGTERM` ↦ `server.ts`'s `stop()`) is untestable on Windows
+by construction — the S27.2/S27.3 tests already skip there, citing #28.
+The reason that decides it is deployment reach, not code shape: **Docker Desktop is not supported on
+Windows Server.** A container-only Windows story therefore does not run on the class of host this is
+most likely deployed to, which is not a parity argument but an availability one.
+`src/jail/index.ts`'s Windows handling — 8.3 short names through `realpath.native`, `\\?\`
+extended-length prefixes, case-insensitive comparison with separator normalisation — is consistent
+with native execution and would go unexercised in production under a container-only story, but it is
+**not** on its own decisive: `win32`/`process.platform` branches appear in four non-test source files
+(not the eleven an earlier draft of this entry claimed, a count that wrongly included test files), and
+`.github/workflows/verify.yml`'s `windows-latest` job already exercises them on every push. Supported
+native behaviour is not the same as a requirement to deploy natively, and this entry originally
+conflated the two.
+Chosen: Windows does not run the Linux container under Docker Desktop, even though bind-mounting
+Windows paths into a Linux container works on supported desktop Windows and would be the cheaper
+option there. It is unavailable on Windows Server, and a deployment story that silently excludes the
+server SKUs of the brief's primary platform is not one. Instead the compiled server runs directly on the
+host, registered as a Windows Service by a new script, `tools/Install-WindowsService.ps1`, via NSSM
+(an operator-installed tool, not a project dependency — the Windows analogue to Docker itself, which
+is likewise never installed by this repository's own tooling). Credential parity with the Linux
+bind-mount comes for free rather than needing one: the service runs under the operator's own Windows
+account, so `claude`/`codex` resolve `%USERPROFILE%\.claude`/`.codex` exactly as interactive use
+would, with no container boundary to cross. The script validates every field `src/config/index.ts`'s
+`loadConfig` refuses to boot without, plus `ALLOWED_ORIGINS` (a deployment-level requirement
+`docker-compose.yml` also imposes with no default, though the app itself falls back to an empty
+list), and refuses to touch NSSM at all if any is missing from its `-EnvFile` — the same fail-closed
+shape the compose files get from `${VAR:?...}` interpolation.
+
+**The environment block is written to the registry, not passed to `nssm set`.** Under `shared-secret`
+it contains `AUTH_SECRET`, the credential authenticating every operator, and a Windows command line
+is not a private channel: it is readable through `Win32_Process.CommandLine` and captured by Sysmon
+Event ID 1 and PowerShell script-block logging. `Set-ServiceEnvironment` writes `AppEnvironmentExtra`
+directly as `REG_MULTI_SZ` and reads it back before returning, so a wrong assumption about NSSM's
+registry layout fails loudly instead of leaving a service that boots with no configuration; neither
+the comparison nor its failure message ever echoes a value. `-ServiceAccount` is advisory for the same
+reason and deliberately sets nothing — configuring it non-interactively would put a password on a
+command line, the very exposure this avoids.
+
+**The graceful shutdown route works, and an earlier draft of this entry wrongly hedged it.** That
+draft reasoned that `GenerateConsoleCtrlEvent` needs a console, that an SCM-started service has none,
+and therefore that the console step might never reach the process. The first two premises are true of
+services in general and false of NSSM in particular: NSSM gives the child a console — 2.24 allocates
+one for inheritance, newer builds use `CREATE_NEW_CONSOLE` — and on stop it attaches to that console
+and raises `CTRL_C_EVENT`. Node converts that to `SIGINT`, which `src/server.ts` already handles on
+the same path as the container's `SIGTERM`. The installer does not disable any of it. The hedge was
+reasoning from the general case to a specific tool without reading the tool, and it is withdrawn.
+Two corrections travel with it: NSSM walks the process tree during stop escalation, so even the
+`TerminateProcess` fallback does not inherently orphan children — what it costs is the graceful path
+(`manager.shutdown()`, the tombstones, the lock release), not the children; and #28 was never the
+right tracker for any of this, being the two-platform CI gate and closed on 2026-08-17.
+
+**The post-stop check survives, on a different justification.** It is no longer needed to answer
+whether NSSM *can* deliver the event — it can. It is needed because the delivery is
+configuration-dependent in a way an operator can trip without noticing: NSSM 2.24 is documented as
+unable to launch services on newer Windows without `AppNoConsole=1`, and that setting removes the very
+console the Ctrl+C route depends on, converting every stop into a hard kill that still reports
+success. So after a stop, `<STORAGE_ROOT>\server.lock` must be absent — a shutdown that reached
+`stop()` removes it (D175, asserted by `server.test.ts`'s S27.12); a hard kill leaves it and the next
+boot logs a stale-lock reclaim (S22.3). `Invoke-Install` prints the check on success and names the
+symptom. The observation itself is tracked as #232, which is what #72 item 5 needs and what this
+change does not supply.
+`tools/Install-WindowsService.Tests.ps1` covers all of the above in 15 Pester cases, including the
+read-back guard's own negative case and an assertion that its failure message names `AUTH_SECRET`
+without echoing its value.
+Rejected: the same container via Docker Desktop. Mechanically simplest, but it tests nothing about
+Windows' own process model — the reason the brief's constraint exists — and would leave
+the primary host's actual termination behaviour as unverified as it is today, just hidden behind a
+green checkmark that measured Linux instead.
+Rejected: `node-windows` (an npm dependency that self-installs a service wrapper) over NSSM. It would
+be a new project dependency needing its own decision-log entry under "no new dependencies", for a
+capability an already-external, already-documented tool (NSSM) provides with no addition to
+`package.json` at all — the same reasoning that keeps `tini` and `git` as `apt-get install` lines in
+the Dockerfile rather than npm packages.
+Rejected: passing the environment through `nssm set` because it is the documented interface and the
+argv exposure is "only local". The exposure is to any process enumerating command lines plus every
+log sink that records them, for the one value in the block that is a credential — and this same script
+already refuses that trade for the service password, so accepting it for `AUTH_SECRET` would be
+inconsistent within a single file.
+Rejected: closing #72's Windows item as fully verified. Item 5's shutdown-reaping check is confirmed
+for Linux (`src/server.test.ts`'s S27.2/S27.3/S27.10/S27.12, passing, plus S27.5–S27.13 in
+`session-manager/index.test.ts` covering the reap logic `stop()` calls into) but not exercised end to
+end on Windows in this pass — building an unverified end-to-end claim into the record would be exactly
+the assertion `AGENTS.md § Verification` rules out. Tracked as #232 instead, and the pull request
+carries no closing keyword — GitHub honours no partial exception, so `Closes #72 except item 5` would
+have closed the whole issue on merge with that item unobserved.
+Rejected: holding the Windows half back entirely until a real NSSM stop had been observed. The
+artifact is useful before that check runs, and the check is one command an operator runs on their own
+host — withholding a documented deployment path to wait for evidence only a deployment can produce is
+circular.
+Reversibility: cheap. Two new files under `tools/`, one README section, no product code touched.
+
 ### 2026-08-19 — D157 The audit read is `session-manager`'s, and the design's module table is corrected
 Context: `10-design.md § Module boundaries` credited `records` with "the incident read". `records`
 has no such method, in the tree or in `20-contract.md`'s `Records` interface; the read is
@@ -4166,6 +4265,389 @@ and after a reclaim-and-restart cycle the two are not the same server — so it 
 question than the one asked.
 Reversibility: expensive. One field on a persisted append-only line, in the file boot depends on.
 Landing point: #206, with D180.
+
+### 2026-08-25 — D182 A restore reports the ignored paths it did not roll back
+Context: A red-team pass on `main` at `984eae5` found that DoD #6 promised the workspace back at
+its state before an earlier message while `10-design.md` deliberately excluded every
+`.gitignore`d path from both the checkpoint and the clean. Both are defensible and they cannot
+both be unqualified, so this was ruled a brief conflict rather than a defect. The operator-facing
+consequence is the part neither document owned: an agent that edits `.env` or removes a generated
+artifact leaves that change standing across a restore the console reports as successful, and the
+operator has no way to learn it short of noticing.
+Chosen: qualify the brief and buy back the honesty rather than the reach. `00-brief.md` item 6
+gains "and be told what the rollback could not reach" plus a paragraph saying the exclusion is a
+decision and why; `10-design.md`'s symmetry bullet gains the reporting obligation. A checkpoint
+records a manifest of the ignored paths `git status --ignored=matching` names — never their
+content — and a restore diffs the target's manifest against the workspace and names what differs.
+`--ignored=matching` collapses an ignored directory into one entry, so the manifest is bounded by
+the matching ignore rules rather than by the files beneath them; the cost is that a collapsed
+directory is compared on its own metadata, which sees a child added or removed and not an edit
+deeper inside. That weakness is stated in the design because the report is a pointer for the
+operator and not evidence, and no security control may come to lean on it.
+Rejected: amending the brief and stopping there. Cheapest, and the design already carried the
+reasoning — but it leaves the console saying "restored" over a workspace that is not, which is the
+same class of silent partial success `read-tree`'s verification pass (D112) exists to refuse.
+Rejected: widening the checkpoint with `add -A -f` and `clean -fdx` so item 6 becomes literally
+true. It makes every restore force a dependency reinstall, which is the failure that makes
+operators stop using restores at all — the exact argument D31's symmetry was adopted for — and it
+grows a checkpoint with the workspace rather than with the diff. Expensive to reverse once
+checkpoints exist holding that content.
+Rejected: a manifest that walks the files inside an ignored directory. Precise, and it costs more
+per checkpoint than the checkpoint does on any workspace with a dependency tree.
+Reversibility: cheap for the two documents. The manifest itself is a new persisted artifact and a
+new field on the restore result, so it needs a `/contract` amendment before it is implemented;
+this entry does not authorise that edit.
+Note: D180 and D181 are reserved by the unmerged `design/180-storage-lock-lease` branch, which is
+why this entry is D182.
+
+
+### 2026-08-25 — D183 The pid reuse guard gains a creation-time limb, and fails closed
+Context: The guard reaps a `pids.ndjson` entry when it has no `exitedAt`, its `startedAt` is later
+than the host's last boot, and the live process's image matches. A red-team pass on `main` at
+`984eae5` found all three pass on same-boot reuse: the recorded child exits, the host hands pid
+4242 to another `claude`, and boot runs `taskkill /PID 4242 /T /F` against another operator's live
+agent and everything under it. The image limb is nearly free to satisfy by accident in a console
+whose every child is named `claude` or `codex`, and the boot-time limb was written against
+reboots when reuse is not confined to them. `src/session-manager/index.ts:509` implements exactly
+the three documented limbs, so this is a defect in the design and in the code together.
+Chosen: a fourth limb comparing the live process's own creation time against the recorded
+`startedAt`, and where creation time cannot be established the entry is tombstoned and logged
+rather than reaped. Node exposes creation time on no platform, so each is a shell-out of the shape
+`taskkill` already is — CIM `Win32_Process.CreationDate` on Windows, `/proc/<pid>/stat` field 22
+against `/proc/stat`'s `btime` on Linux. The same helper serves the `server.lock` staleness test,
+whose same-container PID/image reuse failure is #206's second bullet.
+Rejected: the same limb, failing open — falling back to the three existing limbs when creation
+time cannot be read. It reaps more genuine orphans automatically, and it leaves a live path to
+the exact incident the guard exists to prevent, on precisely the hosts where the check is least
+reliable. The cost of failing closed is one orphan an operator ends by hand, which the
+spawn-window paragraph already accepts as the price of not owning a pre-spawn handle.
+Rejected: abandoning pid identity for an OS-enforced ownership token — a Windows Job Object, a
+cgroup. Correct by construction, and it would also close the spawn-window exposure. It is the
+dependency D23 rejected, it is a far larger change, and it overlaps the unmerged
+`design/180-storage-lock-lease` work; nothing here is new evidence against D23.
+Reversibility: cheap. One limb, one helper, and the tombstone-and-log path already exists.
+
+### 2026-08-25 — D184 A turn owns every process it spawned, and ends all of them
+Context: `10-design.md § Process lifetime` claims checkpoint restore is safe by construction
+because no turn means no child and no child means nothing holds a handle on the workspace. A
+red-team pass found "no child" meant only "no CLI". A tool that starts a detached process — a dev
+server, a watcher — leaves it running when its CLI parent exits, and `close` in both adapters
+notifies and clears without calling `terminate` (`src/adapters/claude/index.ts:528`). Interrupt
+tree-kills and boot reaping tree-kills; ordinary completion, the overwhelmingly common way a turn
+ends, did not. So the workspace is reported idle, the claim released and the next session admitted
+while an untracked process is still writing — a Windows restore failure by the exact mechanism
+D16 claims to make impossible, and a silent cross-session race on POSIX.
+Chosen: run the tree kill on every path a turn can end by, normal exit included, using the
+mechanism interrupt and boot reaping already share (D38, D148). There is one way to end a process
+tree in this server and no path may grow a second. The consequence is stated in the design rather
+than discovered: an agent cannot leave a server running past the end of its turn.
+Rejected: leaving descendants alive and adding a liveness check before a restore and before the
+workspace claim is released. It preserves the deliberate dev-server case, at the cost of a new
+detection path on two platforms and a workspace claim that becomes conditional on something no
+component can observe — which is the complexity D30's blanket refusal was adopted to avoid.
+Rejected: accepting the leak and correcting only the prose, so the design stops claiming safety by
+construction. Cheapest and honest, and it leaves operators a Windows restore failure that this
+console exists to not have.
+Reversibility: cheap. One call on an existing helper, on a path that already runs.
+
+### 2026-08-25 — D185 The storage root may not overlap a workspace root
+Context: D30's overlap rule compares live sessions' `cwd` to each other. Nothing compared the
+server's own storage tree to the roots it admits sessions in, and `storageRoot` was a raw
+configuration string while `workspaceRoots` were jail-normalised (`src/config/index.ts:184`) — so
+the two could not have been compared even had anything tried. Storage at `D:\work\.skynethr`
+under a root at `D:\work` puts `meta.json`, the event spills, the audit log, the process records
+and every `ckpt.git` inside a checkpoint's work-tree: `add -A` ingests live server state and grows
+recursively, and a restore or `clean -fd` deletes evidence the server is mid-write on — including
+the audit log D25 exists to keep beyond the reach of the subject it indicts.
+Chosen: canonicalise `storageRoot` through the jail's own normalisation, then refuse to start when
+`pathsOverlap` says it meets any `workspaceRoot`. `pathsOverlap` is the one containment predicate
+in this server and no second is hand-rolled for this. The refusal reuses
+`ConfigError.invalid_field` with `field: 'STORAGE_ROOT'` and a `detail` naming the root it
+collides with, so no new public interface is minted and no contract amendment is owed. The shipped
+Compose deployment already separates `/workspaces` from `/data`, so nothing documented moves.
+Rejected: a dedicated `ConfigError` variant. More legible in a log, and it is a contract surface
+this decision has no standing to add; `invalid_field` with a naming `detail` is honest, since the
+field genuinely is invalid relative to `WORKSPACE_ROOTS`.
+Rejected: refusing at session creation instead, so a misconfigured deployment still serves the
+workspaces that do not collide. It trades a loud startup failure for a quiet partial one, and the
+thing at risk is server-wide evidence rather than one session's files.
+Rejected: permitting the overlap and pathspec-excluding the storage subtree from `add -A` and from
+restore. It supports the storage-inside-the-repo layout, and D30 already rejected pathspec-scoped
+checkpoints on the grounds that they make restore partial by design and hand the shared-workspace
+question to every downstream component.
+Reversibility: cheap. One predicate call at configuration load; deleting it restores today's
+behaviour exactly.
+
+
+### 2026-08-25 — D186 The pid-reuse guard's fourth limb compares a recorded OS reading, not `startedAt`
+Context: D183 added a fourth limb reading "the live process's own creation time matches the
+recorded `startedAt`". Deriving the contract from it exposed that those two values come from
+different clocks and are never equal: `startedAt` is this server's wall-clock reading taken at
+spawn, while a platform derives creation time from boot time plus ticks — on Linux from
+`/proc/stat`'s `btime`, which is second-granularity, plus `/proc/<pid>/stat` field 22. Compared
+for equality the limb never passes and the guard reaps nothing; compared within a tolerance, the
+window has to absorb clock-domain error and NTP steps, and a window wide enough to be reliable is
+wide enough to admit same-second pid reuse — which is the case D183 exists to close. D183 did not
+determine the rule, so this settles it rather than reopening it.
+Chosen: record the operating system's own reading at spawn, as `ProcessRecord.osCreatedAt`
+(`IsoTimestamp | null`), and have the guard compare it for exact equality against the same
+platform source at boot. Like is compared with like, there is no tolerance to pick or justify, and
+the shell-out at spawn is the shape `taskkill` already is. `ServerLock` gains the same field for
+the same reason — the `server.lock` staleness test shares the implementation, and same-container
+pid-and-image reuse defeats three limbs there identically. Where the spawn-time read fails the
+field is `null`, and a `null` is tombstoned and never reaped, which is the fail-closed posture
+D183 already chose at the other end.
+Rejected: a tolerance window against `startedAt`, D183's literal wording. No new field and no
+spawn-time cost, and it turns a security limb into a tuned constant whose safe value is smaller
+than its reliable value. The two requirements have no overlap, which is the whole finding.
+Rejected: deriving `startedAt` itself from the OS reading, so one field serves both limbs. It
+collapses the new field away, and it retypes an existing field two other limbs and every log line
+already depend on; a spawn whose OS read failed would then have no `startedAt` at all, which the
+boot-time limb needs.
+Reversibility: cheap while nothing has been written. One additive nullable field on two records,
+and readers already ignore unknown fields.
+
+### 2026-08-25 — D187 The ignored-path manifest is a per-checkpoint sidecar written by `checkpoints`
+Context: D182 ruled that a restore reports the ignored paths it did not roll back, and delegated
+the manifest's shape and home to `20-contract.md` without settling either. Two constraints shaped
+the answer. The manifest is keyed by a checkpoint sha that does not exist until the commit
+returns, so it cannot be part of the commit it describes. And `20-contract.md § Types §
+Checkpoint` claims no mirror is persisted because git is the store — a claim this artifact has to
+either break or work around.
+Chosen: one JSON file per checkpoint at `<storage>/sessions/<sessionId>/ignored/<sha>.json`,
+written by `checkpoints` rather than by `store`. `checkpoints` already derives that directory from
+`config.storageRoot` and already runs the `git status --ignored=matching` the manifest is built
+from, so no module edge is added — which `store` ownership would have required, since
+`checkpoints` depends on `store` nowhere. The "git is the store" claim is stated as an exception
+rather than softened: ignored paths are the one thing git holds no record of, so there is nothing
+for a second copy to disagree with. What a sidecar can be is *absent*, and that is answered by
+I58 — `unreached === null` is unknown and never "nothing differs", covering an absent file, an
+unparseable one, and a `status` that fails at either end.
+Rejected: a git note on a dedicated ref inside `ckpt.git`. Keeps the no-mirror claim literally
+true, travels with the history, and dies with `destroy` for free. It costs notes plumbing on every
+read and write and a second ref to reason about, and it does not remove the missing-manifest case
+that forced I58 anyway — a note is as absent as a file. The claim it preserves is one sentence in
+a document; the plumbing is permanent.
+Rejected: storing the manifest inside `meta.json`. One file fewer, and it puts per-checkpoint data
+under the one file with a `schemaVersion` gating rehydration (D49) — a corrupt manifest would then
+cost the whole session at boot, which is the opposite of the degrade-to-unknown behaviour this
+needs.
+Rejected: recording content or a hash per ignored path, making `'modified'` exact. It is the
+widening the brief declined arriving by the back door, paid on every checkpoint rather than on the
+one restore that reads it, and on a workspace with a dependency tree it costs more than the
+checkpoint does. Size and mtime are what make `'modified'` detectable without it; the
+collapsed-directory blindness that leaves is stated in the contract and in I58 precisely so no
+control comes to lean on the report.
+Reversibility: cheap while no checkpoints carry one. The file is additive, nothing rehydrates from
+it, and deleting the mechanism degrades every restore to today's silence.
+
+### 2026-08-26 — D188 Kit re-install: /done renamed to /clean, delivery delegation widened to all work, Codex tier resolution moved to configuration
+Context: `/kit-sync` against `SubZeroDev.AgentKit` at `de6ae8f` (previously synced at `80a19bdd`,
+30 commits behind). `Sync-Kit.ps1` found `.claude/commands/done.md` removed upstream (renamed to
+`clean.md`, #122) and `.claude/commands/install-all.md`/`kit-help.md`/`kit-sync.md` updated
+outright; two non-core tools (`Test-DesignDrift.ps1`, `Update-WorkMirror.ps1`) had diverged in
+both directions; six files present in the kit since before the last sync
+(`Read-DesignState.ps1`, its `.Tests.ps1`, `Test-DesignState.ps1`, its `.Tests.ps1`,
+`Update-DesignProjection.ps1`, its `.Tests.ps1`, and `Test-CIWorkflow.Tests.ps1`) had never been
+installed here; and `AGENTS.md` had drifted from the kit's content on several points beyond what
+`Sync-Kit.ps1` covers, since it only diffs kit-owned command/tool files.
+Chosen, one per fork:
+- **Adopted the `/done` → `/clean` rename.** The new `/clean` always hands off to `/track`
+  (#111/#121), unlike this repository's non-pipelined `/done`. Deleted `done.md`, took `clean.md`
+  outright, and updated the 2 `AGENTS.md` references and the Command routing row.
+- **Took the kit's `Invoke-GhRaw` UTF-8 fix** for `Test-DesignDrift.ps1` and `Update-WorkMirror.ps1`
+  (native `& gh` capture decodes non-ASCII via the OEM code page on Windows, corrupting section
+  marks and em dashes in issue text) — a real bug this repository's copies had not received — and
+  **re-applied this repository's own `(?!\.)` regex fix** on top of `Test-DesignDrift.ps1` (without
+  it, `^S5\b` also matches a bug issue titled `"S5.1's interrupt test is flaky..."` as if it were
+  slice S5's own tracking issue), which has no upstream equivalent and would otherwise have been
+  silently dropped by taking the kit's file verbatim.
+- **Skipped the six design-state/projection files**, matching `D164`'s precedent for
+  `Start-AgentSession.ps1`. Each file's own docstring says it targets `design/state/`, a
+  structured per-record Markdown schema (`design/20-contract.md § Persisted schemas` — the kit's
+  own contract, not this repository's) that is explicitly documented as absent "in every installed
+  target, where design/state/ does not exist by design." This repository's `design/` uses the
+  prose-plus-append-only-decision-log methodology instead; the two are alternatives, not layers.
+- **Added `/install-code-review-agent`** (writes only `.github/workflows/claude-code-review.yml`;
+  GitHub App consent and the API secret stay manual by the command's own design) and
+  `tools/Invoke-CodexCommand.ps1` (a `codex --profile` launcher keyed off `AGENTS.md`'s Command
+  routing table) — both new, no local conflict.
+- **Added the missing `## Marked regions` section to `AGENTS.md`.** `.claude/COMPANIONS.md`
+  (already installed) names it as the section defining what a "declared" region is; this
+  repository's `AGENTS.md` had no such section, a dangling cross-reference rather than a fork.
+  Installed the kit's text, dropping its `design/20-contract.md § Marked regions` pointer (that
+  section does not exist in this repository's contract).
+- **Adopted retiring the "High volume"/`haiku`/`Luna` tier.** The kit merged that tier's work
+  (summaries, formatting, changelogs, commit messages, PR descriptions, mechanical triage) into
+  Implementation (`sonnet`, medium/high) and dropped haiku and `Luna` everywhere. Retargeted
+  `/kit-help` and `/clean` (formerly `/done`) from `haiku`/`low` to `sonnet`/`medium` to match.
+- **Adopted widening delivery delegation to all work, not just the named commands.** The kit's
+  *Git and delivery* now requires every session to branch off the default branch before its first
+  edit and delegates commit/push/PR-open uniformly, rather than scoping delegation to `/slice`,
+  `/fix`, `/pr` and `/install` by name. This session had already branched before editing, which is
+  what surfaced the gap.
+- **Adopted `/code-review` running `high` effort by default, always applying fixes, and
+  auto-committing/pushing the result** — consistent with the delivery-delegation widening above;
+  once a fix is being applied on a branch, committing it is no longer a separate ask.
+- **Adopted resolving a Codex session's tier from its configured `model`/`model_reasoning_effort`
+  (via `codex/PROFILES.md`, layering any `--profile` overlay) rather than from its self-reported
+  name.** Replaced the `Vendor model aliases` table and its surrounding text with the kit's
+  configuration-based version, dropped the stale `Luna` row, and made a bare `GPT-5` self-report an
+  explicit unresolved-mismatch rather than a match for Implementation tier — closing a real gate
+  gap, since every model in that family answers `GPT-5` regardless of which tier it is actually
+  running at.
+Rejected: leaving any of the above as a silent gap for the next sync to re-raise — each has a
+concrete reason (a real bug fix, a closed gate gap, or a stated kit-internal boundary) rather than
+being simple staleness, so each is worth a citable record now.
+Reversibility: cheap. All wording and tooling; no product code or contract shape changed.
+
+### 2026-08-26 — D189 `Test-DesignReferences.ps1` learns a conditional citation; adopting the record mechanism is judged by its five non-work directories, not `design/state/` as a whole
+Context: `/pr`'s gate phase on D188's branch found `tools/Test-DesignReferences.ps1` (issue #210,
+PR #225) failing with all 5 of this repository's `design/10-design.md` § citations broken —
+`contract.md`, `design.md`, `fix.md`, `reconcile.md` and `slice.md` each cite `§ Record` or
+`§ Orient`, and neither heading exists in this repository's `10-design.md`. Confirmed pre-existing
+on `main` (`git show main:.claude/commands/contract.md` carries the identical line; none of the
+five files are touched by D188), and out of `/pr`'s gate-phase scope by its own rule against
+fixing a failure there — put to the user as a decision (fix here vs. file an issue), who chose to
+widen this PR's scope and fix it now. Each citation's own text is already conditional — "Where
+this repository's own `design/state/` exists, ... `§ Record`/`§ Orient` ..." — but the checker
+enforced every citation unconditionally. A first fix (checking bare `Test-Path design/state`) was
+wrong: this repository's `design/state/` already exists, holding only `work/` — `/track`'s WorkRef
+mirror (`Update-WorkMirror.ps1`), a separate mechanism this repository already runs, unrelated to
+`§ Record` (the decision-writing sequence) or `§ Orient` (unit-closure orientation). Those sections
+describe the other five record kinds the kit's own contract defines
+(`units`/`invariants`/`contracts`/`decisions`/`questions`), none of which this repository has ever
+populated — consistent with D188 skipping `Read-DesignState.ps1`/`Test-DesignState.ps1`/
+`Update-DesignProjection.ps1`, the tools that would create or read them.
+Chosen: a citation on a line matching `design/state/`?\s*exists` (case-insensitive) is conditional;
+a conditional citation is checked against `10-design.md`'s headings only when at least one of
+`design/state/{units,invariants,contracts,decisions,questions}` exists — never `design/state/work/`
+alone, and never bare `design/state/`. An unconditional citation is checked exactly as before.
+Added four Pester cases: a conditional citation skipped absent any record-kind directory, the same
+citation enforced once one is added, a populated `work/`-only mirror still not counting as
+adoption, and an unconditional citation still failing regardless. `Run and passed:` in this PR's
+`Verified` section replaces the earlier `Run and failed:` entry for this gate — the same tree this
+paragraph describes, not two different results reported.
+Rejected: dropping the conditional prose from the five command files instead — they are kit cores
+this repository does not own reconciling by hand (`.claude/COMPANIONS.md`); an edit there would be
+a local fork with no companion, `Unmigrated-Blocked` on the next `/kit-sync`. Rejected treating
+bare `design/state/` presence as adoption — correct only by accident today (this repository's sole
+subdirectory happens to be `work/`), and wrong the moment any repository runs `/track`'s WorkRef
+mirror without ever adopting the record mechanism, which is this repository's actual shape.
+Reversibility: cheap. `tools/Test-DesignReferences.ps1` and its tests only; no product code, no
+contract shape, and no command-core file changed.
+
+### 2026-08-29 — D190 S3.3's remaining divergence is transcribed, closing #66
+Context: D40 (2026-08-08) already decided S3.3's assertion should read "a gap is reported only
+when the spill cannot serve", recorded as a slice change, but the edit to `30-slices.md` was
+never made — the same as D111 found for D105's freeze marker. D155 transcribed #66's other
+divergence into `20-contract.md § Streaming` already; this is the second half of the same issue,
+adjudicated and unlanded rather than undecided.
+Chosen: S3.3 now reads "a healthy spill produces one only for a resume point outside the
+session's history; a truncated or unwritable spill produces one for any range" — matching
+`20-contract.md:1694-1697`'s wording for the same rule. The criterion id is unchanged.
+Rejected: reopening the question. D40 already settled it; nothing found while checking the tree
+against the criterion counts as new evidence (`AGENTS.md § Budget discipline`).
+Reversibility: cheap. One sentence in one slice criterion; no behaviour moves.
+
+### 2026-08-30 — D192 Kit sync (d57880d→5095a55): design-state mechanism un-skipped, two tool divergences resolved kit's-way
+Context: `/kit-sync` against `SubZeroDev.AgentKit` (previously synced tools/commands at `d57880d`,
+12 commits behind at `5095a55`). The kit's current `track.md` core now unconditionally runs
+`tools/Update-DesignProjection.ps1` after the work-mirror refresh and commits mirror+projection
+straight to `main` under a new `AGENTS.md` carve-out — but `D188`/`D189` had deliberately skipped
+that script (and `Read-DesignState.ps1`, `Test-DesignState.ps1`, `Test-CIWorkflow.Tests.ps1`),
+matching `D164`'s precedent for `Start-AgentSession.ps1`. Taking `track.md`'s core outright, as
+`.claude/COMPANIONS.md` requires with no per-repo reconciliation, would have made `/track` invoke
+a script this repository does not have. Separately, `Sync-Kit.ps1` found two non-core tools had
+diverged in both directions: `tools/Invoke-DoneHousekeeping.ps1` (kit added a
+`TipAheadOfMergedPr` safety check verifying a branch's local tip against the merged PR's
+`headRefOid` before force-delete, with tests; this repository independently fixed a stale
+`$Matches` bug, #228, with its own regression test) and `tools/Update-WorkMirror.ps1` (kit added
+re-fetching closed issues individually so their `WorkRef` never sticks at `OPEN`, plus a
+write-only-if-changed optimization; this repository independently added two small correctness
+fixes — a single-element array unwrap via the comma operator in `Get-IssueCriteriaIds`, and no
+trailing space on an empty `Criteria:` line).
+Chosen, one per fork:
+- **Reversed `D188`/`D189`'s scope decision and adopted the full design-state mechanism**, on new
+  evidence: the kit's own `/track` now structurally depends on `Update-DesignProjection.ps1` to
+  satisfy the direct-to-main carve-out, and this repository already carries the exact PR-churn
+  loop that carve-out exists to break (`Refresh work mirror after /track run`, #234). Installed
+  `Read-DesignState.ps1`, `Test-DesignState.ps1`, `Update-DesignProjection.ps1` (+ their `.Tests.ps1`),
+  `Test-CIWorkflow.Tests.ps1`, `Test-RecordWritingSequenceCitation.Tests.ps1` and
+  `Test-TrackCommand.Tests.ps1`; added `AGENTS.md § Writing a design-state record` and the
+  direct-to-main exception clause in *Git and delivery* the new tests and `track.md`'s core both
+  assume. `design/state/{units,invariants,contracts,decisions,questions}` remain unpopulated and
+  `design/20-contract.md` still has no `§ Marked regions` section defining the schema — the
+  tooling is adopted, not the record set itself. That population, and the contract schema section,
+  is `/contract`'s or `/design`'s to do, not a routine sync's.
+- **Took the kit's `Invoke-DoneHousekeeping.ps1` and `Update-WorkMirror.ps1` verbatim**, against my
+  recommendation to merge — the user chose simplicity over preserving both sides. This discards
+  #228's stale-`$Matches` fix (reintroducing that bug) and the two `Update-WorkMirror.ps1`
+  correctness fixes. Adopted the matching `AGENTS.md` paragraph widening force-delete delegation
+  to squash-merged branches on the `TipAheadOfMergedPr` evidence, consistent with taking the tool
+  outright.
+- **Adopted `AGENTS.md`'s `AGENTKIT_TIER` stamp-first tier resolution, the `/next` row and command,
+  and the `Hard rules` section's reordering** (moved earlier, right after *Model, effort, and
+  review budget*, matching the kit) — pure additions/reorg, no local content lost.
+- **Left the dropped `design/20-contract.md § Marked regions` cross-reference dropped**, per
+  `D188` — that section still does not exist in this repository's contract, and adopting the
+  design-state tooling above does not by itself write it.
+- **Noted a `Sync-Kit.ps1` defect**: a kit-owned file present unchanged in the kit since the
+  target's recorded sync sha, but that the target never had on disk, is invisible to the script's
+  report — it falls into the `NoUpstreamChange` branch without ever checking target existence.
+  Affected `Read-DesignState.ps1`, `Read-DesignState.Tests.ps1`, `Update-DesignProjection.ps1` and
+  `Test-CIWorkflow.Tests.ps1` this run; copied by hand instead of relying on the script. Not filed
+  as an issue here — it is a defect in `SubZeroDev.AgentKit`, a repository this entry does not
+  own reporting into.
+Rejected: keeping `D188`/`D189`'s skip (my recommendation) — would have shipped a `/track` whose
+core calls a missing script. Merging both tool files instead of taking the kit's version outright
+(my recommendation) — declined in favour of the simpler, kit-verbatim option.
+Reversibility: mixed. The design-state adoption is cheap to reverse — tooling and prose only, no
+product code, and no `design/state/` records depend on it yet. The tool-file choice is the more
+expensive one to notice going wrong: #228's bug and the two `Update-WorkMirror.ps1` fixes are gone
+silently until someone rediscovers them.
+
+### 2026-08-31 — D193 D180's lease supersedes D186's `ServerLock.osCreatedAt`; the fourth limb stays on `ProcessRecord` alone
+Context: `design/180-storage-lock-lease` was authored on 2026-08-25 against `main` at `984eae5` and
+sat unmerged while `main` moved 21 commits. D183 named the overlap at the time — "it overlaps the
+unmerged `design/180-storage-lock-lease` work" — and went ahead, so two lines of work reached one
+file from opposite directions; merging them made that collision explicit rather than creating it.
+D183 and D186 gave the pid-reuse guard a fourth limb, an exact-equality comparison against the
+operating system's own creation-time reading recorded at spawn, and put the field on **both**
+`ProcessRecord` and `ServerLock` on the reasoning that `claimLock` shares the guard through a
+`LivenessProbe`. D180 deletes that sharing: the lock stops asking a process table anything.
+**One of D180's four measured grounds is answered by that work and three are not, and that is what
+decided this rather than which entry is younger.** Answered: `docker start` on the same container,
+where the booting server found *itself* at pid 7 — a fresh process has a different creation-time
+reading, so `main` recovers there today. Not answered: recreating the container, where the hostname
+changes and `claimLock` refuses on `holder.hostname !== self.hostname` permanently; a storage root
+on a network share, which every limb forbids by reading a *local* process table; and #207's
+`Done when` 4, since `releaseLock` is still an unconditional `rm` that a reclaimed-then-tidily-
+stopped server would aim at its successor's lock.
+Chosen: D180 stands for the lock and D186's `ServerLock` half is withdrawn. `ServerLock` carries
+`instanceId` and `renewals` and no `osCreatedAt`; `LivenessProbe` leaves the `store` surface;
+`ProcessRecord.osCreatedAt` and the fourth limb are **kept in full**, because they answer same-boot
+pid reuse on `pids.ndjson` — a different failure from anything D180 touches, and one the lease does
+not cover. I19 carries both amendments at once, D181's hostname gate and D183/D186's fourth limb,
+since the two decisions amended it independently and neither side of the merge held the other's.
+Rejected: **keeping D186's `ServerLock.osCreatedAt` alongside D180**, the field surviving as
+informational next to `pid`, `hostname`, `startedAt` and `image`. Cheapest merge, and no withdrawal
+to record. It puts a field on a persisted file for a test that no longer runs, and I57 says no
+decision reads the informational four — a fifth that *looks* like evidence and is not is worse than
+four that are labelled.
+Rejected: **keeping D161 as D183 and D186 refined it, and withdrawing D180.** Genuinely cheaper —
+no invariant deleted, no persisted shape changed, and it relitigates nothing. It leaves the
+container-recreate refusal permanent on the path `docker-compose.yml` documents as the redeploy, it
+leaves shared storage structurally unsupported, and it leaves #207 closed with its fourth criterion
+unmet in the tree.
+Rejected: **landing D181 alone and reopening D180 against post-D186 `main`.** The hostname gate is
+compatible with either lock and would merge today. It splits one file's argument across two branches
+and leaves #206 open on a premise the split makes harder to state rather than easier.
+Reversibility: expensive, and it is D180's cost rather than a new one — a persisted file's shape,
+two `store` signatures, boot's step 0, shutdown's step 4, and I50. What *this* entry adds is cheap to
+reverse by itself: `ServerLock.osCreatedAt` was never written to the tree, which declares neither it
+nor `ProcessRecord.osCreatedAt`, so withdrawing it is a document change and nothing more. Landing
+point: #206.
 
 ## Open
 

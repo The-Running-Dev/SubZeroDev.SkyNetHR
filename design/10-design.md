@@ -343,7 +343,8 @@ the server (D23). Boot reaps orphaned children, and it cannot reap what it canno
 | `pid` | `number` | OS process id, at spawn |
 | `pgid` | `number \| null` | POSIX process group id; `null` on Windows, which has no equivalent to record |
 | `sessionId` / `turnId` | ids | Which turn owned it |
-| `startedAt` | ISO 8601 UTC | **Load-bearing** — see the reuse guard below |
+| `startedAt` | ISO 8601 UTC | This server's own wall clock at spawn. **Load-bearing** — see the reuse guard below |
+| `osCreatedAt` | ISO 8601 UTC \| `null` | The operating system's own reading of the child's creation time, taken at spawn. `null` where that read failed, and a `null` is never reaped (D186) |
 | `image` | string | Executable name the child was spawned as |
 | `hostname` | string | **Load-bearing** — the machine whose process table this `pid` means anything in (D181) |
 | `exitedAt` | ISO 8601 UTC \| `null` | Set by folding in the tombstone line the child's close appends. That line is narrower than this record and the reader folds the two — shape and rule in `20-contract.md § Process record` (D95) |
@@ -356,9 +357,44 @@ otherwise have to walk every session directory before it is allowed to accept a 
 systems reuse process ids, so a pid recorded before a reboot may name something entirely
 unrelated afterwards — reaping it would kill an innocent process, as root on some hosts.
 Boot therefore reaps an entry only when it has no `exitedAt`, its `startedAt` is later than
-the host's last boot time, **and** the live process's image matches. An entry failing any of
-those is not reaped; it is logged and tombstoned, because a stale record is a bookkeeping
-problem and a wrong kill is an incident.
+the host's last boot time, the live process's image matches, **and the live process's
+creation time, read from the platform, is exactly the recorded `osCreatedAt`**. An entry
+failing any of those is not reaped; it is logged and tombstoned, because a stale record is a
+bookkeeping problem and a wrong kill is an incident.
+
+**The fourth limb is the one that makes the other three mean anything** (D183). Reuse is not
+confined to reboots: an operating system reuses a pid within a single boot as freely as
+across one, and a console whose children are all named `claude` or `codex` makes the image
+limb nearly free to satisfy by accident. All three original limbs pass when the host reuses
+pid 4242 for another `claude` before this server restarts, and boot then tree-kills another
+operator's live agent and everything under it — the precise incident the record exists to
+prevent, reached through the guard rather than around it. Creation time is what distinguishes
+*that* process from *a* process with the same name and number.
+
+**The fourth limb compares like with like, which is why it needs a field of its own** (D186).
+`startedAt` cannot serve it. That is this server's wall-clock reading taken at spawn, while a
+platform derives creation time from the host's boot time plus elapsed ticks — two clocks,
+whose readings are never equal. Tested for equality against `startedAt` the limb would pass on
+nothing and the guard would reap nothing at all; tested within a tolerance, the window has to
+absorb clock-domain error and NTP steps, and a window wide enough to be reliable is wide
+enough to admit the same-second reuse the limb exists to catch. So the operating system's own
+reading is recorded at spawn, as `osCreatedAt`, and boot compares it for exact equality
+against the same platform source. There is no constant to tune and none to justify.
+`ServerLock` does **not** carry the field. D186 gave it one on the reasoning that the
+`server.lock` staleness test shared this implementation; D180 removed that test, so there is
+no limb left for the field to feed and the lock reclaims by watching a renewal counter
+instead (D193, *Concurrency § Boot ordering*).
+
+**It fails closed, and that is a deliberate asymmetry.** No platform exposes process creation
+time to Node, so each is a shell-out of the same shape `taskkill` already is, and each can
+fail — the process may exit between the read and the test, or the host may not answer at all.
+That holds at both ends: a spawn whose read fails records `osCreatedAt` as `null`, and a boot
+that cannot read the live process's creation time has nothing to compare it with. Where
+creation time cannot be established at either end the entry is **tombstoned and logged, never
+reaped**. The cost is a real orphan an operator ends by hand, which is exactly the cost the
+spawn-window paragraph below already accepts and for the same reason: this design would
+rather leak a process than end the wrong one. The same helper serves the `server.lock`
+staleness test, whose same-container reuse failure is #206's second bullet.
 
 **A pid is meaningless off the machine that issued it, which is why the record names one** (D181).
 Every test above reads *this* host's process table, so running them against a record another host
@@ -549,7 +585,8 @@ the correction; this section is the last place that still described the broken s
 target exactly — additions, edits and removals alike — **without moving `HEAD`**, so the
 shadow history stays linear and `list`'s `git log` still walks it. Creating files is the
 common case for a coding agent, and the brief's DoD #6 says "roll the workspace back to its
-state before any earlier message"; half a rollback is not that.
+state before any earlier message, and be told what the rollback could not reach"; half a
+rollback is not that, and a half-rollback reported as whole is worse.
 
 Three properties make this safe enough to do without a confirmation dialog carrying a
 warning:
@@ -564,6 +601,24 @@ warning:
   could have restored, so it never forces a dependency reinstall — the failure that would
   make operators stop using restores. D31's symmetry argument survives the change of
   mechanism unaltered.
+
+  **The exclusion is reported rather than silent** (D182). Symmetry keeps a restore from
+  forcing a reinstall; it does not make the operator's belief about what was rolled back
+  true. An agent that edits `.env`, or deletes a generated artifact, leaves that change
+  standing across a restore reported as successful — and the brief's item 6 was unqualified
+  about it until this was ruled on. So a checkpoint records a manifest of the ignored paths
+  `status --ignored=matching` names, and a restore diffs the target checkpoint's manifest
+  against the workspace and names what differs. Three properties, each of which is why it is
+  affordable: `--ignored=matching` collapses an ignored *directory* into one entry, so the
+  manifest is bounded by the ignore rules that match rather than by the file count beneath
+  them — a 60 000-file `node_modules` contributes one line; a collapsed directory is
+  therefore compared on its own metadata alone, which sees a child added or removed and does
+  not see an edit deeper inside, so this report is a pointer for the operator and **not
+  evidence**, and nothing in *Security controls* leans on it; and **content is never
+  recorded**, because storing it would be the widening the brief declined, arriving by the
+  back door and paid for on every checkpoint. The manifest's shape and where it lives are
+  `20-contract.md`'s, as is the field the restore result grows to carry the list — an
+  amendment `/contract` owns, which this document does not pre-empt.
 - **Success is verified rather than inferred from an exit code.** `read-tree` exits 0 with
   only a warning when it cannot remove a directory an embedded repository occupies, and
   `clean` declines such a directory unless forced twice, which this deliberately never does.
@@ -1582,6 +1637,26 @@ creation and the resolved path, never the client's string, is what gets passed a
 What this control does and does not cover is stated in *Threat model*; the short version is
 that it governs where a session starts, not where the agent can reach.
 
+**Storage may not sit inside a workspace root, and the server refuses to start if it does**
+(D185). The overlap rule that keeps two sessions off one work-tree compared only *live
+sessions* to each other; nothing compared the server's own storage tree to the roots it
+admits sessions in. Configure storage at `D:\work\.skynethr` with a root at `D:\work` and
+the shadow git operations run over a work-tree containing `meta.json`, the event spills, the
+audit log, the process records and every session's `ckpt.git`: a checkpoint ingests live
+server state and grows recursively, and a restore or a `clean -fd` deletes the evidence the
+server is mid-write on — including the audit log D25 exists to make undeletable by the
+subject it indicts. The refusal is at **startup**, not at session creation, because a
+configuration that can destroy server-wide evidence should not be permitted to serve the
+workspaces that happen not to collide; that would trade a loud failure for a quiet partial
+one, which is the same argument `insecure_bind` makes two paragraphs above.
+
+Two things follow, and both are cheaper than they look. `storageRoot` must be canonicalised
+with **the same normalisation** the jail applies before it can be compared at all — it was a
+raw configuration string while `workspaceRoots` were already resolved, which is D94's
+argument arriving one field short. And the comparison itself is `pathsOverlap`, the single
+containment predicate this server has: no second one is hand-rolled for this. The shipped
+Compose deployment already separates the two, so nothing documented has to move.
+
 **Every route that reads session data is under `/api/sessions/:id`.** Not a style
 preference — it is what makes "ownership check on every session route" a true statement
 rather than an aspiration. A route keyed on a vendor-minted identifier instead, such as
@@ -1624,7 +1699,7 @@ Grouped by boundary, because that is where the handling lives.
 | CLI not installed | `spawn` `ENOENT` | `error / agent_unavailable`, `fatal`; turn cleared | "Agent unavailable" | Session live, no turn. Retryable |
 | Child dies mid-turn | `close` with non-zero or signal | Resolve every pending permission with `cancelled_process_exit`; `turn.ended` | Turn ended abnormally, stderr shown | Session live. Checkpoint from before the turn is intact |
 | Child dies before `system/init` | `close` with no init seen | `turn.ended`; `cliSessionId` unchanged (D34) | Turn ended abnormally | Session live. **Next turn spawns with no `--resume`** and says so — `session.notice / warn`, conversation context not carried forward |
-| Child exits normally | `result` then `close(0)` | `turn.ended`, clear turn | Turn complete | Session idle |
+| Child exits normally | `result` then `close(0)` | **Kill the tree first** (D184), then `turn.ended`, clear turn | Turn complete | Session idle, and nothing the turn spawned is still running |
 | **Operator interrupts a turn** | `POST /interrupt` | Manager kills the child, resolves pending permissions with `cancelled_process_exit`, emits `turn.ended` with an interrupted stop reason (D24) | "Turn interrupted" — not an error | Session live and idle. Checkpoint from before the turn is intact; partial file writes are **not** rolled back |
 | Interrupt of a turn that has already ended | No live child | `{ok: true}`, nothing emitted | Nothing | Idle, unchanged |
 | Child hangs with no output | Client-side elapsed-since-last-envelope | **Nothing is killed** (D21); the client shows "no output for N min" | Elapsed time, and interrupt | Turn continues until the operator acts |
@@ -1661,6 +1736,7 @@ a client tell a silent agent from a dead connection, so this costs nothing on th
 
 | Failure | Detection | System does | Operator sees | State left behind |
 |---|---|---|---|---|
+| Storage root overlaps a workspace root | `pathsOverlap`, at configuration load (D185) | **Refuse to start**, naming both paths | Startup error naming the collision and which to move | Nothing written; the storage tree is untouched |
 | `cwd` outside every root | Jail check | `409 outside_workspace_root` | Refusal naming the roots | No session created |
 | Workspace overlaps a live session's | Registry lookup: equal, ancestor or descendant of a live `cwd` (D30) | `409 workspace_busy` | Refusal naming the holding path and operator | No session created; the existing one is untouched |
 | Workspace is not a git repo | — | Nothing; shadow git needs no repo in the workspace | Checkpoints work normally | — |
@@ -1732,6 +1808,7 @@ a CI detail, because these are the places where one design compiles into two beh
 | Process group id | None to record; `pgid` is `null` | Recorded and load-bearing for the tree kill | *Data model § Process record* |
 | Checkpoint restore | An open handle blocks the write — which is why D16's per-turn child matters here and not on Linux | No equivalent block | *Concurrency § Process lifetime* |
 | Host boot time, for the pid reuse guard | Different source | Different source | *Data model § Process record* |
+| Process creation time, for the guard's fourth limb (D183) — read at spawn to record `osCreatedAt`, and again at boot to compare against it (D186) | CIM `Win32_Process.CreationDate` | `/proc/<pid>/stat` field 22, against `/proc/stat`'s `btime` | *Data model § Process record* |
 | Storage root on a network share | SMB | NFS | *Concurrency § Boot ordering*, D180 |
 
 **A third target joined the pair, and it is a storage class rather than an OS.** D180 supports a
@@ -1758,7 +1835,8 @@ used to describe and is not the same as being ungated.
 | Restart mid-turn — spill ends on an unpaired `turn.started` | Boot scan of the spill tail | **Close the turn on disk** (D39): `permission.resolved / cancelled_process_exit` for each outstanding request, then `turn.ended / stopReason: 'server_restart'` | A turn that ends, saying the server restarted | Ordering guarantees hold unconditionally; no renderer special case |
 | Message to a rehydrated session | `state == 'ended'` | `409 session_ended` | "This session ended when the server restarted" | Nothing started |
 | Restart with a child running | `pids.ndjson` entry with no `exitedAt` | Reap before accepting connections, after checking the reuse guard (D23) | — | Orphan killed, entry tombstoned |
-| Recorded pid predates the host's last boot, or its image does not match | Reuse guard | **Do not kill.** Log it, tombstone the entry, continue | — | Whatever now owns that pid is left alone. A stale record is bookkeeping; a wrong kill is an incident |
+| Recorded pid predates the host's last boot, its image does not match, or its creation time is not exactly the recorded `osCreatedAt` (D186) | Reuse guard | **Do not kill.** Log it, tombstone the entry, continue | — | Whatever now owns that pid is left alone. A stale record is bookkeeping; a wrong kill is an incident |
+| Creation time cannot be read for a recorded pid | Reuse guard, fourth limb (D183) | **Do not kill.** Log it, tombstone the entry, continue | — | The guard fails closed. A genuine orphan survives to be ended by hand, which this design prefers to a wrong kill |
 | `meta.json` unreadable or corrupt | Parse failure at boot | Skip that session, log it; **boot continues** | One session missing | Its files untouched for inspection |
 | `meta.json` carries an unknown `schemaVersion` | Version check at boot (D49) | **Identical to a parse failure**: skip, log, continue. Never a migration attempt, never a partial read | One session missing, the log saying it is a newer format | Its files untouched. This is the whole reason the field exists |
 | A record log is unreadable at boot *(tier two)* | Open error | Log it; start with that registry empty; **boot continues** | Reviews or requisitions missing | File untouched. Tier two failing must not deny an operator tier one |
@@ -1838,6 +1916,25 @@ Three consequences, and the third is the reason to prefer it:
    flight; no turn means no child; no child means nothing holds a handle on the workspace.
    On Windows, where an open handle blocks the write, this turns a whole class of
    platform-specific restore failure into an impossibility rather than a retry loop.
+
+**The third consequence was not true, because "no child" meant only "no CLI"** (D184). A tool
+that starts a detached process — a dev server, a watcher, a daemonised test runner — leaves it
+running when its CLI parent exits, and the normal-exit path tree-killed nothing: it tombstoned
+the recorded pid and cleared the turn. Interrupt and boot reaping both kill the tree; ordinary
+completion, which is the overwhelmingly common way a turn ends, did not. So the workspace could
+be reported idle, released to the next session and restored over, while a process nothing tracks
+was still writing to it — a Windows restore failure by the exact mechanism D16 claims to make
+impossible, and on POSIX a silent race between two sessions instead.
+
+**A turn owns everything it spawned, and it ends by ending all of it.** The tree kill runs on
+every path a turn can end by, normal exit included, using the same mechanism interrupt and boot
+reaping already use — there is one way to end a process tree in this server and no path may
+grow a second. The cost is real and belongs in the open: **an agent cannot leave a server
+running past the end of its turn.** Asked to start a dev server and report the URL, it starts
+one that dies with the turn. That is a genuine loss of capability, accepted because the
+alternative is a workspace exclusivity claim and a restore guarantee that are both conditional
+on something no component can observe — and because a console whose restore silently fails is
+worse than one that cannot babysit a daemon.
 
 This is logged as D16, and it is the reason the contract needs an amendment — see
 *Alternatives considered*.
@@ -2141,10 +2238,12 @@ reach it. It comes after step 3 rather than before step 1 only because tier one 
 booting even if tier two's files are broken — which is also why an unreadable record log
 starts an empty registry rather than aborting.
 
-Step 1 kills nothing it cannot positively identify. An entry whose `startedAt` predates the
-host's last boot, or whose pid now belongs to a process with a different image, is logged
-and tombstoned rather than reaped — the reasoning is in *Data model § Process record*, and
-the short version is that pid reuse turns a tidy-up into a wrong kill.
+Step 1 kills nothing it cannot positively identify, and D183 raised the bar for what counts
+as identification. An entry whose `startedAt` predates the host's last boot, whose pid now
+belongs to a process with a different image, or whose pid belongs to a process created at a
+different time than the record names, is logged and tombstoned rather than reaped — as is one
+whose creation time cannot be read at all. The reasoning is in *Data model § Process record*,
+and the short version is that pid reuse turns a tidy-up into a wrong kill.
 
 **No step may abort boot.** A `meta.json` that fails to parse, or carries a version this
 build does not know, is skipped and logged; an unreapable pid is tombstoned and logged; an
@@ -2735,12 +2834,16 @@ these are cited by number elsewhere in this document and in the slices.
    children — are prevented by `<storage>/server.lock`, claimed before boot's first step and
    refusing with `StartupError.storage_locked` naming the holder. That much stands. **The staleness
    half was resolved wrongly and the correction is worth keeping visible.** D161 reused D23's
-   three-part liveness test against the lock's holder and concluded a container restart would not
-   become an incident. Measured, it becomes one every time: a fresh pid namespace gives the booting
-   server the pid its predecessor recorded, so it finds *itself* and calls the holder live, while
+   liveness test against the lock's holder and concluded a container restart would not become an
+   incident. Measured, it became one every time: a fresh pid namespace gives the booting server the
+   pid its predecessor recorded, so it finds *itself* and calls the holder live, while
    `os.uptime()` reports the host kernel's uptime and leaves the pid-reuse limb permanently true —
    and recreating a container changes the hostname, which the foreign-host rule refuses on forever.
-   D180 replaces the whole test with an observation: the holder renews a counter, and a boot
+   **D183 and D186 have since closed the first of those three** — a fourth limb comparing the
+   operating system's own creation-time reading for exact equality tells a fresh pid 7 from the
+   recorded one — and they reach neither of the others, because nothing there relaxes the
+   foreign-host rule and every limb still reads a local process table (D193). D180 replaces the
+   whole test with an observation: the holder renews a counter, and a boot
    reclaims only a lock whose counter did not move across one window measured on its own monotonic
    clock. One rule, no shared clock, no process table — which is what makes a storage root on a
    network share supportable at all, and D181 is the guard that support forced, since a pid means

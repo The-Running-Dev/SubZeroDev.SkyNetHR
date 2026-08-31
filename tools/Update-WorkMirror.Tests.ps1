@@ -109,7 +109,7 @@ Describe 'Update-WorkMirror' {
             $text | Should -Match 'Criteria: S14\.1, S14\.2'
         }
 
-        It 'stamps MirroredAt even when a write changes no other field' {
+        It 'does not rewrite a record, and does not restamp MirroredAt, when no mirrored field changed' {
             $repo = New-RepoRoot
             Mock Get-OpenIssueList { [pscustomobject]@{
                 Issues  = @((New-Issue -Number 57 -Title 'S14 — Work state' -Body "- [ ] **S14.1** first"))
@@ -120,10 +120,34 @@ Describe 'Update-WorkMirror' {
             Invoke-WorkMirrorUpdate -RepoPath $repo | Out-Null
 
             Mock Get-CurrentWorkMirrorSha { 'sha0002' }
+            $r = Invoke-WorkMirrorUpdate -RepoPath $repo
+
+            $text = Get-Content -LiteralPath (Join-Path $repo 'design/state/work/57.md') -Raw
+            $text | Should -Match 'MirroredAt: sha0001'
+            $r.Written.Count | Should -Be 0
+        }
+
+        It 'rewrites a record and restamps MirroredAt when a mirrored field changed' {
+            $repo = New-RepoRoot
+            Mock Get-OpenIssueList { [pscustomobject]@{
+                Issues  = @((New-Issue -Number 57 -Title 'S14 — Work state' -Body "- [ ] **S14.1** first"))
+                Failure = $null
+            } }
+            Mock Get-ProjectItemPositions { $null }
+            Mock Get-CurrentWorkMirrorSha { 'sha0001' }
             Invoke-WorkMirrorUpdate -RepoPath $repo | Out-Null
+
+            Mock Get-OpenIssueList { [pscustomobject]@{
+                Issues  = @((New-Issue -Number 57 -Title 'S14 — Work state, renamed' -Body "- [ ] **S14.1** first"))
+                Failure = $null
+            } }
+            Mock Get-CurrentWorkMirrorSha { 'sha0002' }
+            $r = Invoke-WorkMirrorUpdate -RepoPath $repo
 
             $text = Get-Content -LiteralPath (Join-Path $repo 'design/state/work/57.md') -Raw
             $text | Should -Match 'MirroredAt: sha0002'
+            $text | Should -Match 'Title: S14 — Work state, renamed'
+            $r.Written.Count | Should -Be 1
         }
 
         It 'writes never carry an Issue, Milestone or git side effect - fields are the closed WorkRef vocabulary only' {
@@ -139,6 +163,54 @@ Describe 'Update-WorkMirror' {
 
             $text = Get-Content -LiteralPath (Join-Path $repo 'design/state/work/3.md') -Raw
             $text | Should -Match 'Criteria:\s*$'
+        }
+    }
+
+    Context 'closed-issue refresh' {
+        It 'rewrites a stale on-disk WorkRef to State: CLOSED when its issue drops off the open list' {
+            $repo = New-RepoRoot
+            $workDir = Join-Path $repo 'design/state/work'
+            New-Item -ItemType Directory -Path $workDir -Force | Out-Null
+            Set-Content -LiteralPath (Join-Path $workDir '9.md') -Value "# work/9`nIssue: 9`nTitle: Closed thing`nState: OPEN`nRank: 9`nMirroredAt: sha0001`nCriteria:`n"
+            Mock Get-OpenIssueList { [pscustomobject]@{ Issues = @(); Failure = $null } }
+            Mock Get-IssuesByNumber { @((New-Issue -Number 9 -Title 'Closed thing' -State 'CLOSED')) }
+            Mock Get-CurrentWorkMirrorSha { 'sha0002' }
+
+            $r = Invoke-WorkMirrorUpdate -RepoPath $repo
+
+            $text = Get-Content -LiteralPath (Join-Path $workDir '9.md') -Raw
+            $text | Should -Match 'State: CLOSED'
+            $text | Should -Match 'MirroredAt: sha0002'
+            $r.Written.Count | Should -Be 1
+        }
+
+        It 'only re-fetches issue numbers that already have an on-disk WorkRef, not the whole tracker' {
+            $repo = New-RepoRoot
+            $workDir = Join-Path $repo 'design/state/work'
+            New-Item -ItemType Directory -Path $workDir -Force | Out-Null
+            Set-Content -LiteralPath (Join-Path $workDir '9.md') -Value "# work/9`nIssue: 9`nTitle: Closed thing`nState: OPEN`nRank: 9`nMirroredAt: sha0001`nCriteria:`n"
+            Mock Get-OpenIssueList { [pscustomobject]@{ Issues = @(); Failure = $null } }
+            Mock Get-IssuesByNumber { @((New-Issue -Number 9 -Title 'Closed thing' -State 'CLOSED')) }
+            Mock Get-CurrentWorkMirrorSha { 'sha0002' }
+
+            Invoke-WorkMirrorUpdate -RepoPath $repo | Out-Null
+
+            Should -Invoke Get-IssuesByNumber -ParameterFilter { @($Numbers) -join ',' -eq '9' } -Times 1 -Exactly
+        }
+
+        It 'leaves an already-closed on-disk record untouched when nothing about it changed' {
+            $repo = New-RepoRoot
+            $workDir = Join-Path $repo 'design/state/work'
+            New-Item -ItemType Directory -Path $workDir -Force | Out-Null
+            Set-Content -LiteralPath (Join-Path $workDir '9.md') -Value "# work/9`nIssue: 9`nTitle: Closed thing`nState: CLOSED`nRank: 9`nMirroredAt: sha0001`nCriteria:`n"
+            Mock Get-OpenIssueList { [pscustomobject]@{ Issues = @(); Failure = $null } }
+            Mock Get-IssuesByNumber { @((New-Issue -Number 9 -Title 'Closed thing' -State 'CLOSED')) }
+            Mock Get-CurrentWorkMirrorSha { 'sha0002' }
+
+            $r = Invoke-WorkMirrorUpdate -RepoPath $repo
+
+            (Get-Content -LiteralPath (Join-Path $workDir '9.md') -Raw) | Should -Match 'MirroredAt: sha0001'
+            $r.Written.Count | Should -Be 0
         }
     }
 
