@@ -17,11 +17,18 @@ import { spawn } from 'node:child_process';
 //   unknown-kind  — one record of a type outside the vocabulary, then a valid record.
 //   many          — a long run of `assistant` text records with contiguous usage, for
 //                   volume assertions.
-//   many-big      — SKYNET_MANY_BIG_COUNT (default 50) `assistant` text records, each
+//   many-big      — SKYNET_MANY_BIG_COUNT (default 1000) `assistant` text records, each
 //                   SKYNET_MANY_BIG_BYTES (default 20000) bytes, emitted back to back —
-//                   megabytes in well under a second, for forcing genuine socket
+//                   tens of megabytes in well under a second, for forcing genuine socket
 //                   backpressure on a subscriber that never reads (#133), where `many`'s
-//                   volume is too small to reliably cross an OS receive buffer.
+//                   volume is too small to reliably cross an OS receive buffer. #246: two
+//                   distinct CI-only failure modes, neither reproducible on a dev machine.
+//                   ubuntu-latest: the original 50-record/1MB default is not enough volume
+//                   once production is under way — bumped to 1000 records (~20MB) here.
+//                   windows-latest: production itself trickles slowly enough that a client
+//                   that starts draining immediately keeps pace regardless of volume — the
+//                   corresponding fix (withholding reads with a fixed delay) lives in the
+//                   two `#133` tests themselves, not this fixture.
 //   many-permissions — three sequential control_request/control_response round trips
 //                   in one turn, before a final result (S4.3).
 //   die-with-pending — emits two control_requests and exits without ever reading a
@@ -282,7 +289,7 @@ function runScenario() {
       return;
     }
     case 'many-big': {
-      const count = Number(process.env.SKYNET_MANY_BIG_COUNT || 50);
+      const count = Number(process.env.SKYNET_MANY_BIG_COUNT || 1000);
       const size = Number(process.env.SKYNET_MANY_BIG_BYTES || 20000);
       for (let i = 0; i < count; i++) assistantText('x'.repeat(size), 'msg-many-big-' + i);
       line({ type: 'result', subtype: 'success' });
