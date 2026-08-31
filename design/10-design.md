@@ -346,6 +346,7 @@ the server (D23). Boot reaps orphaned children, and it cannot reap what it canno
 | `startedAt` | ISO 8601 UTC | This server's own wall clock at spawn. **Load-bearing** — see the reuse guard below |
 | `osCreatedAt` | ISO 8601 UTC \| `null` | The operating system's own reading of the child's creation time, taken at spawn. `null` where that read failed, and a `null` is never reaped (D186) |
 | `image` | string | Executable name the child was spawned as |
+| `hostname` | string | **Load-bearing** — the machine whose process table this `pid` means anything in (D181) |
 | `exitedAt` | ISO 8601 UTC \| `null` | Set by folding in the tombstone line the child's close appends. That line is narrower than this record and the reader folds the two — shape and rule in `20-contract.md § Process record` (D95) |
 
 Append-only, server-wide, `pids.ndjson`. Server-wide rather than per-session for the same
@@ -379,9 +380,10 @@ absorb clock-domain error and NTP steps, and a window wide enough to be reliable
 enough to admit the same-second reuse the limb exists to catch. So the operating system's own
 reading is recorded at spawn, as `osCreatedAt`, and boot compares it for exact equality
 against the same platform source. There is no constant to tune and none to justify.
-`ServerLock` carries the field for the same reason: the `server.lock` staleness test shares
-this implementation, and same-container pid-and-image reuse defeats the other three limbs
-there identically.
+`ServerLock` does **not** carry the field. D186 gave it one on the reasoning that the
+`server.lock` staleness test shared this implementation; D180 removed that test, so there is
+no limb left for the field to feed and the lock reclaims by watching a renewal counter
+instead (D193, *Concurrency § Boot ordering*).
 
 **It fails closed, and that is a deliberate asymmetry.** No platform exposes process creation
 time to Node, so each is a shell-out of the same shape `taskkill` already is, and each can
@@ -393,6 +395,16 @@ reaped**. The cost is a real orphan an operator ends by hand, which is exactly t
 spawn-window paragraph below already accepts and for the same reason: this design would
 rather leak a process than end the wrong one. The same helper serves the `server.lock`
 staleness test, whose same-container reuse failure is #206's second bullet.
+
+**A pid is meaningless off the machine that issued it, which is why the record names one** (D181).
+Every test above reads *this* host's process table, so running them against a record another host
+wrote is not a weaker check but a meaningless one — pid 4711 running `node` here says nothing
+whatever about pid 4711 running `node` there, and the two agreeing is a coincidence that reads as
+proof. Boot skips a record from another host entirely: not reaped, and not tombstoned either, because
+an exit record for a child this server never saw is a lie in the file boot trusts most. This was
+unreachable while a lock naming another host was never reclaimed, and D180 made it reachable, so the
+guard and the thing it guards against arrive together. A record predating the field is read as this
+host's — shared storage was unsupported until D180, so no existing `pids.ndjson` holds a foreign one.
 
 **Reaping kills the tree, not the pid** (D38). The recorded process is the agent CLI; what
 holds the workspace open is whatever it spawned — a compiler, a test runner, a language
@@ -881,7 +893,7 @@ encodes is `store`'s business.
   ckpt.git/           shadow git dir, work-tree = the session's workspace
 <storage>/audit.ndjson
 <storage>/pids.ndjson                                                (D23)
-<storage>/server.lock        one ServerLock; claimed before boot step 1   (D161)
+<storage>/server.lock        one ServerLock; a renewed lease, claimed before boot step 1  (D180)
 <storage>/reviews.ndjson             (tier two) latest line per reviewId wins       (D65)
 <storage>/requisitions.ndjson        (tier two) latest line per requisitionId wins  (D65)
 ```
@@ -1797,6 +1809,14 @@ a CI detail, because these are the places where one design compiles into two beh
 | Checkpoint restore | An open handle blocks the write — which is why D16's per-turn child matters here and not on Linux | No equivalent block | *Concurrency § Process lifetime* |
 | Host boot time, for the pid reuse guard | Different source | Different source | *Data model § Process record* |
 | Process creation time, for the guard's fourth limb (D183) — read at spawn to record `osCreatedAt`, and again at boot to compare against it (D186) | CIM `Win32_Process.CreationDate` | `/proc/<pid>/stat` field 22, against `/proc/stat`'s `btime` | *Data model § Process record* |
+| Storage root on a network share | SMB | NFS | *Concurrency § Boot ordering*, D180 |
+
+**A third target joined the pair, and it is a storage class rather than an OS.** D180 supports a
+storage root on a network share, which makes the lease's cross-client visibility a gated behaviour
+and not an incidental one: renewals must become visible to another client inside the observation
+window, which is a property of the mount's caching, not of Node. The two rows above are what the
+gate has to exercise beyond the OS matrix — and the honest scope is close-to-open consistency and
+nothing stronger, with partition named as the residual rather than tested away.
 
 **The gate exists and it does not cover this whole list.** The pair is a requirement of the
 brief and the design carries code paths for both; D64's objection was to a two-platform claim
@@ -1821,6 +1841,10 @@ used to describe and is not the same as being ungated.
 | `meta.json` carries an unknown `schemaVersion` | Version check at boot (D49) | **Identical to a parse failure**: skip, log, continue. Never a migration attempt, never a partial read | One session missing, the log saying it is a newer format | Its files untouched. This is the whole reason the field exists |
 | A record log is unreadable at boot *(tier two)* | Open error | Log it; start with that registry empty; **boot continues** | Reviews or requisitions missing | File untouched. Tier two failing must not deny an operator tier one |
 | One corrupt line in a record log *(tier two)* | Parse failure on that line | Drop the line, log it, keep reading | The record at its previous state, or absent | See *Persistence summary* for why a drop here reverts rather than shortens |
+| Another server is holding the storage root | Its lease is still being renewed across one observation window (D180) | **Refuse to start**, non-zero | Startup error naming the holder's `pid`, `hostname` and `startedAt` — informational fields, printed because a refusal that cannot say *who* is most of the way to useless | Nothing server-wide written; the claim precedes the reap step |
+| A crashed server's lock is still on disk | Its counter does not move across one observation window | **Reclaim it**, logged, and boot on | One observation window of startup delay, once | The reclaimed lock replaced by this server's own |
+| A live holder's renewals cannot be seen — partition, or the share went read-only under it | **Not detected.** This is the residual D180 names | Reclaim, and both servers run | Nothing, until the displaced holder's next renewal finds a foreign id and stops | Interleaved appends to the four server-wide files for the overlap. Unpreventable without a fencing service outside the storage root (D7) |
+| This server's renewal finds the lock gone, or holding another instance's id | Ownership check on every renewal (D180) | **Stop.** It no longer holds the root | The server exiting, saying it was displaced | Whatever the successor holds, untouched — release checks ownership too, so it cannot delete a successor's lock (#207) |
 | Routable bind with no `trustProxy` allow-list, **under a header-trust mode** | Startup check | **Refuse to start**, say why | Startup error naming the fix | — |
 | The same bind under `shared-secret` | Startup check | **Nothing** — it is a legitimate configuration (D154) | The console, listening | — |
 | No auth mode in the configuration | Config parse (D93) | **Refuse to start** — `missing_field`, before any bind decision | Startup error naming the field | — |
@@ -1860,9 +1884,14 @@ Genuinely simultaneous:
   appends through one stream in one single-threaded process cannot interleave a partial line.
   Tier two added two files to this set and no new argument, which is the point of choosing
   append-only files for it (D65). Two server processes over one storage root would break it
-  for all four, **and that is now prevented rather than noted** (D161): `<storage>/server.lock`
-  is claimed before boot's first step, so the single-process premise this whole argument rests on
-  is enforced instead of assumed.
+  for all four, **and that is now prevented rather than noted** (D161, D180):
+  `<storage>/server.lock` is claimed before boot's first step, so the single-process premise this
+  whole argument rests on is enforced instead of assumed. **The enforcement is a lease the holder
+  renews, and the one case it cannot cover is named** (D180): a holder that is alive but whose
+  renewals are invisible to a second server for a full observation window — a partition, or a share
+  that went read-only underneath it — is declared dead, and then both servers do write to these four
+  files. No filesystem-only mechanism closes that; closing it needs a fencing token from a service
+  outside the storage root, which is a dependency D7 kept out.
 - **The two record registries** *(tier two)*, which are shared mutable state in *memory* and
   therefore governed by the same rule as the turn slot: every state test that decides
   something is claimed in the synchronous block that tests it. There are exactly two such
@@ -2136,11 +2165,13 @@ one place D19 and D20 touch, and it is why they are stated together.
 Six steps, and the order is the point:
 
 ```
-0. lock    claim <storage>/server.lock, or refuse to start                    (D161)
-           a live holder → StartupError.storage_locked, naming it
-           a stale holder → reclaimed, logged; staleness is D23's own test
-           another hostname → never reclaimed; the test cannot see that host
+0. lock    claim <storage>/server.lock, or refuse to start                    (D180)
+           a renewing holder → StartupError.storage_locked, naming it
+           a holder that did not renew across one observation window →
+             reclaimed, logged; staleness is observed, never clocked
+           one rule, whichever host wrote the lock
 1. reap    pids.ndjson entries with no exitedAt, subject to the reuse guard   (D23)
+           only records this host spawned; another host's are left alone      (D181)
            kill the process TREE, not the recorded pid                        (D38)
 2. rehydrate  meta.json → registry, every session marked ended                (D20)
            an unknown schemaVersion is handled as a corrupt file              (D49)
@@ -2157,6 +2188,28 @@ trees it believes are orphans, and it cannot tell another server's live agents f
 ones. A second server that got as far as reaping would take down the first server's running work
 before anything else went wrong, so the claim has to come before the first destructive act rather
 than merely before `listen`.
+
+**Step 0 decides liveness by watching, not by interrogating the process table** (D180). The holder
+renews a counter in the lock; a boot that finds a lock samples it, waits one observation window on
+its own monotonic clock, and samples again. Unchanged across a whole window means the holder is gone.
+This replaces a mechanism that asked the operating system whether a recorded pid was still running,
+and the replacement matters because **that question has no useful answer in a container**: process
+ids restart from 1 in a fresh pid namespace, so a booting server finds itself at the pid its
+predecessor recorded, and `os.uptime()` reports the host kernel's uptime rather than the container's,
+so the limb meant to catch pid reuse is true unconditionally. Both were measured, and both are why
+`docker start` and `docker compose up -d` each refused to start forever against a lock nobody held.
+Watching a counter needs neither a process table nor a shared clock, which is what lets one rule
+cover this container, another container, and another host — and the two-rule split it replaces is
+where both container failures lived.
+
+**A boot that reclaims must not then reap across that boundary** (D181). Reclaiming is now possible
+against a lock another host wrote, and `pids.ndjson` records are read straight afterwards. A record
+names a pid, and a pid means nothing outside the machine that issued it, so step 1 reaps only records
+carrying this host's own name and leaves the rest untouched — neither killed nor tombstoned, since
+writing an exit record for a child this server never saw would put a lie in the file boot trusts. The
+consequence is worth stating: an orphan on a host that has lost the root survives until that host
+next boots successfully. That is smaller than the alternative, which is killing an unrelated local
+process that happens to share a number and an image.
 
 Reaping precedes rehydration so that no rehydrated session can be adopted by an orphan
 still holding its workspace. Listening comes last so that no client can observe a registry
@@ -2246,11 +2299,21 @@ reaps processes that are still working. A restart is the one moment at which a s
 certain to be starting, which is exactly when this must not be made cheap.
 
 Failing to release is nonetheless safe, and not by luck — **the lock was designed for the
-crash case first.** Its absence *is* the first limb of D23's liveness test
-(*`20-contract.md` § Server lock*), so a lock nobody removed is reclaimed by the next boot on
-the strength of the other two. Clean release buys one thing: it keeps the reclaim path off the
-ordinary restart, which is what S22.5 asserts by instrumenting the reclaim and finding it
-uncalled. A guard exercised on every boot has stopped being a guard.
+crash case first.** A holder that stopped renewing stops looking alive one observation window
+later, so a lock nobody removed is reclaimed by the next boot without anyone clearing anything
+(D180). Clean release buys one thing: it keeps the reclaim path off the ordinary restart, which is
+what S22.5 asserts by instrumenting the reclaim and finding it uncalled. A guard exercised on every
+boot has stopped being a guard.
+
+**Release is a check, not a delete** (D180, #207's `Done when` 4). Removing the lock unconditionally
+is safe only while "the lock on disk" and "the lock this process claimed" cannot have come apart, and
+a lease is precisely the mechanism that lets them: a server that stalled long enough to be declared
+dead, was reclaimed, and then shut down tidily would delete a lock a *successor* is holding, leaving
+the root open to a third. So release removes the file only while it still carries this instance's own
+id. The same check runs on the renewing side and is the more valuable half — a holder that finds the
+lock absent, or holding another id, has lost the storage root and stops. Two servers over one root is
+the failure D161 said an operator cannot diagnose from symptoms; this is what makes it announce
+itself instead.
 
 **Step 2 exists because the clean path's own precondition is otherwise unreachable** (D176).
 Closing an HTTP listener closes the connections that are idle and waits for the rest, and a
@@ -2667,7 +2730,7 @@ and D113 to D116 from the reconciliation that lifted the freeze. Where one of th
 document disagree, `90-decisions.md` wins and this document is the defect — which is what
 D113 was written to stop being true eleven times over.
 
-**From this pass over shutdown, D174 to D176.** **D174** — shutdown repairs nothing and boot
+**From this pass over shutdown, D174 to D177.** **D174** — shutdown repairs nothing and boot
 stays the only repair pass; rejected finalising at shutdown, which duplicates boot's repair
 into the path a developer exercises and leaves the path that matters untested, and rejected a
 clean-shutdown marker boot could trust, which selects between two code paths on a file that is
@@ -2686,6 +2749,26 @@ writing to the operator's work-tree unwatched on an assumption that the server c
 rejected killing only outside a container, which puts the code path in the one configuration
 that never exercises it, and rejected reusing `SessionManager.interrupt`, which would emit,
 append and resolve at teardown and report a shutdown as an operator's own act.
+
+**From reopening the storage lock, D180 and D181.** **D180** — the lock is a lease the holder
+renews, carrying an instance identity, and `pid` and `hostname` are demoted to informational. The
+choice was forced by measurement rather than argument: D161's mechanism refuses to start forever
+after either container restart, because a fresh pid namespace hands the booting server the pid its
+predecessor recorded and `os.uptime()` inside a container reports the host's uptime, so the pid-reuse
+limb is inert. Rejected an **OS advisory lock**, which is correct by construction and needs no
+counter, because `flock` over NFS is advisory at best and client-local at worst — it would work
+everywhere except the storage class this decision was asked to support — and because D161's native
+dependency and platform-divergence objections both still stand. Rejected a **wall-clock `expiresAt`**
+compared against the reader's own clock, the obvious lease, because it is the one shape that cannot
+cross hosts: skewed clocks make a boot declare a live server dead. Rejected **pinning a stable
+compose `hostname:`**, one line and a real fix for the recreate refusal, because it drives every
+recreate into the pid probe that self-matches. Rejected **the hand-cleared lock** a second time, on
+D161's own grounds, though it is now strictly better than what shipped because it does not name a
+holder that is not there. **D181** — a `ProcessRecord` names the host that spawned it and the reaper
+skips the rest, because D180 makes reclaiming another host's lock possible and a pid means nothing
+off the machine that issued it; rejected carrying the `instanceId` instead, which is more precise
+than the question the reaper is asking, and rejected skipping records that predate the field, which
+strands a generation of real orphans to avoid a foreign record that cannot yet exist.
 
 Standing decisions this design rests on, all in `90-decisions.md`: D1/D10 transport,
 D2 sequencing, D3 delegated auth, D4 the jail, D5 the permission asymmetry, D6 shadow git,
@@ -2745,19 +2828,26 @@ these are cited by number elsewhere in this document and in the slices.
    link go dead invisibly. **The rule does not extend to `attachments/`** (D160): a tool blob is a
    re-runnable command's output, an attachment is the operator's only copy, and those are bounded
    at upload instead.
-3. **Resolved by D161: the lock is taken.** The three failures this named — interleaved appends
-   to all four server-wide files, two registries disagreeing about which workspace is busy (D19),
-   and boot reaping a live sibling's children — are prevented by `<storage>/server.lock`, claimed
-   before boot's first step and refusing with `StartupError.storage_locked` naming the holder. The
-   deployment judgement this item deferred was whether an accidental double-start justifies a
-   startup failure mode, and the answer turned on cost rather than principle: **the staleness
-   objection is answered by machinery that already exists.** The reuse guard's liveness test — no
-   `exitedAt`, `startedAt` after the host's last boot, matching image, and the platform's
-   creation-time reading exactly equal to the recorded `osCreatedAt` (D23, D183, D186) — is reused
-   verbatim against the lock's own holder, which is why `ServerLock` carries `osCreatedAt` too. A
-   crashed server's lock is therefore reclaimed automatically and a container restart is not an
-   incident. A lock naming another `hostname` is never reclaimed, because that test cannot see
-   another machine's process table.
+3. **Resolved by D161: the lock is taken. Re-resolved by D180: it is a lease, not a pid
+   assertion.** The three failures this named — interleaved appends to all four server-wide files,
+   two registries disagreeing about which workspace is busy (D19), and boot reaping a live sibling's
+   children — are prevented by `<storage>/server.lock`, claimed before boot's first step and
+   refusing with `StartupError.storage_locked` naming the holder. That much stands. **The staleness
+   half was resolved wrongly and the correction is worth keeping visible.** D161 reused D23's
+   liveness test against the lock's holder and concluded a container restart would not become an
+   incident. Measured, it became one every time: a fresh pid namespace gives the booting server the
+   pid its predecessor recorded, so it finds *itself* and calls the holder live, while
+   `os.uptime()` reports the host kernel's uptime and leaves the pid-reuse limb permanently true —
+   and recreating a container changes the hostname, which the foreign-host rule refuses on forever.
+   **D183 and D186 have since closed the first of those three** — a fourth limb comparing the
+   operating system's own creation-time reading for exact equality tells a fresh pid 7 from the
+   recorded one — and they reach neither of the others, because nothing there relaxes the
+   foreign-host rule and every limb still reads a local process table (D193). D180 replaces the
+   whole test with an observation: the holder renews a counter, and a boot
+   reclaims only a lock whose counter did not move across one window measured on its own monotonic
+   clock. One rule, no shared clock, no process table — which is what makes a storage root on a
+   network share supportable at all, and D181 is the guard that support forced, since a pid means
+   nothing off the machine that issued it.
 
 **Needing an experiment:**
 
@@ -2921,3 +3011,19 @@ these are cited by number elsewhere in this document and in the slices.
     container* tempting, and is exactly why it was rejected: it puts the code path where it
     never runs. The kill is **not** routed through interrupt, so shutdown still emits nothing
     and closes nothing; see *Shutdown ordering*.
+
+**Needing a decision from the owner (tier one, opened by *Boot ordering*):**
+
+16. **Which network filesystems is a storage root supported on, and where does the gate run?**
+    D180 supports a shared storage root rather than excluding it, and support that is not gated is
+    the two-platform claim D64 already rejected once. The design can state the property that has to
+    hold — a renewal must become visible to another client inside the observation window, which is
+    close-to-open consistency and nothing stronger — but not which mounts actually deliver it here.
+    NFSv3 and NFSv4 differ on attribute caching, SMB differs again and is the likelier mount on the
+    Windows primary host, and each has cache-window options that could exceed any window this design
+    would otherwise pick. **This is not a question a probe answers on its own**, because the answer
+    depends on which shares this deployment will really use and how they are mounted — a fact only
+    the owner has. What is needed to close it: the list of storage classes in scope, and whether the
+    gate is expected to exercise two real hosts against a real share or to simulate a second client.
+    Until it is answered the observation window cannot be given a number, and `30-slices.md` cannot
+    write an acceptance criterion for #206's `Done when` 5.
