@@ -13,7 +13,7 @@
     {
       "name": "Run Pester tests",
       "status": "Passed",
-      "detail": "Tests completed in 58.86s. Tests Passed: 327, Failed: 0, Skipped: 22, NotRun: 0."
+      "detail": "Tests completed in 38.36s. Tests Passed: 327, Failed: 0, Skipped: 22, NotRun: 0."
     },
     {
       "name": "Check design/10-design.md references resolve",
