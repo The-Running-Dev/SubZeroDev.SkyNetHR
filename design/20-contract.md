@@ -774,7 +774,7 @@ though it were new is silent wrong state rather than a parse error.
 | `attachments/<turnId>/<attachmentId>` | `(sessionId, turnId, attachmentId)` | — | Written once, never appended, fsync'd before the envelope naming it exists (I49). `attachmentId` is server-minted, so the operator's `filename` never reaches a path. A sidecar `attachments/<turnId>/<attachmentId>.meta` holds the stored `mediaType` as UTF-8 text, written the same way, so the read route can echo it for an allow-listed image type without scanning the spill for the `AttachmentRef` that named this id. Removed with the session (D25, D160) |
 | `audit.ndjson` | append order | append order, read newest first | Server-wide. fsync'd before the decision it records reaches the child (I10). Never truncated, never deleted with a session (I13). Every read is a bounded window resumed by `AuditCursor` (I39) |
 | `pids.ndjson` | append order; `pid` is not unique over time | append order | Server-wide. Two line shapes: a `ProcessRecord` at spawn, a `ProcessTombstone` at exit (D95). The latest line for a `pid` decides liveness; the spawn line carries everything else |
-| `server.lock` | — | — | Server-wide, one `ServerLock` object, written before boot's first step and removed as shutdown's last act, after the children are gone (D161, D175). A shutdown that does not get that far leaves it. **Not append-only, and alone among these files rewritten repeatedly while the server runs**: every renewal is a whole-file write (D180). Reclaimed only on a holder whose `renewals` did not move across one observation window, whichever host wrote it. Every renewal is a fresh open-write-fsync-close and every sample a fresh open-read-close, because close-to-open consistency is the only cross-client guarantee a network share actually offers and the lease's whole cross-host claim rests on it |
+| `server.lock` | — | — | Server-wide, one `ServerLock` object, written before boot's first step and removed as shutdown's last act, after the children are gone (D161, D175). A shutdown that does not get that far leaves it. **Not append-only, and alone among these files rewritten repeatedly while the server runs**: every renewal is a whole-file write (D180). Reclaimed only on a holder whose `renewals` did not move across one observation window, whichever host wrote it. **Every write publishes the file whole, so a sample observes the previous contents or the next and never a torn file** (D196, I61). The mechanism differs by which write it is, and the difference is not cosmetic: a **claim on an absent lock is an exclusive create**, which must fail rather than overwrite when a second booting server got there first, while a **reclaim and every renewal are a temp-file-then-atomic-rename**, the shape I16 already gives `meta.json`, which must overwrite. Each sample is a fresh open-read-close. **The one file here where durability is irrelevant**: it is not fsync'd, because a lock lost to a host crash and a lock that survived one lead a booting server to the same correct outcome — claim with no wait, or reclaim one window later |
 | `reviews.ndjson` *(tier two)* | `reviewId` | append order; the latest line for an id wins | Server-wide. Never rewritten. Survives deletion of the session it names (D67). Durable per line (D128). A `final` line is terminal — no later line for that id is written |
 | `requisitions.ndjson` *(tier two)* | `requisitionId` | append order; the latest line for an id wins | Server-wide. Never rewritten. **Not durable per line**, which is why a lost consumption line reverts an approval to spendable — D68's written exception |
 | `ckpt.git/` | git object ids | git history | Git is the store. `add -A` honours the workspace's own `.gitignore`, and neither `read-tree` nor `clean -fd` takes `-x`, so exactly the same set is left alone — which is what `ignored/<sha>.json` exists to report on |
@@ -787,13 +787,17 @@ single-threaded process cannot interleave a partial line. **Two server processes
 storage root would break that for all four, which is what `server.lock` prevents** (D161, D180) —
 so the single-process premise is enforced rather than assumed.
 
-**The one case the lease cannot cover is named rather than buried** (D180). A holder that is alive
-but whose renewals are invisible to an observing boot for a full window — a partition, a share that
-went read-only underneath it, or a client attribute cache longer than the window — is declared
-dead, reclaimed, and then both servers do write to these four files. No filesystem-only mechanism
-closes that; closing it needs a fencing token from a service outside the storage root, which is the
-dependency D7 kept out. The displaced holder detects it at its next renewal and stops (I56), so the
-overlap is bounded and announced rather than silent — but it is not prevented.
+**The one case the lease cannot cover is out of reach rather than tolerated, and that is what
+draws the supported scope** (D180, D194). A holder that is alive but whose renewals are invisible to
+an observing boot for a full window is declared dead, reclaimed, and then both servers do write to
+these four files. No filesystem-only mechanism closes it; closing it needs a fencing token from a
+service outside the storage root, which is the dependency D7 kept out. What it needs to happen at
+all is a cache or a partition between the writer and the reader — and **a storage root is supported
+on a local filesystem or a bind mount only** (D194), where two processes on one host share one page
+cache and no such gap exists. So the case is not a hole inside the supported scope; it is what a
+network-share root would reintroduce, and it is the reason one is out of scope until a gate
+exercises it. Where it did occur, the displaced holder would detect it at its next renewal and stop
+(I56), bounding the overlap rather than preventing it.
 
 **"Durable" means fsync**, and for a rename the containing directory too. An append that has
 reached the OS survives a process crash; it does not survive a host crash. Exactly two writes
@@ -823,7 +827,7 @@ shape:
 | `meta.json` | none | `schemaVersion` gates rehydration. An unknown version is treated exactly as a corrupt file: the session is skipped, logged, and its files left untouched |
 | `events.ndjson`, `audit.ndjson`, `pids.ndjson` | none | Readers ignore unknown fields and drop an unparseable trailing line. Added fields must be optional; a removed or retyped field is a new `schemaVersion` on `meta.json` and a refusal to rehydrate older sessions |
 | `reviews.ndjson`, `requisitions.ndjson` | none | Readers ignore unknown fields; added fields must be optional. A dropped trailing line does not shorten the record, it reverts it to the previous line for that id. **A removed or retyped field has no discriminator to gate on in these two files**; see `## Unresolved` 11 |
-| `server.lock` | none | Rewritten whole at every claim **and at every renewal**, and removed at every clean release. Nothing reads a lock it did not just find, so there is nothing to migrate. A lock left by a build predating the lease carries neither `instanceId` nor `renewals`, which is a counter that can never be observed moving — the reclaim path, reached by the ordinary rule and not by a special case |
+| `server.lock` | none | Rewritten whole at every claim **and at every renewal**, and removed at every clean release. Nothing reads a lock it did not just find, so there is nothing to migrate. A lock left by a build predating the lease carries neither `instanceId` nor `renewals`, which is a counter that can never be observed moving — the reclaim path, reached by the ordinary rule and not by a special case. **That is why D196's refusal is keyed on a file that will not *parse*, not on one missing a field**: a legacy lock is well-formed JSON and must reach the reclaim path, and a rule that refused on an absent `renewals` would strand exactly the deployment this migration story exists for |
 | `ignored/<sha>.json` | none | Readers ignore unknown fields; added fields must be optional. **A file that fails to parse is treated exactly as an absent one**: the restore reports unknown rather than reading a partial manifest as a complete one (I58). There is no discriminator and none is needed — nothing rehydrates from it and a wrong answer here is a degraded report, not wrong state |
 | `tool-output/*`, `attachments/*` | none | Opaque bytes; no schema to migrate |
 | `ckpt.git/` | none | Git's own format; not ours to migrate |
@@ -912,7 +916,7 @@ refusal**: the server does not decline to start under `shared-secret`.
   under the same normalisation `resolveInsideRoot` applies. Both arguments must already be
   jail-resolved. It has two callers and no others: `session-manager`'s workspace busy check
   (D30, I6), and `config`'s startup check that storage does not sit inside a workspace root
-  (D185, I57). **The second is why "both arguments must already be jail-resolved" is a
+  (D185, I60). **The second is why "both arguments must already be jail-resolved" is a
   requirement on `config` and not only on this module** — a raw `storageRoot` string could not
   have been compared at all, whatever the predicate.
 - `stripExtendedPrefix` normalises away the `\\?\` extended-length prefix a native realpath
@@ -964,12 +968,29 @@ receives a `LivenessProbe`** (D180): there is nothing left for a probe to answer
 independence from process enumeration — which is what the parameter bought — is now structural
 rather than arranged.
 
+**A third method joins them, and it has no declaration to point at yet** (D195):
+
+```ts
+type LockRenewal = 'renewed' | 'displaced';
+
+renewLock(): Promise<Result<LockRenewal, StoreError>>;
+```
+
+`displaced` is a **success**, not an error: the call did what it was asked to do and found that this
+process no longer holds the root. Modelling it as a `StoreError` would put it beside `io` — a
+failure the caller may reasonably log and carry on past — and this is the one outcome no caller may
+ever carry on past. A `StoreError.io` here means the renewal could not be attempted, which is not
+the same thing and does not by itself mean the root was lost.
+
 **`claimLock` decides by observation, and the observation is the expensive part.** Finding a lock
 at all costs one full observation window before this server may do anything: sample
 `(instanceId, renewals)`, wait the window **on this process's own monotonic clock**, sample again.
-No wall clock is compared, across hosts or otherwise, and that single property is what makes any
-cross-host claim possible at all — two machines on one share disagree about the time by however
-much their clocks disagree, and the failure that produces is a boot declaring a live server dead.
+No wall clock is compared, across hosts or otherwise. D194 narrows the supported storage classes to
+a local filesystem and a bind mount, so no cross-host claim is being made today — the property is
+kept because it costs nothing, because it is what any later widening would have to rest on, and
+because the alternative it rules out is worse on one host too: a wall-clock `expiresAt` compared
+against the reader's own clock declares a live server dead the moment the two disagree, and an NTP
+step is enough.
 
 **`claimLock`'s decision table, which the signature cannot carry:**
 
@@ -978,13 +999,20 @@ much their clocks disagree, and the failure that produces is a boot declaring a 
 | absent | Write `self`. Claimed, **with no wait** — the ordinary restart, and keeping it out of the window is the whole return on releasing cleanly (D175) |
 | present, `(instanceId, renewals)` changed across the window | Refuse. `StartupError.storage_locked` naming the holder's `pid`, `hostname` and `startedAt` — informational fields, printed because a refusal that cannot say *who* is most of the way to useless |
 | present, `(instanceId, renewals)` unchanged across the window | Reclaim: log the holder, overwrite with `self`. Claimed. **Whichever host wrote it** — there is one rule here, and the absence of a second is the correction (I50) |
-| present but unparseable | **Undetermined**; see `## Unresolved` 17. D161's rule cannot be carried forward unexamined, because a file rewritten at every renewal can be unreadable for a reason a write-once file never had |
+| present but unparseable | Refuse. `StartupError.storage_lock_corrupt`, naming the path (D196). **This is corruption, not a race**: every write publishes the file whole (I61), so a sample sees the previous contents or the next and never a partial file. It is also not a legacy lock — one written before the lease parses cleanly and simply carries no `renewals`, which takes the row above (I61) |
 
 **The holding host has left this table, and the deletion is the point.** D161's rule — a lock
 naming another `hostname` is never reclaimed — made a recreated container's refusal permanent,
 since recreating changes the hostname and nothing ever reclaims a foreign lock. It is deleted
 rather than relaxed, and what it was guarding against is covered instead by never consulting a
 process table.
+
+**D194's local-only scope does not make "whichever host wrote it" vacuous, and reading it that way
+is the mistake the narrowing invites.** A hostname is not a machine here. Two containers sharing one
+bind-mounted storage root sit on one host and answer to different hostnames — that *is* the
+`docker compose up -d` recreate path D180 was opened on, and it is inside the supported scope. So a
+lock naming a hostname this process does not recognise is still an ordinary, expected observation,
+D181's reap guard is still load-bearing for `pids.ndjson`, and neither becomes dead code.
 
 **A failed `claimLock` must leave every server-wide file byte-identical.** The claim precedes
 reaping specifically so that a second server cannot take down the first server's running work
@@ -999,9 +1027,48 @@ applies the same check as it writes: a holder finding the lock absent, or carryi
 it no longer owns. That is what turns "two servers over one storage root" from the silent state
 D161 correctly said an operator cannot diagnose from symptoms into a detected and logged one.
 
-**What drives renewal, and what a displaced holder's "stop" travels through, are not determined
-by the design** — `## Unresolved` 15, and the window's own value is 16. Nothing downstream may
-invent either.
+**`store` renews on demand; it owns no clock** (D195). `renewLock` performs one ownership-checked
+write and reports which of the two things happened. It starts no timer, holds no interval, and
+schedules nothing — `store` has no lifecycle anywhere else in this design, and giving it one here
+would make every test that claims a lock responsible for tearing a timer down. **`server.ts` drives
+the clock**, which is the module that already owns exiting and already holds the drain and release
+bounds; what a displaced holder's stop travels through is stated under *`server`* below.
+
+**The window and the interval are module constants, and they live in one file so that their
+relation is enforced rather than requested** (D194, D195, I62):
+
+| Constant | Value | Home | Read by |
+|---|---|---|---|
+| `LOCK_OBSERVATION_WINDOW_MS` | 10 000 | `src/store/index.ts` | `claimLock`, and nothing else |
+| `LOCK_RENEWAL_INTERVAL_MS` | 2 000 | `src/store/index.ts`, exported | `server.ts`'s timer |
+
+The interval must stay strictly below the window with room to spare — at 2 000 against 10 000 a
+live holder has to miss five consecutive renewals before it is declared dead. **Violating that
+relation has no symptom short of two servers over one storage root**, which is why the interval is
+declared beside the window and imported rather than written a second time in `server.ts` beside the
+drain's bound, where the two could drift apart in separate commits with nothing to catch it. Neither
+is a `Config` field: D194 fixes the supported storage classes to a local filesystem and a bind
+mount, so no correct value here depends on how an operator mounted anything, and this document's
+standing ruling stands — promoting either to a deployment flag is a contract amendment.
+
+**The cost is one window, and only where a lock is found.** An absent lock claims immediately, so
+the wait falls on an unclean restart and never on the ordinary one, which is the whole return on
+releasing cleanly (D175) and the reason `30-slices.md § S22.5` instruments the reclaim and expects
+it uncalled.
+
+**Every write of the lock publishes it whole, and which mechanism does that depends on the
+write** (D196, I61). A **reclaim and every renewal** go through the temp-file-then-atomic-rename
+helper the same module already uses for `meta.json` under I16, writing into the same directory so
+the rename stays on one volume — they must overwrite what is there. A **claim on an absent lock does
+not**, and must not: `rename` overwrites unconditionally and so cannot detect that a second booting
+server made the same "absent" observation and wrote first, which is why the claim is an exclusive
+create instead — atomic, and failing rather than clobbering. Both publish a complete file or none,
+which is all I61 asks; only the claim additionally needs to lose a race it did not win. That is what
+makes the unparseable row above a refusal rather than a guess: a reader observes the previous contents or the next, never a
+partial file, so a lock that will not parse is corruption and not a renewal caught in flight. **It
+is deliberately not fsync'd.** This is the one file here whose durability buys nothing — a lock lost
+to a host crash and a lock that survived one lead a booting server to the same correct outcome, and
+the holder that wrote it is gone either way.
 
 ### `checkpoints`
 
@@ -1264,7 +1331,7 @@ What the declarations cannot say:
   **Every step here repairs state some earlier process left, and shutdown deliberately leaves
   all of it** — see *`server`* below, and I52. So `server_restart` fires on an orderly stop
   exactly as it does after a power cut: boot cannot tell them apart and is not asked to.
-- **A turn ends by ending everything it spawned, on every path it can end by** (D184, I56).
+- **A turn ends by ending everything it spawned, on every path it can end by** (D184, I59).
   The tree kill is not the interrupt path's and boot reaping's alone: normal completion — a
   `result` followed by `close(0)`, which is the overwhelmingly common way a turn ends — kills the
   tree too, before `turn.ended` is emitted and before the turn slot is cleared. **There is one
@@ -1446,7 +1513,8 @@ none of them is a warning.
 2. drain    bounded; whatever is still connected when the window closes
             is closed                                                         (D176)
 3. kill     every live turn's child TREE, then one ProcessTombstone each      (D177)
-4. release  remove <storage>/server.lock if still ours, bounded, exit zero    (D175, D180)
+4. release  stop renewing, then remove <storage>/server.lock if still ours,
+            bounded, exit zero                                                (D175, D180, D195)
 ```
 
 **What is *not* among them is the load-bearing part** (D174, I52). No session is marked ended,
@@ -1513,6 +1581,25 @@ observation window later, so a lock nobody removed is reclaimed by the next boot
 clearing anything (D180). What clean release buys is keeping that reclaim — and the window's wait —
 off the ordinary restart, and a guard exercised on every boot has stopped being a guard.
 
+**Renewal stops as step 4's first act, and not when shutdown begins** (D195, I56). The direction is
+easy to get backwards, so it is stated rather than left to taste: this server still holds the
+storage root all the way through steps 1 to 3 — it is draining, killing children, and writing the
+one `ProcessTombstone` I52 permits — so it must keep renewing across them. A timer cancelled at
+step 0 or 1 would let a booting successor observe an unchanged counter and reclaim the root while
+this server is still writing to it, which is the exact overlap the lease exists to prevent, arrived
+at through the tidy path rather than the crash. The timer is cancelled immediately before the
+ownership-checked read below, and the gap between the two is the only moment in this server's life
+when it holds the root and is not renewing.
+
+**A displaced holder runs this same path, and that is why there is no second one** (D195). Where a
+renewal returns `displaced` — the lock absent, or carrying another `instanceId` — this server has
+lost the root and stops, and it stops by running steps 1 to 4 unchanged. Nothing special is needed
+at step 4, because I56 already made release an ownership check: it reads a foreign `instanceId` and
+removes nothing. What differs is the exit code, below — and the timer, which is **cancelled at once
+rather than at step 4**: the renewal that returned `displaced` is by definition this server's last,
+and a process that no longer holds the root has no business writing to the lock through steps 1 to
+3. The paragraph above orders the two only for a shutdown that still holds it.
+
 **Release is a check, not a delete** (D180, I56). Removing the lock unconditionally was safe only
 while "the lock on disk" and "the lock this process claimed" could not come apart, and a lease is
 precisely the mechanism that lets them: a server that stalled long enough to be declared dead, was
@@ -1521,8 +1608,12 @@ the file only while it still carries this instance's `instanceId`, and a mismatc
 no-op rather than an error — shutdown raises nothing, as below.
 
 **Shutdown raises nothing.** Past the guard every step is best-effort: a failure is logged and
-the next step runs, and **no variant is added to any error union** for it. The guard is the only
-non-zero exit — the operator saying they are done waiting, on which nothing below it is retried.
+the next step runs, and **no variant is added to any error union** for it. **Shutdown has exactly
+two non-zero exits** (D195): the guard — the operator saying they are done waiting, on which nothing
+below it is retried — and a displacement, which is nobody asking for anything and is the one
+abnormal end this path has. They are not symmetrical. A displacement runs all four steps; the guard
+runs none past wherever the second signal found it, which is why its row below leaves both a tree
+and the lock.
 
 **What is left behind, by how the server was stopped:**
 
@@ -1532,12 +1623,14 @@ non-zero exit — the operator saying they are done waiting, on which nothing be
 | One signal, drain times out | Removed | As above | As above | As above |
 | A second signal | **Left** | As above | **Still running** — the guard exits before step 3 | Reclaimed one observation window after the last renewal, logged; the reap kills the tree; the rest as above |
 | `SIGKILL`, OOM, power cut | **Left** | As above | Still running, or gone with the container | As above — except after a host crash, where the `startedAt` limb of D23's *reap* guard tombstones the `pids.ndjson` entry rather than killing anything |
+| **Displaced** — a renewal found the lock absent or foreign (D195) | **Left, and it is the successor's**: release reads a foreign `instanceId` and removes nothing (I56) | As above | Killed and tombstoned | Nothing to reclaim — a successor already holds the root and has already reaped. This server's `pids.ndjson` children are tombstoned by its own step 3, so the successor's reap finds them closed |
 
 **The spill column does not vary, and that is the measure of how little shutdown is
-load-bearing**: all four end a turn in flight identically on disk, and boot repairs all four the
-same way. **Two of the four still leave a tree for boot's reap**, and both are ways of stopping
+load-bearing**: all five end a turn in flight identically on disk, and boot repairs all five the
+same way. **Two of the five still leave a tree for boot's reap**, and both are ways of stopping
 that shutdown does not control — which is why D177 adds a step without taking anything away
-from D23.
+from D23. The displacement row is not among them: it runs step 3 like an ordinary signal, and it
+differs from one only in what it may do to the lock and in the code it exits with.
 
 **A shutdown may leave `ckpt.git/index.lock`** behind, where the process dies with a
 `git commit` in flight. That is an already-designed state rather than a new one:
@@ -1822,6 +1915,20 @@ rejected (D161, and again on the network-share ground in D180). **The named fiel
 for the operator and for nothing else**: this error is the one place `pid`, `hostname`, `startedAt`
 and `image` are read at all, and reading them where a decision is made violates I57.
 
+**`StartupError` gains one variant, and it exists because the other one cannot carry the case**
+(D196). A lock that will not parse names nobody, and `storage_locked` is declared with a
+`holder: ServerLock`:
+
+```ts
+| { readonly code: 'storage_lock_corrupt'; readonly path: string; readonly detail: string }
+```
+
+Widening `storage_locked`'s `holder` to nullable was rejected: it would make every consumer of the
+one error whose whole value is *naming the holder* handle the case where it names nobody, to spare
+one variant. The two are also acted on differently — a held root is someone else's server and the
+operator goes and looks at it; a corrupt lock is a damaged file on this host and the operator
+removes it.
+
 | HTTP | `code` | Meaning |
 |---|---|---|
 | 401 | `unauthenticated` | No usable identity |
@@ -1884,8 +1991,9 @@ control rather than concealment (D50, D70).
 | Variant | Raised when | Retryable | Caller does |
 |---|---|---|---|
 | `ConfigError.insecure_bind` | A routable bind that no `trustProxy` allow-list covers, **under `proxy-header` or `open-webui` only** (D154) — those are the modes that trust a header the client could otherwise set. Under `shared-secret` the same bind is legitimate and this is never raised: a credential the caller must present is not a claim about who the peer is. **Not** a missing auth mode either: D93 makes one mandatory in every configuration, so that case is `missing_field` at parse time and never reaches here | No | Refuse to start, naming the fix |
-| `ConfigError.missing_field` / `invalid_field` | Validation of the environment. `invalid_field` additionally covers **`STORAGE_ROOT` overlapping any `WORKSPACE_ROOTS` entry** under `pathsOverlap`, once both are jail-normalised (D185, I57) — `detail` names the root it collides with. No variant is added for it: the field is genuinely invalid relative to another field | No | Refuse to start. On the overlap, naming both paths and which to move; nothing is written and the storage tree is untouched |
+| `ConfigError.missing_field` / `invalid_field` | Validation of the environment. `invalid_field` additionally covers **`STORAGE_ROOT` overlapping any `WORKSPACE_ROOTS` entry** under `pathsOverlap`, once both are jail-normalised (D185, I60) — `detail` names the root it collides with. No variant is added for it: the field is genuinely invalid relative to another field | No | Refuse to start. On the overlap, naming both paths and which to move; nothing is written and the storage tree is untouched |
 | `StartupError.storage_unwritable` | The storage root cannot be written at boot | No | Refuse to start |
+| `StartupError.storage_lock_corrupt` | `<storage>/server.lock` is present and will not parse (D196). **Not a renewal caught in flight** — every write publishes the file whole (I61), so a reader sees complete contents or none — and **not a lock predating the lease**, which parses and reaches the reclaim path on its absent counter (I61) | No | Refuse to start with a non-zero exit, naming the path. Nothing server-wide has been written. The operator's action is to remove the file, having satisfied themselves no server is running |
 | `StartupError.storage_locked` | Another server process holds this storage root: the lock's `renewals` moved across one observation window measured on this process's own monotonic clock (D180). **Never raised on a host comparison**, which no longer happens | No | Refuse to start with a non-zero exit, naming the holding `pid`, `hostname` and `startedAt`. **Nothing server-wide has been written**, because the claim precedes the reap step |
 | `IdentityError.no_identity` | No header, no cookie, or an empty one | No | `401 unauthenticated` |
 | `IdentityError.untrusted_proxy` | The identity header arrived from an address not in `trustProxy` | No | `401 unauthenticated`; log the address |
@@ -2000,24 +2108,36 @@ highest-value section in this document.
 | I47 | `updatedPermissions` is never written to a child's stdin, under any decision or scope | `adapters/*`, `session-manager` |
 | I48 | `ToolCall.summary` is display-only: above `adapters/*` it is rendered as a text node and nothing else. No module parses it, matches against it, or derives anything persisted or security-relevant from it; its shape is not contractual. Testing it for empty, to decide whether to show the line at all, is display and is permitted | `adapters/*`, `session-manager`, `client` |
 | I49 | An attachment's bytes never enter `events.ndjson`, and an operator's `filename` never reaches a filesystem path — the server-minted `AttachmentId` is the only path segment. The blob is written and fsync'd before the `message` envelope naming it is constructed | `store`, `session-manager` |
-| I50 | A storage root is held by at most one server process. `<storage>/server.lock` is claimed **before boot's reap step**, not merely before `listen`, and is reclaimed only where its `(instanceId, renewals)` pair is observed unchanged across one full observation window measured on the claiming process's own monotonic clock — **whichever host wrote it**, and with no wall clock compared anywhere in the decision (D180). A boot that refuses on a held lock has written nothing server-wide. The one hole is named and not closed: a live holder whose renewals are invisible for a full window is reclaimed, and closing that needs a fencing service outside the storage root (D7) | `store`, `session-manager` |
+| I50 | A storage root is held by at most one server process. `<storage>/server.lock` is claimed **before boot's reap step**, not merely before `listen`, and is reclaimed only where its `(instanceId, renewals)` pair is observed unchanged across one full observation window measured on the claiming process's own monotonic clock — **whichever host wrote it**, and with no wall clock compared anywhere in the decision (D180). A boot that refuses on a held lock has written nothing server-wide. **A storage root is supported on a local filesystem or a bind mount only** (D194): the one hole — a live holder whose renewals are invisible for a full window — needs a cache or a partition between writer and reader, which two processes on one host do not have, so it is out of reach rather than tolerated. It is what a network-share root would reintroduce, and closing it there would need a fencing service outside the storage root (D7) | `store`, `session-manager` |
 | I51 | A `message.delta` is a live-only frame, for **both** vendors: it is assigned no `seq`, no `Envelope` is ever constructed for it, it never enters the ring buffer, it is never appended to `events.ndjson`, and it is never replayed. It is delivered to the subscribers attached when it is produced and to no others. Deltas for one `turnId` concatenate in arrival order to the `message` that follows (D168) | `session-manager`, `adapters/*` |
 | I52 | A shutdown establishes no durable state and holds no session invariant. It marks no session ended, closes no turn on disk, appends to no spill, writes no `session.notice`, and emits no envelope. Its only durable write is one `ProcessTombstone` per child it killed, which records what shutdown *did* rather than repairing what it found. Every repair stays boot's, so the crash path and the orderly path converge on one implementation of each (D174). **It is held by construction rather than by inspection**: I55 stops every notification at the sink, so no code below it is in a position to emit, resolve or append during teardown (D178) | `server`, `session-manager` |
 | I53 | `<storage>/server.lock` is removed only as the last act before exit, after the listener has closed and after the kill step has run. A shutdown that cannot get that far leaves the lock rather than releasing it early, and the next boot reclaims it one observation window after the holder's last renewal (D175, D180) | `server` |
 | I54 | A shutdown's completion never depends on a client disconnecting. Every step past the guard is bounded, so the exit is reached whether or not a subscriber is still attached — the clean path is reachable in the configuration that ships, not only when nobody was watching (D176) | `server` |
 | I55 | From the moment `SessionManager`'s shutdown method is entered, no `AdapterNotification` of any kind reaches a handler. The mute sits on the manager's own `notify` sink, which every notification already passes through, and **not** on the `exited` handler: `turn.ended` arrives as a second, separate notification after `exited` inside the same synchronous callback, so a mute on the handler would silence the cancellations and let the turn's closure through. The mute is one-way — nothing clears it, and shutdown is its only caller (D178) | `session-manager` |
-| I56 | `<storage>/server.lock` is written or removed only by the instance that holds it. `releaseLock` and every renewal read the file first and act only while it still carries this process's `instanceId`; an absent file or a foreign one means this server has been displaced — it removes nothing, and stops rather than going on writing server-wide state it no longer owns (D180) | `store`, `server` |
+| I56 | `<storage>/server.lock` is written or removed only by the instance that holds it. `releaseLock` and every renewal read the file first and act only while it still carries this process's `instanceId`; an absent file or a foreign one means this server has been displaced — it removes nothing, and stops by running shutdown's ordinary steps, whose release then reads a foreign id and deletes nothing of its own accord (D180, D195). **Renewal continues through shutdown's steps 1 to 3 and is cancelled as step 4's first act**: this server holds the root while it drains, kills and tombstones, so a timer stopped any earlier lets a successor reclaim a root still being written to | `store`, `server` |
 | I57 | `pid`, `hostname`, `startedAt` and `image` on a `ServerLock` are informational. No decision reads them: not the reclaim decision, not the release check, not the renewal check. Their only consumer is the text of a `StartupError.storage_locked` (D180) | `store`, `session-manager` |
 
-| I56 | A turn ends by ending the process tree its child rooted, on **every** path a turn can end by — normal exit, interrupt, adapter failure, shutdown — using D38's one mechanism and no other. When `turn.ended` is observable for a turn, no process that turn started is still running, so a released workspace claim and a subsequent restore are never conditional on an untracked descendant (D184) | `session-manager`, `adapters/*` |
-| I57 | `Config.storageRoot` is jail-normalised, and `pathsOverlap` is false between it and every entry of `Config.workspaceRoots`. A configuration failing this is refused at startup and the server does not listen; no session is ever served from it (D185) | `config` |
+| I59 | A turn ends by ending the process tree its child rooted, on **every** path a turn can end by — normal exit, interrupt, adapter failure, shutdown — using D38's one mechanism and no other. When `turn.ended` is observable for a turn, no process that turn started is still running, so a released workspace claim and a subsequent restore are never conditional on an untracked descendant (D184) | `session-manager`, `adapters/*` |
+| I60 | `Config.storageRoot` is jail-normalised, and `pathsOverlap` is false between it and every entry of `Config.workspaceRoots`. A configuration failing this is refused at startup and the server does not listen; no session is ever served from it (D185) | `config` |
 | I58 | An `IgnoredManifest` records path, kind, size and mtime and **never content**. `RestoreResult.unreached === null` means the comparison could not be made and never that nothing differs; an empty array is the positive answer. No gate, control, or refusal anywhere in this contract reads a manifest — it is a report to an operator and its collapsed-directory blindness makes it unusable as evidence (D182, D187) | `checkpoints`, `client` |
+| I61 | Every write of `<storage>/server.lock` publishes the file whole, so a sample observes complete contents or none and never a partial file: a reclaim and every renewal by temp-file-then-atomic-rename, and a claim on an absent lock by an exclusive create, which must fail rather than overwrite when a second booting server wrote first. A lock that will not **parse** is therefore corruption, and `claimLock` refuses on it rather than reclaiming (D196). A lock that parses and merely lacks `renewals` is not corruption: it predates the lease, and it reclaims by the ordinary rule (I50) | `store` |
+| I62 | `LOCK_RENEWAL_INTERVAL_MS` is strictly less than `LOCK_OBSERVATION_WINDOW_MS`, by a margin of at least three renewals, so a live holder can never be sampled unchanged across a window. **Enforced by the two being declared in one file** — `src/store/index.ts`, with the interval exported for `server.ts` to import rather than written a second time beside the drain's bound — because a violation has no symptom short of two servers over one storage root (D194, D195) | `store`, `server` |
 
 **I40, I41 and I42 were never allocated, and the gap is left open rather than closed.** The
 numbering jumps from I39 to I43 and nothing is missing. Ids here are cited by number in
 `90-decisions.md`, in this document's own prose, and in `src/`, so renumbering to close a gap
 would silently repoint every one of those citations — the same reason `AGENTS.md § Tracking
 work` compares drift on ids and never on position.
+
+**I59 and I60 were briefly numbered I56 and I57, and a citation predating this pass may still
+mean them.** Two passes allocated independently: `97c1483` took I56, I57 and I58 for D184, D185
+and D182/D187, and the lease pass six days later reused I56 and I57 for the lock, leaving each id
+defined twice and every citation of them resolving to whichever row the reader met first. The
+lease's pair keeps the ids and D184's and D185's move, which is the direction that leaves
+`90-decisions.md` — append-only — untouched, since the one entry citing either sense (D193) means
+the lock's. **This is the exception the paragraph above argues against, and it is taken only
+because the alternative was two invariants answering to one name.** The table is ordered by when
+a row was written, never by id, so I58 following I60 is not a symptom of it.
 
 ## Vendor mapping — Claude
 
@@ -2433,37 +2553,42 @@ belong to the `exec --json` fallback alone; neither affects a session on `app-se
 
     Building it is staged in `90-decisions.md § Open` with D174–D177's, and is not yet issued.
 
-15. **What drives the lease's renewal, and what a displaced holder's stop travels through.** D180
-    settles that the holder renews, and that a renewal finding the lock absent or carrying another
-    `instanceId` means this server has lost the root and must stop. It settles neither which module
-    owns the interval nor how the stop reaches the process, and two shapes are both defensible:
-    `store` gaining a renewal entry on its surface with something above it — `server.ts` or
-    `session-manager` — holding the timer and exiting on displacement; or `claimLock` starting the
-    loop inside `store` and taking a displacement callback. The first keeps `store` free of a
-    lifecycle it does not have today and keeps the exit decision in the module that owns exiting;
-    the second matches D180's own count of "two `store` signatures" and keeps the file's whole life
-    in the module that owns the file. **The renewal interval is bounded but not fixed** — short
-    enough that a live holder is never observed unchanged across a window — and no number can be
-    put on it until 16 is answered. Nothing downstream may invent a signature here. (#206)
-16. **The observation window's value, and whether it is a `Config` field or a module constant.**
-    The design states the property the window must satisfy — a renewal must become visible to
-    another client inside it, which is close-to-open consistency and nothing stronger — and
-    `10-design.md § Open questions` 16 records why no number follows from that alone: it depends on
-    which storage classes are in scope and how they are mounted, and NFSv3, NFSv4 and SMB each have
-    attribute-cache options that could exceed any window this design would otherwise pick. The same
-    fact decides the shape. Every sibling bound — the drain's, the release's — is a module constant,
-    and this document already rules that promoting one to a deployment flag is a contract amendment;
-    a window whose correct value is a property of the operator's mount is the first candidate that
-    argues the other way. **Both halves are the owner's**, and until they are answered
-    `30-slices.md` can write no acceptance criterion for the window. (#206)
-17. **What a lock that will not parse means, now that the file is rewritten while the server
-    runs.** Under D161 the lock was written once, so an unreadable one named no holder and was
-    reclaimed — refusing on it was D161's own first rejected alternative, because it makes every
-    unclean shutdown need a human. D180 makes each renewal a whole-file write, so an unparseable
-    read is now at least as likely to be a **live** holder caught mid-renewal, and reclaiming on it
-    would start a second server beside a healthy one. The old rule cannot be carried forward
-    unexamined, and both readings are defensible: keep reclaim, on the ground that two unparseable
-    samples a full window apart are not a plausible renewal race; or require the write to be atomic
-    — the temp-file-then-rename shape I16 already gives `meta.json` — and treat an unparseable lock
-    as corruption again, which costs a rename whose atomicity over SMB and NFS is itself part of 16.
-    Until this is settled `claimLock`'s table has no row for it. (#206)
+15. **Resolved by D195.** Both halves are settled and neither shape was taken whole. `store` gains
+    one plain method, `renewLock`, declared under *Public surface § `store`*: it performs the
+    ownership-checked write and reports `renewed` or `displaced`, and it owns no clock — `store` has
+    a lifecycle nowhere else in this design, and giving it one here would make every test that
+    claims a lock responsible for tearing a timer down. `server.ts` drives the interval, which is
+    the module that already owns exiting and already holds the drain's and the release's bounds.
+    **What a displaced holder's stop travels through turned out to be nothing new**: it runs
+    shutdown's ordinary steps 1 to 4, because I56 already made release an ownership check, so step 4
+    reads a foreign `instanceId` and removes nothing without being told to. The only addition is a
+    second non-zero exit beside the guard's. The interval's own value follows from 16 and is
+    `LOCK_RENEWAL_INTERVAL_MS`, declared beside the window and exported so the two cannot drift
+    apart (I62). (#206)
+16. **Resolved by D194, and it is the design's open question 16 that was answered.** The supported
+    storage classes are a local filesystem and a bind mount, and nothing else; a network-share root
+    is out of scope until a gate exercises one, rather than claimed and ungated — which is the
+    design's own reading of D64 applied to itself. Fixing the scope answers the shape as well as the
+    number: within these classes a write is visible to another process on the same host at once, so
+    the window is bounded by a stalled *holder* rather than by a client's attribute cache, and no
+    correct value depends on how an operator mounted anything. It is therefore a **module
+    constant** — `LOCK_OBSERVATION_WINDOW_MS`, 10 000 ms — and this document's standing ruling on
+    sibling bounds stands unreversed. The partition residual is not closed but put out of reach, and
+    is now the reason the scope is drawn where it is. **This leaves `10-design.md` overstating the
+    scope in three places** — *Platform divergence*'s network-share row and the paragraph above it,
+    the partition row in *Failure modes*, and open question 16 itself. That edit is `/design`'s, and
+    this pass deliberately did not make it. (#206)
+17. **Resolved by D196, and only because 16 went the way it did.** Every write of the lock
+    publishes it whole — a reclaim and every renewal by the temp-file-then-atomic-rename helper the
+    same module already uses for `meta.json` under I16, a claim on an absent lock by an exclusive
+    create, which unlike a rename fails rather than overwrites when a second booting server wrote
+    first (I61). A reader therefore observes complete contents or none. An
+    unparseable lock is therefore corruption rather than a renewal caught in flight, and `claimLock`
+    refuses on it: `StartupError` gains `storage_lock_corrupt`, since `storage_locked` names a
+    `holder: ServerLock` and a file that will not parse names nobody. **D161's objection does not
+    survive into the lease, which is what makes refusing affordable**: a crash now leaves a
+    well-formed lock whose counter merely stops moving, reclaimed by the ordinary rule one window
+    later, so no unclean shutdown needs a human and refusal costs nothing that objection was
+    protecting. The rule is keyed on *parsing* and not on a missing field, so a lock predating the
+    lease still reclaims (I61). Had 16 kept a network share in scope this would have gone the other
+    way — rename's atomicity over SMB and NFS is exactly the uncertainty the item named. (#206)
