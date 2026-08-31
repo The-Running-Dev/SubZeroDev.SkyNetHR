@@ -179,6 +179,22 @@ None.
             $r.Findings.Count | Should -Be 0
         }
 
+        It 'a bug issue titled "S1''s ..." with no period is not mistaken for the slice issue' {
+            # `(?!\.)` alone excludes "S27.1's ..." but not "S27's ..." - no period ever
+            # appears between the number and the apostrophe. Reproduces the false
+            # InDocNotIssue findings Test-DesignDrift.ps1 reported against #246 for S27.
+            $path = New-SlicesDoc -Content $script:TwoCriterionDoc
+            Mock Get-TrackerIssue { New-Tracker -Issues @(
+                New-Issue -Number 246 -Title "S1's backpressure test times out waiting for a slow subscriber to be dropped" -Body '- [ ] unrelated bug tracking'
+                New-Issue -Number 9 -Title 'S1 — A slice' -Body "- [x] **S1.1** first`n- [x] **S1.2** second"
+            ) }
+
+            $r = Invoke-DriftCheck -SlicesPath $path
+
+            $r.State | Should -Be 'Clean'
+            $r.Findings.Count | Should -Be 0
+        }
+
         It 'a slice with no issue at all is reported rather than skipped' {
             $path = New-SlicesDoc -Content $script:TwoCriterionDoc
             Mock Get-TrackerIssue { New-Tracker }
