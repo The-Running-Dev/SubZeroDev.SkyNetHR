@@ -86,6 +86,15 @@ it did not, rather than an implementer's guess wearing the amendment's clothes.
 
 ---
 
+## Landed
+
+Every slice below has a closed GitHub issue. `/track` does not sync these — the issue already
+carries the doneness signal, and re-deriving it from this document's prose is the generative
+comparison `design/FROZEN.md` exists to escape. Bodies are kept in full rather than retired to a
+bare index, because other slices, `10-design.md` and `90-decisions.md` cite specific criterion
+ids from several of them (S1.6, S3.3, S6.5, S7.5, S7.6, S8.1 among others) and those citations
+need the criterion text to resolve.
+
 ## S1 — Drive Claude from the server, and keep what it said
 
 Delivers: Someone with a terminal on the machine holding the code can point the tool at a
@@ -1522,6 +1531,11 @@ anthropics/claude-code#34046 or acting on `--permission-prompt-tool stdio` being
 while absent from `--help` — the probe records that, and what to do about an undocumented flag the
 permission path depends on is a decision, not a fix; inventing the shape of any surface a hook
 process would reach; and retiring the fixture CLI.
+
+## Outstanding
+
+Slices below have no closed issue, or an issue reopened because it was closed with unticked
+`Done when` boxes. `/track` syncs these normally.
 
 ## S27 — Stop the server without leaving an agent behind
 
