@@ -4649,6 +4649,118 @@ reverse by itself: `ServerLock.osCreatedAt` was never written to the tree, which
 nor `ProcessRecord.osCreatedAt`, so withdrawing it is a document change and nothing more. Landing
 point: #206.
 
+### 2026-08-31 — D194 A storage root is supported on a local filesystem or a bind mount only; the observation window is a module constant
+Context: `20-contract.md § Unresolved` 16, and `10-design.md § Open questions` 16, which parked both
+halves for the owner. D180 supports a shared storage root rather than excluding it, and the design
+says outright that "support that is not gated is the two-platform claim D64 already rejected once".
+No gate for a real share exists, and building one needs a fact only the owner has: which storage
+classes are actually in scope, and whether the gate stands two real hosts against one share or
+simulates a second client. Until that was fixed no number followed for the observation window
+either, because NFSv3, NFSv4 and SMB each carry attribute-cache options that could exceed any
+window this design would otherwise pick — NFS `acregmax` alone defaults to 60 s.
+Chosen: the supported storage classes are **a local filesystem and a bind mount, and nothing else**.
+A network-share root is out of scope until a gate exercises one, and that is stated rather than left
+as an ungated claim. Fixing the scope answers both halves at once. Within these classes a write is
+visible to another process on the same host immediately, so the window is bounded by a stalled
+*holder* rather than by a client's attribute cache, and no correct value depends on how an operator
+mounted anything. The window is therefore a **module constant** — `LOCK_OBSERVATION_WINDOW_MS`,
+10 000 ms, in `src/store/index.ts` beside the code that reads it — which keeps this document's
+standing ruling that a sibling bound is a module constant and that promoting one to a deployment
+flag is a contract amendment. The renewal interval is 2 000 ms, so a holder must miss five
+consecutive renewals to be declared dead, and an unclean restart costs one 10 s wait — only where a
+lock is actually found, which clean release keeps off the ordinary restart (D175).
+**The partition residual D180 named is not closed; it is put out of reach.** A live holder whose
+renewals are invisible to an observer for a full window needs a client cache or a partition between
+the writer and the reader, and neither exists between two processes on one host over one
+filesystem. It is precisely what a network-share root would reintroduce, so it stops being a
+documented hole inside the supported scope and becomes the reason the scope is drawn where it is.
+Rejected: **NFSv4 and SMB in scope, with the window as a `Config` field.** Keeps D180's claim whole,
+and it is the honest shape *if* shares are supported, since no single constant is correct across
+mounts and a too-short window silently starts a second server. It reverses this document's own
+ruling on sibling bounds for a value nothing gates, and it ships an operator-tunable timing knob
+whose wrong setting has no symptom until two servers interleave appends to the four server-wide
+files.
+Rejected: **NFSv4 and SMB in scope with mandated mount options** (`actimeo`, `noac`), the window
+staying a module constant sized to them. Cheapest of the two supporting options. The mandate is
+unenforceable from inside the process — nothing reads the mount — so a misconfigured share breaks
+the guarantee with no symptom at all, which is worse than the option above, where at least the
+wrong value is visible in configuration.
+Reversibility: cheap in this direction. Widening later is additive: it adds storage classes,
+promotes the constant to a `Config` field, and needs the gate this decision declines to claim
+without. No persisted shape changes either way.
+**Consequence for `10-design.md`, which this pass does not edit:** *Platform divergence*'s "A third
+target joined the pair" paragraph and its `Storage root on a network share` row, the partition row
+in *Failure modes*, and open question 16 itself now all overstate the scope. That edit is
+`/design`'s, `opus`/`high`, in a fresh session.
+Landing point: #206.
+
+### 2026-08-31 — D195 `store` renews on demand, `server.ts` drives the clock, and displacement runs the ordinary shutdown path
+Context: `20-contract.md § Unresolved` 15. D180 settles that the holder renews, and that a renewal
+finding the lock absent or carrying another `instanceId` means this server has lost the root and
+must stop. It settles neither which module owns the interval nor what that stop travels through,
+and it named two defensible shapes without choosing between them.
+Chosen: `store` gains one plain method, `renewLock`, which performs the ownership-checked write and
+reports renewed or displaced; `server.ts` holds the timer. On displacement `server.ts` runs its
+**ordinary shutdown path, unchanged** — steps 1 to 4 — because I56 already makes step 4's release an
+ownership check, so it finds a foreign `instanceId` and removes nothing of its own accord. There is
+no second stop path to write, to test, or to get subtly wrong. The exit is non-zero, which amends
+"the guard is the only non-zero exit": there are two now, and the second one says the root was lost.
+**The renewal timer stops as step 4's first act, not when shutdown begins**, and the ordering is
+load-bearing in the direction that is easy to get backwards. This server still holds the root
+through steps 1 to 3 — it is draining, killing children, and writing the one `ProcessTombstone` I52
+permits — so it must keep renewing across them, or a booting successor may reclaim the root while
+it is still writing. Renewal stops immediately before the ownership-checked removal, and not before.
+**`LOCK_RENEWAL_INTERVAL_MS` lives in `src/store/index.ts` and is exported for `server.ts` to
+import**, beside the window it has to stay below. The relation between the two decides whether a
+live holder can ever be observed unchanged, and violating it has no symptom short of two servers
+over one storage root, so it is enforced by the two values sharing one file rather than by a comment
+asking a future editor to keep them in step (I62).
+Rejected: **`claimLock` starting the loop inside `store` and taking a displacement callback.**
+Matches D180's own count of two changed `store` signatures, and keeps the lock file's whole life in
+the module that owns the file. It gives `store` a lifecycle it has nowhere else, so every test that
+claims a lock acquires a timer to tear down; it moves the exit decision out of the module that owns
+exiting and already holds the drain and release bounds; and it forces `releaseLock` to stop the
+timer internally, hiding inside a function an ordering the shutdown table otherwise states outright.
+Reversibility: cheap. One method, one timer, one import.
+Landing point: #206.
+
+### 2026-08-31 — D196 The lock is written by atomic rename, and a lock that will not parse is corruption
+Context: `20-contract.md § Unresolved` 17. Under D161 the lock was written once, so an unreadable one
+named no holder and was reclaimed; refusing on it was D161's own first-rejected alternative, because
+it would make every unclean shutdown need a human. D180 makes each renewal a whole-file write, so an
+unparseable read became at least as likely to be a **live** holder caught mid-renewal, and
+reclaiming on that would start a second server beside a healthy one. The old rule could not be
+carried forward unexamined.
+Chosen: every write of `server.lock` publishes the file whole, and which mechanism does that
+depends on the write. A **reclaim and each renewal** go through the temp-file-then-atomic-rename
+helper already at `src/store/index.ts:104`, the shape I16 gives `meta.json`. A **claim on an absent
+lock keeps the exclusive create it already has** (`tryClaimExclusive`, `src/store/index.ts:119`) and
+must: `rename` overwrites unconditionally, so claiming through it would stop detecting that a second
+booting server made the same "absent" observation and wrote first — the race that helper's own
+comment exists to explain. Both publish complete contents or none, which is the whole of what this
+decision needs; only the claim additionally has to lose a race it did not win. A reader therefore
+never observes a torn file, an unparseable lock is genuine
+corruption, and `claimLock` **refuses**. `StartupError` gains a variant, `storage_lock_corrupt`,
+carrying `path` and `detail`: `storage_locked` cannot carry the case, because it names a
+`holder: ServerLock` and a file that will not parse names nobody.
+**This does not revive D161's objection, because the lease changed what an unclean shutdown
+leaves.** A crash leaves a *well-formed* lock whose counter simply stops moving, and the ordinary
+rule reclaims it one window later with nobody clearing anything. Corruption is now only disk damage
+or a hand edit. So no unclean shutdown needs a human — the thing D161 rejected refusal to protect —
+and refusing costs nothing that rejection was protecting.
+D194 is what makes this available. `rename` is atomic within one filesystem on POSIX and via
+`MoveFileEx` on Windows, and it is already trusted here for `meta.json`, the file boot depends on
+most. Over SMB and NFS that atomicity is itself uncertain, which is why this was the wrong option
+while a network share was in scope and became the right one when D194 took it out.
+Rejected: **carrying D161's reclaim rule forward.** Cheaper — nothing about how the lock is written
+changes — and the probability argument is sound on its face: a write takes microseconds, the window
+is ten seconds, and two unparseable samples a full window apart are not a plausible renewal race. It
+rests the safety of the one decision whose wrong answer starts a second server beside a healthy one
+on a probability rather than a guarantee, when the guarantee costs one call to a helper already in
+the same module, writing into the same directory.
+Reversibility: cheap. The write path is one helper call, and the variant is additive.
+Landing point: #206.
+
 ## Open
 
 Staging only. Once an item becomes an issue it leaves this list.
