@@ -2,23 +2,23 @@
   "gates": [
     {
       "name": "Run tests",
-      "status": "Failed",
-      "detail": "npm test: run 1 of 2 — 449 tests, 445 pass, 1 fail, 3 skipped, 64 suites, duration 65428.8ms. Failing test: test at dist\\session-manager\\index.test.js:1324:1 — 'S5.2 — interrupt terminates the whole process tree: no live descendant five seconds after it returns, on this platform' (5692.5ms). Error: timed out waiting for condition, at waitUntil (file:///D:/Dropbox/Projects/SubZeroDev.SkyNetHR/dist/session-manager/index.test.js:127:19), at async TestContext.<anonymous> (file:///D:/Dropbox/Projects/SubZeroDev.SkyNetHR/dist/session-manager/index.test.js:1360:5). Run 2 of 2, immediately after with no tree changes: 449 tests, 446 pass, 0 fail, 3 skipped, 64 suites, duration 65461.1ms — S5.2 passed. Same tree, both runs; only the outcome varied, so this is a flake, not a fix. This diff touches only design/20-contract.md prose and does not touch src/session-manager or its process-tree teardown path."
+      "status": "Passed",
+      "detail": "npm test, re-run after merging origin/main (b7a6f81) to resolve the conflict with #256: 449 tests, 446 pass, 0 fail, 3 skipped, 64 suites, duration 67051.8ms. Earlier on this branch, before the merge, a flake was observed and reported (S5.2 process-tree interrupt test, timed out on one of two identical runs); this diff still touches no code path that test exercises, and this run reproduces the earlier clean pass."
     },
     {
       "name": "Parse-check PowerShell scripts",
       "status": "Passed",
-      "detail": "PASS: 0 failures — 41 *.ps1 files parsed cleanly via [System.Management.Automation.Language.Parser]::ParseFile."
+      "detail": "PASS: 0 failures — 41 *.ps1 files parsed cleanly via [System.Management.Automation.Language.Parser]::ParseFile, re-run after the merge."
     },
     {
       "name": "Run Pester tests",
       "status": "Passed",
-      "detail": "Tests completed in 38.73s. Tests Passed: 328, Failed: 0, Skipped: 22, NotRun: 0."
+      "detail": "Tests completed in 36.18s. Tests Passed: 328, Failed: 0, Skipped: 22, NotRun: 0, Total: 350. Re-run after the merge."
     },
     {
       "name": "Check design/10-design.md references resolve",
       "status": "Passed",
-      "detail": "Design references OK - 2 citation(s) checked, all resolve to a real heading."
+      "detail": "Design references OK - 2 citation(s) checked, all resolve to a real heading. Re-run after the merge, against the now much larger design/20-contract.md (D197's divergence-classes section landed via main)."
     }
   ]
 }
