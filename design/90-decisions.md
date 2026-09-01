@@ -4761,6 +4761,68 @@ the same module, writing into the same directory.
 Reversibility: cheap. The write path is one helper call, and the variant is additive.
 Landing point: #206.
 
+### 2026-09-01 — D197 The design-state divergence classes become this repository's policy, adapted to the script it has
+Context: D192 adopted the design-state tooling and left two things undone by name — the record
+set, and `20-contract.md`'s schema sections — routing both to `/contract` or `/design`.
+`tools/Test-DesignState.ps1` reads `$RepoPath/design/20-contract.md` (its `Invoke-DesignStateCheck`)
+for `### The divergence classes` … `### The freeze`, and for `## Invariants`. Neither existed in a
+form it could read: the first pair not at all, so every run reported `ContractListUnreadable`; the
+second parsed to **zero of 59 rows**, because the parser matches `| **I1** |` and this table wrote
+`| I1 |` — which does not fail, it returns an empty set, and an empty set compares clean against
+every artifact. `10-design.md` says nothing about design-state, so the contract had nothing to
+derive from; the kit's own contract is the upstream policy and states the arrangement outright —
+the script is the detection, the document is the policy.
+Chosen: the sections are written into this contract, **adapted rather than copied**, and
+§ *Invariants*' rows take the parser's form. The class tables carry the 13 blocking, 4 reported and
+6 could-not-evaluate ids the script *in this tree* declares — not the kit's 21 blocking, whose
+extra rows are a record-pair and site-placement round this script does not implement. Measured
+either side of the change: the invariants parse went 0 → 59 rows, and `ContractListUnreadable` no
+longer fires; `StateSetAbsent` remains and is now documented as this repository's standing state
+rather than a defect.
+Also chosen: **stating the enforcement gap rather than closing it.** `Test-ClassListAgreement`
+runs before the graph is read, needing no records — and `StateSetAbsent` then returns an empty
+finding list, discarding the result it already computed. Verified both ways: called directly
+against a table carrying an injected undeclared class it reports `ClassListDisagreement`,
+`contract-only: [Blocking:BogusClassNotInScript]`, blocking; run through `Invoke-DesignStateCheck`
+the same table reports zero findings. So the section is canonical and its agreement with the
+script is not enforced here today. That is written into the section, because a document claiming a
+live check it does not have is worse than one stating its own reach.
+Rejected: **copying the kit's tables verbatim.** Cheapest, and it is the upstream text. Rejected
+because it would state a policy no installed code detects — 8 blocking ids with no implementation
+here — which is precisely the divergence `ClassListDisagreement` exists to catch, written in by
+hand. It would also import the kit's invariant citations (I14, I19–I22, I30), every one of which
+means something unrelated in this document.
+Rejected: **removing the design-state tooling**, reverting D192's first fork on D188/D189's
+original reasoning that this is development tooling and not part of this architecture (D164).
+Rejected on the evidence D192 reversed on and which still holds: `track.md`'s core depends on
+`Update-DesignProjection.ps1` for the direct-to-main carve-out, and that carve-out is what breaks
+the pull-request churn loop (#234).
+Rejected: **recording the gap in `## Unresolved` and writing nothing.** No cost today, since the
+checker gates no CI workflow. Rejected because a permanently non-zero report trains its reader to
+ignore it, and the false-clean invariant parse above would have gone on reading as a pass.
+Rejected: **fixing the short-circuit in `tools/Test-DesignState.ps1`** so a pre-computed blocking
+finding survives `StateSetAbsent`. One line. Rejected here on two counts: the file is kit-owned and
+a local edit is what `/kit-sync` has already silently discarded once (D192's second fork), and the
+change moves that path's exit code from 2 to 1, which is the freeze and could-not-evaluate contract
+rather than a bug fix. Filed instead.
+Reversibility: cheap. Prose and a row format; no code, nothing persisted, and no signature moves.
+
 ## Open
 
 Staging only. Once an item becomes an issue it leaves this list.
+
+- **`Test-DesignState.ps1` discards a blocking finding it already computed** (D197).
+  `Invoke-DesignStateCheck` runs `Test-ClassListAgreement` before reading the graph, then the
+  `StateSetAbsent` branch returns `-Findings @()`, dropping it. Measured: the comparison called
+  directly reports `ClassListDisagreement` on an undeclared class; the same table through the
+  entry point reports zero findings. So `20-contract.md § The divergence classes` is canonical
+  and nothing enforces its agreement with the script while `StateSetAbsent` holds — this
+  repository's standing state. The file is kit-owned, and the fix moves that path's exit code
+  from 2 to 1, so it touches the could-not-evaluate contract rather than being a bug fix alone.
+  Belongs upstream in `SubZeroDev.AgentKit` as much as here.
+- **The design-state record set is still unpopulated**, which is D192's other half. D197 wrote the
+  contract's schema sections; `design/state/{units,invariants,contracts,decisions,questions}`
+  remain empty, so `StateSetAbsent` is permanent and every check past it is unreached.
+  `20-contract.md § Artifacts of a unit kind` is not written either, and the section records that
+  the first commit populating the record set makes `GlobDisagreement` read it and report
+  `ContractListUnreadable` until it exists.

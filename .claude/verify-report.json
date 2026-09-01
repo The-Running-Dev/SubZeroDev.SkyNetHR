@@ -2,23 +2,23 @@
   "gates": [
     {
       "name": "Run tests",
-      "status": "Passed",
-      "detail": "npm test: 448 tests, 446 pass, 0 fail, 2 skipped, 64 suites."
+      "status": "Failed",
+      "detail": "npm test (node --test dist/**/*.test.js client/**/*.test.js), run twice on this branch (which touches only design/20-contract.md and design/90-decisions.md, no code): first run failed one test, second run passed all 449. Failing output from run 1:\n\ntest at dist\\session-manager\\index.test.js:2340:1\n\u2716 S9.1/S9.2/S9.4 \u2014 a tool.result over the byte cap is truncated before its envelope is built, the full bytes are fetchable, and two turns sharing a callId keep separate blobs (685.5184ms)\n  AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:\n\n  false !== true\n\n      at TestContext.<anonymous> (file:///D:/Dropbox/Projects/SubZeroDev.SkyNetHR/dist/session-manager/index.test.js:2398:12)\n      at async Test.run (node:internal/test_runner/test:1113:7)\n      at async Test.processPendingSubtests (node:internal/test_runner/test:788:7) {\n    generatedMessage: true,\n    code: 'ERR_ASSERTION',\n    actual: false,\n    expected: true,\n    operator: 'strictEqual',\n    diff: 'simple'\n  }\n\nRun 2 summary: tests 449, suites 64, pass 446, fail 0, cancelled 0, skipped 3. Run 1 summary: tests 449, suites 64, pass 445, fail 1, skipped 3. CI's own verify workflow ran this exact test suite against the parent commit 41295b6 (ubuntu-latest and windows-latest) and reported success. This is a flaky test, not a regression from this diff \u2014 the diff contains no code changes."
     },
     {
       "name": "Parse-check PowerShell scripts",
       "status": "Passed",
-      "detail": "PASS: 0 failures — every *.ps1 file under the repo parsed cleanly via [System.Management.Automation.Language.Parser]::ParseFile."
+      "detail": "Parsed every *.ps1 file recursively with [System.Management.Automation.Language.Parser]::ParseFile, as the CI step does. 0 files failed to parse."
     },
     {
       "name": "Run Pester tests",
       "status": "Passed",
-      "detail": "Tests completed in 38.36s. Tests Passed: 327, Failed: 0, Skipped: 22, NotRun: 0."
+      "detail": "Invoke-Pester -Path tools -Output Detailed -PassThru. Tests Passed: 328, Failed: 0, Skipped: 22, NotRun: 0. Completed in 40.88s."
     },
     {
       "name": "Check design/10-design.md references resolve",
       "status": "Passed",
-      "detail": "Design references OK - 2 citation(s) checked, all resolve to a real heading."
+      "detail": "./tools/Test-DesignReferences.ps1 exited 0. \"Design references OK - 2 citation(s) checked, all resolve to a real heading.\" State: Valid, CitationCount: 2, Findings: none."
     }
   ]
 }
