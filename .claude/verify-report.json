@@ -2,18 +2,18 @@
   "gates": [
     {
       "name": "Run tests",
-      "status": "Passed",
-      "detail": "npm test: 448 tests, 446 pass, 0 fail, 2 skipped, 64 suites."
+      "status": "Failed",
+      "detail": "npm test: run 1 of 2 — 449 tests, 445 pass, 1 fail, 3 skipped, 64 suites, duration 65428.8ms. Failing test: test at dist\\session-manager\\index.test.js:1324:1 — 'S5.2 — interrupt terminates the whole process tree: no live descendant five seconds after it returns, on this platform' (5692.5ms). Error: timed out waiting for condition, at waitUntil (file:///D:/Dropbox/Projects/SubZeroDev.SkyNetHR/dist/session-manager/index.test.js:127:19), at async TestContext.<anonymous> (file:///D:/Dropbox/Projects/SubZeroDev.SkyNetHR/dist/session-manager/index.test.js:1360:5). Run 2 of 2, immediately after with no tree changes: 449 tests, 446 pass, 0 fail, 3 skipped, 64 suites, duration 65461.1ms — S5.2 passed. Same tree, both runs; only the outcome varied, so this is a flake, not a fix. This diff touches only design/20-contract.md prose and does not touch src/session-manager or its process-tree teardown path."
     },
     {
       "name": "Parse-check PowerShell scripts",
       "status": "Passed",
-      "detail": "PASS: 0 failures — every *.ps1 file under the repo parsed cleanly via [System.Management.Automation.Language.Parser]::ParseFile."
+      "detail": "PASS: 0 failures — 41 *.ps1 files parsed cleanly via [System.Management.Automation.Language.Parser]::ParseFile."
     },
     {
       "name": "Run Pester tests",
       "status": "Passed",
-      "detail": "Tests completed in 38.36s. Tests Passed: 327, Failed: 0, Skipped: 22, NotRun: 0."
+      "detail": "Tests completed in 38.73s. Tests Passed: 328, Failed: 0, Skipped: 22, NotRun: 0."
     },
     {
       "name": "Check design/10-design.md references resolve",
