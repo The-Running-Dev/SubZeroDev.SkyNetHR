@@ -840,8 +840,16 @@ this project has none, so every entry here is code.
 
 ### `contract`
 
-Declared in `src/contract/index.ts`. Types, plus **one runtime enumeration**: `RATINGS`.
-Everything else this module exports is a type and leaves nothing behind at runtime (D150).
+Declared in `src/contract/index.ts`. Types, plus **two runtime exports**, each of a kind this
+section admits and each named here: the enumeration of a closed union a validator must test
+membership of — `RATINGS` (D150) — and the discriminator for a union the type system cannot
+separate structurally — `isFrame` (D171). Everything else this module exports is a type and
+leaves nothing behind at runtime.
+
+**The property is stated as a rule so that it stays checkable**: a runtime export of neither
+kind does not belong in this module, and one of either kind that is not declared by name in this
+section is a defect in the section, not a permitted omission. It has widened twice, each time
+against a named export and never speculatively.
 
 `RATINGS` is the one runtime enumeration of `Rating`'s members, and it lives here rather than
 beside its consumer because the edge validator that tests membership before accepting a
@@ -855,6 +863,22 @@ tier-one edge needs this vocabulary to parse a body.
 **A caller may rely on the array holding every member of `Rating` and no other value. It may
 not rely on the order**: the tokens read as a scale, but nothing ranks or compares them, and
 `Rating` is display-independent besides (D82).
+
+**`isFrame` is the one place the frame-versus-envelope test is written** (D168, I51). A `Frame`
+is an `Envelope` minus `seq`, so the two are not separable structurally by anything a consumer
+can name, and every module that must tell them apart otherwise repeats the same negative test.
+It lives here rather than beside either consumer because I51 *defines* a frame in this module's
+own vocabulary, so the discriminator belongs beside the types it discriminates; moving it to
+`session-manager` was rejected for putting a predicate over `contract`'s types in the largest
+module in the system, and for giving `edge/sse` a concrete import where it takes the manager by
+injection today (D171).
+
+**A caller may not repeat that test inline.** Two independent copies of the I51 discriminator is
+the drift the `RATINGS` argument above was written against, and it is the sharper case of the
+two, because a wrong copy does not fail loudly — it silently spills or replays a frame, against
+I51. What a caller may rely on is the predicate's *meaning*: a true answer says the value carries
+no `seq` and therefore has no position in the replayable stream. **Its implementation is not
+contractual** and moves with `Frame`; nothing may reimplement it from that meaning.
 
 ### `config`
 
