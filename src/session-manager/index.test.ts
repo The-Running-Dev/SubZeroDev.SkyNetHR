@@ -3969,52 +3969,68 @@ test('S27.8 — the tombstone is written at kill time, not in response to an exi
   assert.equal((await store.readOpenPids()).some((r) => r.pid === cliPid), false, 'shutdown tombstoned it without waiting on an exit that never arrives');
 });
 
-test('S27.9 — a spawned notification arriving after the mute gets no pids.ndjson entry and no tombstone', async () => {
+test('S27.9 — a spawned notification arriving after the mute gets no pids.ndjson entry and no tombstone, and the child is killed all the same', async () => {
   const { manager, workspaceRoot, store } = await makeManager('grandchild');
   const owner = 'operator-1' as OperatorId;
   const projectDir = path.join(workspaceRoot, 'proj-s279');
   await mkdir(projectDir);
-  const markerDir = await mkdtemp(path.join(tmpdir(), 'skynet-marker-'));
-  const markerPath = path.join(markerDir, 'grandchild.json');
-  process.env['SKYNET_GRANDCHILD_MARKER'] = markerPath;
 
   const created = await manager.create(owner, { vendor: 'claude', cwd: projectDir, model: null, sandbox: null, requisitionId: null });
   assert.equal(created.ok, true);
   if (!created.ok) return;
   const { sessionId } = created.value;
 
-  // Claims the turn slot synchronously and returns before `adapter.send()` — and
-  // therefore the real `spawn()` call and its `spawned` notification — has run: message()
-  // still has real async work ahead of it (attachment writes, a checkpoint commit) before
-  // it gets there. `shutdown`'s kill loop is a single pass taken here, before that child
-  // exists — the same shape as an ordinary in-flight request racing a signal (S27.2), and
-  // why this criterion is about the bookkeeping only: `entry.adapter!.kill()` no-ops
-  // against a child that has not spawned yet, and this manager does not sweep again for
-  // one that spawns later. What production adds on top is `server.ts`'s own `process.exit`
-  // right after this step, which tears the event loop down before a still-suspended
-  // `message()` can ever reach the real `spawn()` call — this test lets it run to
-  // completion instead, specifically to observe the notification side of the guarantee.
-  const messagePromise = manager.message(sessionId, owner, 'go', []);
-  await manager.shutdown();
+  // The pid is the only witness this path leaves, and that is by construction rather
+  // than for want of a better one: `pids.ndjson` is deliberately untouched (the first
+  // assertion below), every envelope is suppressed (I52), and the child is killed
+  // before it executes an instruction of its own — so a marker the fixture writes, or a
+  // scan of the process table hoping to catch it alive, cannot see it. Both were tried
+  // and fail empirically. The manager's own warn line carries the pid off the muted
+  // notification, which is what makes the "and it is killed all the same" half
+  // assertable at all.
+  const warned: string[] = [];
+  const realWarn = console.warn;
+  console.warn = (...args: unknown[]) => { warned.push(args.map(String).join(' ')); };
+  let cliPid: number | null = null;
+  try {
+    // Claims the turn slot synchronously and returns before `adapter.send()` — and
+    // therefore the real `spawn()` call and its `spawned` notification — has run:
+    // message() still has real async work ahead of it (attachment writes, a checkpoint
+    // commit) before it gets there. `shutdown`'s kill loop is a single pass taken here,
+    // before that child exists, so `entry.adapter!.kill()` no-ops against a null child.
+    // Everything this criterion asserts is therefore owed by the sink rather than by
+    // that pass: the same shape as an ordinary in-flight request racing a signal
+    // (S27.2), and the race S27 exists to close.
+    const messagePromise = manager.message(sessionId, owner, 'go', []);
+    await manager.shutdown();
 
-  const messaged = await messagePromise;
-  assert.equal(messaged.ok, true);
+    // Deliberately not asserted `ok`: the SIGKILL is issued from inside the adapter's own
+    // `spawn` handler, synchronously, just before it writes the turn's first line to a
+    // stdin whose reader may already be gone. Which side of that wins is the kernel's
+    // to decide and is not what this criterion is about — `send` returning `write_failed`
+    // is the same guarantee holding, not a different outcome.
+    await messagePromise;
 
-  let marker: { cliPid: number; grandchildPid: number } | null = null;
-  await waitUntil(async () => {
-    try {
-      marker = JSON.parse(await readFile(markerPath, 'utf8')) as { cliPid: number; grandchildPid: number };
-      return true;
-    } catch {
-      return false;
-    }
-  }, 5000);
-  const { cliPid, grandchildPid } = marker!;
+    await waitUntil(() => warned.some((l) => l.includes('spawned behind the mute')), 5000);
+    const line = warned.find((l) => l.includes('spawned behind the mute'))!;
+    const matched = /pid (\d+)/.exec(line);
+    assert.notEqual(matched, null, `the warn line names the pid it killed: ${line}`);
+    cliPid = Number(matched![1]);
+  } finally {
+    console.warn = realWarn;
+  }
+
   // Spawned behind the mute: never a live process this test's harness is tracking, so the
   // module-level safety net at the top of this file would not reap it either.
-  strayPids.push(cliPid, grandchildPid);
+  strayPids.push(cliPid);
 
   assert.equal((await store.readOpenPids()).some((r) => r.pid === cliPid), false, 'a spawned arriving behind the mute gets no pids.ndjson entry');
+  // Process enumeration, and the half that was never asserted before: the child exists —
+  // the pid above is a real one the OS handed out — and it is gone. `waitUntil` rather
+  // than a bare check because a SIGKILLed child stays in the process table as a zombie
+  // until this process reaps it, which the adapter's own `ChildProcess` does on its next
+  // turn of the loop.
+  await waitUntil(() => !isAlive(cliPid!), 5000);
 });
 
 test('S27.11 — past the guard, nothing prevents the exit: a failed tombstone write is logged and shutdown still resolves and still kills', async () => {
