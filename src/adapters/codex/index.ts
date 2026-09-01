@@ -516,6 +516,10 @@ export function createCodexAdapter(
       }
       child = proc;
       killRequested = false;
+      // Mirrors `../claude/index.ts`'s identical handler, for the identical reason: a write
+      // racing this child's death lands on a pipe whose reader is gone, and an unhandled
+      // stream `error` is an uncaught exception that takes the whole server down.
+      proc.stdin?.on('error', () => {});
 
       proc.once('spawn', () => {
         notify({
@@ -704,6 +708,9 @@ export function createCodexAdapter(
         return;
       }
       child = proc;
+      // As above: an unhandled stream `error` on a pipe whose reader has died is an
+      // uncaught exception, and this write is the one most likely to race a kill.
+      proc.stdin?.on('error', () => {});
       // The prompt goes over stdin (as the real CLI was probed: `echo <prompt> | codex exec
       // --json ...`, `design/findings/S8-codex-adapter.md` §2), never argv — the resolved
       // spawn command runs through a Windows shell for a bare `codex`/`.cmd` executable

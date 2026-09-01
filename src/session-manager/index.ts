@@ -876,8 +876,14 @@ export function createSessionManager(deps: {
 
       // D177: every *live turn's* child tree, not every session — a rehydrated session has
       // `turn: null` and no adapter to kill. `adapter.kill()` reaches the real child through
-      // the adapter's own closure state regardless of whether `spawned` ever recorded its pid
-      // (S27.9), so this is never routed through `pids.ndjson` (S27.13).
+      // the adapter's own closure state regardless of whether `spawned` ever recorded its pid,
+      // so this is never routed through `pids.ndjson` (S27.13).
+      //
+      // This is one pass over a snapshot, and deliberately so — waiting for every in-flight
+      // `message()` to settle is the wait D174-D176 spent the drain bound refusing. The turn
+      // that claimed its slot but has not yet reached `adapter.send()` therefore meets a
+      // `kill()` with no child to kill; its child is caught at the sink instead, when the
+      // `spawned` it would have recorded arrives behind the mute (D198, S27.9).
       //
       // Each session is caught on its own, which is what "best-effort" has to mean once
       // there is more than one of them: an unguarded `Promise.all` rejects on the first
@@ -1706,7 +1712,35 @@ export function createSessionManager(deps: {
   }
 
   function handleNotification(sessionId: SessionId, n: AdapterNotification): void {
-    if (notifyMuted) return;
+    if (notifyMuted) {
+      // D178, I55: nothing below this line runs, which is why a child spawning here gets
+      // no `pids.ndjson` entry and is owed no tombstone (S27.9). For `event`, `cli-session`
+      // and `exited` silence is the whole answer. `spawned` is the one kind that still owes
+      // an action, because shutdown's kill pass is a single snapshot taken before this
+      // child existed: `message()` had claimed the turn slot but had not yet reached
+      // `adapter.send()`, so `entry.adapter.kill()` no-opped against a null child and
+      // nothing sweeps again. Without this the process outlives the server — the orphan
+      // S27 exists to prevent, in the one race it is hardest to see.
+      //
+      // The pid comes from the notification rather than from the adapter, and the kill is
+      // boot's reap kill rather than `adapter.kill()`, so `Adapter` gains nothing here
+      // (D178). It writes nothing, resolves nothing and emits nothing, so I52 holds; and
+      // no handler runs, so I55 holds in the sense it is stated for — the sink acts, the
+      // handlers below it do not.
+      if (n.kind === 'spawned') {
+        // The pid is the only witness this leaves: with `pids.ndjson` deliberately
+        // untouched and every envelope suppressed, an operator reading the shutdown log
+        // would otherwise have no record that a child was created and killed during
+        // teardown. S27.9 asserts against this line for the same reason.
+        console.warn(`[session-manager] shutdown: pid ${n.pid} (${n.image}) spawned behind the mute; killing it and recording nothing`);
+        // The adapters report `proc.pid ?? -1` for a child whose pid Node never assigned,
+        // and `killProcessTree` negates what it is given: `-1` would arrive at the kernel
+        // as a `SIGKILL` to pid 1, the container's own entrypoint. Nothing to kill is the
+        // one case where doing nothing is right.
+        if (n.pid > 0) void killProcessTree(n.pid, n.pgid && n.pgid > 0 ? n.pgid : null);
+      }
+      return;
+    }
     const entry = sessions.get(sessionId);
     if (!entry) return;
     void handleNotificationAsync(entry, n);

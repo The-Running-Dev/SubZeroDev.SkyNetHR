@@ -481,6 +481,14 @@ export function createClaudeAdapter(opts: AdapterOptions & { readonly executable
           return;
         }
         child = proc;
+        // A write racing this child's death — an operator interrupt, or shutdown killing a
+        // child that spawned behind the mute (S27.9) — lands on a pipe whose reader is
+        // already gone. Node reports that as an `error` event on the stream, and an
+        // unhandled one is an uncaught exception that takes the whole server down. The
+        // failure itself is already `writeLine`'s to report through its own Result; this
+        // only stops the stream from escalating it into a crash. Nothing about the server
+        // stopping is known here — this is stream hygiene on this adapter's own child.
+        proc.stdin?.on('error', () => {});
 
         let settled = false;
         proc.once('spawn', () => {

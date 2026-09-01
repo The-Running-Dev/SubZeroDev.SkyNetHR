@@ -4807,6 +4807,64 @@ change moves that path's exit code from 2 to 1, which is the freeze and could-no
 rather than a bug fix. Filed instead.
 Reversibility: cheap. Prose and a row format; no code, nothing persisted, and no signature moves.
 
+### 2026-09-01 — D198 The mute kills a child that spawns behind it, and D178 is not amended to do it
+Context: issue #211, S27.9, reopened. S27.9 has two halves and only the first was ever asserted:
+a `spawned` arriving behind the mute gets no `pids.ndjson` entry (proved), **and it is killed all
+the same** (never proved). The investigation recorded on the issue found the second half is not
+merely unasserted but untrue. `shutdown`'s kill pass is a single snapshot over the sessions map:
+a `message()` that has claimed the turn slot but has not yet reached `adapter.send()` — it still
+has attachment writes and the pre-turn checkpoint commit ahead of it — meets an
+`entry.adapter.kill()` that no-ops against a null child, and nothing sweeps again once that child
+does spawn. That is a real orphaned agent surviving the server, in exactly the race S27 exists to
+close. The blocker was never the fix but the proof: the child is killed before it executes an
+instruction of its own, so a marker it writes cannot exist, and a scan of the process table is
+far too slow to catch something that short-lived. Both were tried and failed empirically. The
+question this entry answers is whether proving it requires reaching into `Adapter`, which D178
+refused.
+Chosen: **the mute acts on `spawned` and only on `spawned`, killing from the pid the notification
+itself carries.** `handleNotification`'s `if (notifyMuted)` branch gains one case: warn, then
+`killProcessTree(n.pid, n.pgid)` — boot's reap kill, already in this module for D23's reaper.
+Nothing is written, resolved, emitted or appended, so I52 still holds by construction, and no
+handler below the sink runs, so I55 holds in the sense it is stated for. **`Adapter` gains
+nothing, so D178 needs no amendment** — its prohibition was on the public surface (it rejected
+`Adapter.detach()` as "a public method whose only correct caller is shutdown"), and killing by
+pid at the sink reaches the same outcome from the side D178 already chose to put the mute on.
+The instrumentation question dissolves with it: **the warn line is the witness**, and it is the
+only one available by construction, since the criterion itself forbids the `pids.ndjson` entry and
+I52 forbids the envelope. That line is not test scaffolding — this same handler already warns when
+it refuses to record a `spawned` with no live turn (D102), and an operator reading a shutdown log
+otherwise has no record that a child was created and killed during teardown. S27.9's test reads
+the pid off it and enumerates: the process existed, and it is gone. Verified as a regression test
+by reverting the branch — the test then fails waiting for a line that is never written.
+Also chosen: **an `error` handler on the child's stdin, in both adapter implementations.** The
+kill lands synchronously inside the adapter's own `spawn` handler, immediately before it writes
+the turn's first line to a pipe whose reader is already dead; Node reports that as an `error`
+event on the stream and an unhandled one is an uncaught exception. Measured: without the handler
+the new test does not fail, it takes the process down with `write EPIPE`. This is a latent defect
+older than this change — any write racing an operator interrupt can reach it — and it is not a
+change to `Adapter`: it adds nothing to the interface, and an adapter closing over its own child's
+broken pipe knows nothing about the server stopping, which is the direction I20 and D178 care
+about.
+Rejected: **amending D178 to permit an `Adapter` test hook.** The straightforward reading of the
+question, and it fails on D178's own rejection of `Adapter.detach()` verbatim: a second public
+addition whose only correct caller is shutdown, with nothing in the type to stop another caller
+blinding a live session. It also buys nothing the sink does not already have — the pid is on the
+notification either way.
+Rejected: **accepting the fix with no dedicated regression test**, on the grounds that the two
+failed verification attempts showed the behaviour is unobservable. Rejected because it is
+observable, just not from the child: the parent holds the pid before the child holds anything.
+Rejected: **accepting the gap as a documented risk** and leaving S27.9 permanently unticked. It is
+the one criterion naming the orphan the whole slice exists to prevent, and the leak is silent —
+`pids.ndjson` records nothing, so the next boot's reap will not collect it either.
+Rejected: **re-sweeping the sessions map after the kill pass**, or bounding shutdown until every
+in-flight `message()` settles. Both make shutdown wait on the thing D174–D176 spent the drain
+bound refusing to wait on, and neither is closed: a sweep needs a second sweep for the spawn that
+races it.
+Reversibility: cheap. One branch in one function, plus a one-line stream handler in each adapter.
+Owed elsewhere: I55's wording in `20-contract.md` says no notification "reaches a handler", which
+now under-describes the sink — the mute acts on one kind. That is `/contract`'s to write, and it
+is a clarification of what the mute always meant rather than a change of behaviour.
+
 ## Open
 
 Staging only. Once an item becomes an issue it leaves this list.
