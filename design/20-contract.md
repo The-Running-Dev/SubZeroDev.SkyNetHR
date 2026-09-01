@@ -2077,6 +2077,142 @@ re-derived:
   where a registry claiming a `state` the disk does not have would silently revert at the next
   boot (D120).
 
+### The divergence classes
+
+`tools/Test-DesignState.ps1` declares the same ids and `ClassListDisagreement` compares the two:
+**the script is the detection and this section is the policy** (D192, D197). A class not listed
+here does not exist, and adding one is a contract amendment. **Whether that comparison currently
+reaches this repository is a separate question, and it is answered — no — at the end of this
+section rather than left to be assumed.**
+
+**The list is this repository's, and where it is shorter than the kit's that is deliberate.**
+These classes arrive with `SubZeroDev.AgentKit`, whose own contract carries a longer table — a
+record-pair and site-placement round the script in this tree does not implement. Transcribing
+that table would state a policy no installed code detects, which is the exact divergence
+`ClassListDisagreement` exists to catch, written in by hand. The table below is true of the
+script this repository has; a `/kit-sync` bringing a newer script brings the rows with it, in the
+same commit.
+
+**Blocking.** Every one is evaluable from the checkout alone — no network, no tracker, no running
+service. That rule is what decides membership; it is not a coincidence of the list.
+
+| Class | Raised when | Caller sees |
+|---|---|---|
+| `UnresolvedId` | A record names an id with no record | The referring record and the missing id |
+| `AnchorMissing` | An **active** record carries a tree-pointer field naming a path not in the tree — a unit's `Anchor`, a contract's `Declaration`, or any entry of an `Evidence` list | The record, the field, and the path. **Which of the two sides is wrong is the user's call** |
+| `OwnerMismatch` | A contract's `Owner` is not the unique active unit whose `Exposes` names that contract — nobody exposes it, or two units do | The contract, its `Owner`, and every unit exposing it |
+| `UnrecordedArtifact` | A tree artifact of a unit kind has no record | The unrecorded artifact |
+| `ProjectionStale` | A region differs from its regeneration, after line-ending normalisation | A diff of the region |
+| `RegionMalformed` | A marked region of either kind is unbalanced or nested | The document and the marker |
+| `IdCollision` | An id is duplicated, renumbered, disagrees with its file path, or appears in both the projected and the declared marker form | Every file claiming it |
+| `DecisionAnchorAmbiguous` | A decision anchor resolves to zero or two log headings | The anchor and the count |
+| `LogEntryUnrecorded` | A log heading has no decision record | The entry's heading |
+| `EnforcementUnevidenced` | A conditionally-required field is absent on a record whose own `Status` or `Enforcement` requires it — an invariant with `Enforcement: code` and no `Evidence`, a decision with `Status: superseded` and no `SupersededBy`, or a question with `Status: answered` and no `AnsweredBy` | The record, the absent field, and the value that required it |
+| `ClosureOverBudget` | A closure exceeds 16,384 bytes | The unit, its size, and its largest contributor |
+| `ClassListDisagreement` | The checker's declared class ids differ from this section's list | Both sets, and the difference in each direction |
+| `GlobDisagreement` | For a globbed unit kind, the file set § *Artifacts of a unit kind*'s patterns resolve to differs from the set the checker's enumeration returns | The kind, the direction, and the paths |
+
+**`GlobDisagreement` compares file sets, not tokens, and only in that direction.** Comparing the
+patterns as text would be a third id-level check in a section that already knows id-level checks
+miss definition drift. Resolving both sides against the checkout instead means the table is
+checked for what it *means*, and it is what qualifies the class as blocking on the rule's own
+terms: expansion needs the checkout and nothing else. The `invariant` kind is outside the
+comparison because it has no pattern in either cell, which is a fact about the table rather than
+an exemption the checker carries.
+
+**What a set comparison cannot see, stated rather than left to be found: an exclusion that
+excludes nothing in this checkout.** `*-local.md` is the standing example — this repository ships
+no command companion — so removing it from the table would change no resolved set here and the
+class would stay silent. That is the comparison working as specified, not a hole in it, and the
+exposure is bounded by the same fact that causes it: a divergence invisible here is invisible
+because it has no artifact here to be wrong about.
+
+**`AnchorMissing` is named for a unit's `Anchor` and checks every tree pointer a record carries.**
+`Contract.Declaration` and the `Evidence` list on a unit or an invariant record restate a tree
+path exactly as `Anchor` does, so leaving them unresolved would be an unchecked restatement. One
+class covers all three because the check, the remedy, and the reason each is evaluable from the
+checkout alone are the same in every case. **The name reading narrower than what it checks is the
+price, and it is paid deliberately** — renaming it costs this list, the checker's declared ids,
+and the tests that cite it by name. Three exemptions, each of which would otherwise block
+forever:
+
+- **A retired record is exempt entirely.** Its artifact is gone by definition, which is why it
+  was retired.
+- **An invariant record's `Anchor` is the invariant number, not a path.** Its resolution check is
+  well-formedness and uniqueness, and it is `IdCollision`'s, never `Test-Path`'s.
+- **A contract's `Declaration` of the literal `prose` resolves to nothing on purpose.** A
+  Markdown command surface has no declaration to point at, and that is the field's documented
+  second value rather than an absent path.
+
+**A widened class definition is invisible to `ClassListDisagreement`.** That class compares class
+*ids*, and an id does not change when what it detects does, so a definition widened ahead of its
+detection stays green until the code lands. `GlobDisagreement` fixes the shape of the remedy
+rather than being an exception to it — what closed the glob table's own version of this was
+resolving both sides against the checkout instead of comparing their names. A definition has no
+checkout to resolve against, so that remedy does not carry, and nothing on this list closes it.
+
+**Reported, never blocking.** Each fails in exactly the environment where the failure means
+nothing, which is why none of them is on the list above.
+
+| Class | Raised when | Why it never blocks |
+|---|---|---|
+| `MirrorStale` | A `WorkRef`'s `MirroredAt` is not the current commit | The mirror is stale by construction; that is its documented state, not a divergence |
+| `WorkStateDivergence` | A `WorkRef` disagrees with the tracker | Needs `gh`. A build that fails on an unauthenticated CLI reports an absent comparison as a divergence |
+| `PinAncestry` | A cited commit is not an ancestor of the default branch | A shallow CI checkout has no history to answer with, and "could not check" must not read as "checked and failed" |
+| `SemanticDisagreement` | A model judges a record's claim untrue | Permanently reported. The brief's *no formal specification of behaviour* non-goal puts it out of reach, and a build that fails on a model's opinion is a build nobody trusts |
+
+**Could not evaluate.** Exit 2, and **never** a pass.
+
+| `DesignStateFailure` | Raised when | Caller does |
+|---|---|---|
+| `StateSetAbsent` | `design/state/` missing, or holding no records other than `WorkRef` mirrors | Report that nothing was checked |
+| `RecordUnparseable` | A line matches no production | Report the file, the line number, and the line **verbatim**. Never drop it |
+| `TrackerUnavailable` | `gh` missing or unauthenticated | Report the tracker classes as not compared; the rest of the run completes |
+| `ShallowCheckout` | No history for `merge-base` | Report that ancestry was not checked, and why. Never a pass |
+| `ProjectorFailed` | `Update-DesignProjection.ps1 -DryRun` non-zero or absent | Report `ProjectionStale` as uncomputed, not as clean |
+| `ContractListUnreadable` | A list this section is canonical for cannot be read or parsed — the divergence classes above, § *Invariants*, or § *Artifacts of a unit kind* | Report the class it feeds as uncomputed: `ClassListDisagreement` for the first, `UnrecordedArtifact`'s invariant half for the second, `GlobDisagreement` for the third. **Read-and-disagrees is a finding; cannot-read is not** |
+
+**`StateSetAbsent` is this repository's standing state, and it is not a defect** (D192). The
+tooling is adopted; the record set is not. `design/state/` holds `WorkRef` mirrors alone, which
+`/track` writes into every target regardless of adoption and which therefore never count toward
+the set being present. A run consequently reaches only the two reads that precede it — this
+section's class list, and § *Invariants* — and returns.
+
+**And that return currently discards the class-list comparison, which is measured rather than
+inferred** (D197). `Test-ClassListAgreement` runs *before* the graph is read, deliberately,
+because it needs no records — and `StateSetAbsent` then returns an empty finding list, dropping
+the result it already computed. Called directly against a table carrying an undeclared class, the
+comparison reports it: `ClassListDisagreement`, `contract-only: [Blocking:<id>]`, blocking. Run
+through `Invoke-DesignStateCheck`, the same table reports zero findings. **So this section is
+canonical and its agreement with the script is not, today, enforced here** — the policy binds a
+reader, and nothing checks the reader. It is written down because a section that silently claims
+a live check is worse than one that states its own reach: the discrepancy is a defect in
+`tools/Test-DesignState.ps1`, which is kit-owned, and resolving it is not this document's.
+
+**§ *Artifacts of a unit kind* does not exist here, and its absence is reachable rather than
+inert.** `GlobDisagreement` runs after the `StateSetAbsent` return, so nothing reads the glob
+table today; the first commit that populates the record set makes it read, and it reports
+`ContractListUnreadable` until that section is written. Stating it here is what keeps it from
+being rediscovered as a regression.
+
+**§ *Invariants* is read by id, and the ids must be legible to a parser.** Its rows carry the
+invariant number in the first column in bold, `| **I1** |`, because that is the form
+`Test-DesignState.ps1` matches. The reason this is written down rather than left as formatting:
+a row in any other form is not reported — it is silently absent from the set, and an empty set
+compares clean against every artifact. **A false clean is worse than an unreadable table**, which
+is why `ContractListUnreadable` exists beside it, and it is the one failure mode this section's
+own canonicity cannot protect against.
+
+### The freeze
+
+While `design/FROZEN.md` exists: every blocking class is **downgraded to reported**, the count
+downgraded is stated, and the marker's `Frozen because` and `Lifts when` are reproduced
+**verbatim**. Exit 2 still stands.
+
+A freeze permits known staleness. It does not permit a checker that could not run, and treating
+those the same would make writing one file a way to switch the gate off — including for a broken
+checker, which has nothing to do with the staleness a freeze is meant to permit.
+
 ## Invariants
 
 Written so each could become an assertion. The named module is responsible for maintaining it;
@@ -2086,66 +2222,66 @@ highest-value section in this document.
 
 | # | Invariant | Owner |
 |---|---|---|
-| I1 | `seq` is strictly increasing by exactly one, per session, from 1. A gap is a bug, never a dropped event. It governs what `emit` assigns, and two things are outside that: the `replay_gap` envelope restates a watermark instead of consuming a `seq` (D156, *Streaming*), and a `message.delta` is assigned none at all (I51). Neither weakens the contiguity — the first consumes no number and the second never enters the sequence (D168) | `session-manager` |
-| I2 | The ring buffer's contents are a strict suffix of the spill's, envelope for envelope, byte for byte | `store` |
-| I3 | A `tool.result` is truncated before its envelope is constructed; the envelope in the ring and the line in the spill are identical | `session-manager` |
-| I4 | At most one `Turn` per session is non-null at any time | `session-manager` |
-| I5 | A guard is claimed in the same synchronous block that tests it: no `await` sits between a check and the mutation it protects. It governs six guards — the turn slot, the workspace claim, a requisition's decision, a requisition's consumption, a review's mutation, and a checklist item's completion | `session-manager`, `records` |
-| I6 | No two `live` sessions have `cwd` values where one equals, contains, or is contained by the other | `session-manager` |
-| I7 | `cwd` is a `ResolvedPath` inside a configured root, resolved exactly once at session creation and never re-resolved | `jail`, `session-manager` |
-| I8 | `state === 'ended'` implies `LiveSession.turn === null` and `endedAt !== null`; `state === 'live'` implies `endedAt === null` | `session-manager` |
-| I9 | Every `permission.request` is followed by exactly one `permission.resolved` with the same `requestId`, in the same session, before or at `turn.ended` | `session-manager` |
-| I10 | An `AuditRecord` is fsync'd before the corresponding `control_response` is written to the child's stdin | `session-manager`, `store` |
-| I11 | Every `permission.resolved` has exactly one `AuditRecord`, including auto-answers with `scope: 'standing'` | `session-manager` |
-| I12 | `AuditRecord.input` is never truncated, summarised, or derived; it is the bytes shown to the operator | `session-manager` |
-| I13 | `audit.ndjson` is never deleted, rewritten, or shortened, including when the session it names is deleted | `store` |
-| I14 | `turn.started` for a turn precedes every other event of that turn, and `turn.ended` follows all of them, including across a server restart | `session-manager` |
-| I15 | The `checkpoint.created` for turn N precedes `turn.started` for turn N, where a checkpoint was taken at all | `session-manager` |
-| I16 | `meta.json` is written only by temp-file-then-atomic-rename, and only on create, a `state` transition, or a `cliSessionId` change | `store` |
-| I17 | `lastSeq` used at boot is derived from the spill's tail, never read from `meta.json` | `session-manager`, `store` |
-| I18 | No connection is accepted until the storage lock, reaping, rehydration, open-turn closure, and record-log loading have all completed | `session-manager`, `records` |
-| I19 | A `ProcessRecord` is reaped only when its `hostname` is this host's — or absent, which reads as this host's (D181) — and it has no `exitedAt`, its `startedAt` is later than the host's last boot, the live process's image matches, **and the live process's creation time is exactly the recorded `osCreatedAt`** (D183, D186). A record naming another host is neither reaped nor tombstoned. The guard **fails closed**: a record whose `osCreatedAt` is `null`, or whose live counterpart cannot be read, is tombstoned and logged, never reaped. Reaping kills the tree, never the bare pid. **It governs `pids.ndjson` alone** — `<storage>/server.lock` is reclaimed by observation and shares nothing with this guard (D180, I50) | `session-manager` |
-| I20 | No module above `adapters/*` branches on a vendor string. `vendor` is carried as data on `SessionRecord`, `SessionSummary`, `SessionStarted`, `AuditRecord`, `SessionSnapshot` and `Requisition`, and is display or evidence in every one of them | all |
-| I21 | `CliSessionId`, `CallId`, and `RequestId` are only ever compared for equality above the adapter layer | `session-manager` |
-| I22 | A blob path contains both `turnId` and `callId`; no blob is addressable by `callId` alone | `store` |
-| I23 | Every route that reads or mutates a **session's** data is under `/api/sessions/:id` and applies the ownership check. The record routes are not session data and are governed by D70 instead: read is open, write is attributed | `edge/sse`, `edge/ws` |
-| I24 | The origin allow-list is applied to every mutating route and to the WebSocket handshake, before identity is resolved | `edge/sse`, `edge/ws` |
-| I25 | A `preauthorised` session emits zero `permission.request` events | `adapters/*` |
-| I26 | No string this codebase did not write is ever assigned to `innerHTML` or parsed as markup — agent output, tool results, and stored operator text alike | `client` |
-| I27 | There is no mutex, lock, or semaphore in the server. `emit`'s synchronous prefix — `seq`, ring push, fan-out — is the serialisation point. The per-session append chain that follows it orders I/O and excludes nothing (D89). `server.lock` is not a counter-example: it excludes a second *process*, not a second caller, and the running server only ever renews a lock it already holds — no code path acquires or waits on one after boot (D161, D180) | all |
-| I28 | `Usage` on an emitted `usage` event is incremental and summable; no module above `adapters/*` performs arithmetic on a vendor's own token numbers | `adapters/*` |
-| I29 | *(tier two)* A review's `state` moves `draft → final` and never back. A `final` review accepts no further append for that `reviewId` | `records` |
-| I30 | *(tier two)* A review's `snapshot` is copied at authorship and never refreshed; no read of a review resolves its `subject` | `records` |
-| I31 | *(tier two)* A `draft` review is readable and writable by its `author` alone; a `final` review is readable by every authenticated operator; `listReviews` returns finals only | `records` |
-| I32 | *(tier two)* A requisition moves only `open → approved → consumed` or `open → rejected`. There is no revocation and no expiry | `records` |
-| I33 | *(tier two)* A requisition is consumed at most once. A second claim is refused, never queued | `records` |
-| I34 | *(tier two)* `Requisition.workspace` is never a `ResolvedPath` and is never resolved before session creation; only `jail` mints a `ResolvedPath` | `records`, `session-manager` |
-| I35 | *(tier two)* PIP status is the `pip` of the `final` review for that subject with the greatest `updatedAt`, ties broken by the later line. Drafts never contribute | `records` |
-| I36 | *(tier two)* At most one `checklist.item.completed` envelope exists per `(sessionId, itemId)`; a second tick emits nothing and still succeeds | `session-manager` |
-| I37 | *(tier two)* A record-log append that fails leaves the in-memory registry and the file agreeing, with nothing changed in either | `records` |
-| I38 | *(tier two)* An unreadable or partly corrupt record log yields an empty or shortened registry and a log line. It never aborts boot, and never denies an operator tier one | `records` |
-| I39 | Every read of `audit.ndjson` is bounded by `Caps.auditPageMax` and resumed by cursor. Nothing scans the whole file | `store` |
-| I43 | A standing rule is created only where `decision === 'allow'`, `rule` parses, and the named request's `matchTarget` is non-null. Every other `scope: 'always'` is `bad_request`; none is silently downgraded to `once` | `session-manager` |
-| I44 | `PermissionRequest.suggestions` is the vendor's array forwarded verbatim. No module narrows, parses, indexes, or derives a `StandingRuleExpression` from it | `adapters/*`, `client` |
-| I45 | A standing rule exists only in its session's in-memory state. Nothing writes one to disk, and a session rehydrated at boot holds none | `session-manager` |
-| I46 | `match` reads only `rule`, `request.tool` and `request.matchTarget`. It never reads `input`, and no tool name appears in `session-manager` | `session-manager` |
-| I47 | `updatedPermissions` is never written to a child's stdin, under any decision or scope | `adapters/*`, `session-manager` |
-| I48 | `ToolCall.summary` is display-only: above `adapters/*` it is rendered as a text node and nothing else. No module parses it, matches against it, or derives anything persisted or security-relevant from it; its shape is not contractual. Testing it for empty, to decide whether to show the line at all, is display and is permitted | `adapters/*`, `session-manager`, `client` |
-| I49 | An attachment's bytes never enter `events.ndjson`, and an operator's `filename` never reaches a filesystem path — the server-minted `AttachmentId` is the only path segment. The blob is written and fsync'd before the `message` envelope naming it is constructed | `store`, `session-manager` |
-| I50 | A storage root is held by at most one server process. `<storage>/server.lock` is claimed **before boot's reap step**, not merely before `listen`, and is reclaimed only where its `(instanceId, renewals)` pair is observed unchanged across one full observation window measured on the claiming process's own monotonic clock — **whichever host wrote it**, and with no wall clock compared anywhere in the decision (D180). A boot that refuses on a held lock has written nothing server-wide. **A storage root is supported on a local filesystem or a bind mount only** (D194): the one hole — a live holder whose renewals are invisible for a full window — needs a cache or a partition between writer and reader, which two processes on one host do not have, so it is out of reach rather than tolerated. It is what a network-share root would reintroduce, and closing it there would need a fencing service outside the storage root (D7) | `store`, `session-manager` |
-| I51 | A `message.delta` is a live-only frame, for **both** vendors: it is assigned no `seq`, no `Envelope` is ever constructed for it, it never enters the ring buffer, it is never appended to `events.ndjson`, and it is never replayed. It is delivered to the subscribers attached when it is produced and to no others. Deltas for one `turnId` concatenate in arrival order to the `message` that follows (D168) | `session-manager`, `adapters/*` |
-| I52 | A shutdown establishes no durable state and holds no session invariant. It marks no session ended, closes no turn on disk, appends to no spill, writes no `session.notice`, and emits no envelope. Its only durable write is one `ProcessTombstone` per child it killed, which records what shutdown *did* rather than repairing what it found. Every repair stays boot's, so the crash path and the orderly path converge on one implementation of each (D174). **It is held by construction rather than by inspection**: I55 stops every notification at the sink, so no code below it is in a position to emit, resolve or append during teardown (D178) | `server`, `session-manager` |
-| I53 | `<storage>/server.lock` is removed only as the last act before exit, after the listener has closed and after the kill step has run. A shutdown that cannot get that far leaves the lock rather than releasing it early, and the next boot reclaims it one observation window after the holder's last renewal (D175, D180) | `server` |
-| I54 | A shutdown's completion never depends on a client disconnecting. Every step past the guard is bounded, so the exit is reached whether or not a subscriber is still attached — the clean path is reachable in the configuration that ships, not only when nobody was watching (D176) | `server` |
-| I55 | From the moment `SessionManager`'s shutdown method is entered, no `AdapterNotification` of any kind reaches a handler. The mute sits on the manager's own `notify` sink, which every notification already passes through, and **not** on the `exited` handler: `turn.ended` arrives as a second, separate notification after `exited` inside the same synchronous callback, so a mute on the handler would silence the cancellations and let the turn's closure through. The mute is one-way — nothing clears it, and shutdown is its only caller (D178) | `session-manager` |
-| I56 | `<storage>/server.lock` is written or removed only by the instance that holds it. `releaseLock` and every renewal read the file first and act only while it still carries this process's `instanceId`; an absent file or a foreign one means this server has been displaced — it removes nothing, and stops by running shutdown's ordinary steps, whose release then reads a foreign id and deletes nothing of its own accord (D180, D195). **Renewal continues through shutdown's steps 1 to 3 and is cancelled as step 4's first act**: this server holds the root while it drains, kills and tombstones, so a timer stopped any earlier lets a successor reclaim a root still being written to | `store`, `server` |
-| I57 | `pid`, `hostname`, `startedAt` and `image` on a `ServerLock` are informational. No decision reads them: not the reclaim decision, not the release check, not the renewal check. Their only consumer is the text of a `StartupError.storage_locked` (D180) | `store`, `session-manager` |
+| **I1** | `seq` is strictly increasing by exactly one, per session, from 1. A gap is a bug, never a dropped event. It governs what `emit` assigns, and two things are outside that: the `replay_gap` envelope restates a watermark instead of consuming a `seq` (D156, *Streaming*), and a `message.delta` is assigned none at all (I51). Neither weakens the contiguity — the first consumes no number and the second never enters the sequence (D168) | `session-manager` |
+| **I2** | The ring buffer's contents are a strict suffix of the spill's, envelope for envelope, byte for byte | `store` |
+| **I3** | A `tool.result` is truncated before its envelope is constructed; the envelope in the ring and the line in the spill are identical | `session-manager` |
+| **I4** | At most one `Turn` per session is non-null at any time | `session-manager` |
+| **I5** | A guard is claimed in the same synchronous block that tests it: no `await` sits between a check and the mutation it protects. It governs six guards — the turn slot, the workspace claim, a requisition's decision, a requisition's consumption, a review's mutation, and a checklist item's completion | `session-manager`, `records` |
+| **I6** | No two `live` sessions have `cwd` values where one equals, contains, or is contained by the other | `session-manager` |
+| **I7** | `cwd` is a `ResolvedPath` inside a configured root, resolved exactly once at session creation and never re-resolved | `jail`, `session-manager` |
+| **I8** | `state === 'ended'` implies `LiveSession.turn === null` and `endedAt !== null`; `state === 'live'` implies `endedAt === null` | `session-manager` |
+| **I9** | Every `permission.request` is followed by exactly one `permission.resolved` with the same `requestId`, in the same session, before or at `turn.ended` | `session-manager` |
+| **I10** | An `AuditRecord` is fsync'd before the corresponding `control_response` is written to the child's stdin | `session-manager`, `store` |
+| **I11** | Every `permission.resolved` has exactly one `AuditRecord`, including auto-answers with `scope: 'standing'` | `session-manager` |
+| **I12** | `AuditRecord.input` is never truncated, summarised, or derived; it is the bytes shown to the operator | `session-manager` |
+| **I13** | `audit.ndjson` is never deleted, rewritten, or shortened, including when the session it names is deleted | `store` |
+| **I14** | `turn.started` for a turn precedes every other event of that turn, and `turn.ended` follows all of them, including across a server restart | `session-manager` |
+| **I15** | The `checkpoint.created` for turn N precedes `turn.started` for turn N, where a checkpoint was taken at all | `session-manager` |
+| **I16** | `meta.json` is written only by temp-file-then-atomic-rename, and only on create, a `state` transition, or a `cliSessionId` change | `store` |
+| **I17** | `lastSeq` used at boot is derived from the spill's tail, never read from `meta.json` | `session-manager`, `store` |
+| **I18** | No connection is accepted until the storage lock, reaping, rehydration, open-turn closure, and record-log loading have all completed | `session-manager`, `records` |
+| **I19** | A `ProcessRecord` is reaped only when its `hostname` is this host's — or absent, which reads as this host's (D181) — and it has no `exitedAt`, its `startedAt` is later than the host's last boot, the live process's image matches, **and the live process's creation time is exactly the recorded `osCreatedAt`** (D183, D186). A record naming another host is neither reaped nor tombstoned. The guard **fails closed**: a record whose `osCreatedAt` is `null`, or whose live counterpart cannot be read, is tombstoned and logged, never reaped. Reaping kills the tree, never the bare pid. **It governs `pids.ndjson` alone** — `<storage>/server.lock` is reclaimed by observation and shares nothing with this guard (D180, I50) | `session-manager` |
+| **I20** | No module above `adapters/*` branches on a vendor string. `vendor` is carried as data on `SessionRecord`, `SessionSummary`, `SessionStarted`, `AuditRecord`, `SessionSnapshot` and `Requisition`, and is display or evidence in every one of them | all |
+| **I21** | `CliSessionId`, `CallId`, and `RequestId` are only ever compared for equality above the adapter layer | `session-manager` |
+| **I22** | A blob path contains both `turnId` and `callId`; no blob is addressable by `callId` alone | `store` |
+| **I23** | Every route that reads or mutates a **session's** data is under `/api/sessions/:id` and applies the ownership check. The record routes are not session data and are governed by D70 instead: read is open, write is attributed | `edge/sse`, `edge/ws` |
+| **I24** | The origin allow-list is applied to every mutating route and to the WebSocket handshake, before identity is resolved | `edge/sse`, `edge/ws` |
+| **I25** | A `preauthorised` session emits zero `permission.request` events | `adapters/*` |
+| **I26** | No string this codebase did not write is ever assigned to `innerHTML` or parsed as markup — agent output, tool results, and stored operator text alike | `client` |
+| **I27** | There is no mutex, lock, or semaphore in the server. `emit`'s synchronous prefix — `seq`, ring push, fan-out — is the serialisation point. The per-session append chain that follows it orders I/O and excludes nothing (D89). `server.lock` is not a counter-example: it excludes a second *process*, not a second caller, and the running server only ever renews a lock it already holds — no code path acquires or waits on one after boot (D161, D180) | all |
+| **I28** | `Usage` on an emitted `usage` event is incremental and summable; no module above `adapters/*` performs arithmetic on a vendor's own token numbers | `adapters/*` |
+| **I29** | *(tier two)* A review's `state` moves `draft → final` and never back. A `final` review accepts no further append for that `reviewId` | `records` |
+| **I30** | *(tier two)* A review's `snapshot` is copied at authorship and never refreshed; no read of a review resolves its `subject` | `records` |
+| **I31** | *(tier two)* A `draft` review is readable and writable by its `author` alone; a `final` review is readable by every authenticated operator; `listReviews` returns finals only | `records` |
+| **I32** | *(tier two)* A requisition moves only `open → approved → consumed` or `open → rejected`. There is no revocation and no expiry | `records` |
+| **I33** | *(tier two)* A requisition is consumed at most once. A second claim is refused, never queued | `records` |
+| **I34** | *(tier two)* `Requisition.workspace` is never a `ResolvedPath` and is never resolved before session creation; only `jail` mints a `ResolvedPath` | `records`, `session-manager` |
+| **I35** | *(tier two)* PIP status is the `pip` of the `final` review for that subject with the greatest `updatedAt`, ties broken by the later line. Drafts never contribute | `records` |
+| **I36** | *(tier two)* At most one `checklist.item.completed` envelope exists per `(sessionId, itemId)`; a second tick emits nothing and still succeeds | `session-manager` |
+| **I37** | *(tier two)* A record-log append that fails leaves the in-memory registry and the file agreeing, with nothing changed in either | `records` |
+| **I38** | *(tier two)* An unreadable or partly corrupt record log yields an empty or shortened registry and a log line. It never aborts boot, and never denies an operator tier one | `records` |
+| **I39** | Every read of `audit.ndjson` is bounded by `Caps.auditPageMax` and resumed by cursor. Nothing scans the whole file | `store` |
+| **I43** | A standing rule is created only where `decision === 'allow'`, `rule` parses, and the named request's `matchTarget` is non-null. Every other `scope: 'always'` is `bad_request`; none is silently downgraded to `once` | `session-manager` |
+| **I44** | `PermissionRequest.suggestions` is the vendor's array forwarded verbatim. No module narrows, parses, indexes, or derives a `StandingRuleExpression` from it | `adapters/*`, `client` |
+| **I45** | A standing rule exists only in its session's in-memory state. Nothing writes one to disk, and a session rehydrated at boot holds none | `session-manager` |
+| **I46** | `match` reads only `rule`, `request.tool` and `request.matchTarget`. It never reads `input`, and no tool name appears in `session-manager` | `session-manager` |
+| **I47** | `updatedPermissions` is never written to a child's stdin, under any decision or scope | `adapters/*`, `session-manager` |
+| **I48** | `ToolCall.summary` is display-only: above `adapters/*` it is rendered as a text node and nothing else. No module parses it, matches against it, or derives anything persisted or security-relevant from it; its shape is not contractual. Testing it for empty, to decide whether to show the line at all, is display and is permitted | `adapters/*`, `session-manager`, `client` |
+| **I49** | An attachment's bytes never enter `events.ndjson`, and an operator's `filename` never reaches a filesystem path — the server-minted `AttachmentId` is the only path segment. The blob is written and fsync'd before the `message` envelope naming it is constructed | `store`, `session-manager` |
+| **I50** | A storage root is held by at most one server process. `<storage>/server.lock` is claimed **before boot's reap step**, not merely before `listen`, and is reclaimed only where its `(instanceId, renewals)` pair is observed unchanged across one full observation window measured on the claiming process's own monotonic clock — **whichever host wrote it**, and with no wall clock compared anywhere in the decision (D180). A boot that refuses on a held lock has written nothing server-wide. **A storage root is supported on a local filesystem or a bind mount only** (D194): the one hole — a live holder whose renewals are invisible for a full window — needs a cache or a partition between writer and reader, which two processes on one host do not have, so it is out of reach rather than tolerated. It is what a network-share root would reintroduce, and closing it there would need a fencing service outside the storage root (D7) | `store`, `session-manager` |
+| **I51** | A `message.delta` is a live-only frame, for **both** vendors: it is assigned no `seq`, no `Envelope` is ever constructed for it, it never enters the ring buffer, it is never appended to `events.ndjson`, and it is never replayed. It is delivered to the subscribers attached when it is produced and to no others. Deltas for one `turnId` concatenate in arrival order to the `message` that follows (D168) | `session-manager`, `adapters/*` |
+| **I52** | A shutdown establishes no durable state and holds no session invariant. It marks no session ended, closes no turn on disk, appends to no spill, writes no `session.notice`, and emits no envelope. Its only durable write is one `ProcessTombstone` per child it killed, which records what shutdown *did* rather than repairing what it found. Every repair stays boot's, so the crash path and the orderly path converge on one implementation of each (D174). **It is held by construction rather than by inspection**: I55 stops every notification at the sink, so no code below it is in a position to emit, resolve or append during teardown (D178) | `server`, `session-manager` |
+| **I53** | `<storage>/server.lock` is removed only as the last act before exit, after the listener has closed and after the kill step has run. A shutdown that cannot get that far leaves the lock rather than releasing it early, and the next boot reclaims it one observation window after the holder's last renewal (D175, D180) | `server` |
+| **I54** | A shutdown's completion never depends on a client disconnecting. Every step past the guard is bounded, so the exit is reached whether or not a subscriber is still attached — the clean path is reachable in the configuration that ships, not only when nobody was watching (D176) | `server` |
+| **I55** | From the moment `SessionManager`'s shutdown method is entered, no `AdapterNotification` of any kind reaches a handler. The mute sits on the manager's own `notify` sink, which every notification already passes through, and **not** on the `exited` handler: `turn.ended` arrives as a second, separate notification after `exited` inside the same synchronous callback, so a mute on the handler would silence the cancellations and let the turn's closure through. The mute is one-way — nothing clears it, and shutdown is its only caller (D178) | `session-manager` |
+| **I56** | `<storage>/server.lock` is written or removed only by the instance that holds it. `releaseLock` and every renewal read the file first and act only while it still carries this process's `instanceId`; an absent file or a foreign one means this server has been displaced — it removes nothing, and stops by running shutdown's ordinary steps, whose release then reads a foreign id and deletes nothing of its own accord (D180, D195). **Renewal continues through shutdown's steps 1 to 3 and is cancelled as step 4's first act**: this server holds the root while it drains, kills and tombstones, so a timer stopped any earlier lets a successor reclaim a root still being written to | `store`, `server` |
+| **I57** | `pid`, `hostname`, `startedAt` and `image` on a `ServerLock` are informational. No decision reads them: not the reclaim decision, not the release check, not the renewal check. Their only consumer is the text of a `StartupError.storage_locked` (D180) | `store`, `session-manager` |
 
-| I59 | A turn ends by ending the process tree its child rooted, on **every** path a turn can end by — normal exit, interrupt, adapter failure, shutdown — using D38's one mechanism and no other. When `turn.ended` is observable for a turn, no process that turn started is still running, so a released workspace claim and a subsequent restore are never conditional on an untracked descendant (D184) | `session-manager`, `adapters/*` |
-| I60 | `Config.storageRoot` is jail-normalised, and `pathsOverlap` is false between it and every entry of `Config.workspaceRoots`. A configuration failing this is refused at startup and the server does not listen; no session is ever served from it (D185) | `config` |
-| I58 | An `IgnoredManifest` records path, kind, size and mtime and **never content**. `RestoreResult.unreached === null` means the comparison could not be made and never that nothing differs; an empty array is the positive answer. No gate, control, or refusal anywhere in this contract reads a manifest — it is a report to an operator and its collapsed-directory blindness makes it unusable as evidence (D182, D187) | `checkpoints`, `client` |
-| I61 | Every write of `<storage>/server.lock` publishes the file whole, so a sample observes complete contents or none and never a partial file: a reclaim and every renewal by temp-file-then-atomic-rename, and a claim on an absent lock by an exclusive create, which must fail rather than overwrite when a second booting server wrote first. A lock that will not **parse** is therefore corruption, and `claimLock` refuses on it rather than reclaiming (D196). A lock that parses and merely lacks `renewals` is not corruption: it predates the lease, and it reclaims by the ordinary rule (I50) | `store` |
-| I62 | `LOCK_RENEWAL_INTERVAL_MS` is strictly less than `LOCK_OBSERVATION_WINDOW_MS`, by a margin of at least three renewals, so a live holder can never be sampled unchanged across a window. **Enforced by the two being declared in one file** — `src/store/index.ts`, with the interval exported for `server.ts` to import rather than written a second time beside the drain's bound — because a violation has no symptom short of two servers over one storage root (D194, D195) | `store`, `server` |
+| **I59** | A turn ends by ending the process tree its child rooted, on **every** path a turn can end by — normal exit, interrupt, adapter failure, shutdown — using D38's one mechanism and no other. When `turn.ended` is observable for a turn, no process that turn started is still running, so a released workspace claim and a subsequent restore are never conditional on an untracked descendant (D184) | `session-manager`, `adapters/*` |
+| **I60** | `Config.storageRoot` is jail-normalised, and `pathsOverlap` is false between it and every entry of `Config.workspaceRoots`. A configuration failing this is refused at startup and the server does not listen; no session is ever served from it (D185) | `config` |
+| **I58** | An `IgnoredManifest` records path, kind, size and mtime and **never content**. `RestoreResult.unreached === null` means the comparison could not be made and never that nothing differs; an empty array is the positive answer. No gate, control, or refusal anywhere in this contract reads a manifest — it is a report to an operator and its collapsed-directory blindness makes it unusable as evidence (D182, D187) | `checkpoints`, `client` |
+| **I61** | Every write of `<storage>/server.lock` publishes the file whole, so a sample observes complete contents or none and never a partial file: a reclaim and every renewal by temp-file-then-atomic-rename, and a claim on an absent lock by an exclusive create, which must fail rather than overwrite when a second booting server wrote first. A lock that will not **parse** is therefore corruption, and `claimLock` refuses on it rather than reclaiming (D196). A lock that parses and merely lacks `renewals` is not corruption: it predates the lease, and it reclaims by the ordinary rule (I50) | `store` |
+| **I62** | `LOCK_RENEWAL_INTERVAL_MS` is strictly less than `LOCK_OBSERVATION_WINDOW_MS`, by a margin of at least three renewals, so a live holder can never be sampled unchanged across a window. **Enforced by the two being declared in one file** — `src/store/index.ts`, with the interval exported for `server.ts` to import rather than written a second time beside the drain's bound — because a violation has no symptom short of two servers over one storage root (D194, D195) | `store`, `server` |
 
 **I40, I41 and I42 were never allocated, and the gap is left open rather than closed.** The
 numbering jumps from I39 to I43 and nothing is missing. Ids here are cited by number in
