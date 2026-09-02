@@ -54,6 +54,9 @@ The design's riskiest bets, and where each is exercised:
 | `audit.ndjson` can be read newest-first, bounded, with no index (D73) | S12 |
 | Tier two adds two append-only files and one module and no new architecture (D65, D77) | S13, then S15 |
 | One design compiles into two working behaviours across the eight surfaces `10-design.md § Platform divergence` lists | S19 |
+| A process tree can still be reached from the pid of a process that has already exited | S28.1 |
+| The operating system's own creation time for a process is readable, and exactly comparable, on both platforms | S29.1 |
+| Watching a counter for one observation window is enough evidence of a dead holder, on the storage classes D194 supports | S30 |
 
 S8 sits eighth because everything after S8.1 needs the adapter interface and the policy
 banner to exist. **S8.1 itself needs neither and is cheap — run it early, out of order, and
@@ -72,13 +75,24 @@ S12's route and S18 on S10's held rules. **S19 is reachable as soon as S7 has la
 should be taken there rather than left to the end: everything after it is written against a
 suite that has still only ever run on one of the two supported platforms.
 
-**Ten slices open with a stop rather than with code.** S8.1, S10.1, S12.1, S13.1, S14.1,
-S15.1, S16.2, S21.1, S25.1 and S26.1 name a question the design, the contract, or the vendor's
-observed behaviour has not answered, and each says the slice stops until it does. **Two of them
-stop a second time after the probe reports** — S25.2 and S26.6 — because a measurement that
-settles what is possible does not settle what should be built. That is the shape an unresolved
+**Twelve slices open with a stop rather than with code.** S8.1, S10.1, S12.1, S13.1, S14.1,
+S15.1, S16.2, S21.1, S25.1, S26.1, S28.1 and S29.1 name a question the design, the contract, or the
+vendor's observed behaviour has not answered, and each says the slice stops until it does. **Three
+of them stop a second time after the probe reports** — S25.2, S26.6 and S28.2 — because a
+measurement that settles what is possible does not settle what should be built, and S28.2 is that
+read the other way round: a measurement finding that the contract's mechanism cannot reach where the
+contract puts it does not settle where to move it. That is the shape an unresolved
 input has to take here: a criterion that is checkable, because the amendment either landed or
 it did not, rather than an implementer's guess wearing the amendment's clothes.
+
+**D199's five slices are S28 to S32, and two of them are coupled.** S28 goes first: it is the one
+of the five an operator meets today without misconfiguring anything, and its probe answers whether
+D38's mechanism can do what I59 asks of it at all. **S29 lands before S30, and that is a
+requirement rather than a preference** — the lease makes another host's `pids.ndjson` records
+reachable for the first time, so a reaper with no host gate reading them looks a foreign pid up in
+the local process table and kills whatever holds that number (D181). Building the lease first opens
+that window and closes it in the following slice. S31 and S32 depend on neither and can be taken in
+any order, before or after; S32 is the one of the five that closes a definition-of-done item.
 
 `spike/` covers parts of S1 and S2 as throwaway proof. It is not the implementation; see
 `spike/README.md § What this is not`. `spike/.data` is deleted rather than migrated
@@ -1280,14 +1294,18 @@ Acceptance:
     a second boot against a root whose `pids.ndjson` names live children of the first server, and
     confirming those children are still alive after the refusal (D161). This is the criterion the
     slice exists for; a lock taken after step 1 prevents nothing that matters.
-  - S22.3 A lock whose holder fails D23's three-part test — an `exitedAt`, a `startedAt` earlier
-    than the host's last boot, or a mismatched image — is reclaimed automatically, the reclaim is
-    logged naming the stale holder, and boot proceeds. Asserted for each of the three
-    independently, so a single always-stale answer cannot pass this.
-  - S22.4 A lock naming a different `hostname` is **never** reclaimed, whatever its `pid` says:
-    the refusal stands and says the holder is on another host. The liveness test cannot see
-    another machine's process table, and reclaiming on one that it cannot see is how two servers
-    over one network share both start.
+  - S22.3 **Retired by S30 (D180), and the id is kept allocated rather than removed.** It
+    asserted that a lock whose holder fails D23's three-part test — an `exitedAt`, a `startedAt`
+    earlier than the host's last boot, or a mismatched image — is reclaimed automatically, for each
+    of the three independently. The lease deletes that test: liveness is decided by watching the
+    holder's own counter, and S30.1 asserts the decision table that replaces it. The assertions
+    behind this criterion are deleted by S30, not by this document.
+  - S22.4 **Retired by S30 (D180), on the same terms.** It asserted that a lock naming a different
+    `hostname` is never reclaimed, whatever its `pid` says. That rule is deleted rather than
+    relaxed — it is exactly what made a recreated container's refusal permanent, since recreating
+    changes the hostname and nothing ever reclaimed a foreign lock (#206) — and S30.2 asserts the
+    opposite behaviour. What it was guarding against is covered instead by never consulting a
+    process table.
   - S22.5 A clean shutdown removes the lock, and the next boot takes it without invoking the
     staleness path at all — asserted by instrumenting the reclaim and finding it uncalled.
   - S22.6 A storage root that cannot be written still fails as `StartupError.storage_unwritable`
@@ -1621,6 +1639,353 @@ which are their own issue; and doing anything about a `ckpt.git/index.lock` a dy
 behind — the next turn's checkpoint already fails it with a warning and proceeds, and nothing
 further is owed. Running this slice's suite on the second platform is **S19's**, not this one's.
 
+## S28 — Nothing the agent starts outlives its turn
+
+**Tier one**, and a live defect rather than an addition. D184 decided it; this builds it. Ordinary
+completion — the overwhelmingly common way a turn ends — is the one of four end paths that does not
+end the process tree its child rooted, so a tool that starts something in the background leaves it
+running while the console reports the session idle, the workspace claim released and the next
+session admitted. **It opens with a measurement and carries a second stop after it**, because the
+mechanism the contract names may not be able to do what the contract asks of it on one of the two
+platforms.
+
+Delivers: An operator whose agent starts something in the background — a development server, a file
+watcher, a long test runner — has it stopped when the turn stops, instead of finding it still
+running afterwards with nobody watching it. Rolling the folder back then works, instead of failing
+on a file something invisible is holding, and the next person to open that folder is not competing
+with it.
+
+Touches: `session-manager` (the turn's end path, and the tree-kill helper it already holds),
+`adapters/*` (the close path, which today notifies and clears without terminating). No new type —
+the contract already carries the invariant.
+
+Depends on: S1, S5 (the one kill mechanism), S6 (the restore this exists to protect), S7 (boot's
+reap, which already uses that mechanism).
+
+Acceptance:
+  - S28.1 A written finding, committed before any change to the turn's end path, citing the command
+    run and its observed output on each supported platform: **whether a process tree can still be
+    reached from the pid of a process that has already exited.** The contract puts this kill on the
+    normal-completion path, which runs after the CLI child's own exit, and D38's Windows mechanism
+    "resolves the tree from the live process table at kill time" — from a pid that is by then gone.
+    The finding spawns a child, has it spawn a detached grandchild, waits for the child to exit,
+    issues the kill, and reports whether the grandchild died. POSIX and Windows are recorded
+    separately with the OS version named, because the two mechanisms are different and only one of
+    them is in doubt.
+  - S28.2 **The slice stops for a decision where S28.1 reports the tree unreachable after the
+    child's exit.** Where the kill is issued is `/design`'s and `/contract`'s: the contract has it
+    run "before `turn.ended` is emitted and before the turn slot is cleared", and moving it earlier
+    — to the `result` record, before the child is allowed to exit — changes what the adapter owes
+    and when a turn is considered over. This slice may not settle that by implementing one of them,
+    and a half-platform invariant is not I59.
+  - S28.3 A turn whose tool started a detached grandchild ends with that grandchild gone: process
+    enumeration once `turn.ended` is observable finds it absent. Asserted on the
+    **normal-completion** path — a `result` followed by the child's own exit — which is the path
+    that does not kill today.
+  - S28.4 The kill completes before `turn.ended` is emitted and before the turn slot is cleared,
+    asserted by instrumenting all three in order, so a caller that reacts to `turn.ended` by
+    requesting a restore cannot race a surviving descendant.
+  - S28.5 One mechanism, not two: the same helper boot's reap and `interrupt` already call is
+    entered on each of the four paths a turn can end by — normal exit, interrupt, adapter failure
+    and shutdown — asserted by a call count per path rather than by reading the code.
+  - S28.6 A turn that spawned nothing, and a turn whose child is already gone, both end normally:
+    exactly one `turn.ended`, no extra envelope, no notice, and the kill is a no-op rather than a
+    failure.
+  - S28.7 The capability this costs is asserted rather than assumed: a turn told to start a server
+    and report its address ends with that server dead, and the transcript is unchanged — no new
+    envelope kind, no new `stopReason`, no notice. The loss is silent by decision (D184), and a
+    test naming it is what stops a later reader from filing it as a bug.
+  - S28.8 The suites S5, S7 and S27 already own re-run green unchanged: interrupt still ends a turn
+    under its own stop reason, boot's reap still tombstones what it kills, and shutdown still writes
+    nothing to any spill.
+
+Out of scope: a liveness check before a restore or before the workspace claim is released, which
+D184 rejects — the claim may not become conditional on something no component can observe; keeping
+a deliberate background process alive past its turn, which is the capability D184 spends and which
+cannot be had back without that check; changing D38's mechanism, which this slice reuses and does
+not touch; and **the second platform's suite, which is S19's** — S28.1's finding covers both
+platforms because the value it measures is the platform's own, and that is a different thing from a
+gated suite.
+
+## S29 — The reaper knows whose process it is, and which one
+
+**Tier one**, and it lands before S30. D181, D183 and D186 decided it; this builds it. Boot's reap
+guard has three limbs and both of the missing two were adjudicated: one because the lease S30 builds
+makes another machine's process records readable for the first time, the other because a host that
+reuses a process number within one boot for another child of the same name defeats all three limbs
+at once — and in a console whose every child is named `claude` or `codex`, that is not a remote
+case. **It opens with a measurement**, because the fourth limb reads a value no platform exposes to
+this runtime directly.
+
+Delivers: A console starting up after a crash no longer risks killing an unrelated program that
+happens to have been given the same process number as an agent it once ran. Where two consoles
+share one storage folder, neither touches anything the other machine started. Where the console
+cannot be certain a process is the one it recorded, it leaves it alone and writes down that it did,
+rather than guessing.
+
+Touches: `contract` (`ProcessRecord` gains the host that spawned it and the operating system's own
+creation time for it), `store` (the spawn append and the open-record fold), `session-manager` (the
+capture at spawn, and the reap guard, which stops being shared with the lock's).
+
+Depends on: S1, S5, S7 (the guard and the file this grows).
+
+Acceptance:
+  - S29.1 A written finding, committed before any change to `ProcessRecord`, citing the command run
+    and its raw output on each supported platform: whether the operating system's own creation time
+    for a just-spawned child is readable at all, and whether reading it twice for one live process
+    yields **byte-identical** values — which is what an exact-equality limb requires and what a
+    coarse or recomputed reading would not give. The OS version is named. **The slice stops where
+    either platform cannot produce a stable exact value**: a limb that never matches makes the
+    guard's fail-closed behaviour universal, so nothing is ever reaped and every orphan is left to
+    an operator by hand, which is a different bargain from the one D183 struck and is not this
+    slice's to accept.
+  - S29.2 A record naming another host is neither reaped nor tombstoned. Asserted with a record
+    whose host is a foreign string but whose pid, image and timings all name a **live local
+    process** — D181's coincidence — which is still running afterwards, with `pids.ndjson`
+    byte-identical: no tombstone was appended either.
+  - S29.3 A record written before the host field existed is read as this host's and takes the
+    ordinary guard, asserted against a `pids.ndjson` holding lines in the previous shape. This is
+    the migration D181 chose over the conservative reading, which would strand one generation of
+    real orphans on bare metal.
+  - S29.4 The fourth limb rejects same-boot pid reuse: a record whose recorded creation time differs
+    from the live process's is logged and tombstoned, never killed. Asserted against a live local
+    process that passes all three original limbs — no exit recorded, a `startedAt` after the host's
+    last boot, a matching image — and which is still running afterwards.
+  - S29.5 The guard fails closed at both ends, asserted independently so one always-null answer
+    cannot satisfy both: a record whose recorded creation time is absent is tombstoned and logged,
+    never reaped; and a record whose live counterpart's creation time cannot be read is tombstoned
+    and logged, never reaped.
+  - S29.6 A record passing all five limbs is still reaped — tree killed, then tombstoned — in the
+    same suite. This is the negative control on S29.2, S29.4 and S29.5: without it, a guard that
+    refuses everything passes all three.
+  - S29.7 A capture failure at spawn costs nothing but the guard: the child runs, its line is
+    appended with the creation time absent, no envelope and no notice is emitted, and the turn is
+    indistinguishable from one where the capture succeeded.
+  - S29.8 The reap guard is no longer shared with the lock's liveness probe (D193). The probe `boot`
+    hands `claimLock` is unchanged in behaviour, and S22.1, S22.2, S22.5, S22.6 and S22.7 re-run
+    green — S30 is what retires that probe, and this slice must not leave a lock decision reading
+    limbs written for a process record.
+  - S29.9 The open-record fold still never hands back a tombstone as an open record, now with two
+    more fields to lose: a pid whose latest line is a tombstone is absent from the open set, and one
+    whose latest line is a spawn carries all five guard inputs from that spawn line and none from
+    any tombstone.
+
+**S7.5 states the three-limb guard, and this slice gives the guard five.** S7.5 reads "a
+`ProcessRecord` with no `exitedAt`, a `startedAt` later than the host's last boot and a matching
+process image is reaped"; after this slice, such a record whose recorded creation time is absent is
+tombstoned instead. That is a landed criterion contradicting `20-contract.md`'s I19, which outranks
+it. **It is not corrected here**: D199 routed one landed-body correction to this pass, S22's, and an
+acceptance criterion is a decision under `AGENTS.md` *Hard rules* rather than descriptive drift. It
+is named so that whoever implements this slice meets the contradiction stated rather than as a
+failing assertion.
+
+Out of scope: `server.lock` in every respect — S30 owns the lease, the probe's retirement and the
+decision table; reaping another host's orphans, which D181 states stays that host's own next boot
+and is the residual it accepts; closing the window between a spawn returning and its line landing,
+which D23 and D38 both accept; and correcting S7.5, above. Running this slice's suite on the second
+platform is S19's; S29.1's finding covers both platforms because the value it reads is the
+platform's own.
+
+## S30 — The storage lock becomes a lease
+
+**Tier one**, and the largest of the five. D180 decided it and D193 to D196 finished it; this builds
+it, and it is what #206 was closed without. **It cannot be split**: a claim that reclaims on an
+unmoving counter, with nothing renewing, declares every live holder dead one observation window
+after it starts, so the two halves are one slice or a regression.
+
+Delivers: A console that gets redeployed — its container recreated, its service reinstalled —
+starts again by itself, instead of refusing forever because the machine now answers to a different
+name. Two consoles pointed at one storage folder still cannot both run. One that has been taken
+over while it was stalled notices, stops, and does not delete its replacement's claim on the way
+out.
+
+Touches: `contract` (the lock gains an identity for the run and a counter; a startup refusal for a
+damaged lock; the liveness probe retires; `store` gains a renewal method and `claimLock` loses a
+parameter), `store` (the decision table, the renewal, the ownership-checked release, and the two
+constants), `session-manager` (boot's first step, which now hands `store` nothing), `server.ts` (the
+renewal clock, the displaced stop, and where renewal is cancelled).
+
+Depends on: S7, S22 (the lock this replaces), S27 (shutdown's five steps, whose step 4 is where
+renewal is cancelled), S29 (the reaper's host gate, which must be in place before a foreign host's
+records can be read).
+
+Acceptance:
+  - S30.1 Each row of `claimLock`'s decision table asserted independently: an absent lock is claimed
+    **with no wait**, measured as a boot completing in well under one observation window; a lock
+    whose identity-and-counter pair changes across the window is refused with `storage_locked`
+    naming the holder's pid, hostname and start time; a pair unchanged across the window is
+    reclaimed with the stale holder logged; and a lock that will not parse is refused with
+    `storage_lock_corrupt` naming the path.
+  - S30.2 **A lock naming a different hostname whose counter is not moving is reclaimed, and boot
+    proceeds.** This is the criterion the slice exists for and the defect #206 was opened on: under
+    the rule this replaces, recreating a container changed the hostname and nothing ever reclaimed
+    a foreign lock, so the refusal was permanent.
+  - S30.3 A lock written before the lease — well-formed, carrying no counter — reaches the reclaim
+    path by the ordinary rule and is not treated as corruption. The refusal is keyed on parsing and
+    never on an absent field, and this is the deployment the migration story exists for.
+  - S30.4 No wall clock is compared anywhere in the decision. Asserted by stepping the system clock
+    an hour backwards during one observation window and an hour forwards during another, and
+    finding both decisions unchanged.
+  - S30.5 A live holder is never declared dead: with one server running and renewing, three
+    consecutive boots each observe the counter move and each refuse.
+  - S30.6 The renewal interval and the observation window are declared in one file, the interval is
+    exported and the process's clock imports it rather than declaring a second copy, and a test over
+    the two imported values fails if the interval ever stops being at most a third of the window.
+    Violating that relation has no other symptom short of two servers over one storage root.
+  - S30.7 Every write publishes the file whole, and the claim additionally loses a race it did not
+    win: two boots racing on one absent lock produce exactly one claim, and the loser takes the
+    refusal path rather than overwriting. A reclaim and a renewal go through the same
+    atomic-rename helper `meta.json` already uses.
+  - S30.8 Release is an ownership check. A server whose lock was reclaimed and rewritten by a
+    successor removes nothing at shutdown, and the successor's lock file is byte-identical
+    afterwards.
+  - S30.9 A renewal reports `displaced` — a success, not an error — when the lock is absent and when
+    it carries another identity, and reports a storage error only when the renewal could not be
+    attempted at all. All three asserted; conflating the first two with the third is what would let
+    a caller carry on past the one outcome no caller may carry on past.
+  - S30.10 A displaced holder stops by running shutdown's ordinary steps and exits non-zero: its
+    live turns' children are killed and tombstoned, the successor's lock is untouched, and its
+    renewal timer stops at once rather than at step 4.
+  - S30.11 A shutdown that still holds the root keeps renewing through the drain and the kill and
+    cancels renewal as step 4's first act — asserted by instrumenting both and finding at least one
+    renewal between the first signal and the kill step's completion. A timer cancelled any earlier
+    lets a successor reclaim a root still being written to.
+  - S30.12 No decision reads the lock's pid, hostname, start time or image. Asserted by
+    instrumenting those four reads and finding the only reader is the text of the refusal (I57).
+  - S30.13 S22.1, S22.2, S22.5, S22.6 and S22.7 re-run green unchanged. **S22.3 and S22.4 are
+    retired by this slice** and the assertions behind them deleted, because each states the rule
+    D180 removes; their ids stay allocated and are never reused.
+  - S30.14 A refused boot has still written nothing server-wide, on the corrupt-lock row as well as
+    the held one: the four server-wide append files are byte-identical before and after, no
+    session's `meta.json` is rewritten, and the reap step did not run.
+
+Out of scope: amending the shutdown invariant for the failed-bind path, which D199 routes to
+`/contract`; correcting the design's three surviving statements that a network-share storage root is
+supported, which D199 routes to `/design`; a network-share root itself, out of supported scope until
+a gate exercises one (D194); an OS advisory lock and a `--force` override, both already refused by
+S22; coordinating two servers that genuinely want to share a root; promoting either constant to a
+deployment setting, which is a contract amendment; the reap guard, which is S29's; and fencing
+outside the storage root, which is the dependency D7 kept out and the only thing that would close
+the residual. Running this slice's suite on the second platform is S19's.
+
+## S31 — Storage may not live inside a workspace
+
+**Tier one**, and small. D185 decided it; this builds it. It exists because nothing compared the
+server's own storage tree against the roots it admits sessions in, so a deployment can put its
+records where a checkpoint's `add -A` ingests them and a rollback deletes them — including the audit
+log that exists to be beyond the reach of whoever it indicts.
+
+Delivers: A deployment that would keep the console's own records inside a folder it also hands to
+agents is refused at startup, by name, instead of starting and then losing the record of what the
+agent did the first time somebody rolls that folder back.
+
+Touches: `config` (the storage root is normalised the way the workspace roots already are, and then
+checked against them), `contract` (the storage root stops being a raw string), `jail` (nothing new —
+the one containment predicate gains its second caller).
+
+Depends on: S1 (the jail and its normalisation), S2 (configuration loading, and the startup refusal
+this is shaped after).
+
+Acceptance:
+  - S31.1 A storage root that equals a workspace root, sits inside one, or contains one is refused
+    with `ConfigError.invalid_field` naming the field and the root it collides with. All three
+    containment relations asserted independently — an equality-only check passes two of them.
+  - S31.2 The refusal is at startup and nothing is listening: asserted by a non-zero exit with no
+    port bound, rather than a server that goes on to serve the workspaces that happen not to
+    collide.
+  - S31.3 The collision is found through spelling and not only through a literal match, because the
+    storage root now goes through the same normalisation the workspace roots already get: a `..`
+    traversal, a symlink whose target is inside a workspace root, and on Windows a case variation
+    and an 8.3 short name are each refused.
+  - S31.4 No error variant is minted: `ConfigError` is unchanged and the refusal reuses the
+    invalid-field variant. A variant whose only caller is this one check is a surface this refusal
+    has no standing to add.
+  - S31.5 A non-overlapping configuration is untouched: a storage root that is a sibling of a
+    workspace root starts normally, and every existing configuration test passes unchanged.
+  - S31.6 The containment predicate is the jail's and there is still exactly one, with two callers
+    and no others — the workspace busy check and this one. Asserted at the call sites rather than by
+    searching for a duplicate implementation.
+  - S31.7 Nothing downstream notices the type change: a full session round trip — meta, spill,
+    blobs, audit, pids, the shadow git directory and both record logs — writes to the same paths as
+    before, asserted by comparing the on-disk layout against a run taken before the change.
+
+Out of scope: refusing per session instead of at startup, which D185 rejects — one loud failure
+beats a quiet partial one, and what is at risk here is server-wide evidence rather than one
+session's files; overlap between two workspace roots, which is a different question nothing has
+asked; the live sessions' `cwd` busy check, which is D30's and already exists; and anything about
+where a child process may reach once running, which the jail has never governed. Running this
+slice's suite on the second platform is S19's.
+
+## S32 — Say what the rollback did not reach
+
+**Tier one, and it finishes brief item 6.** "Roll the workspace back … and be told what the rollback
+could not reach" is a definition-of-done item, and only the first half is built: the exclusion of
+ignored paths is deliberate and symmetric, and it is silent. D182 and D187 decided the report; this
+builds it.
+
+Delivers: An operator rolling the project folder back is told which of the excluded files — the
+environment file, the build output, the dependency folder — changed since the point they rolled back
+to and were left standing. Where the console cannot work that out, it says so, rather than showing
+the same clean success it shows when nothing differed.
+
+Touches: `contract` (the manifest, its entries, one difference, and what a restore returns),
+`checkpoints` (capture alongside every checkpoint, and the comparison at restore), the restore
+route, `client` (the two answers, which must not render alike).
+
+Depends on: S2, S6 (checkpoints, restore, and the safety checkpoint this return type now carries).
+
+Acceptance:
+  - S32.1 Every checkpoint writes a manifest beside it holding one entry per line of the
+    ignore-matching status, each carrying a workspace-relative POSIX path, whether it is a file or a
+    collapsed directory, a size absent exactly for a directory, and its own modification time.
+    Asserted against a workspace holding both an ignored file and an ignored directory, where the
+    directory contributes exactly one entry however many files sit beneath it.
+  - S32.2 No entry carries content or a digest of it: a known byte string written into an ignored
+    file appears nowhere in the manifest, and a 60 000-file ignored dependency tree still produces
+    one entry. Size and modification time are what make a change detectable without the bytes.
+  - S32.3 A capture failure never fails the commit: with the status command forced to fail, the
+    checkpoint returns normally, appears in the list, writes no manifest, and emits no envelope and
+    no notice.
+  - S32.4 A restore returns the safety checkpoint it took on the way in and never the target —
+    asserted by restoring that safety checkpoint and getting the pre-restore state back, which is
+    S6.4 re-run against the return type this slice grows.
+  - S32.5 The report names the differences and only the differences: an ignored file edited since
+    the target reads as modified, one created since reads as added, one deleted since reads as
+    removed, and one untouched appears in neither the report nor as a false positive. All four in
+    one workspace, in one assertion.
+  - S32.6 Unknown is `null`, and all three routes to it are asserted independently: the target
+    predates this mechanism and has no manifest; the manifest is present and will not parse; the
+    status command fails at restore time. None of the three yields an empty report.
+  - S32.7 An empty report is the positive answer and is distinguishable from unknown both on the
+    wire and on the screen: the route's JSON carries an empty array in one case and a null in the
+    other, and the console renders them as two different sentences. A renderer showing both as a
+    clean restore puts back exactly the silence this slice exists to break.
+  - S32.8 The report gates nothing. With the manifest deleted, corrupt, or reporting differences,
+    the restore itself is identical: the same files on disk compared by recursive hash, the same
+    success response, the same envelopes. No error variant is added at either end.
+  - S32.9 The report runs last and can neither delay nor prevent a restore: instrumented, it is
+    entered after the verification pass, and a restore whose report throws still succeeds and
+    returns unknown.
+  - S32.10 A verification pass that comes back dirty still fails the restore the way it does today —
+    the non-fatal `error / checkpoint_restore_failed` and the `500 checkpoint_failed` — and carries
+    no report. S6.11 re-run unchanged.
+  - S32.11 Deleting a session removes its manifests along with its shadow git directory. S6.10
+    re-run, extended to the new directory.
+  - S32.12 The collapsed-directory blindness is asserted rather than left in prose: an edit inside
+    an ignored directory that does not move that directory's own modification time is **not**
+    reported, and the test says so by name. This report is a pointer and not evidence, and the
+    difference is invisible at the call site.
+  - S32.13 Every path in the report reaches the page as a text node and never as markup (I26),
+    asserted with an ignored file whose name carries angle brackets and a quote.
+
+Out of scope: recording content or a hash per ignored path, which D187 rejects as the widening the
+brief declined arriving by the back door; making the report a gate, a control, or a precondition on
+anything, which I58 forbids and which is why the blindness is stated where the call site is;
+checkpointing or cleaning ignored paths, which the brief itself excludes and which this slice does
+not touch in either direction; a git note or `meta.json` as the manifest's home, both rejected by
+D187; and reporting ignored paths anywhere but a restore. Running this slice's suite on the second
+platform is S19's.
+
 ---
 
 ## What no slice covers
@@ -1673,8 +2038,7 @@ worse of the two irregularities. See S19 for why the verticality rule's purpose 
   aggregation. S16 covers the part with a source — burn and idle over a session's own event log.
   Whether the rest is in scope, and from what data, is unanswered.
 
-Next: run `/track` in a fresh session to open the issues for S12 to S18, for S26 and for S27, to
-sync the existing ones, to clear the `PermissionRequest` hook items from
-`design/90-decisions.md § Open` once S26's issue carries them, and to clear the
-*Build Shutdown ordering (D174–D178)* item from that same section once S27's issue carries it.
-`/slices` does not write to GitHub.
+Next: run `/track` in a fresh session to open the issues for S12 to S18, for S26 and S27 and for
+S28 to S32, to reopen #206 against S30 (D199 — it was closed by the pull request that decided the
+lease rather than by one that built it), and to sync the existing ones. `design/90-decisions.md
+§ Open` is empty, so nothing needs clearing from it this pass. `/slices` does not write to GitHub.
