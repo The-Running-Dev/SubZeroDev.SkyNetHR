@@ -4865,6 +4865,59 @@ Owed elsewhere: I55's wording in `20-contract.md` says no notification "reaches 
 now under-describes the sink — the mute acts on one kind. That is `/contract`'s to write, and it
 is a clarification of what the mute always meant rather than a change of behaviour.
 
+### 2026-09-02 — D199 The lock, the reaper, the manifest, the overlap and the tree kill are the tree's debt, not the contract's error
+Context: a `/reconcile` pass against `20-contract.md` and `10-design.md`. Between 2026-08-25 and
+2026-08-31 seven decisions — D180 to D187 and D193 to D196 — amended the contract in eight places
+and named no landing point. The result is eight invariants the document asserts and the tree does
+not hold: I19's two new limbs (a hostname gate, and the `osCreatedAt` fourth limb), I50, I56, I57,
+I58, I59, I60, I61 and I62. `<storage>/server.lock` is the sharpest case — the contract specifies
+D180's renewed lease and `src/store/index.ts` implements D161's liveness probe, so the two
+disagree on every row of `claimLock`'s decision table: a foreign hostname refuses where the
+contract reclaims (I50), an unparseable lock reclaims where the contract refuses (I61, D196),
+`releaseLock` deletes unconditionally where the contract checks ownership (I56), and `renewLock`,
+both module constants and `server.ts`'s renewal timer do not exist at all (I62). Nothing carried
+the gap: `## Open` is empty, no slice covers it, `30-slices.md` has S22 under `## Landed` with
+S22.3 and S22.4 still stating the rule the contract deletes, and **#206 was closed by the pull
+request that decided the lease rather than by one that built it**, which removed the last artifact
+that would have shown the work outstanding. Three checkers pass over all of it —
+`Test-DesignDrift.ps1` compares slices to issues, `Test-DesignReferences.ps1` compares citations to
+headings, and `Test-DesignState.ps1` returns `StateSetAbsent` — because none of them compares the
+contract to the tree.
+Chosen: **the contract is correct in every one of the eight and the tree owes the work.** Each
+amendment was adjudicated in full when it was taken and nothing since has weakened the reasoning;
+two of them describe defects that are live in the shipped build rather than merely undocumented —
+D184's turn that ends without ending its descendants, so an agent-started dev server outlives the
+turn and holds the workspace against the next session's restore, and D180's recreated container
+that can never reclaim a lock its predecessor wrote under a different hostname. The work is sliced
+and issued rather than absorbed here: `/slices` (`opus`, `high`) writes slices for the lease
+(D180, D193 to D196), the reaper's two limbs (D181, D183, D186), the ignored-path manifest (D182,
+D187), the storage-root overlap check (D185) and the turn tree kill (D184), correcting S22's
+landed body in that same pass; `/track` (`sonnet`, `medium`) then opens the issues and reopens
+#206.
+Also chosen: **three document edits, each routed to the command that owns it, none made in this
+pass.** `/contract` reworks I55 and the `spawned` paragraph in § *Public surface —
+session-manager*, which still say the child behind the mute "is killed all the same, because the
+adapter holds it" — D198 measured that false and moved the kill to the notification's own pid at
+the sink. `/contract` also amends I53, whose "only as the last act before exit, after the listener
+has closed and after the kill step has run" has no clause for `server.on('error')`, the failed-bind
+path #207 added, where there is no listener to close and no child to kill and holding the lock is
+the defect. `/design` corrects `10-design.md`'s three surviving statements that a network-share
+storage root is supported — *Platform divergence*'s row and the paragraph beneath it, *Failure
+modes*' partition row, and open question 16, still posed as unanswered though D194 answered it.
+Rejected: **reverting the eight invariants out of the contract to match the tree**, keeping the
+entries as recorded-and-not-taken. Cheapest to perform and the most expensive to undo: it discards
+reasoning that was adjudicated once and would have to be adjudicated again, and it re-accepts
+#206's original defect as permanent.
+Rejected: **building the lease and the tree kill and leaving the other four stated but unbuilt**,
+with issues opened for visibility. It halves the work and preserves exactly the condition this
+entry exists to end — a contract asserting invariants nothing checks and nothing schedules.
+Rejected: **correcting I55, I53 and the design's scope claims in this pass** on the grounds that
+each merely transcribes a decision already taken. An invariant and a supported-scope claim are
+decisions under `AGENTS.md` *Hard rules*, not descriptive drift, and editing one here would make
+every invariant editable outside `/contract` whenever a decision entry can be pointed at.
+Reversibility: cheap for the routing; expensive for the classification, since reversing it means
+re-arguing seven decisions.
+
 ## Open
 
 Staging only. Once an item becomes an issue it leaves this list.
