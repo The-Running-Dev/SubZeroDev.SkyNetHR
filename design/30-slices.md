@@ -512,8 +512,13 @@ Acceptance:
     `permission.resolved { reason: 'cancelled_process_exit' }` per outstanding request, then
     `turn.ended { stopReason: 'server_restart' }`, appended at the next `seq` and durable
     before listening (I14, D39).
-  - S7.5 A `ProcessRecord` with no `exitedAt`, a `startedAt` later than the host's last boot
-    and a matching process image is reaped — killing the tree — and its entry is tombstoned.
+  - S7.5 **Retired by S29 (D183, D186), and the id is kept allocated rather than removed.** It
+    asserted that a `ProcessRecord` with no `exitedAt`, a `startedAt` later than the host's last
+    boot and a matching process image is reaped — killing the tree — and its entry tombstoned.
+    Those three tests remain, and are no longer sufficient: I19 adds a host gate ahead of them and
+    an exact creation-time limb behind them, and a record whose recorded creation time is absent is
+    tombstoned rather than reaped. S29.4, S29.5 and S29.6 assert the guard that replaces this. The
+    assertions behind this criterion are S29's to replace, not this document's to delete.
   - S7.6 A record failing any one of those three tests is **not** killed: it is logged and
     tombstoned. Asserted with a record naming a live process of a different image, which is
     still running afterwards (I19).
@@ -1770,20 +1775,20 @@ Acceptance:
     whose latest line is a spawn carries all five guard inputs from that spawn line and none from
     any tombstone.
 
-**S7.5 states the three-limb guard, and this slice gives the guard five.** S7.5 reads "a
+**S7.5 stated the three-limb guard, and this slice gives the guard five.** It read "a
 `ProcessRecord` with no `exitedAt`, a `startedAt` later than the host's last boot and a matching
 process image is reaped"; after this slice, such a record whose recorded creation time is absent is
-tombstoned instead. That is a landed criterion contradicting `20-contract.md`'s I19, which outranks
-it. **It is not corrected here**: D199 routed one landed-body correction to this pass, S22's, and an
-acceptance criterion is a decision under `AGENTS.md` *Hard rules* rather than descriptive drift. It
-is named so that whoever implements this slice meets the contradiction stated rather than as a
-failing assertion.
+tombstoned instead — a landed criterion contradicting `20-contract.md`'s I19, which outranks it.
+**S7.5 is marked retired by this slice**, on the same terms S30 retires S22.3 and S22.4: the id
+stays allocated at the head of its own line, is never reused, and S7.6 still reads against the
+three tests it names. S7.6 itself is untouched and remains true — a record failing any one test is
+logged and tombstoned rather than killed — over five tests now rather than three.
 
 Out of scope: `server.lock` in every respect — S30 owns the lease, the probe's retirement and the
 decision table; reaping another host's orphans, which D181 states stays that host's own next boot
 and is the residual it accepts; closing the window between a spawn returning and its line landing,
-which D23 and D38 both accept; and correcting S7.5, above. Running this slice's suite on the second
-platform is S19's; S29.1's finding covers both platforms because the value it reads is the
+which D23 and D38 both accept; and re-asserting S7.6, which this slice leaves standing. Running
+this slice's suite on the second platform is S19's; S29.1's finding covers both platforms because the value it reads is the
 platform's own.
 
 ## S30 — The storage lock becomes a lease
