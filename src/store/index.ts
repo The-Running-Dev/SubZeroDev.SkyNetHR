@@ -101,11 +101,14 @@ async function toolOutputBytesUsed(storageRoot: string, sessionId: SessionId): P
   return total;
 }
 
-// Temp-file-then-atomic-rename, in the same directory so the rename is on one volume.
-async function atomicWrite(targetPath: string, contents: string): Promise<void> {
+// Temp-file-then-atomic-rename, in the same directory so the rename is on one volume. A
+// reader opening `targetPath` mid-write otherwise observes it after `writeFile`'s internal
+// create/truncate but before the bytes land — this closes that window: `targetPath` only
+// ever exists absent or complete.
+async function atomicWrite(targetPath: string, contents: Buffer | string): Promise<void> {
   const dir = path.dirname(targetPath);
   const tmpPath = path.join(dir, `.${path.basename(targetPath)}.${randomBytes(6).toString('hex')}.tmp`);
-  await writeFile(tmpPath, contents, 'utf8');
+  await writeFile(tmpPath, contents);
   await rename(tmpPath, targetPath);
 }
 
@@ -676,7 +679,7 @@ export async function createStore(config: Config): Promise<Result<Store, StoreEr
       }
       try {
         await mkdir(dir, { recursive: true });
-        await writeFile(filePath, bytes);
+        await atomicWrite(filePath, bytes);
       } catch (err) {
         return ioError(filePath, (err as Error).message);
       }

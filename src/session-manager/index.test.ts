@@ -130,6 +130,23 @@ async function makeManager(
   return { manager, workspaceRoot, storageRoot, store: storeResult.value, checkpoints, config, records };
 }
 
+// `writeToolOutput` is fire-and-forget (I27) — observing `turn.ended` says nothing about
+// whether the blob write has landed yet. Retries only on the specific `storage`/`not_found`
+// outcome that means "not written yet", the same synchronization `getBlobWhenReady` closes
+// over HTTP (`src/edge/sse/index.test.ts`); any other outcome, success included, returns at
+// once (#257).
+async function openToolOutputWhenReady<T>(
+  fn: () => Promise<{ ok: true; value: T } | { ok: false; error: { code: string; cause?: { code?: string } } }>,
+  timeoutMs = 5000,
+): Promise<{ ok: true; value: T } | { ok: false; error: { code: string; cause?: { code?: string } } }> {
+  const start = Date.now();
+  for (;;) {
+    const res = await fn();
+    if (res.ok || res.error.code !== 'storage' || res.error.cause?.code !== 'not_found' || Date.now() - start > timeoutMs) return res;
+    await new Promise((r) => setTimeout(r, 10));
+  }
+}
+
 async function waitUntil(predicate: () => boolean | Promise<boolean>, timeoutMs = 5000): Promise<void> {
   const start = Date.now();
   while (!(await predicate())) {
@@ -2616,7 +2633,7 @@ test('S9.1/S9.2/S9.4 — a tool.result over the byte cap is truncated before its
 
   // S9.2: the untruncated bytes are fetchable, and are the full pre-truncation payload —
   // not the capped envelope's `output`.
-  const openedFirst = await manager.openToolOutput(sessionId, owner, firstData.turnId as never, firstData.callId as never);
+  const openedFirst = await openToolOutputWhenReady(() => manager.openToolOutput(sessionId, owner, firstData.turnId as never, firstData.callId as never));
   assert.equal(openedFirst.ok, true);
   if (openedFirst.ok) {
     const chunks: Buffer[] = [];
@@ -2625,7 +2642,7 @@ test('S9.1/S9.2/S9.4 — a tool.result over the byte cap is truncated before its
   }
 
   // S9.4: two turns emitted the same callId; each turn's link fetches only its own blob.
-  const openedSecond = await manager.openToolOutput(sessionId, owner, secondData.turnId as never, secondData.callId as never);
+  const openedSecond = await openToolOutputWhenReady(() => manager.openToolOutput(sessionId, owner, secondData.turnId as never, secondData.callId as never));
   assert.equal(openedSecond.ok, true);
   if (openedSecond.ok) {
     const chunks: Buffer[] = [];
