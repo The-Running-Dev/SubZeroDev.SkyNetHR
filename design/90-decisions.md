@@ -4868,19 +4868,3 @@ is a clarification of what the mute always meant rather than a change of behavio
 ## Open
 
 Staging only. Once an item becomes an issue it leaves this list.
-
-- **`Test-DesignState.ps1` discards a blocking finding it already computed** (D197).
-  `Invoke-DesignStateCheck` runs `Test-ClassListAgreement` before reading the graph, then the
-  `StateSetAbsent` branch returns `-Findings @()`, dropping it. Measured: the comparison called
-  directly reports `ClassListDisagreement` on an undeclared class; the same table through the
-  entry point reports zero findings. So `20-contract.md § The divergence classes` is canonical
-  and nothing enforces its agreement with the script while `StateSetAbsent` holds — this
-  repository's standing state. The file is kit-owned, and the fix moves that path's exit code
-  from 2 to 1, so it touches the could-not-evaluate contract rather than being a bug fix alone.
-  Belongs upstream in `SubZeroDev.AgentKit` as much as here.
-- **The design-state record set is still unpopulated**, which is D192's other half. D197 wrote the
-  contract's schema sections; `design/state/{units,invariants,contracts,decisions,questions}`
-  remain empty, so `StateSetAbsent` is permanent and every check past it is unreached.
-  `20-contract.md § Artifacts of a unit kind` is not written either, and the section records that
-  the first commit populating the record set makes `GlobDisagreement` read it and report
-  `ContractListUnreadable` until it exists.
