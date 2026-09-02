@@ -21,6 +21,11 @@ jobs:
 
       - run: npm ci
 
+      # Temporary — S28.1's tree-reachability probe (design/30-slices.md § S28),
+      # captured on a real windows-latest runner. Removed once the finding is recorded.
+      - name: S28.1 probe
+        run: node harness/s28-tree-probe.mjs
+
       # verification: true
       - name: Run tests
         run: npm test
