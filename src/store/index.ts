@@ -1,6 +1,6 @@
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import { createReadStream } from 'node:fs';
-import { link, mkdir, open, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { link, mkdir, open, readdir, readFile, rename, rm, stat, writeFile, type FileHandle } from 'node:fs/promises';
 import { createInterface } from 'node:readline';
 import path from 'node:path';
 import type {
@@ -136,22 +136,27 @@ async function tryClaimExclusive(targetPath: string, contents: string): Promise<
 
 async function appendLine(filePath: string, line: string, fsync: boolean): Promise<Result<void, StoreError>> {
   try {
-    if (fsync) {
-      const handle = await open(filePath, 'a');
-      try {
-        await handle.appendFile(line + '\n', 'utf8');
-        await handle.sync();
-      } finally {
-        await handle.close();
-      }
-    } else {
-      const handle = await open(filePath, 'a');
-      try {
-        await handle.appendFile(line + '\n', 'utf8');
-      } finally {
-        await handle.close();
-      }
+    const handle = await open(filePath, 'a');
+    try {
+      await handle.appendFile(line + '\n', 'utf8');
+      if (fsync) await handle.sync();
+    } finally {
+      await handle.close();
     }
+    return { ok: true, value: undefined };
+  } catch (err) {
+    return ioError(filePath, (err as Error).message);
+  }
+}
+
+// `10-design.md § Concurrency` rests audit.ndjson/pids.ndjson/reviews.ndjson/
+// requisitions.ndjson's no-lock argument on each being opened once, as a single append
+// stream owned by `store` — this is that stream: opened once at `createStore` and reused
+// by every append, rather than `appendLine`'s per-call open/close (#57).
+async function appendToHandle(handle: FileHandle, filePath: string, line: string, fsync: boolean): Promise<Result<void, StoreError>> {
+  try {
+    await handle.appendFile(line + '\n', 'utf8');
+    if (fsync) await handle.sync();
     return { ok: true, value: undefined };
   } catch (err) {
     return ioError(filePath, (err as Error).message);
@@ -492,6 +497,23 @@ export async function createStore(config: Config): Promise<Result<Store, StoreEr
     return ioError(storageRoot, (err as Error).message);
   }
 
+  const auditPath = path.join(storageRoot, 'audit.ndjson');
+  const pidsPath = path.join(storageRoot, 'pids.ndjson');
+  const reviewsPath = path.join(storageRoot, 'reviews.ndjson');
+  const requisitionsPath = path.join(storageRoot, 'requisitions.ndjson');
+  let auditHandle: FileHandle;
+  let pidsHandle: FileHandle;
+  let reviewsHandle: FileHandle;
+  let requisitionsHandle: FileHandle;
+  try {
+    auditHandle = await open(auditPath, 'a');
+    pidsHandle = await open(pidsPath, 'a');
+    reviewsHandle = await open(reviewsPath, 'a');
+    requisitionsHandle = await open(requisitionsPath, 'a');
+  } catch (err) {
+    return ioError(storageRoot, (err as Error).message);
+  }
+
   const ring = new Map<SessionId, Envelope[]>();
   const auditCursorSecret = randomBytes(32);
 
@@ -779,25 +801,25 @@ export async function createStore(config: Config): Promise<Result<Store, StoreEr
     },
 
     async appendAudit(record: AuditRecord) {
-      return appendLine(path.join(storageRoot, 'audit.ndjson'), JSON.stringify(record), true);
+      return appendToHandle(auditHandle, auditPath, JSON.stringify(record), true);
     },
 
     async readAuditPage(query: AuditQuery): Promise<Result<AuditPage, StoreError>> {
-      return readAuditPageImpl(path.join(storageRoot, 'audit.ndjson'), query, config.caps.auditPageMax, auditCursorSecret);
+      return readAuditPageImpl(auditPath, query, config.caps.auditPageMax, auditCursorSecret);
     },
 
     async appendPid(record: ProcessRecord) {
-      return appendLine(path.join(storageRoot, 'pids.ndjson'), JSON.stringify(record), false);
+      return appendToHandle(pidsHandle, pidsPath, JSON.stringify(record), false);
     },
 
     async tombstonePid(pid: number, exitedAt: IsoTimestamp) {
       // D95: a tombstone is the second of the file's two line shapes, not a partial record.
       // The latest line for a pid decides liveness; the spawn line carries everything else.
-      return appendLine(path.join(storageRoot, 'pids.ndjson'), JSON.stringify({ pid, exitedAt } satisfies ProcessTombstone), false);
+      return appendToHandle(pidsHandle, pidsPath, JSON.stringify({ pid, exitedAt } satisfies ProcessTombstone), false);
     },
 
     async readOpenPids(): Promise<readonly ProcessRecord[]> {
-      const all = await foldLatestById<ProcessRecord>(path.join(storageRoot, 'pids.ndjson'), 'pid', false);
+      const all = await foldLatestById<ProcessRecord>(pidsPath, 'pid', false);
       return all.filter((r) => r.exitedAt === null);
     },
 
@@ -806,19 +828,19 @@ export async function createStore(config: Config): Promise<Result<Store, StoreEr
       // finalising one. Reviews are human-paced and kilobytes, so the cost that exempts
       // ordinary spill events does not apply here, and a torn tail must never revert an
       // acknowledged `final` review back to `draft` (I29).
-      return appendLine(path.join(storageRoot, 'reviews.ndjson'), JSON.stringify(record), true);
+      return appendToHandle(reviewsHandle, reviewsPath, JSON.stringify(record), true);
     },
 
     async readAllReviews(): Promise<readonly Review[]> {
-      return foldLatestById<Review>(path.join(storageRoot, 'reviews.ndjson'), 'reviewId', true);
+      return foldLatestById<Review>(reviewsPath, 'reviewId', true);
     },
 
     async appendRequisition(record: Requisition) {
-      return appendLine(path.join(storageRoot, 'requisitions.ndjson'), JSON.stringify(record), false);
+      return appendToHandle(requisitionsHandle, requisitionsPath, JSON.stringify(record), false);
     },
 
     async readAllRequisitions(): Promise<readonly Requisition[]> {
-      return foldLatestById<Requisition>(path.join(storageRoot, 'requisitions.ndjson'), 'requisitionId', false);
+      return foldLatestById<Requisition>(requisitionsPath, 'requisitionId', false);
     },
 
     // D161: the decision table this implements is `20-contract.md § store, claimLock's

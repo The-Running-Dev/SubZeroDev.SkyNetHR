@@ -3401,6 +3401,34 @@ test('D130 — boot marks every session live at shutdown with one session.notice
   );
 });
 
+// #115: `endedAt` alone cannot tell a real end from boot's synthesised one for a session
+// still `live` on disk — `endReason` is the field that can. A session already ended before
+// shutdown keeps whatever reason it was given (or `null`, predating this field); one boot
+// closes itself is stamped `'server_restart'` so a later reader knows that `endedAt` was
+// invented, not observed.
+test('#115 — a session ended by restart is persisted with endReason: server_restart; one already ended keeps its own reason', async () => {
+  const { config, store, checkpoints } = await makeManager('full');
+  const wasLive = bootSessionRecord('sess-115-live');
+  const wasEnded = bootSessionRecord('sess-115-ended', { state: 'ended', endedAt: isoAt(500), endReason: 'operator' });
+  for (const record of [wasLive, wasEnded]) {
+    assert.equal((await store.createSession(record)).ok, true);
+    assert.equal((await store.appendEvent(record.id, bootEnvelope(record.id, 1, 'message', { turnId: 't1', role: 'user', text: 'm' }))).ok, true);
+  }
+
+  const manager2 = createSessionManager({ config, store, checkpoints, records: notImplementedProxy<Records>('records') });
+  assert.equal((await manager2.boot()).ok, true);
+
+  const loaded = await store.readAllMeta();
+  const persisted = (id: string) => {
+    const found = loaded.find((m) => m.sessionId === id);
+    assert.ok(found?.result.ok, `expected ${id} to load`);
+    return found.result.ok ? found.result.value : null;
+  };
+
+  assert.equal(persisted('sess-115-live' as never)?.endReason, 'server_restart', 'boot names itself as the reason for the end it synthesised');
+  assert.equal(persisted('sess-115-ended' as never)?.endReason, 'operator', 'a session already ended keeps its own recorded reason, untouched by boot');
+});
+
 test('D130 — a server that went down between turns reports the outage as one dropped interval, and one that went down mid-turn reports none', async () => {
   // Between turns: the spill ends on a paired turn.ended, so boot's notice closes a real
   // idle interval. This is the case D76's `turn.ended { server_restart }` marker could not
