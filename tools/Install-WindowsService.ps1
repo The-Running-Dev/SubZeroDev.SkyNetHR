@@ -33,13 +33,22 @@
 
     That route works: NSSM gives the child a console (2.24 allocates one for inheritance,
     newer builds use CREATE_NEW_CONSOLE) and on stop attaches to it and raises CTRL_C_EVENT.
-    This script does not disable any of that, and never sets AppNoConsole.
+    This script does not disable any of that, and never sets AppNoConsole - and refuses to
+    install over an existing service that already has AppNoConsole set (Test-NssmNoConsole),
+    since that is the one configuration this script's own route depends on not being true.
 
     It is still worth confirming once per host, because the route is configuration-dependent
     in a way that fails silently. NSSM 2.24 is documented as unable to launch services on
     newer Windows without AppNoConsole=1, and that setting removes the console the Ctrl+C
     route needs - every stop then escalates to TerminateProcess, skipping `stop()`'s drain,
-    `manager.shutdown()` and the lock release, while the SCM still reports a clean stop.
+    `manager.shutdown()` and the lock release, while the SCM still reports a clean stop. This
+    script does not attempt to detect that case by parsing the resolved nssm.exe's own
+    version: NSSM documents no command-line way to query it, and picking an admissibility
+    rule without one would be guessing at a policy this repository's own convention (AGENTS.md
+    "Stop if... bring it back rather than picking a floor unilaterally") says not to make
+    unilaterally. Tracked as issue #233's open item; every *other* nssm call's exit status is
+    now checked (Invoke-Nssm), so a rejected command fails the install instead of continuing
+    past it silently.
 
     The check: stop the service, then look for `<STORAGE_ROOT>\server.lock`. A shutdown that
     reached `stop()` removes it (D175, asserted by src/server.test.ts's S27.12); a hard kill
@@ -161,6 +170,34 @@ function Test-RequiredEnv {
     return [pscustomobject]@{ Ok = $true; MissingFields = @() }
 }
 
+function Invoke-Nssm {
+    <# Runs one `nssm <args>` call and throws if it exits nonzero. $ErrorActionPreference =
+       'Stop' does not do this for a native command - a nonzero exit from an .exe is not a
+       terminating error to PowerShell, only a value left in $LASTEXITCODE, so every call
+       below the missing-executable check that "throws" today actually just prints NSSM's
+       own error and carries on to Set-ServiceEnvironment and the "Installed" message. #>
+    param(
+        [Parameter(Mandatory)] [string]   $Nssm,
+        [Parameter(Mandatory)] [string[]] $Arguments
+    )
+    $output = & $Nssm @Arguments 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        throw "nssm $($Arguments -join ' ') failed (exit $LASTEXITCODE): $output"
+    }
+}
+
+function Test-NssmNoConsole {
+    <# $true when the named service already has AppNoConsole set to a nonzero REG_DWORD.
+       Absent key or absent value both mean "not set" - NSSM's own documented default is to
+       allocate a console, so no value present is not the dangerous state. #>
+    param([Parameter(Mandatory)] [string] $ParametersKey)
+
+    if (-not (Test-Path -LiteralPath $ParametersKey)) { return $false }
+    $prop = Get-ItemProperty -LiteralPath $ParametersKey -Name 'AppNoConsole' -ErrorAction SilentlyContinue
+    if (-not $prop) { return $false }
+    return [bool]$prop.AppNoConsole
+}
+
 function Get-ServiceParametersKey {
     <# Where NSSM keeps its per-service settings. Separated so the tests can exercise
        Set-ServiceEnvironment against a writable HKCU key instead of HKLM. #>
@@ -239,17 +276,22 @@ function Invoke-Install {
         throw "EnvFile '$EnvFile' is missing: $($check.MissingFields -join ', ')"
     }
 
+    $paramsKey = Get-ServiceParametersKey -ServiceName $ServiceName
+    if (Test-NssmNoConsole -ParametersKey $paramsKey) {
+        throw "Service '$ServiceName' already has AppNoConsole set. That removes the console the Ctrl+C stop route needs (see this script's own header comment), so every stop would skip src/server.ts's graceful shutdown and still report success. Remove the AppNoConsole value (or the existing service) before installing over it."
+    }
+
     $logDir = Join-Path $RepoRoot 'logs'
     New-Item -ItemType Directory -Force -Path $logDir | Out-Null
 
-    & $nssm.Source install $ServiceName $node.Source $entry
-    & $nssm.Source set $ServiceName AppDirectory $RepoRoot
-    & $nssm.Source set $ServiceName AppStdout (Join-Path $logDir 'service.out.log')
-    & $nssm.Source set $ServiceName AppStderr (Join-Path $logDir 'service.err.log')
-    & $nssm.Source set $ServiceName AppStopMethodConsole $StopTimeoutMs
-    & $nssm.Source set $ServiceName Start SERVICE_AUTO_START
+    Invoke-Nssm -Nssm $nssm.Source -Arguments @('install', $ServiceName, $node.Source, $entry)
+    Invoke-Nssm -Nssm $nssm.Source -Arguments @('set', $ServiceName, 'AppDirectory', $RepoRoot)
+    Invoke-Nssm -Nssm $nssm.Source -Arguments @('set', $ServiceName, 'AppStdout', (Join-Path $logDir 'service.out.log'))
+    Invoke-Nssm -Nssm $nssm.Source -Arguments @('set', $ServiceName, 'AppStderr', (Join-Path $logDir 'service.err.log'))
+    Invoke-Nssm -Nssm $nssm.Source -Arguments @('set', $ServiceName, 'AppStopMethodConsole', $StopTimeoutMs)
+    Invoke-Nssm -Nssm $nssm.Source -Arguments @('set', $ServiceName, 'Start', 'SERVICE_AUTO_START')
 
-    Set-ServiceEnvironment -Vars $vars -ParametersKey (Get-ServiceParametersKey -ServiceName $ServiceName)
+    Set-ServiceEnvironment -Vars $vars -ParametersKey $paramsKey
 
     if ($ServiceAccount) {
         Write-Host "This script does not set the service account - run: sc.exe config $ServiceName obj= $ServiceAccount password= <password>, or set it through Services.msc. Passing the password here would put it in this process's argument list, which is the exact exposure Set-ServiceEnvironment above exists to avoid for AUTH_SECRET."
