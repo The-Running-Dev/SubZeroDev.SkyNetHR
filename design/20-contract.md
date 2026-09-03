@@ -824,7 +824,7 @@ shape:
 
 | File | Existing data | Rule |
 |---|---|---|
-| `meta.json` | none | `schemaVersion` gates rehydration. An unknown version is treated exactly as a corrupt file: the session is skipped, logged, and its files left untouched |
+| `meta.json` | none | `schemaVersion` gates rehydration. An unknown version is treated exactly as a corrupt file: the session is skipped, logged, and its files left untouched. **Additive-only under the same rule as the append-only files above, with `schemaVersion` reserved for what that rule cannot absorb** (D203): readers ignore unknown fields, an added field must be optional *and* must read as absent on a record written before it existed, and a **removed or retyped** field is a `schemaVersion` bump plus the refusal to rehydrate. So an optional addition costs no bump — `SessionRecord.endReason?` was the first, and bumping for it would have orphaned every existing session over a change no reader can misread. This is the one file whose misreading D49 calls silent wrong state rather than a parse error, which is why the ordinary case is written down here rather than left to precedent |
 | `events.ndjson`, `audit.ndjson`, `pids.ndjson` | none | Readers ignore unknown fields and drop an unparseable trailing line. Added fields must be optional; a removed or retyped field is a new `schemaVersion` on `meta.json` and a refusal to rehydrate older sessions |
 | `reviews.ndjson`, `requisitions.ndjson` | none | Readers ignore unknown fields; added fields must be optional. A dropped trailing line does not shorten the record, it reverts it to the previous line for that id. **A removed or retyped field is refused rather than gated** (I63, D200): these two carry no discriminator and one is not added — a shape change the additive rules cannot absorb is written under a new filename, `reviews.v2.ndjson` or `requisitions.v2.ndjson`, which boot selects by presence. Converting the records already under the old name is a one-time read-and-write of the *new* file, so `Never rewritten` above still holds of both |
 | `server.lock` | none | Rewritten whole at every claim **and at every renewal**, and removed at every clean release. Nothing reads a lock it did not just find, so there is nothing to migrate. A lock left by a build predating the lease carries neither `instanceId` nor `renewals`, which is a counter that can never be observed moving — the reclaim path, reached by the ordinary rule and not by a special case. **That is why D196's refusal is keyed on a file that will not *parse*, not on one missing a field**: a legacy lock is well-formed JSON and must reach the reclaim path, and a rule that refused on an absent `renewals` would strand exactly the deployment this migration story exists for |
@@ -985,6 +985,24 @@ What the declarations cannot say:
 - `writeAttachment` carries `mediaType` alongside the bytes so that a later `openAttachment`
   can answer the read route's allow-list check without scanning the session's spill for the
   `AttachmentRef` that named the id.
+
+**A `Store` owns OS handles and must be closed, and the method has no declaration to point at
+yet** (D202):
+
+```ts
+close(): Promise<void>;
+```
+
+The four server-wide append files are each opened once and held for the life of the store — that
+is what *Persisted schemas* rests its no-lock claim on — so until this exists a `Store`'s OS
+resources outlive every use of it. **It returns no `Result`**: it is called from shutdown, where
+best-effort is the rule and no error union gains a variant. **It is idempotent and writes
+nothing**, so it establishes no durable state and I52 needs no room made for it. The obligation is
+the *caller's*, and a `Store` is deliberately **not** process-scoped: several suites construct one
+per temporary root precisely to exercise a storage root vanishing under a live store (S7.10,
+S22.6), and declaring a single process-wide store would reclassify those as contract violations
+rather than release a handle. Where the close sits in shutdown, and why it is behind the release
+rather than in front of it, is under *`server`* below.
 
 **`ServerLock`, `Store.claimLock` and `Store.releaseLock` are declared in
 `src/contract/index.ts` (the type) and `src/store/index.ts` (the bodies). `claimLock` no longer
@@ -1356,10 +1374,34 @@ What the declarations cannot say:
   all of it** — see *`server`* below, and I52. So `server_restart` fires on an orderly stop
   exactly as it does after a power cut: boot cannot tell them apart and is not asked to.
 - **A turn ends by ending everything it spawned, on every path it can end by** (D184, I59).
-  The tree kill is not the interrupt path's and boot reaping's alone: normal completion — a
-  `result` followed by `close(0)`, which is the overwhelmingly common way a turn ends — kills the
-  tree too, before `turn.ended` is emitted and before the turn slot is cleared. **There is one
-  way to end a process tree in this server (D38's) and no path may grow a second.**
+  The tree kill is not the interrupt path's and boot reaping's alone: normal completion — the
+  overwhelmingly common way a turn ends — kills the tree too, before `turn.ended` is emitted and
+  before the turn slot is cleared. **There is one way to end a process tree in this server (D38's)
+  and no path may grow a second.**
+
+  **On that path the kill is issued at the `result`, while the child is still alive — not after
+  its exit** (D201). The ordering is not a preference.
+  `design/findings/S28-tree-reachability.md` measured D38's two mechanisms against an
+  already-exited root on this repository's own CI matrix, and they diverge: POSIX's
+  `process.kill(-pgid, 'SIGKILL')` still reaches a surviving group member once the leader is gone,
+  while Windows' `taskkill /PID <pid> /T /F` fails at target resolution — `ERROR: The process
+  "<pid>" not found.`, exit code 128 — and **never begins `/T`'s tree walk at all**, so a kill
+  issued behind the child's exit reaches nothing there whatever the descendants' own fate.
+  Killing while the tree still has a live root is the one placement at which D38's single
+  mechanism holds I59 on both platforms, which is the half of the invariant the finding actually
+  threatened.
+
+  **So an adapter surrenders the tree at `result` rather than at `close`, and any later adapter
+  inherits that obligation** (D201). The turn's work is complete at the `result` and the child has
+  nothing further to contribute, so the manager kills from there and the child's own exit arrives
+  as a *consequence* of the kill rather than as its trigger. `turn.ended` still follows that exit,
+  which is what keeps the guarantee below observable at the moment a caller can see it.
+
+  **A child's exit status is therefore not diagnostic on this path**: a non-zero code or a signal
+  behind a `result` records the server's own act and must never turn a completed turn into a failed
+  one. What the `result` established is the turn's outcome; nothing about how the child then died
+  revises it. The other three paths — interrupt, adapter failure, shutdown — are unmoved, because
+  each already kills a tree whose root is alive.
 
   **What a caller may rely on is the whole point**: when `turn.ended` is observable, no process
   that turn started is still running. Without that, "no turn means no child" meant only "no CLI"
@@ -1533,7 +1575,7 @@ the order *`session-manager`* fixes above, wires exactly one edge (D10, D117) �
 listens (I18). Every refusal on that path exits non-zero having named the fix on stderr, and
 none of them is a warning.
 
-**Shutdown runs five steps and, as with boot, the order is the point**
+**Shutdown runs six steps and, as with boot, the order is the point**
 (`10-design.md` § *Shutdown ordering*):
 
 ```
@@ -1543,7 +1585,8 @@ none of them is a warning.
             is closed                                                         (D176)
 3. kill     every live turn's child TREE, then one ProcessTombstone each      (D177)
 4. release  stop renewing, then remove <storage>/server.lock if still ours,
-            bounded, exit zero                                                (D175, D180, D195)
+            bounded                                                           (D175, D180, D195)
+5. close    store.close(): the four server-wide append handles, then exit     (D202)
 ```
 
 **What is *not* among them is the load-bearing part** (D174, I52). No session is marked ended,
@@ -1635,6 +1678,13 @@ precisely the mechanism that lets them: a server that stalled long enough to be 
 reclaimed, and then shut down tidily would delete a *successor's* lock. Step 4 therefore removes
 the file only while it still carries this instance's `instanceId`, and a mismatch is a logged
 no-op rather than an error — shutdown raises nothing, as below.
+
+**Step 5 is last because step 4 is what a successor watches** (D202, I53). A store closed ahead
+of the release could not write a line the release path still wanted, and there is nothing to gain
+by closing earlier: the handles are this process's own, invisible to any other, and no successor
+can observe them either way. So the close sits behind the one act that matters across processes
+and in front of the exit. **It is best-effort like every step past the guard**, and it establishes
+no durable state — I52 is untouched, because closing a handle is not a write.
 
 **Shutdown raises nothing.** Past the guard every step is best-effort: a failure is logged and
 the next step runs, and **no variant is added to any error union** for it. **Shutdown has exactly
@@ -2276,13 +2326,13 @@ highest-value section in this document.
 | **I50** | A storage root is held by at most one server process. `<storage>/server.lock` is claimed **before boot's reap step**, not merely before `listen`, and is reclaimed only where its `(instanceId, renewals)` pair is observed unchanged across one full observation window measured on the claiming process's own monotonic clock — **whichever host wrote it**, and with no wall clock compared anywhere in the decision (D180). A boot that refuses on a held lock has written nothing server-wide. **A storage root is supported on a local filesystem or a bind mount only** (D194): the one hole — a live holder whose renewals are invisible for a full window — needs a cache or a partition between writer and reader, which two processes on one host do not have, so it is out of reach rather than tolerated. It is what a network-share root would reintroduce, and closing it there would need a fencing service outside the storage root (D7) | `store`, `session-manager` |
 | **I51** | A `message.delta` is a live-only frame, for **both** vendors: it is assigned no `seq`, no `Envelope` is ever constructed for it, it never enters the ring buffer, it is never appended to `events.ndjson`, and it is never replayed. It is delivered to the subscribers attached when it is produced and to no others. Deltas for one `turnId` concatenate in arrival order to the `message` that follows (D168) | `session-manager`, `adapters/*` |
 | **I52** | A shutdown establishes no durable state and holds no session invariant. It marks no session ended, closes no turn on disk, appends to no spill, writes no `session.notice`, and emits no envelope. Its only durable write is one `ProcessTombstone` per child it killed, which records what shutdown *did* rather than repairing what it found. Every repair stays boot's, so the crash path and the orderly path converge on one implementation of each (D174). **It is held by construction rather than by inspection**: I55 stops every notification at the sink, so no code below it is in a position to emit, resolve or append during teardown (D178) | `server`, `session-manager` |
-| **I53** | `<storage>/server.lock` is removed only as the last act before exit, after the listener has closed and after the kill step has run — **except on `server.on('error')`, the failed-bind path**, where neither precondition can be met: `listen` never succeeded, so there is no listener to close, and no turn has been started, so there is no child to kill. There, release is the whole of shutdown: it runs at once, still ownership-checked like every other release, and exits non-zero. A shutdown that cannot get that far — on either path — leaves the lock rather than releasing it early, and the next boot reclaims it one observation window after the holder's last renewal (D175, D180, D199) | `server` |
+| **I53** | `<storage>/server.lock` is removed only as the last act **a successor can observe** — after the listener has closed and after the kill step has run, with nothing behind it but `store.close()`, which releases this process's own file handles, writes nothing, and is invisible to any other process (D202) — **except on `server.on('error')`, the failed-bind path**, where neither precondition can be met: `listen` never succeeded, so there is no listener to close, and no turn has been started, so there is no child to kill. There, release is the whole of shutdown: it runs at once, still ownership-checked like every other release, and exits non-zero. A shutdown that cannot get that far — on either path — leaves the lock rather than releasing it early, and the next boot reclaims it one observation window after the holder's last renewal (D175, D180, D199) | `server` |
 | **I54** | A shutdown's completion never depends on a client disconnecting. Every step past the guard is bounded, so the exit is reached whether or not a subscriber is still attached — the clean path is reachable in the configuration that ships, not only when nobody was watching (D176) | `server` |
 | **I55** | From the moment `SessionManager`'s shutdown method is entered, no `AdapterNotification` of any kind reaches a handler below the sink. The mute sits on the manager's own `notify` sink, which every notification already passes through, and **not** on the `exited` handler: `turn.ended` arrives as a second, separate notification after `exited` inside the same synchronous callback, so a mute on the handler would silence the cancellations and let the turn's closure through. **One kind is not simply dropped**: a `spawned` reaching the sink is answered there — `killProcessTree(n.pid, n.pgid)` on the pid the notification itself carries, D23's own reap-kill — because that pid is the only handle a child spawned behind the mute leaves, and nothing else in this module ever holds it. The kill writes nothing, resolves nothing, emits nothing and appends nothing, so no code below the sink runs either way and I52 still holds by construction (D198). The mute is one-way — nothing clears it, and shutdown is its only caller (D178) | `session-manager` |
 | **I56** | `<storage>/server.lock` is written or removed only by the instance that holds it. `releaseLock` and every renewal read the file first and act only while it still carries this process's `instanceId`; an absent file or a foreign one means this server has been displaced — it removes nothing, and stops by running shutdown's ordinary steps, whose release then reads a foreign id and deletes nothing of its own accord (D180, D195). **Renewal continues through shutdown's steps 1 to 3 and is cancelled as step 4's first act**: this server holds the root while it drains, kills and tombstones, so a timer stopped any earlier lets a successor reclaim a root still being written to | `store`, `server` |
 | **I57** | `pid`, `hostname`, `startedAt` and `image` on a `ServerLock` are informational. No decision reads them: not the reclaim decision, not the release check, not the renewal check. Their only consumer is the text of a `StartupError.storage_locked` (D180) | `store`, `session-manager` |
 
-| **I59** | A turn ends by ending the process tree its child rooted, on **every** path a turn can end by — normal exit, interrupt, adapter failure, shutdown — using D38's one mechanism and no other. When `turn.ended` is observable for a turn, no process that turn started is still running, so a released workspace claim and a subsequent restore are never conditional on an untracked descendant (D184) | `session-manager`, `adapters/*` |
+| **I59** | A turn ends by ending the process tree its child rooted, on **every** path a turn can end by — normal exit, interrupt, adapter failure, shutdown — using D38's one mechanism and no other. When `turn.ended` is observable for a turn, no process that turn started is still running, so a released workspace claim and a subsequent restore are never conditional on an untracked descendant (D184). **Every one of those paths kills a tree whose root is still alive**: on normal exit the kill is issued at the `result` and not behind the child's own exit, because `taskkill /PID <pid> /T /F` against an exited root fails at target resolution and never walks the tree, so a kill placed after `close` would hold this invariant on POSIX alone — and a half-platform invariant is not I59 (D201, `design/findings/S28-tree-reachability.md`). The child's exit is then a consequence of the kill and its code or signal is not diagnostic | `session-manager`, `adapters/*` |
 | **I60** | `Config.storageRoot` is jail-normalised, and `pathsOverlap` is false between it and every entry of `Config.workspaceRoots`. A configuration failing this is refused at startup and the server does not listen; no session is ever served from it (D185) | `config` |
 | **I58** | An `IgnoredManifest` records path, kind, size and mtime and **never content**. `RestoreResult.unreached === null` means the comparison could not be made and never that nothing differs; an empty array is the positive answer. No gate, control, or refusal anywhere in this contract reads a manifest — it is a report to an operator and its collapsed-directory blindness makes it unusable as evidence (D182, D187) | `checkpoints`, `client` |
 | **I61** | Every write of `<storage>/server.lock` publishes the file whole, so a sample observes complete contents or none and never a partial file: a reclaim and every renewal by temp-file-then-atomic-rename, and a claim on an absent lock by an exclusive create, which must fail rather than overwrite when a second booting server wrote first. A lock that will not **parse** is therefore corruption, and `claimLock` refuses on it rather than reclaiming (D196). A lock that parses and merely lacks `renewals` is not corruption: it predates the lease, and it reclaims by the ordinary rule (I50) | `store` |
