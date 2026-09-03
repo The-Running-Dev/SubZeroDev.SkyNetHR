@@ -4958,6 +4958,133 @@ sat behind the two that genuinely wait on probes.
 Reversibility: cheap. Adding a per-line discriminator later is an added optional field, which these
 rules already permit, so nothing has to be un-written first.
 
+### 2026-09-03 — D201 The turn's tree kill moves ahead of the child's exit, because Windows cannot reach a tree from a pid that is gone
+Context: S28.1's finding (`design/findings/S28-tree-reachability.md`), measured on this
+repository's own CI matrix and committed by `a921bab` before any change to the turn's end path.
+I59 asserts that a turn ends by ending the process tree its child rooted "on **every** path a turn
+can end by… using D38's one mechanism and no other", and `20-contract.md § session-manager` places
+that kill on the normal-completion path — after a `result` and the child's own `close(0)`, "before
+`turn.ended` is emitted and before the turn slot is cleared". The finding measured that placement
+directly. On POSIX the group survives its leader: `process.kill(-pgid, 'SIGKILL')` reaches a
+grandchild after the recorded pid has exited, confirmed twice. On Windows `taskkill /PID <exited
+pid> /T /F` fails at target resolution — `ERROR: The process "<pid>" not found.`, exit code 128 —
+and **never proceeds to `/T`'s tree walk at all**, so the kill reaches nothing, on both runs,
+independent of the grandchild's own fate. S28.2 fired and the slice stopped, correctly: it says
+"where the kill is issued is `/design`'s and `/contract`'s… a half-platform invariant is not I59."
+Nothing then carried the stop — no entry, `## Open` empty, and #270 tracks the slice rather than
+the decision — so the contract kept asserting an invariant now known to be unachievable.
+Chosen: **the kill moves earlier — to the `result` record, before the child is allowed to exit —
+and I59 stays unconditional.** D184's policy is untouched and its placement is what gives way: the
+invariant a caller relies on is that no process the turn started is running when `turn.ended` is
+observable, and that is satisfied by killing while the tree still has a live root. One mechanism
+covers both platforms again, which is the half of I59 the finding actually threatened. The text is
+not written here: `/contract` (`opus`, `high`) amends I59 and § *session-manager*'s tree-kill
+paragraph, and `/design` (`opus`, `high`) amends *Concurrency § Process lifetime* for what the
+adapter now owes and when a turn is over. S28 then resumes at S28.3.
+Also chosen: **the cost is named rather than discovered.** Killing before the child exits changes
+what the adapter owes — it must surrender the tree at `result` rather than at `close` — and any
+later adapter inherits that obligation. Reversing it once two adapters depend on the new ordering
+is expensive, which is why the placement is decided here and not inside the slice.
+Rejected: **weakening I59 to POSIX only.** Cheapest to write, and it breaks D64's two-platform
+equality, makes the workspace claim and the restore guarantee conditional on Windows alone — which
+is precisely what D184 rejected — and leaves the contract carrying the half-platform invariant its
+own S28.2 says is not I59.
+Rejected: **replacing D38's Windows mechanism with a Job Object assigned at spawn**, which would
+hold I59 unconditionally with no ordering change and is the technically cleaner answer on that
+platform. Rejected on scope and on D38: it is new Windows-specific spawn machinery that S28 puts
+out of scope, and it reopens a settled decision to avoid amending an unsettled placement.
+Rejected: **filing the stop as an issue and deciding later.** That is the status quo, and the
+status quo is a contract asserting an invariant measured to be unachievable — the exact condition
+D199 was written to end.
+Reversibility: expensive. Reversing it means re-arguing where a turn ends and re-teaching every
+adapter.
+
+### 2026-09-03 — D202 A `Store` owns OS handles and must be closed, and the gate exercises the Node range the package declares
+Context: `e545905` replaced `store`'s per-append open-and-close with four cached `FileHandle`s, one
+per server-wide append file, making true of the code what `10-design.md § Concurrency` had asserted
+of it since the beginning — "each is opened once, as a single append stream owned by `store`"
+(#57). Nothing gained the ability to release them: `Store` has no `close` or `dispose`, so a
+`Store`'s OS resources now outlive every use of it. On the shipped server that is invisible,
+because process exit closes the descriptors. In the suite it is not: `dist/records/index.test.js`
+and `dist/session-manager/index.test.js` both fail on Node 25.3.0 with "A FileHandle object was
+closed during garbage collection… now considered an error", naming all four files. **The gate does
+not see it because the gate is narrower than the promise**: `package.json` declares
+`"node": ">=22.11.0"`, an open upper bound, and `.github/workflows/verify.yml` pins exactly
+`22.11.0` — the one version at the bottom of the range, where the same leak is still only a
+deprecation warning. Every check on main is green over a defect reproducible on a supported
+runtime.
+Chosen: **`Store` gains a close, `server.ts` calls it, and the CI matrix gains a current-Node leg.**
+The handle lifetime becomes stated rather than incidental: `20-contract.md § store` says a `Store`
+owns OS handles and must be closed, and the close runs as shutdown's last act **after**
+`releaseLock`, because I53 puts the lock's removal last among the acts that matter to a successor
+and a store closed ahead of it could not write a final line. Widening the matrix is half the fix
+and not a separate nicety — a leak only a version outside the gate can see is one the gate was
+never going to catch, whoever fixes this instance.
+Also chosen: **the code is not written here.** It is a defect with no slice, so `/fix` (`sonnet`,
+`medium`) reproduces it, files the bug issue on its own description path, and lands the close, the
+test cleanup and the workflow leg. This entry decides the shape; it does not implement it.
+Rejected: **fixing the tree and leaving the gate pinned.** Green everywhere within the hour, and it
+preserves exactly the condition that let this ship — the next version-sensitive defect is found the
+same way, by somebody running the suite by hand.
+Rejected: **narrowing the declared range to `~22.11` so the declaration matches what the gate
+proves.** Honest about the gate and wrong about the defect: the unclosed handles are real on every
+version, and 22.11 only downgrades the symptom. It buys a green suite by making the project
+unrunnable on current Node for no design reason.
+Rejected: **declaring a `Store` process-scoped** and reworking the tests to share one. It reads as
+the smaller change and is the larger one: several suites construct a `Store` per temporary root
+precisely to exercise a storage root vanishing underneath a live store (S7.10, S22.6), and this
+would reclassify those as contract violations rather than close a single handle.
+Reversibility: cheap. A close that is never called is inert, and a matrix leg is one line.
+
+### 2026-09-03 — D203 `meta.json` carries the additive-field rule the other persisted files already have
+Context: `20-contract.md § Persisted schemas — Migration` gives every persisted file a forward rule
+except one. `events.ndjson`, `audit.ndjson` and `pids.ndjson` share a row saying readers ignore
+unknown fields and added fields must be optional; the two record logs have their own under I63
+(D200); `server.lock`, the manifest and the opaque blobs each have theirs. `meta.json`'s row states
+only that `schemaVersion` gates rehydration and that an unknown version reads as a corrupt file
+(D49). It is silent on the ordinary case — adding a field — and #115's fix already relied on an
+answer: `SessionRecord.endReason?` was added as optional with no version bump, justified in a code
+comment and nowhere else. The gap is narrow and it sits on the one file whose misreading D49 calls
+silent wrong state rather than a parse error, which is why it is worth closing rather than leaving
+to precedent.
+Chosen: **`meta.json` is additive-only under the same rule as the append-only files, and
+`schemaVersion` is reserved for what that rule cannot absorb.** Readers ignore unknown fields, an
+added field must be optional and must read as absent on a record written before it existed, and a
+removed or retyped field is a `schemaVersion` bump plus D49's refusal to rehydrate. `/contract`
+(`opus`, `high`) writes it into that row. This ratifies what the tree does rather than changing it,
+which is why it is a one-row amendment and not a migration.
+Rejected: **bumping `schemaVersion` to 2 for the field #115 added**, and for every field after it.
+It turns D49's discriminator into a ratchet where each optional addition orphans every existing
+session, and it protects no deployed data — § *Migration* records that there is none.
+Rejected: **leaving it to D49 by implication**, on the grounds that a version gate plus a code
+comment is enough. That is the state that produced this finding: the rule making #115's fix safe
+was never written, so the next person adding a field re-derives whether they owe a bump, and the
+file where guessing wrong is silent wrong state is the worst place to make them guess.
+Reversibility: cheap.
+
+### 2026-09-03 — D204 #206 stays closed; S30's own issue is the artifact D199 wanted it reopened for
+Context: D199 routed `/track` to reopen #206 against S30, on the reasoning that it "was closed by
+the pull request that decided the lease rather than by one that built it, which removed the last
+artifact that would have shown the work outstanding." `/track` ran at `162bb29` and did not reopen
+it, so the tracker and a recorded decision disagree — which is a thing to settle rather than to
+leave as a silent departure.
+Chosen: **#206 stays closed, and the instruction is treated as satisfied by other means.** Between
+D199 and now, `/slices` wrote S30 and `/track` opened #272 for it. #272 *is* the artifact showing
+the lease outstanding, held against the current slice text, which is what the reopen was asked to
+restore. Reopening #206 as well would put two open issues over one body of work, the older carrying
+a framing that predates the lease decision it now sits beside.
+Also chosen: **#57 and #115 are closed here.** `e545905` landed both — the four handles are held
+open and `SessionRecord.endReason` is stamped on every real end — and closing an issue is the
+observing command's act rather than a later sync pass (`AGENTS.md`, *Tracking work*). The unclosed
+handles that D202 addresses are a *consequence* of #57's fix and not #57 reopening: the file is
+held open as designed, and what was missing is the release.
+Rejected: **executing D199 literally and reopening #206.** It follows the recorded decision exactly
+and buys nothing the tracker does not already have, at the cost of two issues for one slice.
+Rejected: **leaving all three to a later `/track` run.** `/track` is idempotent over slices and
+milestones and deliberately does not close issues; #57 and #115 would have stayed open until
+something else noticed, which is how they reached this pass.
+Reversibility: cheap in both directions — an issue reopens as easily as it closes.
+
 ## Open
 
 Staging only. Once an item becomes an issue it leaves this list.
