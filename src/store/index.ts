@@ -151,12 +151,32 @@ async function appendLine(filePath: string, line: string, fsync: boolean): Promi
 
 // `10-design.md § Concurrency` rests audit.ndjson/pids.ndjson/reviews.ndjson/
 // requisitions.ndjson's no-lock argument on each being opened once, as a single append
-// stream owned by `store` — this is that stream: opened once at `createStore` and reused
-// by every append, rather than `appendLine`'s per-call open/close (#57).
-async function appendToHandle(handle: FileHandle, filePath: string, line: string, fsync: boolean): Promise<Result<void, StoreError>> {
+// stream owned by `store` — this is that stream: opened on first use and reused by every
+// append after, rather than `appendLine`'s per-call open/close (#57). Concurrent first
+// calls share one in-flight open via the cached promise, so only one handle is ever opened
+// for a given path.
+function lazyHandle(filePath: string): () => Promise<Result<FileHandle, StoreError>> {
+  let cached: Promise<Result<FileHandle, StoreError>> | null = null;
+  return () => {
+    if (cached === null) {
+      cached = open(filePath, 'a').then(
+        (handle) => ({ ok: true, value: handle }) as const,
+        (err: unknown) => {
+          cached = null; // a failed open holds nothing worth caching; the next call may retry
+          return ioError(filePath, (err as Error).message) as Result<FileHandle, StoreError>;
+        },
+      );
+    }
+    return cached;
+  };
+}
+
+async function appendToHandle(getHandle: () => Promise<Result<FileHandle, StoreError>>, filePath: string, line: string, fsync: boolean): Promise<Result<void, StoreError>> {
+  const handleResult = await getHandle();
+  if (!handleResult.ok) return handleResult;
   try {
-    await handle.appendFile(line + '\n', 'utf8');
-    if (fsync) await handle.sync();
+    await handleResult.value.appendFile(line + '\n', 'utf8');
+    if (fsync) await handleResult.value.sync();
     return { ok: true, value: undefined };
   } catch (err) {
     return ioError(filePath, (err as Error).message);
@@ -501,18 +521,19 @@ export async function createStore(config: Config): Promise<Result<Store, StoreEr
   const pidsPath = path.join(storageRoot, 'pids.ndjson');
   const reviewsPath = path.join(storageRoot, 'reviews.ndjson');
   const requisitionsPath = path.join(storageRoot, 'requisitions.ndjson');
-  let auditHandle: FileHandle;
-  let pidsHandle: FileHandle;
-  let reviewsHandle: FileHandle;
-  let requisitionsHandle: FileHandle;
-  try {
-    auditHandle = await open(auditPath, 'a');
-    pidsHandle = await open(pidsPath, 'a');
-    reviewsHandle = await open(reviewsPath, 'a');
-    requisitionsHandle = await open(requisitionsPath, 'a');
-  } catch (err) {
-    return ioError(storageRoot, (err as Error).message);
-  }
+
+  // Opened on first append rather than here, and cached from then on: a `store` that never
+  // appends to one of these four (S7.10/S22.6 construct one only to find the storage root
+  // gone before ever writing to it) must never hold a handle into it — an open handle on
+  // Windows pins the directory it lives in, so opening all four unconditionally at
+  // `createStore` turned "the root vanished out from under a live store" from a case these
+  // tests can construct into one where the vanishing itself failed on `rmdir`. "Opened
+  // once" (#57) is a property of the appends that happen, not a promise made at
+  // construction to files that may never be written.
+  const getAuditHandle = lazyHandle(auditPath);
+  const getPidsHandle = lazyHandle(pidsPath);
+  const getReviewsHandle = lazyHandle(reviewsPath);
+  const getRequisitionsHandle = lazyHandle(requisitionsPath);
 
   const ring = new Map<SessionId, Envelope[]>();
   const auditCursorSecret = randomBytes(32);
@@ -801,7 +822,7 @@ export async function createStore(config: Config): Promise<Result<Store, StoreEr
     },
 
     async appendAudit(record: AuditRecord) {
-      return appendToHandle(auditHandle, auditPath, JSON.stringify(record), true);
+      return appendToHandle(getAuditHandle, auditPath, JSON.stringify(record), true);
     },
 
     async readAuditPage(query: AuditQuery): Promise<Result<AuditPage, StoreError>> {
@@ -809,13 +830,13 @@ export async function createStore(config: Config): Promise<Result<Store, StoreEr
     },
 
     async appendPid(record: ProcessRecord) {
-      return appendToHandle(pidsHandle, pidsPath, JSON.stringify(record), false);
+      return appendToHandle(getPidsHandle, pidsPath, JSON.stringify(record), false);
     },
 
     async tombstonePid(pid: number, exitedAt: IsoTimestamp) {
       // D95: a tombstone is the second of the file's two line shapes, not a partial record.
       // The latest line for a pid decides liveness; the spawn line carries everything else.
-      return appendToHandle(pidsHandle, pidsPath, JSON.stringify({ pid, exitedAt } satisfies ProcessTombstone), false);
+      return appendToHandle(getPidsHandle, pidsPath, JSON.stringify({ pid, exitedAt } satisfies ProcessTombstone), false);
     },
 
     async readOpenPids(): Promise<readonly ProcessRecord[]> {
@@ -828,7 +849,7 @@ export async function createStore(config: Config): Promise<Result<Store, StoreEr
       // finalising one. Reviews are human-paced and kilobytes, so the cost that exempts
       // ordinary spill events does not apply here, and a torn tail must never revert an
       // acknowledged `final` review back to `draft` (I29).
-      return appendToHandle(reviewsHandle, reviewsPath, JSON.stringify(record), true);
+      return appendToHandle(getReviewsHandle, reviewsPath, JSON.stringify(record), true);
     },
 
     async readAllReviews(): Promise<readonly Review[]> {
@@ -836,7 +857,7 @@ export async function createStore(config: Config): Promise<Result<Store, StoreEr
     },
 
     async appendRequisition(record: Requisition) {
-      return appendToHandle(requisitionsHandle, requisitionsPath, JSON.stringify(record), false);
+      return appendToHandle(getRequisitionsHandle, requisitionsPath, JSON.stringify(record), false);
     },
 
     async readAllRequisitions(): Promise<readonly Requisition[]> {
