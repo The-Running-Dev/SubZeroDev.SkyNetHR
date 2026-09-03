@@ -1809,14 +1809,19 @@ a CI detail, because these are the places where one design compiles into two beh
 | Checkpoint restore | An open handle blocks the write — which is why D16's per-turn child matters here and not on Linux | No equivalent block | *Concurrency § Process lifetime* |
 | Host boot time, for the pid reuse guard | Different source | Different source | *Data model § Process record* |
 | Process creation time, for the guard's fourth limb (D183) — read at spawn to record `osCreatedAt`, and again at boot to compare against it (D186) | CIM `Win32_Process.CreationDate` | `/proc/<pid>/stat` field 22, against `/proc/stat`'s `btime` | *Data model § Process record* |
-| Storage root on a network share | SMB | NFS | *Concurrency § Boot ordering*, D180 |
 
-**A third target joined the pair, and it is a storage class rather than an OS.** D180 supports a
-storage root on a network share, which makes the lease's cross-client visibility a gated behaviour
-and not an incidental one: renewals must become visible to another client inside the observation
-window, which is a property of the mount's caching, not of Node. The two rows above are what the
-gate has to exercise beyond the OS matrix — and the honest scope is close-to-open consistency and
-nothing stronger, with partition named as the residual rather than tested away.
+**A third target was proposed and then withdrawn, and the withdrawal is what keeps this list an OS
+matrix** (D194). D180 supported a storage root on a network share, which would have made the lease's
+cross-client visibility a gated behaviour rather than an incidental one — a renewal becoming visible
+to another client inside the observation window is a property of the mount's attribute caching, not
+of Node, and NFSv3, NFSv4 and SMB each answer it differently and each carry cache options that could
+exceed any window this design would otherwise pick. No gate for a real share exists, and an ungated
+storage class is the ungated two-platform claim D64 already rejected once. So the supported storage
+classes are **a local filesystem and a bind mount, and nothing else**, and the gate's target list is
+the rows above with no storage row among them. Widening stays cheap and additive if a gate is ever
+built — it adds classes and promotes the observation window from a module constant to configuration
+— which is why the scope is stated here rather than left to be inferred from whatever the suite
+happens to run on.
 
 **The gate exists and it does not cover this whole list.** The pair is a requirement of the
 brief and the design carries code paths for both; D64's objection was to a two-platform claim
@@ -1843,7 +1848,7 @@ used to describe and is not the same as being ungated.
 | One corrupt line in a record log *(tier two)* | Parse failure on that line | Drop the line, log it, keep reading | The record at its previous state, or absent | See *Persistence summary* for why a drop here reverts rather than shortens |
 | Another server is holding the storage root | Its lease is still being renewed across one observation window (D180) | **Refuse to start**, non-zero | Startup error naming the holder's `pid`, `hostname` and `startedAt` — informational fields, printed because a refusal that cannot say *who* is most of the way to useless | Nothing server-wide written; the claim precedes the reap step |
 | A crashed server's lock is still on disk | Its counter does not move across one observation window | **Reclaim it**, logged, and boot on | One observation window of startup delay, once | The reclaimed lock replaced by this server's own |
-| A live holder's renewals cannot be seen — partition, or the share went read-only under it | **Not detected.** This is the residual D180 names | Reclaim, and both servers run | Nothing, until the displaced holder's next renewal finds a foreign id and stops | Interleaved appends to the four server-wide files for the overlap. Unpreventable without a fencing service outside the storage root (D7) |
+| A live holder stalls for a full observation window — a suspended VM, a paused container, a host thrashing | **Not detected**, and it cannot be: a holder that is not writing is indistinguishable from one that has died. This is the residual D180 names, narrowed by D194 to what the supported scope still reaches | Reclaim, and both servers run | Nothing, until the displaced holder's next renewal finds a foreign id and stops | Interleaved appends to the four server-wide files for the overlap. Unpreventable without a fencing service outside the storage root (D7). Five consecutive missed renewals are what it takes, which is why the window is sized against a stall rather than against a cache |
 | This server's renewal finds the lock gone, or holding another instance's id | Ownership check on every renewal (D180) | **Stop.** It no longer holds the root | The server exiting, saying it was displaced | Whatever the successor holds, untouched — release checks ownership too, so it cannot delete a successor's lock (#207) |
 | Routable bind with no `trustProxy` allow-list, **under a header-trust mode** | Startup check | **Refuse to start**, say why | Startup error naming the fix | — |
 | The same bind under `shared-secret` | Startup check | **Nothing** — it is a legitimate configuration (D154) | The console, listening | — |
@@ -1888,10 +1893,15 @@ Genuinely simultaneous:
   `<storage>/server.lock` is claimed before boot's first step, so the single-process premise this
   whole argument rests on is enforced instead of assumed. **The enforcement is a lease the holder
   renews, and the one case it cannot cover is named** (D180): a holder that is alive but whose
-  renewals are invisible to a second server for a full observation window — a partition, or a share
-  that went read-only underneath it — is declared dead, and then both servers do write to these four
-  files. No filesystem-only mechanism closes that; closing it needs a fencing token from a service
-  outside the storage root, which is a dependency D7 kept out.
+  renewals do not land for a full observation window is declared dead, and then both servers do
+  write to these four files. No filesystem-only mechanism closes that; closing it needs a fencing
+  token from a service outside the storage root, which is a dependency D7 kept out. **What that case
+  can be was narrowed by D194 rather than closed.** Renewals invisible to a reader while the writer
+  is alive need either a client-side attribute cache or a partition between the two, and neither
+  exists between two processes on one host over one local filesystem or bind mount — which is the
+  supported storage scope, and is a large part of why it is drawn there. What survives inside it is a
+  holder that genuinely stops writing across five consecutive renewals: a suspended VM, a paused
+  container, a host thrashing. That is the residual the window is sized against.
 - **The two record registries** *(tier two)*, which are shared mutable state in *memory* and
   therefore governed by the same rule as the turn slot: every state test that decides
   something is claimed in the synchronous block that tests it. There are exactly two such
@@ -1935,6 +1945,27 @@ one that dies with the turn. That is a genuine loss of capability, accepted beca
 alternative is a workspace exclusivity claim and a restore guarantee that are both conditional
 on something no component can observe — and because a console whose restore silently fails is
 worse than one that cannot babysit a daemon.
+
+**Where on that path the kill is issued is not free, and Windows decided it** (D201). Placed where
+normal completion naturally puts it — after the `result` record and after the child's own exit —
+D38's one mechanism was measured against a pid that is already gone. On POSIX the group outlives its
+leader, and `process.kill(-pgid, 'SIGKILL')` still reaches a grandchild. On Windows `taskkill /PID
+<pid> /T /F` resolves the target first, fails when that pid is gone, and **never reaches `/T`'s tree
+walk at all**, so the kill reaches nothing — reliably, on repeated runs, independent of what the
+grandchild is doing. A tree kill that holds on one platform is not the invariant above; it is the
+workspace exclusivity claim and the restore guarantee made conditional on the operating system,
+which is exactly what the paragraph before this one refused. **So the kill moves earlier: it is
+issued at the `result` record, while the tree still has a live root, before the child is allowed to
+exit.** The policy is untouched and the placement is what gives way. What a caller relies on is
+unchanged and unconditional — nothing the turn started is still running by the time `turn.ended` is
+observable — and one mechanism covers both platforms again.
+
+**That changes what an adapter owes, and the obligation is why the placement is decided here rather
+than inside a slice.** An adapter surrenders the tree at `result` rather than at `close`: a turn is
+over when the tree is gone, not when the process object says so. Any later adapter inherits the
+ordering, and reversing it once two of them depend on it means re-teaching both — expensive in the
+one sense this document cares about. Rejected weakening the invariant to POSIX, and rejected
+replacing D38's Windows mechanism with a Job Object assigned at spawn: see *Alternatives considered*.
 
 This is logged as D16, and it is the reason the contract needs an amendment — see
 *Alternatives considered*.
@@ -2199,16 +2230,21 @@ predecessor recorded, and `os.uptime()` reports the host kernel's uptime rather 
 so the limb meant to catch pid reuse is true unconditionally. Both were measured, and both are why
 `docker start` and `docker compose up -d` each refused to start forever against a lock nobody held.
 Watching a counter needs neither a process table nor a shared clock, which is what lets one rule
-cover this container, another container, and another host — and the two-rule split it replaces is
-where both container failures lived.
+cover this container and another container alike — and the two-rule split it replaces is where both
+container failures lived. The same rule would cover another host, and D180 was argued partly on that
+reach; D194 has since put a root two hosts could share out of scope, so the reach is generality the
+mechanism happens to have rather than a configuration anyone may run.
 
 **A boot that reclaims must not then reap across that boundary** (D181). Reclaiming is now possible
-against a lock another host wrote, and `pids.ndjson` records are read straight afterwards. A record
-names a pid, and a pid means nothing outside the machine that issued it, so step 1 reaps only records
-carrying this host's own name and leaves the rest untouched — neither killed nor tombstoned, since
-writing an exit record for a child this server never saw would put a lie in the file boot trusts. The
-consequence is worth stating: an orphan on a host that has lost the root survives until that host
-next boots successfully. That is smaller than the alternative, which is killing an unrelated local
+against a lock this server did not write, and `pids.ndjson` records are read straight afterwards. A
+record names a pid, and a pid means nothing outside the machine that issued it, so step 1 reaps only
+records carrying this host's own name and leaves the rest untouched — neither killed nor tombstoned,
+since writing an exit record for a child this server never saw would put a lie in the file boot
+trusts. **A foreign record cannot arise inside D194's supported scope**, because a local filesystem
+or a bind mount is not shared between hosts, so the guard is kept for what it costs rather than for
+what it currently catches: it is one comparison, and it is what widening the scope would otherwise
+have to add back. The consequence, should a root ever be shared, is worth stating: an orphan on a
+host that has lost the root survives until that host next boots successfully. That is smaller than the alternative, which is killing an unrelated local
 process that happens to share a number and an image.
 
 Reaping precedes rehydration so that no rehydrated session can be adopted by an orphan
@@ -2758,7 +2794,10 @@ predecessor recorded and `os.uptime()` inside a container reports the host's upt
 limb is inert. Rejected an **OS advisory lock**, which is correct by construction and needs no
 counter, because `flock` over NFS is advisory at best and client-local at worst — it would work
 everywhere except the storage class this decision was asked to support — and because D161's native
-dependency and platform-divergence objections both still stand. Rejected a **wall-clock `expiresAt`**
+dependency and platform-divergence objections both still stand. **D194 has since removed that
+storage class from scope**, which retires the first of those three reasons and leaves the other two
+holding the rejection on their own; it is recorded here because the reason that lapsed is the one
+this entry led with. Rejected a **wall-clock `expiresAt`**
 compared against the reader's own clock, the obvious lease, because it is the one shape that cannot
 cross hosts: skewed clocks make a boot declare a live server dead. Rejected **pinning a stable
 compose `hostname:`**, one line and a real fix for the recreate refusal, because it drives every
@@ -2769,6 +2808,32 @@ skips the rest, because D180 makes reclaiming another host's lock possible and a
 off the machine that issued it; rejected carrying the `instanceId` instead, which is more precise
 than the question the reaper is asking, and rejected skipping records that predate the field, which
 strands a generation of real orphans to avoid a foreign record that cannot yet exist.
+
+**From narrowing the storage root's supported classes, D194.** The supported classes are a local
+filesystem and a bind mount, and nothing else; a network-share root is out of scope until a gate
+exercises one, and the lease's observation window is therefore a module constant rather than a
+deployment flag. Rejected **keeping NFSv4 and SMB in scope with the window promoted to a `Config`
+field**, which is the honest shape *if* shares are supported, since no single constant is correct
+across mounts — rejected because it reverses this document's standing ruling that a sibling bound is
+a module constant, for a storage class nothing gates, and because it ships an operator-tunable timing
+knob whose wrong setting has no symptom until two servers interleave appends to the four server-wide
+files. Rejected **keeping them in scope under mandated mount options** (`actimeo`, `noac`) with the
+constant sized to them, the cheaper of the two supporting shapes, because the mandate is
+unenforceable from inside the process — nothing here reads the mount — so a misconfigured share
+breaks the guarantee with no symptom at all, which is worse than the option above, where at least a
+wrong value is visible in configuration.
+
+**From moving the turn's tree kill, D201.** The kill is issued at the `result` record, before the
+child exits, and the tree-kill invariant stays unconditional across both platforms. Rejected
+**weakening it to POSIX only**, cheapest to write and a break of D64's two-platform equality that
+would make the workspace claim and the restore guarantee conditional on Windows alone — precisely
+what the tree-kill decision rejected in the first place. Rejected **replacing D38's Windows mechanism
+with a Job Object assigned at spawn**, which would hold the invariant with no ordering change at all
+and is the technically cleaner answer on that platform, on scope and on D38: it is new
+Windows-specific spawn machinery, and it reopens a settled mechanism in order to avoid amending an
+unsettled placement. Rejected **filing the measurement as an issue and deciding later**, which is the
+status quo, and the status quo was a contract asserting an invariant already measured to be
+unachievable.
 
 Standing decisions this design rests on, all in `90-decisions.md`: D1/D10 transport,
 D2 sequencing, D3 delegated auth, D4 the jail, D5 the permission asymmetry, D6 shadow git,
@@ -2845,9 +2910,13 @@ these are cited by number elsewhere in this document and in the slices.
    foreign-host rule and every limb still reads a local process table (D193). D180 replaces the
    whole test with an observation: the holder renews a counter, and a boot
    reclaims only a lock whose counter did not move across one window measured on its own monotonic
-   clock. One rule, no shared clock, no process table — which is what makes a storage root on a
-   network share supportable at all, and D181 is the guard that support forced, since a pid means
-   nothing off the machine that issued it.
+   clock. One rule, no shared clock, no process table. That reach was argued partly as what would
+   make a storage root on a network share supportable, and **D194 has since ruled such a root out of
+   scope** — a local filesystem or a bind mount, and nothing else — so it is generality the rule
+   happens to have rather than a configuration anyone may run. D181's guard, which that reach forced,
+   is kept on the same terms: a pid means nothing off the machine that issued it, and a guard that
+   cannot fire inside the supported scope costs one comparison and is what widening would otherwise
+   have to add back.
 
 **Needing an experiment:**
 
@@ -3014,16 +3083,21 @@ these are cited by number elsewhere in this document and in the slices.
 
 **Needing a decision from the owner (tier one, opened by *Boot ordering*):**
 
-16. **Which network filesystems is a storage root supported on, and where does the gate run?**
-    D180 supports a shared storage root rather than excluding it, and support that is not gated is
-    the two-platform claim D64 already rejected once. The design can state the property that has to
-    hold — a renewal must become visible to another client inside the observation window, which is
-    close-to-open consistency and nothing stronger — but not which mounts actually deliver it here.
-    NFSv3 and NFSv4 differ on attribute caching, SMB differs again and is the likelier mount on the
-    Windows primary host, and each has cache-window options that could exceed any window this design
-    would otherwise pick. **This is not a question a probe answers on its own**, because the answer
-    depends on which shares this deployment will really use and how they are mounted — a fact only
-    the owner has. What is needed to close it: the list of storage classes in scope, and whether the
-    gate is expected to exercise two real hosts against a real share or to simulate a second client.
-    Until it is answered the observation window cannot be given a number, and `30-slices.md` cannot
-    write an acceptance criterion for #206's `Done when` 5.
+16. **Resolved by D194: a local filesystem or a bind mount, and nothing else — so there is no
+    network gate left to site.** The two facts this question said only the owner had — which storage
+    classes are in scope, and whether a gate stands two real hosts against one share or simulates a
+    second client — turned out to be one fact, and **fixing the scope answered both halves at once**.
+    Neither half was answerable alone: no window follows until the mounts are known, because NFSv3,
+    NFSv4 and SMB each carry attribute-cache options that could exceed any window this design would
+    otherwise pick (NFS `acregmax` alone defaults to 60 s), and no gate can be specified against a
+    class list nobody has fixed. Narrowing removed the need for both, and it is stated rather than
+    left as the ungated claim D64 already rejected once. Within the supported classes a write is
+    visible to another process on the same host immediately, so the window is bounded by a stalled
+    *holder* rather than by a reader's cache, and **no correct value depends on how an operator
+    mounted anything** — which is what makes it a module constant beside the code that reads it
+    rather than a deployment flag. The two rejected options, both of which kept shares in scope, are
+    in *Alternatives considered*. **What it unblocks**: `30-slices.md` can write #206's `Done when` 5,
+    and *Platform divergence* carries an OS matrix with no storage row. **What it does not close is
+    the partition residual — it puts it out of reach**, which is a different and better thing: the
+    case needs a cache or a partition between writer and reader, and the supported scope has neither.
+    Widening is cheap and additive, and needs the gate this answer declines to claim without.
