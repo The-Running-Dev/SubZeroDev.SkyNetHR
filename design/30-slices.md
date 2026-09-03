@@ -1698,8 +1698,10 @@ Acceptance:
     and a half-platform invariant is not I59.
   - S28.3 A turn whose tool started a detached grandchild ends with that grandchild gone: process
     enumeration once `turn.ended` is observable finds it absent. Asserted on the
-    **normal-completion** path — a `result` followed by the child's own exit — which is the path
-    that does not kill today.
+    **normal-completion** path — a `result`, then the kill, then the child's exit as its consequence
+    (D201) — which is the path that does not kill today. **Do not wait for the child to exit on its
+    own before asserting**: that sequence is what S28.1 measured as unreachable on Windows, and
+    S28.9 is where the ordering itself is checked.
   - S28.4 The kill completes before `turn.ended` is emitted and before the turn slot is cleared,
     asserted by instrumenting all three in order, so a caller that reacts to `turn.ended` by
     requesting a restore cannot race a surviving descendant.
