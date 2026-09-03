@@ -76,6 +76,12 @@ export interface SessionRecord {
   state: SessionState;
   readonly createdAt: IsoTimestamp;
   endedAt: IsoTimestamp | null; // non-null iff state === 'ended'
+  // Optional (#115): absent on a session persisted before this field existed, and on any
+  // other read null means "no reason recorded" rather than "not ended" — `endedAt` alone
+  // still carries that. Boot rehydration is the one path that can tell a real end from its
+  // own synthesised `endedAt` (D130's still-`live`-on-disk case), so it is the one path that
+  // writes `'server_restart'` here; every other write is the real reason for a real end.
+  endReason?: SessionEndReason | null;
 }
 
 // What crosses to the client. The persisted record minus `cliSessionId`, which is

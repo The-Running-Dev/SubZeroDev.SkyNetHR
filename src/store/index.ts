@@ -1,6 +1,6 @@
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import { createReadStream } from 'node:fs';
-import { link, mkdir, open, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { link, mkdir, open, readdir, readFile, rename, rm, stat, writeFile, type FileHandle } from 'node:fs/promises';
 import { createInterface } from 'node:readline';
 import path from 'node:path';
 import type {
@@ -136,22 +136,47 @@ async function tryClaimExclusive(targetPath: string, contents: string): Promise<
 
 async function appendLine(filePath: string, line: string, fsync: boolean): Promise<Result<void, StoreError>> {
   try {
-    if (fsync) {
-      const handle = await open(filePath, 'a');
-      try {
-        await handle.appendFile(line + '\n', 'utf8');
-        await handle.sync();
-      } finally {
-        await handle.close();
-      }
-    } else {
-      const handle = await open(filePath, 'a');
-      try {
-        await handle.appendFile(line + '\n', 'utf8');
-      } finally {
-        await handle.close();
-      }
+    const handle = await open(filePath, 'a');
+    try {
+      await handle.appendFile(line + '\n', 'utf8');
+      if (fsync) await handle.sync();
+    } finally {
+      await handle.close();
     }
+    return { ok: true, value: undefined };
+  } catch (err) {
+    return ioError(filePath, (err as Error).message);
+  }
+}
+
+// `10-design.md § Concurrency` rests audit.ndjson/pids.ndjson/reviews.ndjson/
+// requisitions.ndjson's no-lock argument on each being opened once, as a single append
+// stream owned by `store` — this is that stream: opened on first use and reused by every
+// append after, rather than `appendLine`'s per-call open/close (#57). Concurrent first
+// calls share one in-flight open via the cached promise, so only one handle is ever opened
+// for a given path.
+function lazyHandle(filePath: string): () => Promise<Result<FileHandle, StoreError>> {
+  let cached: Promise<Result<FileHandle, StoreError>> | null = null;
+  return () => {
+    if (cached === null) {
+      cached = open(filePath, 'a').then(
+        (handle) => ({ ok: true, value: handle }) as const,
+        (err: unknown) => {
+          cached = null; // a failed open holds nothing worth caching; the next call may retry
+          return ioError(filePath, (err as Error).message) as Result<FileHandle, StoreError>;
+        },
+      );
+    }
+    return cached;
+  };
+}
+
+async function appendToHandle(getHandle: () => Promise<Result<FileHandle, StoreError>>, filePath: string, line: string, fsync: boolean): Promise<Result<void, StoreError>> {
+  const handleResult = await getHandle();
+  if (!handleResult.ok) return handleResult;
+  try {
+    await handleResult.value.appendFile(line + '\n', 'utf8');
+    if (fsync) await handleResult.value.sync();
     return { ok: true, value: undefined };
   } catch (err) {
     return ioError(filePath, (err as Error).message);
@@ -492,6 +517,24 @@ export async function createStore(config: Config): Promise<Result<Store, StoreEr
     return ioError(storageRoot, (err as Error).message);
   }
 
+  const auditPath = path.join(storageRoot, 'audit.ndjson');
+  const pidsPath = path.join(storageRoot, 'pids.ndjson');
+  const reviewsPath = path.join(storageRoot, 'reviews.ndjson');
+  const requisitionsPath = path.join(storageRoot, 'requisitions.ndjson');
+
+  // Opened on first append rather than here, and cached from then on: a `store` that never
+  // appends to one of these four (S7.10/S22.6 construct one only to find the storage root
+  // gone before ever writing to it) must never hold a handle into it — an open handle on
+  // Windows pins the directory it lives in, so opening all four unconditionally at
+  // `createStore` turned "the root vanished out from under a live store" from a case these
+  // tests can construct into one where the vanishing itself failed on `rmdir`. "Opened
+  // once" (#57) is a property of the appends that happen, not a promise made at
+  // construction to files that may never be written.
+  const getAuditHandle = lazyHandle(auditPath);
+  const getPidsHandle = lazyHandle(pidsPath);
+  const getReviewsHandle = lazyHandle(reviewsPath);
+  const getRequisitionsHandle = lazyHandle(requisitionsPath);
+
   const ring = new Map<SessionId, Envelope[]>();
   const auditCursorSecret = randomBytes(32);
 
@@ -779,25 +822,25 @@ export async function createStore(config: Config): Promise<Result<Store, StoreEr
     },
 
     async appendAudit(record: AuditRecord) {
-      return appendLine(path.join(storageRoot, 'audit.ndjson'), JSON.stringify(record), true);
+      return appendToHandle(getAuditHandle, auditPath, JSON.stringify(record), true);
     },
 
     async readAuditPage(query: AuditQuery): Promise<Result<AuditPage, StoreError>> {
-      return readAuditPageImpl(path.join(storageRoot, 'audit.ndjson'), query, config.caps.auditPageMax, auditCursorSecret);
+      return readAuditPageImpl(auditPath, query, config.caps.auditPageMax, auditCursorSecret);
     },
 
     async appendPid(record: ProcessRecord) {
-      return appendLine(path.join(storageRoot, 'pids.ndjson'), JSON.stringify(record), false);
+      return appendToHandle(getPidsHandle, pidsPath, JSON.stringify(record), false);
     },
 
     async tombstonePid(pid: number, exitedAt: IsoTimestamp) {
       // D95: a tombstone is the second of the file's two line shapes, not a partial record.
       // The latest line for a pid decides liveness; the spawn line carries everything else.
-      return appendLine(path.join(storageRoot, 'pids.ndjson'), JSON.stringify({ pid, exitedAt } satisfies ProcessTombstone), false);
+      return appendToHandle(getPidsHandle, pidsPath, JSON.stringify({ pid, exitedAt } satisfies ProcessTombstone), false);
     },
 
     async readOpenPids(): Promise<readonly ProcessRecord[]> {
-      const all = await foldLatestById<ProcessRecord>(path.join(storageRoot, 'pids.ndjson'), 'pid', false);
+      const all = await foldLatestById<ProcessRecord>(pidsPath, 'pid', false);
       return all.filter((r) => r.exitedAt === null);
     },
 
@@ -806,19 +849,19 @@ export async function createStore(config: Config): Promise<Result<Store, StoreEr
       // finalising one. Reviews are human-paced and kilobytes, so the cost that exempts
       // ordinary spill events does not apply here, and a torn tail must never revert an
       // acknowledged `final` review back to `draft` (I29).
-      return appendLine(path.join(storageRoot, 'reviews.ndjson'), JSON.stringify(record), true);
+      return appendToHandle(getReviewsHandle, reviewsPath, JSON.stringify(record), true);
     },
 
     async readAllReviews(): Promise<readonly Review[]> {
-      return foldLatestById<Review>(path.join(storageRoot, 'reviews.ndjson'), 'reviewId', true);
+      return foldLatestById<Review>(reviewsPath, 'reviewId', true);
     },
 
     async appendRequisition(record: Requisition) {
-      return appendLine(path.join(storageRoot, 'requisitions.ndjson'), JSON.stringify(record), false);
+      return appendToHandle(getRequisitionsHandle, requisitionsPath, JSON.stringify(record), false);
     },
 
     async readAllRequisitions(): Promise<readonly Requisition[]> {
-      return foldLatestById<Requisition>(path.join(storageRoot, 'requisitions.ndjson'), 'requisitionId', false);
+      return foldLatestById<Requisition>(requisitionsPath, 'requisitionId', false);
     },
 
     // D161: the decision table this implements is `20-contract.md § store, claimLock's

@@ -343,6 +343,7 @@ export function createSessionManager(deps: {
       entry.livePid = null;
       entry.record.state = 'ended';
       entry.record.endedAt = nowIso();
+      entry.record.endReason = 'storage_failure';
       console.error(
         `[session-manager] session ${entry.record.id}: the event spill could not be written ` +
           `(${appended.error.code}); the session is ended. ${JSON.stringify(appended.error)}`,
@@ -811,10 +812,16 @@ export function createSessionManager(deps: {
           console.warn(`[session-manager] boot: skipping session ${sessionId}: ${JSON.stringify(lastSeqResult.error)}`);
           continue;
         }
+        // A session already `ended` on disk keeps its own recorded reason (or `null` if it
+        // predates this field). One still `live` on disk never chose to end — boot's
+        // `endedAt` for it is synthesised, and #115 wants that told apart from a real end:
+        // `'server_restart'` records that the reason is boot itself, not a fabrication of
+        // one the session never had.
         const rehydrated: SessionRecord = {
           ...record,
           state: 'ended',
           endedAt: record.endedAt ?? nowIso(),
+          endReason: record.endedAt === null ? 'server_restart' : (record.endReason ?? null),
           lastSeq: lastSeqResult.value,
         };
         const entry: SessionEntry = {
@@ -974,6 +981,7 @@ export function createSessionManager(deps: {
         state: 'live',
         createdAt: nowIso(),
         endedAt: null,
+        endReason: null,
       };
 
       const entry: SessionEntry = {
@@ -1299,6 +1307,7 @@ export function createSessionManager(deps: {
 
       entry.record.state = 'ended';
       entry.record.endedAt = nowIso();
+      entry.record.endReason = 'operator';
       // Best-effort, matching the 'cli-session' notification handler below: `/end`'s
       // only refusals are `bad_origin`, `no_such_session` and `turn_in_flight` (no 500),
       // so a failed rewrite does not block the state transition that already freed the
