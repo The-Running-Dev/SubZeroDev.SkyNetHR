@@ -4918,6 +4918,46 @@ every invariant editable outside `/contract` whenever a decision entry can be po
 Reversibility: cheap for the routing; expensive for the classification, since reversing it means
 re-arguing seven decisions.
 
+### 2026-09-03 — D200 The two record logs are additive-only, and a shape change renames the file
+Context: `20-contract.md § Unresolved` 11, carried by #49 since 2026-08-08 and the only item in
+that list whose resolution waits on no measurement — 12 and 13 both need a probe. `reviews.ndjson`
+and `requisitions.ndjson` have no rule for a removed or retyped field. The design states one for
+append-only files — a `schemaVersion` bump on `meta.json` plus a refusal to rehydrate older
+sessions (D49) — and it cannot reach these two, because `meta.json` is per-session and both files
+are server-wide, so bumping it gates no line of either. The exposure is not hypothetical: both
+rehydrate into an in-memory registry at boot (D65), which is the same condition that made D49 give
+`meta.json` a discriminator in the first place — reading old data as though it were new is silent
+wrong state rather than a parse error. The other two server-wide logs share the absence and not the
+exposure: `audit.ndjson` is evidence whose shape is deliberately never re-typed, and a stale
+`pids.ndjson` line is already answered by D23's reuse guard.
+Chosen: **both files are additive-only, and a shape change the additive rules cannot absorb is
+written under a new filename** — `reviews.v2.ndjson`, `requisitions.v2.ndjson` — which boot selects
+by presence. Stated as I63. **The filename is the discriminator**, which is the thing these files
+had nowhere else to carry, and it is the one discriminator that cannot be misread: an old reader
+does not meet a new-shaped line and parse it wrongly, it does not meet the file. Nothing is built
+for this now and nothing is added to any line; the constraint binds only when someone tries to
+remove a field, which is the moment they want to be stopped. It converts an absence into a stated
+constraint, which is what a migration story is asked for.
+Also chosen: **the cost is recorded rather than hidden.** The day the escape hatch is used,
+records already written under the old name are not read by the new server, and converting them is a
+one-time migration this entry does not write in advance. That is a real cost deferred to the least
+convenient moment, and it is the strongest argument against what was chosen.
+Rejected: **a per-line `schemaVersion` on each record**, a line of unknown version dropped at read
+onto D65's already-accepted latest-line-wins revert. It is the more honest shape in one respect —
+old and new lines coexist in one file, so no conversion is ever needed, which is exactly what the
+chosen option defers — and it was rejected on when the cost falls: a field on every line, and a
+rule fixed now, for a tier-two file that does not yet exist and may never change shape. There is no
+deployed data (`20-contract.md § Persisted schemas`, *Migration*), so nothing is protected today.
+Rejected: **one server-wide version file over all four server-wide logs.** The most uniform, and it
+buys the uniformity by covering `audit.ndjson`, whose shape is never re-typed because it is
+evidence — a version gate over an evidence log invites the retype it exists to refuse. It is also a
+new persisted shape for a problem two of the four do not have.
+Rejected: **deferring until tier two is built**, leaving 11 and #49 open. That is the status quo,
+and the status quo is what left a rehydrating registry with no rule for eight weeks while the item
+sat behind the two that genuinely wait on probes.
+Reversibility: cheap. Adding a per-line discriminator later is an added optional field, which these
+rules already permit, so nothing has to be un-written first.
+
 ## Open
 
 Staging only. Once an item becomes an issue it leaves this list.
