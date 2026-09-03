@@ -184,6 +184,72 @@ Describe 'Get-ServiceParametersKey' {
     }
 }
 
+Describe 'Invoke-Nssm' {
+
+    # A fake "nssm.exe" that just exits with $env:FAKE_NSSM_EXIT_CODE - no real nssm needed
+    # to exercise the exit-status check itself.
+    BeforeAll {
+        $script:FakeNssm = Join-Path ([System.IO.Path]::GetTempPath()) "fake-nssm-$(New-Guid).cmd"
+        Set-Content -LiteralPath $script:FakeNssm -Value @(
+            '@echo off'
+            'echo fake nssm failure 1>&2'
+            'exit /b %FAKE_NSSM_EXIT_CODE%'
+        )
+    }
+
+    AfterAll { Remove-Item -LiteralPath $script:FakeNssm -Force -ErrorAction SilentlyContinue }
+
+    It 'throws, naming the exit code, when the command exits nonzero' {
+        $env:FAKE_NSSM_EXIT_CODE = '3'
+        try {
+            { Invoke-Nssm -Nssm $script:FakeNssm -Arguments @('set', 'Test', 'Bogus', 'x') } |
+                Should -Throw '*exit 3*'
+        }
+        finally { Remove-Item Env:\FAKE_NSSM_EXIT_CODE -ErrorAction SilentlyContinue }
+    }
+
+    It 'does not throw when the command exits zero' {
+        $env:FAKE_NSSM_EXIT_CODE = '0'
+        try {
+            { Invoke-Nssm -Nssm $script:FakeNssm -Arguments @('set', 'Test', 'Bogus', 'x') } |
+                Should -Not -Throw
+        }
+        finally { Remove-Item Env:\FAKE_NSSM_EXIT_CODE -ErrorAction SilentlyContinue }
+    }
+}
+
+Describe 'Test-NssmNoConsole' {
+
+    BeforeEach {
+        $script:TestKey = "HKCU:\Software\SkyNetHRTests\$(New-Guid)"
+        New-Item -Path $script:TestKey -Force | Out-Null
+    }
+
+    AfterEach {
+        if (Test-Path -LiteralPath $script:TestKey) {
+            Remove-Item -LiteralPath $script:TestKey -Recurse -Force
+        }
+    }
+
+    It 'is $false when the parameters key does not exist yet' {
+        Test-NssmNoConsole -ParametersKey "HKCU:\Software\SkyNetHRTests\$(New-Guid)" | Should -Be $false
+    }
+
+    It 'is $false when the key exists but AppNoConsole was never set' {
+        Test-NssmNoConsole -ParametersKey $script:TestKey | Should -Be $false
+    }
+
+    It 'is $false when AppNoConsole is explicitly 0' {
+        New-ItemProperty -LiteralPath $script:TestKey -Name 'AppNoConsole' -Value 0 -PropertyType DWord | Out-Null
+        Test-NssmNoConsole -ParametersKey $script:TestKey | Should -Be $false
+    }
+
+    It 'is $true when AppNoConsole is nonzero' {
+        New-ItemProperty -LiteralPath $script:TestKey -Name 'AppNoConsole' -Value 1 -PropertyType DWord | Out-Null
+        Test-NssmNoConsole -ParametersKey $script:TestKey | Should -Be $true
+    }
+}
+
 Describe 'Invoke-Install' {
 
     It 'refuses when nssm.exe cannot be resolved, before anything is installed' {
@@ -195,5 +261,79 @@ Describe 'Invoke-Install' {
                 Should -Throw '*nssm.exe not found*'
         }
         finally { Remove-Item -LiteralPath $envPath -Force }
+    }
+
+    It 'refuses when nssm rejects a command, rather than reporting success' {
+        # The missing-executable case above is Get-Command failing before nssm ever runs.
+        # This is the other half (#233): nssm resolves and runs, but rejects one of the six
+        # `nssm set`/`install` calls - the case $ErrorActionPreference = 'Stop' does not
+        # catch, because a nonzero native exit is not a PowerShell terminating error.
+        $envPath = [System.IO.Path]::GetTempFileName()
+        $repoRoot = Join-Path ([System.IO.Path]::GetTempPath()) "skynet-hr-test-$(New-Guid)"
+        $fakeNssm = Join-Path ([System.IO.Path]::GetTempPath()) "fake-nssm-$(New-Guid).cmd"
+        try {
+            New-Item -ItemType Directory -Force -Path (Join-Path $repoRoot 'dist') | Out-Null
+            Set-Content -LiteralPath (Join-Path $repoRoot 'dist/server.js') -Value '// unused'
+            # Fails the first call (`install`) so nothing past it ever runs for real.
+            Set-Content -LiteralPath $fakeNssm -Value @('@echo off', 'exit /b 1')
+
+            Set-Content -LiteralPath $envPath -Value @(
+                'AUTH_MODE=shared-secret'
+                'ALLOWED_ORIGINS=https://example.test'
+                'WORKSPACE_ROOTS=C:\work'
+                'STORAGE_ROOT=C:\data'
+                'AUTH_COOKIE_NAME=skynet_hr_session'
+                'AUTH_SECRET=dev-secret'
+            )
+            Mock Get-ServiceParametersKey { "HKCU:\Software\SkyNetHRTests\$(New-Guid)" }
+
+            { Invoke-Install -EnvFile $envPath -ServiceName 'Test' -RepoRoot $repoRoot `
+                -NssmPath $fakeNssm -StopTimeoutMs 30000 } |
+                Should -Throw '*exit 1*'
+        }
+        finally {
+            Remove-Item -LiteralPath $envPath -Force -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $repoRoot -Recurse -Force -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $fakeNssm -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    It 'refuses to install over a service that already has AppNoConsole set' {
+        # Get-ServiceParametersKey is mocked to a disposable HKCU key rather than the real
+        # HKLM service key, the same reason Set-ServiceEnvironment's own tests use HKCU:
+        # writable without elevation. nssm and dist/server.js are faked so every earlier
+        # guard in Invoke-Install passes and this actually reaches the AppNoConsole check -
+        # nssm itself is never invoked, since the throw happens before any `& $nssm` call.
+        $envPath = [System.IO.Path]::GetTempFileName()
+        $repoRoot = Join-Path ([System.IO.Path]::GetTempPath()) "skynet-hr-test-$(New-Guid)"
+        $fakeNssm = Join-Path ([System.IO.Path]::GetTempPath()) "fake-nssm-$(New-Guid).cmd"
+        $fakeParamsKey = "HKCU:\Software\SkyNetHRTests\$(New-Guid)"
+        try {
+            New-Item -ItemType Directory -Force -Path (Join-Path $repoRoot 'dist') | Out-Null
+            Set-Content -LiteralPath (Join-Path $repoRoot 'dist/server.js') -Value '// unused'
+            Set-Content -LiteralPath $fakeNssm -Value @('@echo off', 'exit /b 0')
+
+            Set-Content -LiteralPath $envPath -Value @(
+                'AUTH_MODE=shared-secret'
+                'ALLOWED_ORIGINS=https://example.test'
+                'WORKSPACE_ROOTS=C:\work'
+                'STORAGE_ROOT=C:\data'
+                'AUTH_COOKIE_NAME=skynet_hr_session'
+                'AUTH_SECRET=dev-secret'
+            )
+            New-Item -Path $fakeParamsKey -Force | Out-Null
+            New-ItemProperty -LiteralPath $fakeParamsKey -Name 'AppNoConsole' -Value 1 -PropertyType DWord | Out-Null
+            Mock Get-ServiceParametersKey { $fakeParamsKey }
+
+            { Invoke-Install -EnvFile $envPath -ServiceName 'Test' -RepoRoot $repoRoot `
+                -NssmPath $fakeNssm -StopTimeoutMs 30000 } |
+                Should -Throw '*AppNoConsole*'
+        }
+        finally {
+            Remove-Item -LiteralPath $envPath -Force -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $repoRoot -Recurse -Force -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $fakeNssm -Force -ErrorAction SilentlyContinue
+            if (Test-Path -LiteralPath $fakeParamsKey) { Remove-Item -LiteralPath $fakeParamsKey -Recurse -Force }
+        }
     }
 }
