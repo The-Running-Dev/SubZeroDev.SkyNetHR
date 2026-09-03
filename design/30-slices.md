@@ -1572,7 +1572,7 @@ instead of one that hangs until something harder kills it. No agent is left runn
 machine afterwards with nobody watching it and nothing reading what it does, and pressing stop a
 second time gets out at once rather than waiting again.
 
-Touches: `server.ts` (the five ordered steps), `session-manager` (one new method, and the mute on
+Touches: `server.ts` (the six ordered steps), `session-manager` (one new method, and the mute on
 its own notification sink), `store` (`appendPid` for the tombstone, unchanged), `contract` (no new
 type).
 
@@ -1629,6 +1629,12 @@ Acceptance:
   - S27.14 The `shutdown` declaration lands in the tree, and the placeholder block carrying it in
     `20-contract.md § Public surface § session-manager` is deleted in the same commit — the block
     itself instructs this, since the pointer opening that section already names the file.
+  - S27.15 The store close is step 5 and survives this slice's rewrite of the shutdown path:
+    `store.close()` is entered only after step 4 has returned, asserted by instrumenting both, and
+    the process still exits `0`. A close that throws is logged and changes neither the exit code nor
+    any earlier step, like every step past the guard. **Introducing the close is not this slice's** —
+    D202 routes it to `/fix` against today's path — and what this asserts is that the rewrite keeps
+    it, and keeps it behind the one act a successor can observe (D202, I53).
 
 Out of scope: **finalising anything.** No session is marked ended, no open turn is closed on disk,
 and no `session.notice / server_restart` is written — every one of those is boot's, and duplicating
@@ -1653,6 +1659,13 @@ running while the console reports the session idle, the workspace claim released
 session admitted. **It opens with a measurement and carries a second stop after it**, because the
 mechanism the contract names may not be able to do what the contract asks of it on one of the two
 platforms.
+
+**Both stops have now fired and both are answered, so the slice resumes at S28.3.** S28.1's finding
+is committed (`design/findings/S28-tree-reachability.md`) and it reports the tree **unreachable**
+after the child's exit on Windows — `taskkill /PID <exited pid> /T /F` fails at target resolution
+and never begins `/T`'s walk — so S28.2 stopped correctly. D201 answered it: the kill moves ahead of
+the child's exit, to the `result`, and I59 stays unconditional. The criteria that answer to that
+move are S28.9 to S28.11; **S28.3 to S28.8 are unchanged and none of them is retired.**
 
 Delivers: An operator whose agent starts something in the background — a development server, a file
 watcher, a long test runner — has it stopped when the turn stops, instead of finding it still
@@ -1703,6 +1716,21 @@ Acceptance:
   - S28.8 The suites S5, S7 and S27 already own re-run green unchanged: interrupt still ends a turn
     under its own stop reason, boot's reap still tombstones what it kills, and shutdown still writes
     nothing to any spill.
+  - S28.9 On the normal-completion path the kill is issued while the child is still alive:
+    instrumented, the kill is entered at the `result` and precedes the child's own `close`, and the
+    child's exit arrives behind it. Asserted as an ordering and not as an outcome, because the
+    outcome S28.3 checks is reachable on POSIX from either placement and this is the placement that
+    makes it reachable on Windows too (D201, I59).
+  - S28.10 A child's exit status is not diagnostic behind a `result`: a turn whose child exits
+    non-zero, and one whose child dies under a signal, both end with the outcome the `result`
+    established — the same `turn.ended`, the same stop reason, no new envelope kind and no notice.
+    Asserted for both, because the server's own kill is what produced the status and a turn that
+    completed must not be reported as one that failed (D201).
+  - S28.11 The obligation is the manager's path and not one vendor's close handler: a fixture
+    adapter that emits a `result` and holds its child open indefinitely has its tree killed just the
+    same, and its turn ends. Asserted against that adapter rather than against Claude's, because
+    D201 makes surrendering the tree at `result` an obligation every later adapter inherits, and an
+    assertion that only ever runs through one adapter cannot show where the obligation lives.
 
 Out of scope: a liveness check before a restore or before the workspace claim is released, which
 D184 rejects — the claim may not become conditional on something no component can observe; keeping
@@ -2044,7 +2072,9 @@ worse of the two irregularities. See S19 for why the verticality rule's purpose 
   aggregation. S16 covers the part with a source — burn and idle over a session's own event log.
   Whether the rest is in scope, and from what data, is unanswered.
 
-Next: run `/track` in a fresh session to open the issues for S12 to S18, for S26 and S27 and for
-S28 to S32, to reopen #206 against S30 (D199 — it was closed by the pull request that decided the
-lease rather than by one that built it), and to sync the existing ones. `design/90-decisions.md
-§ Open` is empty, so nothing needs clearing from it this pass. `/slices` does not write to GitHub.
+Next: run `/track` in a fresh session to open the issues for any slice above that still has none,
+and to sync the existing ones — including the criteria this pass appended to S27 and S28, which are
+additions at the next free id rather than drift. **#206 is not reopened**: D199 asked for it, D204
+settled that it stays closed, and #272 is the artifact holding S30 outstanding against the current
+slice text. `design/90-decisions.md § Open` is empty, so nothing needs clearing from it this pass.
+`/slices` does not write to GitHub.
