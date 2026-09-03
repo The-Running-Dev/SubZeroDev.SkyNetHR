@@ -826,7 +826,7 @@ shape:
 |---|---|---|
 | `meta.json` | none | `schemaVersion` gates rehydration. An unknown version is treated exactly as a corrupt file: the session is skipped, logged, and its files left untouched |
 | `events.ndjson`, `audit.ndjson`, `pids.ndjson` | none | Readers ignore unknown fields and drop an unparseable trailing line. Added fields must be optional; a removed or retyped field is a new `schemaVersion` on `meta.json` and a refusal to rehydrate older sessions |
-| `reviews.ndjson`, `requisitions.ndjson` | none | Readers ignore unknown fields; added fields must be optional. A dropped trailing line does not shorten the record, it reverts it to the previous line for that id. **A removed or retyped field has no discriminator to gate on in these two files**; see `## Unresolved` 11 |
+| `reviews.ndjson`, `requisitions.ndjson` | none | Readers ignore unknown fields; added fields must be optional. A dropped trailing line does not shorten the record, it reverts it to the previous line for that id. **A removed or retyped field is refused rather than gated** (I63, D200): these two carry no discriminator and one is not added — a shape change the additive rules cannot absorb is written under a new filename, `reviews.v2.ndjson` or `requisitions.v2.ndjson`, which boot selects by presence. Converting the records already under the old name is a one-time read-and-write of the *new* file, so `Never rewritten` above still holds of both |
 | `server.lock` | none | Rewritten whole at every claim **and at every renewal**, and removed at every clean release. Nothing reads a lock it did not just find, so there is nothing to migrate. A lock left by a build predating the lease carries neither `instanceId` nor `renewals`, which is a counter that can never be observed moving — the reclaim path, reached by the ordinary rule and not by a special case. **That is why D196's refusal is keyed on a file that will not *parse*, not on one missing a field**: a legacy lock is well-formed JSON and must reach the reclaim path, and a rule that refused on an absent `renewals` would strand exactly the deployment this migration story exists for |
 | `ignored/<sha>.json` | none | Readers ignore unknown fields; added fields must be optional. **A file that fails to parse is treated exactly as an absent one**: the restore reports unknown rather than reading a partial manifest as a complete one (I58). There is no discriminator and none is needed — nothing rehydrates from it and a wrong answer here is a degraded report, not wrong state |
 | `tool-output/*`, `attachments/*` | none | Opaque bytes; no schema to migrate |
@@ -2287,6 +2287,7 @@ highest-value section in this document.
 | **I58** | An `IgnoredManifest` records path, kind, size and mtime and **never content**. `RestoreResult.unreached === null` means the comparison could not be made and never that nothing differs; an empty array is the positive answer. No gate, control, or refusal anywhere in this contract reads a manifest — it is a report to an operator and its collapsed-directory blindness makes it unusable as evidence (D182, D187) | `checkpoints`, `client` |
 | **I61** | Every write of `<storage>/server.lock` publishes the file whole, so a sample observes complete contents or none and never a partial file: a reclaim and every renewal by temp-file-then-atomic-rename, and a claim on an absent lock by an exclusive create, which must fail rather than overwrite when a second booting server wrote first. A lock that will not **parse** is therefore corruption, and `claimLock` refuses on it rather than reclaiming (D196). A lock that parses and merely lacks `renewals` is not corruption: it predates the lease, and it reclaims by the ordinary rule (I50) | `store` |
 | **I62** | `LOCK_RENEWAL_INTERVAL_MS` is strictly less than `LOCK_OBSERVATION_WINDOW_MS`, by a margin of at least three renewals, so a live holder can never be sampled unchanged across a window. **Enforced by the two being declared in one file** — `src/store/index.ts`, with the interval exported for `server.ts` to import rather than written a second time beside the drain's bound — because a violation has no symptom short of two servers over one storage root (D194, D195) | `store`, `server` |
+| **I63** | No field is ever removed from, or retyped in, a line of `reviews.ndjson` or `requisitions.ndjson`. Added fields are optional and readers ignore unknown ones; a shape change those rules cannot absorb is written under a **new filename** — `reviews.v2.ndjson`, `requisitions.v2.ndjson` — which boot selects by presence, never by re-typing the file in place. **The filename is the discriminator these two have nowhere else to carry**: `meta.json`'s `schemaVersion` is per-session and both files are server-wide, so it gates no line of either, and an old reader meets no new-shaped line to misread — it does not meet the file (D200). It matters here and not for the other two server-wide logs because these rehydrate into an in-memory registry at boot (D65), which is D49's silent-wrong-state condition. **Held by review, not by code**: nothing at runtime can observe a field that was removed before the build shipped | `records`, `store` |
 
 **I40, I41 and I42 were never allocated, and the gap is left open rather than closed.** The
 numbering jumps from I39 to I43 and nothing is missing. Ids here are cited by number in
@@ -2655,10 +2656,21 @@ never reappears.
     was actually told succeeded cannot be un-written by a later host crash. The accepted
     latest-line-wins reversion (D65) still applies to a write the caller was never acknowledged
     for, which is the same durable-before-ack shape I10 already gives `AuditRecord`. (#35, #36)
-11. **How a removed or retyped field in `reviews.ndjson` or `requisitions.ndjson` is
-    migrated.** Every other persisted shape gates on `meta.json`'s `schemaVersion`, and these
-    two files are not under it. Adding fields is safe today; removing or retyping one has no
-    stated rule and no discriminator to hang one on.
+11. **Resolved by D200.** The gap was real and the design's own rule could not reach it:
+    `meta.json`'s `schemaVersion` is per-session and both files are server-wide, so bumping it
+    gates no line of either. A discriminator is not added — **the filename becomes one** (I63).
+    Both files stay additive-only, and a shape change the additive rules cannot absorb is written
+    under `reviews.v2.ndjson` or `requisitions.v2.ndjson`, which boot selects by presence. That is
+    the one discriminator that cannot be misread: an old reader does not parse a new-shaped line
+    wrongly, it never meets the file. Why these two and not the other two server-wide logs is the
+    same argument D49 made for `meta.json` — they rehydrate into an in-memory registry at boot
+    (D65), so a retyped field is silent wrong state rather than a parse error, where `audit.ndjson`
+    is evidence whose shape is never re-typed and a stale `pids.ndjson` line is already answered by
+    D23's reuse guard. **What it costs is recorded rather than hidden**: the day the escape hatch
+    is used, records already written under the old name need a one-time conversion nothing here
+    writes in advance. That was accepted against a per-line `schemaVersion`, which needs no
+    conversion ever but charges a field on every line of a tier-two file that does not yet exist.
+    (#49)
 
 Items 12 and 13 arrived with S8.2, and both are now carried by an issue: 12 by #29 and #30,
 13 by #93. The note that stood here said both were un-issued because `/track` was suspended
@@ -2716,7 +2728,8 @@ belong to the `exec --json` fallback alone; neither affects a session on `app-se
     in a position to emit, resolve or append — and the `ProcessTombstone` moves to kill time,
     where it no longer has to win a race against whatever budget the drain has left.
 
-    Building it is staged in `90-decisions.md § Open` with D174–D177's, and is not yet issued.
+    Building it is **S27**, with D174–D177's half, under `30-slices.md § Outstanding`. It is not
+    yet issued: `/track`'s next run opens it (`30-slices.md`, closing paragraph).
 
 15. **Resolved by D195.** Both halves are settled and neither shape was taken whole. `store` gains
     one plain method, `renewLock`, declared under *Public surface § `store`*: it performs the

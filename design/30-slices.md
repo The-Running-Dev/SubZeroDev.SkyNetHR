@@ -2035,9 +2035,10 @@ worse of the two irregularities. See S19 for why the verticality rule's purpose 
 **Untracked, found while writing this set:**
 
 - **How a removed or retyped field in `reviews.ndjson` or `requisitions.ndjson` is migrated**
-  (`20-contract.md § Unresolved` 11). Every other persisted shape gates on `meta.json`'s
-  `schemaVersion`; these two files are not under it and have no discriminator to hang a rule on.
-  Adding fields is safe today. It is the only `Unresolved` item with no issue behind it.
+  (`20-contract.md § Unresolved` 11, #49) — **resolved by D200 and no longer uncovered.** Both
+  files are additive-only, and a shape change the additive rules cannot absorb renames the file,
+  so the filename is the discriminator they had nowhere else to carry (I63). No slice covers it
+  because there is nothing to build. It is tracked by #49, not untracked as this listed it.
 - **The prototype's trailing-30-day metrics grid and weekly timecard.** D54 kept the employee
   record whole, and D59 then recast tier two as brief items 8 to 12, none of which names either
   aggregation. S16 covers the part with a source — burn and idle over a session's own event log.
