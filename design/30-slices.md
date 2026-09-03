@@ -1838,7 +1838,8 @@ Touches: `contract` (the lock gains an identity for the run and a counter; a sta
 damaged lock; the liveness probe retires; `store` gains a renewal method and `claimLock` loses a
 parameter), `store` (the decision table, the renewal, the ownership-checked release, and the two
 constants), `session-manager` (boot's first step, which now hands `store` nothing), `server.ts` (the
-renewal clock, the displaced stop, and where renewal is cancelled).
+renewal clock, the displaced stop, where renewal is cancelled, and the failed-bind path, which
+reaches the same release).
 
 Depends on: S7, S22 (the lock this replaces), S27 (shutdown's five steps, whose step 4 is where
 renewal is cancelled), S29 (the reaper's host gate, which must be in place before a foreign host's
@@ -1893,9 +1894,23 @@ Acceptance:
   - S30.14 A refused boot has still written nothing server-wide, on the corrupt-lock row as well as
     the held one: the four server-wide append files are byte-identical before and after, no
     session's `meta.json` is rewritten, and the reap step did not run.
+  - S30.15 The failed-bind path releases through this slice's ownership check and runs nothing else.
+    A server whose `listen` fails before it ever bound — asserted against a port already held —
+    removes the lock its own boot claimed, exits non-zero, and reaches neither the drain nor the kill
+    step, both instrumented and found uncalled. **Introducing this path is not this slice's** —
+    #207 built it and I53 now states it — and what this asserts is that rewriting `releaseLock` into
+    an ownership check keeps it, on the one path where the ordinary preconditions for a release
+    cannot be met: no listener ever opened and no turn ever started (I53, D199).
+  - S30.16 A server that never bound issues no renewal after its error path is entered, asserted by
+    instrumenting `renewLock` and finding no call from that moment to exit. Where the clock is
+    started only on `listening` this holds with nothing to cancel; the criterion states the outcome
+    and not the placement, so either implementation satisfies it and neither can leave a timer
+    renewing a lock for a process that is not serving.
 
-Out of scope: amending the shutdown invariant for the failed-bind path, which D199 routes to
-`/contract`; correcting the design's three surviving statements that a network-share storage root is
+Out of scope: introducing the failed-bind path, which #207 already built and which S30.15 and
+S30.16 assert this slice's rewrite keeps rather than re-deciding — the invariant behind it is
+amended and landed, so D199's routing of it to `/contract` is spent; correcting the design's three
+surviving statements that a network-share storage root is
 supported, which D199 routes to `/design`; a network-share root itself, out of supported scope until
 a gate exercises one (D194); an OS advisory lock and a `--force` override, both already refused by
 S22; coordinating two servers that genuinely want to share a root; promoting either constant to a
@@ -2075,8 +2090,12 @@ worse of the two irregularities. See S19 for why the verticality rule's purpose 
   Whether the rest is in scope, and from what data, is unanswered.
 
 Next: run `/track` in a fresh session to open the issues for any slice above that still has none,
-and to sync the existing ones — including the criteria this pass appended to S27 and S28, which are
-additions at the next free id rather than drift. **#206 is not reopened**: D199 asked for it, D204
+and to sync the existing ones — including the criteria appended to S27 and S28 by the previous pass
+and to S30 by this one, all of them additions at the next free id rather than drift. **This pass
+appended two criteria and wrote no new slice**, which is the finding rather than a short run: every
+decision through D204 already has a home, and the one thing that had fallen through was I53's
+failed-bind clause, excluded by S30 while its `/contract` amendment was pending and left uncovered
+once that amendment landed. **#206 is not reopened**: D199 asked for it, D204
 settled that it stays closed, and #272 is the artifact holding S30 outstanding against the current
 slice text. `design/90-decisions.md § Open` is empty, so nothing needs clearing from it this pass.
 `/slices` does not write to GitHub.
