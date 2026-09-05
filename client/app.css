@@ -621,6 +621,47 @@ body {
   font-size: var(--text-sm);
 }
 
+.restore-report {
+  margin-top: var(--space-2);
+  font-size: var(--text-xs);
+}
+
+.restore-report__unknown {
+  color: var(--warn);
+}
+
+.restore-report__clean {
+  color: var(--ink-dim);
+}
+
+.restore-report__list {
+  margin: var(--space-0);
+  padding: var(--space-0);
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.restore-report__item {
+  display: flex;
+  gap: var(--space-2);
+}
+
+.restore-report__change {
+  color: var(--ink-dim);
+  text-transform: uppercase;
+}
+
+.restore-report__item--modified .restore-report__change,
+.restore-report__item--removed .restore-report__change {
+  color: var(--danger);
+}
+
+.restore-report__item--added .restore-report__change {
+  color: var(--accent);
+}
+
 /* -------------------------------------------------------------------- payroll (S16) */
 
 .payroll {

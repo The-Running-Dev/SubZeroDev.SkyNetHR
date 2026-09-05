@@ -472,6 +472,37 @@ export interface Checkpoint {
   readonly ts: IsoTimestamp;
 }
 
+// The ignored-path manifest (D182, D187) — the one exception to "git is the store",
+// because ignored paths are neither checkpointed nor cleaned and git holds no record of
+// them at all.
+
+// One line of `git status --ignored=matching`, which collapses an ignored *directory*
+// into a single entry rather than walking the files beneath it.
+export interface IgnoredEntry {
+  readonly path: string; // workspace-relative, POSIX separators, never absolute
+  readonly kind: 'file' | 'dir'; // 'dir' is a collapsed directory
+  readonly sizeBytes: number | null; // null exactly when kind === 'dir'
+  readonly mtimeMs: number; // the entry's own mtime, not its subtree's
+}
+
+export interface IgnoredManifest {
+  readonly sha: GitSha; // the checkpoint this was captured alongside
+  readonly capturedAt: IsoTimestamp;
+  readonly entries: readonly IgnoredEntry[];
+}
+
+// One difference between a target checkpoint's manifest and the workspace as restore found it.
+export interface IgnoredDelta {
+  readonly path: string;
+  readonly change: 'added' | 'removed' | 'modified';
+}
+
+// What `restore` returns. `safety` is the checkpoint taken on the way in, never the target.
+export interface RestoreResult {
+  readonly safety: Checkpoint;
+  readonly unreached: readonly IgnoredDelta[] | null;
+}
+
 // ---------------------------------------------------------------------------
 // Audit record
 // ---------------------------------------------------------------------------
@@ -860,7 +891,7 @@ export interface SessionManager {
   remove(sessionId: SessionId, owner: OperatorId): Promise<Result<void, SessionError>>;
 
   listCheckpoints(sessionId: SessionId, owner: OperatorId): Promise<Result<readonly Checkpoint[], SessionError>>;
-  restore(sessionId: SessionId, owner: OperatorId, sha: GitSha): Promise<Result<void, SessionError>>;
+  restore(sessionId: SessionId, owner: OperatorId, sha: GitSha): Promise<Result<RestoreResult, SessionError>>;
   openToolOutput(
     sessionId: SessionId,
     owner: OperatorId,
@@ -1020,7 +1051,7 @@ export interface Checkpoints {
   init(sessionId: SessionId, cwd: ResolvedPath): Promise<Result<void, CheckpointError>>;
   commit(sessionId: SessionId, cwd: ResolvedPath, label: string): Promise<Result<Checkpoint, CheckpointError>>;
   list(sessionId: SessionId, cwd: ResolvedPath): Promise<Result<readonly Checkpoint[], CheckpointError>>;
-  restore(sessionId: SessionId, cwd: ResolvedPath, sha: GitSha): Promise<Result<Checkpoint, CheckpointError>>;
+  restore(sessionId: SessionId, cwd: ResolvedPath, sha: GitSha): Promise<Result<RestoreResult, CheckpointError>>;
   destroy(sessionId: SessionId): Promise<Result<void, CheckpointError>>;
 }
 

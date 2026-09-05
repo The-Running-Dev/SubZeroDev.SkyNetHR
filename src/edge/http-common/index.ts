@@ -833,7 +833,7 @@ export function createHttpHandlers(deps: EdgeDeps) {
     }
     const restored = await manager.restore(sessionId, owner, sha as never);
     if (!restored.ok) return failWith(res, restored.error);
-    sendJson(res, 200, { ok: true });
+    sendJson(res, 200, { ok: true, safety: restored.value.safety, unreached: restored.value.unreached });
   }
 
   async function handleChecklist(req: IncomingMessage, res: ServerResponse, owner: OperatorId, sessionId: SessionId): Promise<void> {

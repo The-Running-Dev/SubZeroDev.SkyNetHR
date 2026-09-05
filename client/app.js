@@ -1,4 +1,4 @@
-import { appendMessageDeltaText, createIncidentGroupsBuilder, renderAuditRow, renderEvent, renderPayrollSummary, renderRequisitionRow, renderReviewRow, renderSummaryRow } from './render.js';
+import { appendMessageDeltaText, createIncidentGroupsBuilder, renderAuditRow, renderEvent, renderPayrollSummary, renderRequisitionRow, renderReviewRow, renderSummaryRow, renderUnreachedReport } from './render.js';
 
 const $ = (id) => document.getElementById(id);
 
@@ -263,6 +263,8 @@ function selectSession(sessionId) {
   $('checkpoints').hidden = false;
   $('reviews').hidden = false;
   $('terminate-open').hidden = false;
+  $('restore-report').hidden = true;
+  clear($('restore-report'));
   resetReviewForm();
   openStream(sessionId);
   void refreshSessions();
@@ -322,7 +324,18 @@ async function restoreCheckpoint(sha) {
   if (result.status === 401) return;
   if (result.status !== 200) return status(describe(result), 'error');
   status('restored', 'ok');
+  showRestoreReport(result.payload.unreached);
   await refreshCheckpoints();
+}
+
+// S32.5/S32.7: `unreached` is `IgnoredDelta[]` or `null` — rendered through
+// `renderUnreachedReport` so `null` (unknown) and `[]` (nothing differs) never collapse
+// into the same message.
+function showRestoreReport(unreached) {
+  const container = $('restore-report');
+  clear(container);
+  container.appendChild(renderUnreachedReport(document, unreached));
+  container.hidden = false;
 }
 
 // ---------------------------------------------------------------------------

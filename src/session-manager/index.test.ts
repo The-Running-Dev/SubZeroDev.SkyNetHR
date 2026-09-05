@@ -1866,6 +1866,12 @@ test('S6.4/S6.5 - restore commits a safety checkpoint (turnId null), is refused 
     break;
   }
   assert.equal(restored.ok, true);
+  if (restored.ok) {
+    // S32.4/S32.7: `manager.restore` threads the whole `RestoreResult` through, not just
+    // success — the safety checkpoint (never the target) and a positive empty report.
+    assert.notEqual(restored.value.safety.sha, target, 'the returned checkpoint is the safety commit, never the target');
+    assert.deepEqual(restored.value.unreached, [], 'nothing ignored exists in this fixture, so the report is empty, not unknown');
+  }
 
   await waitUntil(() => received.filter((e) => e.kind === 'checkpoint.created').length >= 2);
   const safety = received.filter((e) => e.kind === 'checkpoint.created')[1]!;
