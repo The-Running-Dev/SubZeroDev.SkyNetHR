@@ -1484,8 +1484,8 @@ export function createSessionManager(deps: {
 
         // D31: `turnId: null` is CheckpointCreated's discriminator for the safety
         // checkpoint restore always takes first.
-        await emit(entry, 'checkpoint.created', { turnId: null, sha: restored.value.sha, label: restored.value.label });
-        return { ok: true, value: undefined };
+        await emit(entry, 'checkpoint.created', { turnId: null, sha: restored.value.safety.sha, label: restored.value.safety.label });
+        return { ok: true, value: restored.value };
       } finally {
         entry.turn = null;
         entry.livePid = null;

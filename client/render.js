@@ -165,6 +165,33 @@ function checkpointCreatedNode(doc, data) {
   return row(doc, 'checkpoint', 'checkpoint', el(doc, 'div', 'checkpoint__text', data.turnId === null ? `safety checkpoint — ${data.label}` : data.label));
 }
 
+// S32.5/S32.7/S32.13: `unreached` is a restore's `RestoreResult.unreached` — `IgnoredDelta[]`
+// or `null`. `null` means the comparison could not be made and renders as unknown; an empty
+// array is the positive answer and renders distinguishably from it. Every path is untrusted
+// (a workspace-relative filename an agent could have written) and reaches the document only
+// through `el`'s `textContent`, never assembled markup.
+export function renderUnreachedReport(doc, unreached) {
+  const section = el(doc, 'div', 'restore-report');
+  if (unreached === null) {
+    section.appendChild(el(doc, 'p', 'restore-report__unknown', 'could not tell whether the rollback left anything standing'));
+    return section;
+  }
+  if (unreached.length === 0) {
+    section.appendChild(el(doc, 'p', 'restore-report__clean', 'nothing ignored was left standing'));
+    return section;
+  }
+  const list = doc.createElement('ul');
+  list.className = 'restore-report__list';
+  for (const delta of unreached) {
+    const item = el(doc, 'li', `restore-report__item restore-report__item--${delta.change}`);
+    item.appendChild(el(doc, 'span', 'restore-report__change', delta.change));
+    item.appendChild(el(doc, 'span', 'restore-report__path', delta.path));
+    list.appendChild(item);
+  }
+  section.appendChild(list);
+  return section;
+}
+
 // S14.3: this envelope carries no `turnId` and may land mid-turn — rendered attributed to
 // the operator who ticked it (`data.by`), never to the agent.
 function checklistItemCompletedNode(doc, data) {

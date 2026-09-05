@@ -4,11 +4,25 @@
 // own environment can never redirect a command at the operator's real repository (S6.1).
 
 import { execFile } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { mkdir, rm } from 'node:fs/promises';
+import { mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { promisify } from 'node:util';
-import type { Checkpoint, CheckpointError, Checkpoints, Config, GitSha, IsoTimestamp, ResolvedPath, Result, SessionId } from '../contract/index.js';
+import type {
+  Checkpoint,
+  CheckpointError,
+  Checkpoints,
+  Config,
+  GitSha,
+  IgnoredDelta,
+  IgnoredEntry,
+  IgnoredManifest,
+  IsoTimestamp,
+  ResolvedPath,
+  Result,
+  SessionId,
+} from '../contract/index.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -23,6 +37,18 @@ const GIT_ENV_KEYS = ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE', 'GIT_CONFIG'
 
 function ckptGitDir(storageRoot: string, sessionId: SessionId): string {
   return path.join(storageRoot, 'sessions', sessionId, 'ckpt.git');
+}
+
+// D187: the ignored-path manifest is a sibling of `ckpt.git`, owned by this module rather
+// than by `store` — `checkpoints` already derives this directory from `config.storageRoot`
+// and already runs the `status` a manifest is built from, so no module edge to `store` is
+// added.
+function ignoredDir(storageRoot: string, sessionId: SessionId): string {
+  return path.join(storageRoot, 'sessions', sessionId, 'ignored');
+}
+
+function ignoredManifestPath(storageRoot: string, sessionId: SessionId, sha: GitSha): string {
+  return path.join(ignoredDir(storageRoot, sessionId), `${sha}.json`);
 }
 
 function cleanEnv(): NodeJS.ProcessEnv {
@@ -64,7 +90,94 @@ function commitFailure(gitDir: string, f: GitFailure): CheckpointError {
     : { code: 'commit_failed', detail: f.message };
 }
 
-async function doCommit(gitDir: string, cwd: string, label: string): Promise<Result<Checkpoint, CheckpointError>> {
+// Temp-file-then-atomic-rename, the same discipline `store`'s own `atomicWrite` uses for
+// `meta.json` (I61) — duplicated in miniature here rather than imported, since D187
+// deliberately gives `checkpoints` no dependency edge to `store`.
+async function atomicWriteJson(targetPath: string, value: unknown): Promise<void> {
+  const dir = path.dirname(targetPath);
+  await mkdir(dir, { recursive: true });
+  const tmpPath = path.join(dir, `.${path.basename(targetPath)}.${randomBytes(6).toString('hex')}.tmp`);
+  await writeFile(tmpPath, JSON.stringify(value));
+  await rename(tmpPath, targetPath);
+}
+
+// One line of `git status --porcelain=v1 -z --ignored=matching` per ignored path, `-z` so a
+// path with an unusual character is never quoted and never needs unescaping. `matching`
+// collapses an ignored directory into a single entry rather than walking beneath it (I58's
+// collapsed-directory blindness starts here) — the entry's own trailing `/` is how a
+// collapsed directory is told apart from a file.
+export async function listIgnoredEntries(gitDir: string, cwd: string): Promise<IgnoredEntry[]> {
+  const status = await runGit(gitDir, cwd, ['status', '--porcelain=v1', '-z', '--ignored=matching']);
+  if (!status.ok) throw new Error(status.error.message);
+
+  const entries: IgnoredEntry[] = [];
+  for (const record of status.value.split('\0')) {
+    if (!record.startsWith('!! ')) continue;
+    const rawPath = record.slice(3);
+    if (rawPath.length === 0) continue;
+    const isDir = rawPath.endsWith('/');
+    const entryPath = isDir ? rawPath.slice(0, -1) : rawPath;
+    try {
+      const info = await stat(path.join(cwd, rawPath));
+      entries.push({ path: entryPath, kind: isDir ? 'dir' : 'file', sizeBytes: isDir ? null : info.size, mtimeMs: info.mtimeMs });
+    } catch {
+      // Vanished between `status` and `stat` — nothing to report for a path that no
+      // longer exists either way.
+    }
+  }
+  return entries;
+}
+
+// S32.3: a capture failure never fails the commit. The checkpoint is worth more than its
+// manifest, so this is swallowed rather than propagated — a later restore reports the
+// missing manifest as unknown (I58), never as a failure of its own.
+async function captureIgnoredManifest(gitDir: string, cwd: string, storageRoot: string, sessionId: SessionId, sha: GitSha): Promise<void> {
+  try {
+    const entries = await listIgnoredEntries(gitDir, cwd);
+    const manifest: IgnoredManifest = { sha, capturedAt: new Date().toISOString() as IsoTimestamp, entries };
+    await atomicWriteJson(ignoredManifestPath(storageRoot, sessionId, sha), manifest);
+  } catch {
+    // See above.
+  }
+}
+
+// I58/S32.6: `null` means the comparison could not be made, and it has exactly three
+// routes — an absent manifest, one that fails to parse, and a live `status` that fails —
+// each its own `catch` here so a test can force each independently. An empty array is the
+// positive answer: the two sides matched on every entry.
+export async function computeUnreached(gitDir: string, cwd: string, storageRoot: string, sessionId: SessionId, targetSha: GitSha): Promise<readonly IgnoredDelta[] | null> {
+  let target: IgnoredManifest;
+  try {
+    const raw = await readFile(ignoredManifestPath(storageRoot, sessionId, targetSha), 'utf8');
+    const parsed = JSON.parse(raw) as IgnoredManifest;
+    if (!Array.isArray(parsed.entries)) throw new Error('malformed manifest: entries is not an array');
+    target = parsed;
+  } catch {
+    return null;
+  }
+
+  let current: IgnoredEntry[];
+  try {
+    current = await listIgnoredEntries(gitDir, cwd);
+  } catch {
+    return null;
+  }
+
+  const targetByPath = new Map(target.entries.map((e) => [e.path, e] as const));
+  const currentByPath = new Map(current.map((e) => [e.path, e] as const));
+  const deltas: IgnoredDelta[] = [];
+  for (const [entryPath, was] of targetByPath) {
+    const now = currentByPath.get(entryPath);
+    if (now === undefined) deltas.push({ path: entryPath, change: 'removed' });
+    else if (now.kind !== was.kind || now.sizeBytes !== was.sizeBytes || now.mtimeMs !== was.mtimeMs) deltas.push({ path: entryPath, change: 'modified' });
+  }
+  for (const entryPath of currentByPath.keys()) {
+    if (!targetByPath.has(entryPath)) deltas.push({ path: entryPath, change: 'added' });
+  }
+  return deltas;
+}
+
+async function doCommit(gitDir: string, cwd: string, label: string, storageRoot: string, sessionId: SessionId): Promise<Result<Checkpoint, CheckpointError>> {
   const added = await runGit(gitDir, cwd, ['add', '-A']);
   if (!added.ok) return { ok: false, error: commitFailure(gitDir, added.error) };
 
@@ -77,7 +190,9 @@ async function doCommit(gitDir: string, cwd: string, label: string): Promise<Res
   const ts = await runGit(gitDir, cwd, ['log', '-1', '--format=%cI']);
   if (!ts.ok) return { ok: false, error: { code: 'commit_failed', detail: ts.error.message } };
 
-  return { ok: true, value: { sha: sha.value.trim() as GitSha, label, ts: ts.value.trim() as IsoTimestamp } };
+  const checkpoint: Checkpoint = { sha: sha.value.trim() as GitSha, label, ts: ts.value.trim() as IsoTimestamp };
+  await captureIgnoredManifest(gitDir, cwd, storageRoot, sessionId, checkpoint.sha);
+  return { ok: true, value: checkpoint };
 }
 
 export function createCheckpoints(config: Config): Checkpoints {
@@ -108,7 +223,7 @@ export function createCheckpoints(config: Config): Checkpoints {
     },
 
     async commit(sessionId: SessionId, cwd: ResolvedPath, label: string) {
-      return doCommit(ckptGitDir(config.storageRoot, sessionId), cwd, label);
+      return doCommit(ckptGitDir(config.storageRoot, sessionId), cwd, label, config.storageRoot, sessionId);
     },
 
     async list(sessionId: SessionId, cwd: ResolvedPath) {
@@ -148,7 +263,7 @@ export function createCheckpoints(config: Config): Checkpoints {
       // D31: the safety checkpoint first — `add -A` and commit, the same primitive an
       // ordinary pre-turn checkpoint uses — so a restore to the wrong `sha` is itself
       // recoverable. This is what the return value is, not the target.
-      const safety = await doCommit(gitDir, cwd, `before restore to ${sha}`);
+      const safety = await doCommit(gitDir, cwd, `before restore to ${sha}`, config.storageRoot, sessionId);
       if (!safety.ok) return safety;
 
       // `checkout <sha> -- .` only ever writes paths present in `<sha>`'s tree; a file
@@ -193,13 +308,22 @@ export function createCheckpoints(config: Config): Checkpoints {
         return { ok: false, error: { code: 'restore_incomplete', detail: `paths left behind that the target does not have:\n${leftover.value.trim()}` } };
       }
 
-      return { ok: true, value: safety.value };
+      // D182: the report runs last and would give the same answer first, since no step
+      // above touches an ignored path — running it here means it never delays the restore
+      // and never has a way to prevent one (S32.9). A dirty verification pass above
+      // returns before this line is ever reached, so a failed restore carries no report
+      // (S32.10).
+      const unreached = await computeUnreached(gitDir, cwd, config.storageRoot, sessionId, sha);
+
+      return { ok: true, value: { safety: safety.value, unreached } };
     },
 
     async destroy(sessionId: SessionId) {
       const gitDir = ckptGitDir(config.storageRoot, sessionId);
       try {
         await rm(gitDir, { recursive: true, force: true });
+        // S32.11: a deleted session's manifests go with its shadow git directory.
+        await rm(ignoredDir(config.storageRoot, sessionId), { recursive: true, force: true });
       } catch (err) {
         // No dedicated teardown code exists in `CheckpointError` (only lifecycle codes
         // for init/commit/restore); `init_failed` is the closest existing member for "the

@@ -686,7 +686,7 @@ async function runConsole(sessions: ReadonlyArray<Record<string, unknown>>) {
   const byId = new Map<string, FakeEl>();
   for (const id of [
     'status', 'login', 'console', 'sessions', 'transcript', 'compose', 'new-session', 'login-form',
-    'refresh', 'cwd', 'vendor', 'model', 'sandbox', 'requisition-id', 'text', 'secret', 'checkpoints', 'checkpoint-list',
+    'refresh', 'cwd', 'vendor', 'model', 'sandbox', 'requisition-id', 'text', 'secret', 'checkpoints', 'checkpoint-list', 'restore-report',
     'checklist', 'checklist-list',
     'payroll', 'payroll-summary',
     'policy-banner', 'audit', 'audit-open', 'audit-close', 'audit-filters', 'audit-filter-session',
@@ -763,7 +763,9 @@ async function runConsole(sessions: ReadonlyArray<Record<string, unknown>>) {
     return {
     status: 200,
     json: async () =>
-      String(input).endsWith('/checkpoints')
+      String(input).endsWith('/checkpoint/restore')
+        ? { ok: true, safety: { sha: 'a'.repeat(40), label: 'before restore to x', ts: '2026-08-09T00:00:00.000Z' }, unreached: [] }
+        : String(input).endsWith('/checkpoints')
         ? { checkpoints: [] }
         : String(input).endsWith('/checklist')
           ? { items: [] }
@@ -1371,6 +1373,108 @@ describe('#146 — interrupt, end and the hang indicator', () => {
       for (const fn of button.listeners.get('click') ?? []) fn({});
 
       assert.equal(byId.get('end-session')!.hidden, true);
+    } finally {
+      await restore();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// S32 — the restore report distinguishes unknown (`null`) from a positive empty answer
+// (`[]`) on screen, and renders every path as a text node.
+// ---------------------------------------------------------------------------
+
+async function withRestoreResponse(unreachedResponsePayload: unknown) {
+  const console_ = await runConsole([{ id: 's1', owner: 'ben', cwd: '/w', vendor: 'claude', state: 'live' }]);
+  const globals = globalThis as unknown as Record<string, unknown>;
+  // Overrides the shared fetch stub for this test only: a real checkpoint to restore, and
+  // a restore response this test controls — `runConsole`'s own `restore()` still puts back
+  // whatever `fetch` existed before `runConsole` ran, regardless of this reassignment.
+  globals['fetch'] = async (input: string) => {
+    if (String(input).endsWith('/checkpoint/restore')) {
+      return { status: 200, json: async () => unreachedResponsePayload };
+    }
+    return {
+      status: 200,
+      json: async () =>
+        String(input).endsWith('/checkpoints')
+          ? { checkpoints: [{ sha: 'a'.repeat(40), label: 'before turn 1', ts: 'x' }] }
+          : String(input).endsWith('/checklist')
+            ? { items: [] }
+            : String(input).endsWith('/payroll')
+              ? { sessionId: 's1', burn: { inputTokens: 0, outputTokens: 0, cacheRead: 0, cacheCreate: 0 }, budgetTokens: null, remainingTokens: null, idleMs: 0, droppedIntervals: 0, costCurrency: null, currency: null }
+              : String(input) === '/api/sessions'
+                ? { sessions: [{ id: 's1', owner: 'ben', cwd: '/w', vendor: 'claude', state: 'live' }] }
+                : String(input) === '/api/requisitions'
+                  ? { requisitions: [] }
+                  : String(input).startsWith('/api/reviews')
+                    ? { reviews: [] }
+                    : {},
+    };
+  };
+  const button = console_.byId.get('sessions')!.children[0]!.children[0]!;
+  for (const fn of button.listeners.get('click') ?? []) fn({});
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  return console_;
+}
+
+describe('S32.5/S32.7 — the restore report renders unknown and a positive empty answer distinguishably', () => {
+  it('renders an unknown ("could not tell") message when unreached is null', async () => {
+    const { byId, restore } = await withRestoreResponse({ ok: true, safety: { sha: 'b'.repeat(40), label: 'x', ts: 'x' }, unreached: null });
+    try {
+      const restoreButton = byId.get('checkpoint-list')!.children[0]!.children.find((c) => c.tag === 'button')!;
+      for (const fn of restoreButton.listeners.get('click') ?? []) fn({});
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      const report = byId.get('restore-report')!;
+      assert.equal(report.hidden, false);
+      assert.match(allFakeText(report).join(' '), /could not tell/, 'null renders as unknown, never as a clean restore');
+    } finally {
+      await restore();
+    }
+  });
+
+  it('renders a distinct "nothing was left standing" message when unreached is an empty array', async () => {
+    const { byId, restore } = await withRestoreResponse({ ok: true, safety: { sha: 'b'.repeat(40), label: 'x', ts: 'x' }, unreached: [] });
+    try {
+      const restoreButton = byId.get('checkpoint-list')!.children[0]!.children.find((c) => c.tag === 'button')!;
+      for (const fn of restoreButton.listeners.get('click') ?? []) fn({});
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      const rendered = allFakeText(byId.get('restore-report')!).join(' ');
+      assert.match(rendered, /nothing.*left standing/, 'an empty report is the positive answer, not the unknown message');
+      assert.doesNotMatch(rendered, /could not tell/);
+    } finally {
+      await restore();
+    }
+  });
+
+  it('renders each named difference, and a hostile path as literal text, never as markup (I26)', async () => {
+    const hostile = '<img src=x onerror=alert(1)>';
+    const { byId, restore } = await withRestoreResponse({
+      ok: true,
+      safety: { sha: 'b'.repeat(40), label: 'x', ts: 'x' },
+      unreached: [
+        { path: '.env', change: 'modified' },
+        { path: hostile, change: 'added' },
+      ],
+    });
+    try {
+      const restoreButton = byId.get('checkpoint-list')!.children[0]!.children.find((c) => c.tag === 'button')!;
+      for (const fn of restoreButton.listeners.get('click') ?? []) fn({});
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      const report = byId.get('restore-report')!;
+      const rendered = allFakeText(report).join(' ');
+      assert.match(rendered, /\.env/);
+      assert.match(rendered, /modified/);
+      assert.ok(rendered.includes(hostile), 'the exact hostile characters survive as a text node');
+      const tags: string[] = [];
+      (function walk(node: FakeEl) {
+        tags.push(node.tag);
+        for (const child of node.children) walk(child);
+      })(report);
+      assert.ok(!tags.includes('img'), 'no <img> element was ever created from the path');
     } finally {
       await restore();
     }

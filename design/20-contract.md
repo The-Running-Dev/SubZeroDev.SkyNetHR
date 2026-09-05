@@ -487,7 +487,8 @@ are not.
 
 ### Checkpoint
 
-Declared in `src/contract/index.ts`: `Checkpoint`.
+Declared in `src/contract/index.ts`: `Checkpoint`, `IgnoredEntry`, `IgnoredManifest`,
+`IgnoredDelta`, `RestoreResult`.
 
 **Entirely derived from the shadow `GIT_DIR`.** The checkpoint list is `git log`; no mirror is
 persisted, because git is the store and a second copy would be a second thing to fall out of
@@ -497,36 +498,7 @@ sync. `ts` is the git commit time, not a server clock reading.
 softening** (D182, D187). Ignored paths are neither checkpointed nor cleaned, so git holds no
 record of them at all and there is nothing for a second copy to disagree *with*. What the
 manifest can be is absent, and the whole of the rule below exists so that absence cannot be read
-as a clean result. These four are not yet in the tree and are written here as scaffolds:
-
-```ts
-// One line of `git status --ignored=matching`, which collapses an ignored *directory* into a
-// single entry rather than walking the files beneath it.
-export interface IgnoredEntry {
-  readonly path: string;               // workspace-relative, POSIX separators, never absolute
-  readonly kind: 'file' | 'dir';       // 'dir' is a collapsed directory
-  readonly sizeBytes: number | null;   // null exactly when kind === 'dir'
-  readonly mtimeMs: number;            // the entry's own mtime, not its subtree's
-}
-
-export interface IgnoredManifest {
-  readonly sha: GitSha;                // the checkpoint this was captured alongside
-  readonly capturedAt: IsoTimestamp;
-  readonly entries: readonly IgnoredEntry[];
-}
-
-// One difference between a target checkpoint's manifest and the workspace as restore found it.
-export interface IgnoredDelta {
-  readonly path: string;
-  readonly change: 'added' | 'removed' | 'modified';
-}
-
-// What `restore` returns. `safety` is the checkpoint taken on the way in, never the target.
-export interface RestoreResult {
-  readonly safety: Checkpoint;
-  readonly unreached: readonly IgnoredDelta[] | null;
-}
-```
+as a clean result.
 
 **No entry carries content, and that is a constraint rather than an omission** (I58). Storing the
 bytes of ignored paths is the widening the brief declined, and it would arrive by the back door
@@ -1113,8 +1085,8 @@ adapters**, which is what let the shadow-git mechanism survive the move to two b
 unchanged.
 
 **`restore` returns the safety checkpoint, never the target** — as `RestoreResult.safety`,
-since the return type grows to carry the report as well (D182), an amendment owed to the
-declaration. Its sequence is five operations of which the second is not D31's (D112):
+since the return type carries the report as well (D182). Its sequence is five operations of
+which the second is not D31's (D112):
 
 ```
 commit    --allow-empty -m "before restore to <sha>"    a way back
