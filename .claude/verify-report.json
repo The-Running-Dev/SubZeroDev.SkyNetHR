@@ -3,7 +3,7 @@
     {
       "name": "Run tests",
       "status": "Passed",
-      "detail": "489 tests, 484 pass, 0 fail, 5 skipped (node --test, full suite via `npm test`, Windows). This branch now includes the #292/#295 fixes cherry-picked from fix/292-filehandle-gc-leak (commits 6f6b5cc, 92d5c6a) — the previously-flaky records/session-manager/store suites all ran clean. Exit code 0."
+      "detail": "489 tests, 484 pass, 0 fail, 5 skipped (node --test, full suite via `npm test`, Windows), run fresh after merging origin/main (which now carries #292/#295's fixes via PR #294) into this branch. Exit code 0."
     },
     {
       "name": "Parse-check PowerShell scripts",
@@ -13,7 +13,7 @@
     {
       "name": "Run Pester tests",
       "status": "Passed",
-      "detail": "Invoke-Pester -Path tools -PassThru: Tests Passed: 336, Failed: 0, Skipped: 22, Total: 358. Completed in 63.2s."
+      "detail": "Invoke-Pester -Path tools -PassThru: Tests Passed: 336, Failed: 0, Skipped: 22, Total: 358. Completed in 111.32s."
     },
     {
       "name": "Check design/10-design.md references resolve",
