@@ -234,8 +234,13 @@ export function createSessionManager(deps: {
   // tree-kill obligation is this manager's to enforce and not an accident of one
   // vendor's own close handler.
   readonly createAdapter?: typeof createRealAdapter;
+  // Test seam only, for the same reason as `createAdapter` above: S29.5's second
+  // fail-closed case (the live counterpart's own creation time cannot be read) has no
+  // other way to force deterministically — a real live process's own read practically
+  // never fails on the platforms this manager runs the guard against.
+  readonly getOsCreatedAt?: (pid: number) => Promise<IsoTimestamp | null>;
 }): SessionManager {
-  const { config, store, checkpoints, records, createAdapter: adapterFactory = createRealAdapter } = deps;
+  const { config, store, checkpoints, records, createAdapter: adapterFactory = createRealAdapter, getOsCreatedAt: getOsCreatedAtOverride } = deps;
   const sessions = new Map<SessionId, SessionEntry>();
   // D178, I55: one-way, and `shutdown` is its only setter. Checked at `handleNotification`,
   // the one function every `AdapterNotification` already passes through (it is what an
@@ -487,6 +492,53 @@ export function createSessionManager(deps: {
     return isWindows ? strip(recorded).toLowerCase() === strip(actual).toLowerCase() : strip(recorded) === strip(actual);
   }
 
+  // S29.1 (`design/findings/S29-created-at-stability.md`): both supported platforms give
+  // a reading that is byte-identical across two reads of the same live process, so exact
+  // equality (I19's fourth limb) is safe. Linux computes wall-clock creation time from
+  // `/proc/[pid]/stat`'s `starttime` (ticks since boot) plus `/proc/stat`'s `btime`
+  // (seconds since the epoch) — both read fresh, never cached, so a reading taken now and
+  // one taken at reap time are the same computation over the same immutable inputs.
+  // Windows reads `Get-Process`'s own `StartTime`. Neither macOS nor any other platform is
+  // measured; `getOsCreatedAt` returns `null` there; S29.7 makes that indistinguishable
+  // from any other capture failure.
+  let linuxClkTck: number | null = null;
+  async function realGetOsCreatedAt(pid: number): Promise<IsoTimestamp | null> {
+    if (isWindows) {
+      try {
+        const { stdout } = await execFileAsync('powershell', [
+          '-NoProfile',
+          '-Command',
+          `(Get-Process -Id ${pid}).StartTime.ToUniversalTime().ToString('o')`,
+        ]);
+        const line = stdout.trim();
+        return line.length > 0 ? (line as IsoTimestamp) : null;
+      } catch {
+        return null;
+      }
+    }
+    if (isDarwin) return null;
+    try {
+      if (linuxClkTck === null) {
+        const { stdout } = await execFileAsync('getconf', ['CLK_TCK']);
+        linuxClkTck = Number(stdout.trim());
+      }
+      const stat = await readFile('/proc/stat', 'utf8');
+      const btimeLine = stat.split('\n').find((l) => l.startsWith('btime '));
+      if (!btimeLine) return null;
+      const btime = Number(btimeLine.split(/\s+/)[1]);
+      const raw = await readFile(`/proc/${pid}/stat`, 'utf8');
+      // `comm` (the parenthesised field) may itself contain spaces or parens; split past
+      // the last `)` to reach the fixed-width fields reliably, per `man proc`.
+      const afterComm = raw.slice(raw.lastIndexOf(')') + 2).split(' ');
+      const startTicks = Number(afterComm[19]); // field 22; index 22 - 3, past state/ppid/pgrp... counted from field 3
+      if (!Number.isFinite(btime) || !Number.isFinite(startTicks) || !linuxClkTck) return null;
+      return new Date((btime + startTicks / linuxClkTck) * 1000).toISOString() as IsoTimestamp;
+    } catch {
+      return null;
+    }
+  }
+  const getOsCreatedAt = getOsCreatedAtOverride ?? realGetOsCreatedAt;
+
   // D38: the tree, not the recorded pid — `taskkill /T /F` walks the live process table
   // on Windows; on POSIX the recorded pid is the process-group leader (`detached: true`
   // at spawn), so signalling the negated pid reaches everything it later spawned.
@@ -530,29 +582,57 @@ export function createSessionManager(deps: {
     return { live, startedAfterBoot, actualImage };
   }
 
-  // S7.5/S7.6 (D23, I19): the pid-reuse guard. An entry is reaped — tree killed, then
-  // tombstoned — only when it has no `exitedAt` (guaranteed by `readOpenPids`), its
-  // `startedAt` is later than the host's last boot, and the live process's image still
-  // matches. Anything failing either of the remaining two tests is logged and tombstoned
-  // without being touched: a stale record is bookkeeping, a wrong kill is an incident.
+  // S29 (D181, D183, D186, I19): the pid-reuse guard, now five limbs and no longer
+  // shared with the lock's own probe (S29.8) — `checkLiveness` above stays `isLiveHolder`'s
+  // alone. A record naming another host is skipped entirely: not reaped, not tombstoned,
+  // because an exit record for a child this server never saw would be a lie in the file
+  // boot trusts most (D181). Everything else is reaped — tree killed, then tombstoned —
+  // only when it has no `exitedAt` (guaranteed by `readOpenPids`), its `startedAt` is
+  // later than the host's last boot, the live image still matches, *and* the live
+  // process's own creation time is exactly the recorded `osCreatedAt`. The guard fails
+  // closed at both new-limb ends: a `null` recorded or live `osCreatedAt` tombstones
+  // without killing, the same as a stale or mismatched record always has.
   async function reapOne(record: ProcessRecord, hostBootAt: number): Promise<void> {
-    const { live, startedAfterBoot, actualImage } = await checkLiveness(record, hostBootAt);
+    const recordedHost = record.hostname ?? null;
+    if (recordedHost !== null && recordedHost !== os.hostname()) {
+      console.warn(`[session-manager] boot: pid ${record.pid} (${record.image}) was recorded by host ${recordedHost}, not this host; leaving it alone`);
+      return;
+    }
 
-    if (live) {
+    const startedAfterBoot = new Date(record.startedAt).getTime() > hostBootAt;
+    const actualImage = startedAfterBoot ? await getProcessImage(record.pid) : null;
+    const imageMatches = actualImage !== null && imagesMatch(record.image, actualImage);
+
+    let reap = false;
+    let reason = '';
+    if (!startedAfterBoot) {
+      reason = "recorded startedAt predates this host's last boot";
+    } else if (!imageMatches) {
+      reason = `live image is ${actualImage ?? 'unknown'}, not ${record.image}`;
+    } else if (record.osCreatedAt === null) {
+      reason = 'recorded osCreatedAt is absent';
+    } else {
+      const liveCreatedAt = await getOsCreatedAt(record.pid);
+      if (liveCreatedAt === null) {
+        reason = "the live process's creation time could not be read";
+      } else if (liveCreatedAt !== record.osCreatedAt) {
+        reason = `live creation time is ${liveCreatedAt}, not the recorded ${record.osCreatedAt} — same pid and image, a different process`;
+      } else {
+        reap = true;
+      }
+    }
+
+    if (reap) {
       await killProcessTree(record.pid, record.pgid);
     } else {
-      console.warn(
-        `[session-manager] boot: not reaping pid ${record.pid} (${record.image}): ` +
-          (startedAfterBoot ? `live image is ${actualImage ?? 'unknown'}, not ${record.image}` : 'recorded startedAt predates this host\'s last boot'),
-      );
+      console.warn(`[session-manager] boot: not reaping pid ${record.pid} (${record.image}): ${reason}`);
     }
     await store.tombstonePid(record.pid, nowIso());
   }
 
-  // D161/D23: one implementation of the three-part liveness test (`checkLiveness` above),
-  // called from two places — `reapOne` above (against `pids.ndjson`) and `claimLock`'s
-  // `LivenessProbe` (against `server.lock`) — so `store` acquires no dependency on process
-  // enumeration.
+  // D161/D23: the three-part liveness test shared by nothing else (S29.8 retired the
+  // reap guard's own copy) — `claimLock`'s `LivenessProbe` (against `server.lock`) is its
+  // only caller, so `store` acquires no dependency on process enumeration.
   async function isLiveHolder(holder: ServerLock, hostBootAt: number): Promise<boolean> {
     return (await checkLiveness(holder, hostBootAt)).live;
   }
@@ -1797,13 +1877,20 @@ export function createSessionManager(deps: {
           return;
         }
         entry.livePid = n.pid;
+        // S29.7: a capture failure here costs nothing but the guard — `getOsCreatedAt`
+        // already swallows its own failure into `null`, so the child runs and its line is
+        // appended exactly as if the read had simply come back empty; no envelope, no
+        // notice.
+        const osCreatedAt = await getOsCreatedAt(n.pid);
         await store.appendPid({
           pid: n.pid,
           pgid: n.pgid,
           sessionId: entry.record.id,
           turnId: turn.turnId,
+          hostname: os.hostname(),
           startedAt: nowIso(),
           image: n.image,
+          osCreatedAt,
           exitedAt: null,
         });
         return;
