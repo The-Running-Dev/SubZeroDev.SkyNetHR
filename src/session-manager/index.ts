@@ -566,25 +566,10 @@ export function createSessionManager(deps: {
     }
   }
 
-  // D161/D23: the two limbs common to both callers below — `startedAt` later than the
-  // host's last boot, and the live process's image still matching. The third limb ("no
-  // `exitedAt`") isn't read here because it's asserted structurally by each caller instead:
-  // `readOpenPids` guarantees it for a `ProcessRecord`, and a `ServerLock`'s own absence
-  // (`releaseLock` removes the file) is that limb for a lock. `actualImage` is returned
-  // alongside `live` so `reapOne` can still name what it saw without a second exec call.
-  async function checkLiveness(
-    candidate: { readonly pid: number; readonly startedAt: IsoTimestamp; readonly image: string },
-    hostBootAt: number,
-  ): Promise<{ live: boolean; startedAfterBoot: boolean; actualImage: string | null }> {
-    const startedAfterBoot = new Date(candidate.startedAt).getTime() > hostBootAt;
-    const actualImage = startedAfterBoot ? await getProcessImage(candidate.pid) : null;
-    const live = actualImage !== null && imagesMatch(candidate.image, actualImage);
-    return { live, startedAfterBoot, actualImage };
-  }
-
-  // S29 (D181, D183, D186, I19): the pid-reuse guard, now five limbs and no longer
-  // shared with the lock's own probe (S29.8) — `checkLiveness` above stays `isLiveHolder`'s
-  // alone. A record naming another host is skipped entirely: not reaped, not tombstoned,
+  // S29 (D181, D183, D186, I19): the pid-reuse guard, now five limbs and its own — the
+  // lock no longer shares it (S30/D180 deleted the lock's own liveness probe; the lease
+  // decides by watching a counter, never a process table). A record naming another host is
+  // skipped entirely: not reaped, not tombstoned,
   // because an exit record for a child this server never saw would be a lie in the file
   // boot trusts most (D181). Everything else is reaped — tree killed, then tombstoned —
   // only when it has no `exitedAt` (guaranteed by `readOpenPids`), its `startedAt` is
@@ -628,13 +613,6 @@ export function createSessionManager(deps: {
       console.warn(`[session-manager] boot: not reaping pid ${record.pid} (${record.image}): ${reason}`);
     }
     await store.tombstonePid(record.pid, nowIso());
-  }
-
-  // D161/D23: the three-part liveness test shared by nothing else (S29.8 retired the
-  // reap guard's own copy) — `claimLock`'s `LivenessProbe` (against `server.lock`) is its
-  // only caller, so `store` acquires no dependency on process enumeration.
-  async function isLiveHolder(holder: ServerLock, hostBootAt: number): Promise<boolean> {
-    return (await checkLiveness(holder, hostBootAt)).live;
   }
 
   // S16: burn, idle time and the budget subtraction are folds over the session's own
@@ -842,30 +820,31 @@ export function createSessionManager(deps: {
 
       const hostBootAt = Date.now() - os.uptime() * 1000;
 
-      // `self.image` drives every later liveness comparison against this lock
-      // (`isLiveHolder`/`checkLiveness` above) — an unresolved probe silently persisted as
-      // `'unknown'` can never match a real image name later, which would falsely mark this
-      // lock stale and let a second server reclaim it while this one is still running. Warn
-      // loudly rather than staying silent about it.
+      // `pid`, `hostname`, `startedAt` and `image` are informational only (I57): no
+      // reclaim, release or renewal decision reads any of them, so an unresolved image
+      // probe costs this lock nothing beyond what a `storage_locked` refusal prints.
       if (selfImage === null) {
         console.warn(
           "[session-manager] boot: could not determine this process's own image; server.lock will carry " +
-            "image: 'unknown', which no later liveness check can match — a second boot on this host may " +
-            'falsely treat this lock as stale while this server is still running',
+            "image: 'unknown', which a later storage_locked refusal would print for this holder",
         );
       }
 
-      // Step 0 (D161): claim `<storage>/server.lock` before the reap step below, not
+      // Step 0 (D180): claim `<storage>/server.lock` before the reap step below, not
       // merely before `listen` — reaping kills process trees it believes are orphans and
       // cannot tell another server's live agents from its own dead ones, so a second server
-      // must be refused before that first destructive act rather than after it.
+      // must be refused before that first destructive act rather than after it. `instanceId`
+      // is minted fresh for this run; `renewals` starts at zero and `server.ts` drives it
+      // from here.
       const self: ServerLock = {
+        instanceId: randomUUID(),
+        renewals: 0,
         pid: process.pid,
         hostname: os.hostname(),
         startedAt: nowIso(),
         image: selfImage ?? 'unknown',
       };
-      const claimed = await store.claimLock(self, (holder) => isLiveHolder(holder, hostBootAt));
+      const claimed = await store.claimLock(self);
       if (!claimed.ok) return claimed;
 
       // Step 1 (D23, D38): reap orphaned children before anything is rehydrated, so no

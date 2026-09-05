@@ -5,7 +5,7 @@ import { createWsEdge } from './edge/ws/index.js';
 import { resolverFor } from './identity/index.js';
 import { createRecords } from './records/index.js';
 import { createSessionManager } from './session-manager/index.js';
-import { createStore } from './store/index.js';
+import { createStore, LOCK_RENEWAL_INTERVAL_MS } from './store/index.js';
 import { createCheckpoints } from './checkpoints/index.js';
 import { loadConfig } from './config/index.js';
 import type { ConfigError } from './contract/index.js';
@@ -122,8 +122,11 @@ async function main(): Promise<void> {
   //               is still connected when the window closes is force-closed instead
   //   3. kill     `manager.shutdown()` — every live turn's child tree, then one
   //               `ProcessTombstone` each (D177, D178)
-  //   4. release  remove `<storage>/server.lock`, bounded (D175)
-  //   5. close    `store.close()` — this process's own OS handles, then exit zero (D202, I53)
+  //   4. release  cancel the renewal timer, then remove `<storage>/server.lock` if this
+  //               process still holds it, bounded (D175, D180, D195, I56)
+  //   5. close    `store.close()` — this process's own OS handles, then exit (D202, I53)
+  // A displacement (D195) — a renewal finding the lock gone or foreign — runs the same four
+  // steps with a non-zero exit and stops the timer at once rather than at step 4.
   // Neither timing bound is a `Config` field (module constants, beside each other, is the
   // shape the design settles on) — promoting either to a deployment flag is a contract
   // amendment.
@@ -141,11 +144,26 @@ async function main(): Promise<void> {
     socket.on('close', () => sockets.delete(socket));
   });
 
+  // D195/I56: `store` owns no clock — this is the timer that drives it. Started once boot
+  // has claimed the lock, cancelled as step 4's first act on an ordinary shutdown, or at
+  // once on a displacement (I56) or a failed bind (I53) — the three call sites below.
+  let renewalTimer: NodeJS.Timeout | null = null;
+  const cancelRenewalTimer = (): void => {
+    if (renewalTimer !== null) {
+      clearInterval(renewalTimer);
+      renewalTimer = null;
+    }
+  };
+
   let stopping = false;
-  const stop = (signal: NodeJS.Signals): void => {
+  // Shared by an ordinary signal and a displacement (D195): both run the same four steps,
+  // and differ only in the exit code and in when the renewal timer stops — step 4's first
+  // act for a signal, at once for a displacement, which `cancelRenewalNow` selects.
+  const runShutdown = (label: string, exitCode: number, cancelRenewalNow: boolean): void => {
     if (stopping) process.exit(1); // guard (D174): past this, nothing below is retried
     stopping = true;
-    console.log(`${signal} received — shutting down.`);
+    console.log(`${label} — shutting down.`);
+    if (cancelRenewalNow) cancelRenewalTimer();
     void (async () => {
       // Step 1 (quiesce): stops accepting new connections the instant it is called: the
       // callback is a courtesy this caller does not wait on past the drain bound below,
@@ -186,10 +204,12 @@ async function main(): Promise<void> {
         console.error(`[server] shutdown: killing live turns failed; releasing the lock anyway — ${String(err)}`);
       }
 
-      // Step 4 (release), last (D175, D161): removes `server.lock` so the next boot on
+      // Step 4 (release), last (D175, D180): removes `server.lock` so the next boot on
       // this storage root takes it without invoking the staleness path at all. Not fatal
       // if it fails, or if it never settles — the next boot's reclaim is what recovers
-      // from a lock nobody removed.
+      // from a lock nobody removed. The renewal timer is cancelled as this step's first
+      // act (I56) — for a displacement it is already stopped, so this is a no-op then.
+      cancelRenewalTimer();
       const releaseTimeout = new Promise<void>((resolve) => setTimeout(resolve, RELEASE_LOCK_TIMEOUT_MS).unref());
       await Promise.race([store.value.releaseLock().then(() => undefined), releaseTimeout]);
       // S27.15: logged unconditionally, not only under a test hook — this line is what a
@@ -205,15 +225,39 @@ async function main(): Promise<void> {
       // exit code or hold up the exit.
       try {
         await store.value.close();
-        console.log('[server] shutdown: store closed, exiting 0');
+        console.log(`[server] shutdown: store closed, exiting ${exitCode}`);
       } catch (err) {
         console.error(`[server] shutdown: closing the store failed; exiting anyway — ${String(err)}`);
       }
-      process.exit(0);
+      process.exit(exitCode);
     })();
   };
+  const stop = (signal: NodeJS.Signals): void => runShutdown(`${signal} received`, 0, false);
   process.on('SIGTERM', () => stop('SIGTERM'));
   process.on('SIGINT', () => stop('SIGINT'));
+
+  // D195/I56: `store` renews on demand; this is the clock. Started once boot has claimed
+  // the lock, so a live holder renews through its whole run — including steps 1 to 3 of its
+  // own shutdown, which is why cancellation lives in `runShutdown` and here, never in a
+  // handler that fires before either. `'displaced'` — the lock absent or naming another
+  // `instanceId` — is this server's last renewal by definition (D195): the timer is
+  // cancelled at once, not at step 4, and shutdown runs with a non-zero exit. A
+  // `StoreError.io` means the renewal could not be attempted at all; it is logged and the
+  // next tick tries again, since that is not the same thing as having lost the root.
+  renewalTimer = setInterval(() => {
+    if (stopping) return; // shutdown already in progress on this or another path
+    void (async () => {
+      const renewal = await store.value.renewLock();
+      if (!renewal.ok) {
+        console.warn(`[server] renewLock failed; will retry — ${JSON.stringify(renewal.error)}`);
+        return;
+      }
+      if (renewal.value === 'displaced') {
+        console.error('[server] server.lock was reclaimed by another process; shutting down.');
+        runShutdown('displaced', 1, true);
+      }
+    })();
+  }, LOCK_RENEWAL_INTERVAL_MS);
 
   // #207: `listen()`'s own error path (e.g. `EADDRINUSE`) bypasses `stop()` entirely — the
   // process never received a signal — so without this the lock `manager.boot()` already
@@ -231,6 +275,11 @@ async function main(): Promise<void> {
       return;
     }
     console.error(`Refusing to start: ${(err as Error).message}`);
+    // I53/D199: neither precondition of the ordinary release holds here — `listen` never
+    // succeeded, so there is no listener to close, and no turn has been started, so there is
+    // no child to kill. Release is the whole of shutdown, and the renewal timer is stopped
+    // first (S30.16) so nothing between here and exit issues another renewal.
+    cancelRenewalTimer();
     void (async () => {
       const released = await store.value.releaseLock();
       if (!released.ok) {
