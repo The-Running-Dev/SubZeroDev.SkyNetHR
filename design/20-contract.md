@@ -986,29 +986,22 @@ What the declarations cannot say:
   can answer the read route's allow-list check without scanning the session's spill for the
   `AttachmentRef` that named the id.
 
-**A `Store` owns OS handles and must be closed, and the method has no declaration to point at
-yet** (D202):
+**A `Store` owns OS handles and must be closed. `close`, `ServerLock`, `Store.claimLock` and
+`Store.releaseLock` are declared in `src/contract/index.ts` (the types) and `src/store/index.ts`
+(the bodies)** (D202). The four server-wide append files are each opened once and held for the
+life of the store — that is what *Persisted schemas* rests its no-lock claim on. **`close`
+returns no `Result`**: it is called from shutdown, where best-effort is the rule and no error
+union gains a variant. **It is idempotent and writes nothing**, so it establishes no durable
+state and I52 needs no room made for it. The obligation is the *caller's*, and a `Store` is
+deliberately **not** process-scoped: several suites construct one per temporary root precisely
+to exercise a storage root vanishing under a live store (S7.10, S22.6), and declaring a single
+process-wide store would reclassify those as contract violations rather than release a handle.
+Where the close sits in shutdown, and why it is behind the release rather than in front of it,
+is under *`server`* below.
 
-```ts
-close(): Promise<void>;
-```
-
-The four server-wide append files are each opened once and held for the life of the store — that
-is what *Persisted schemas* rests its no-lock claim on — so until this exists a `Store`'s OS
-resources outlive every use of it. **It returns no `Result`**: it is called from shutdown, where
-best-effort is the rule and no error union gains a variant. **It is idempotent and writes
-nothing**, so it establishes no durable state and I52 needs no room made for it. The obligation is
-the *caller's*, and a `Store` is deliberately **not** process-scoped: several suites construct one
-per temporary root precisely to exercise a storage root vanishing under a live store (S7.10,
-S22.6), and declaring a single process-wide store would reclassify those as contract violations
-rather than release a handle. Where the close sits in shutdown, and why it is behind the release
-rather than in front of it, is under *`server`* below.
-
-**`ServerLock`, `Store.claimLock` and `Store.releaseLock` are declared in
-`src/contract/index.ts` (the type) and `src/store/index.ts` (the bodies). `claimLock` no longer
-receives a `LivenessProbe`** (D180): there is nothing left for a probe to answer, and `store`'s
-independence from process enumeration — which is what the parameter bought — is now structural
-rather than arranged.
+**`claimLock` no longer receives a `LivenessProbe`** (D180): there is nothing left for a probe
+to answer, and `store`'s independence from process enumeration — which is what the parameter
+bought — is now structural rather than arranged.
 
 **A third method joins them, and it has no declaration to point at yet** (D195):
 

@@ -57,6 +57,20 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
+  // S27.15, test-only: forces `store.value.close()` to reject, the same way
+  // `SKYNET_TEST_SCENARIO`/`SKYNET_CLAUDE_EXECUTABLE` substitute test behaviour elsewhere —
+  // never set outside `server.test.ts`, and a no-op unless it is. Exercises the one branch
+  // I53/D202 name that nothing in a real deployment can otherwise trigger: `Store.close()`'s
+  // own contract says it never rejects, so this is what proves step 5's own catch still
+  // holds if that ever stops being true.
+  if (process.env['SKYNET_TEST_FORCE_STORE_CLOSE_ERROR'] === '1') {
+    const realClose = store.value.close.bind(store.value);
+    store.value.close = async () => {
+      await realClose();
+      throw new Error('forced failure for S27.15');
+    };
+  }
+
   const records = createRecords({ config: config.value, store: store.value });
 
   const manager = createSessionManager({
@@ -178,13 +192,23 @@ async function main(): Promise<void> {
       // from a lock nobody removed.
       const releaseTimeout = new Promise<void>((resolve) => setTimeout(resolve, RELEASE_LOCK_TIMEOUT_MS).unref());
       await Promise.race([store.value.releaseLock().then(() => undefined), releaseTimeout]);
+      // S27.15: logged unconditionally, not only under a test hook — this line is what a
+      // black-box test (or an operator's own log) observes to know step 4 has returned
+      // before step 5 is entered below.
+      console.log('[server] shutdown: server.lock release step complete');
 
       // Step 5 (close), last and behind step 4 (D202, I53): releases this process's own OS
       // handles. It writes nothing and is invisible to any other process, so it sits behind
       // the one act — the lock's removal — a successor can observe, never in front of it.
-      // Best-effort like every step past the guard: `Store.close()` never rejects, so this
-      // is not wrapped in its own try/catch.
-      await store.value.close();
+      // `Store.close()`'s own contract says it never rejects, but this is still wrapped like
+      // every other best-effort step past the guard (S27.11): nothing here may change the
+      // exit code or hold up the exit.
+      try {
+        await store.value.close();
+        console.log('[server] shutdown: store closed, exiting 0');
+      } catch (err) {
+        console.error(`[server] shutdown: closing the store failed; exiting anyway — ${String(err)}`);
+      }
       process.exit(0);
     })();
   };
