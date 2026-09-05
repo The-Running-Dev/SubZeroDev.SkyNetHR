@@ -99,8 +99,8 @@ async function main(): Promise<void> {
   // take the default terminate at whatever point the event loop happened to be, and
   // `docker stop` would wait out its grace period first.
   //
-  // Five steps, in order, and the order is the point (`design/10-design.md` § *Shutdown
-  // ordering*, D174-D178):
+  // Six steps, in order, and the order is the point (`design/10-design.md` § *Shutdown
+  // ordering*, D174-D178, D202):
   //   0. guard    a second signal exits at once, non-zero, past every step below (D174)
   //   1. quiesce  close the listener: no new connection, so no new session or turn
   //   2. drain    bounded — `server.close()`'s own callback never fires while any SSE or
@@ -108,9 +108,11 @@ async function main(): Promise<void> {
   //               is still connected when the window closes is force-closed instead
   //   3. kill     `manager.shutdown()` — every live turn's child tree, then one
   //               `ProcessTombstone` each (D177, D178)
-  //   4. release  remove `<storage>/server.lock`, bounded, then exit zero (D175)
-  // Neither bound is a `Config` field (module constants, beside each other, is the shape
-  // the design settles on) — promoting either to a deployment flag is a contract amendment.
+  //   4. release  remove `<storage>/server.lock`, bounded (D175)
+  //   5. close    `store.close()` — this process's own OS handles, then exit zero (D202, I53)
+  // Neither timing bound is a `Config` field (module constants, beside each other, is the
+  // shape the design settles on) — promoting either to a deployment flag is a contract
+  // amendment.
   const DRAIN_TIMEOUT_MS = 5000;
   const RELEASE_LOCK_TIMEOUT_MS = 2000;
 
@@ -176,6 +178,13 @@ async function main(): Promise<void> {
       // from a lock nobody removed.
       const releaseTimeout = new Promise<void>((resolve) => setTimeout(resolve, RELEASE_LOCK_TIMEOUT_MS).unref());
       await Promise.race([store.value.releaseLock().then(() => undefined), releaseTimeout]);
+
+      // Step 5 (close), last and behind step 4 (D202, I53): releases this process's own OS
+      // handles. It writes nothing and is invisible to any other process, so it sits behind
+      // the one act — the lock's removal — a successor can observe, never in front of it.
+      // Best-effort like every step past the guard: `Store.close()` never rejects, so this
+      // is not wrapped in its own try/catch.
+      await store.value.close();
       process.exit(0);
     })();
   };

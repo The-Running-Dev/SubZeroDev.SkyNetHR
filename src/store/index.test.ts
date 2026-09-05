@@ -1115,3 +1115,50 @@ test('S23.6 — attachments are not bounded by the tool-output budget', async ()
   const openedAttachment = await store.openAttachment(record.id, 't1' as never, 'att-1' as never);
   assert.equal(openedAttachment.ok, true);
 });
+
+// D202: a `Store` owns OS handles (the four server-wide append files) and must be closed.
+// Before this fix `close` had no declaration on `Store` at all, so a caller could not release
+// them and this test failed to build.
+test('D202 — Store.close() releases the server-wide append handles, writes nothing, and is idempotent', async () => {
+  const storageRoot = await mkdtemp(path.join(tmpdir(), 'skynet-store-'));
+  const storeResult = await createStore(baseConfig(storageRoot));
+  assert.equal(storeResult.ok, true);
+  if (!storeResult.ok) return;
+  const store = storeResult.value;
+
+  // Open two of the four lazy handles (audit, pids) by appending through them; the other
+  // two (reviews, requisitions) are deliberately left never-opened, exercising the case
+  // `S7.10`/`S22.6` already rely on — closing must not require every handle to exist.
+  const appended = await store.appendAudit(auditRecord(1));
+  assert.equal(appended.ok, true);
+  const appendedPid = await store.appendPid({
+    pid: 4242,
+    pgid: null,
+    sessionId: 'sess-1' as never,
+    turnId: 't1' as never,
+    startedAt: new Date().toISOString() as never,
+    image: 'node',
+    exitedAt: null,
+  });
+  assert.equal(appendedPid.ok, true);
+
+  const auditBefore = await readFile(path.join(storageRoot, 'audit.ndjson'), 'utf8');
+  const pidsBefore = await readFile(path.join(storageRoot, 'pids.ndjson'), 'utf8');
+
+  await assert.doesNotReject(store.close(), 'close resolves even with live handles open');
+  await assert.doesNotReject(store.close(), 'a second close is a no-op, not a rejection');
+
+  const auditAfter = await readFile(path.join(storageRoot, 'audit.ndjson'), 'utf8');
+  const pidsAfter = await readFile(path.join(storageRoot, 'pids.ndjson'), 'utf8');
+  assert.equal(auditAfter, auditBefore, 'close writes nothing to audit.ndjson');
+  assert.equal(pidsAfter, pidsBefore, 'close writes nothing to pids.ndjson');
+});
+
+test('D202 — Store.close() is a no-op on a store that never opened any handle', async () => {
+  const storageRoot = await mkdtemp(path.join(tmpdir(), 'skynet-store-'));
+  const storeResult = await createStore(baseConfig(storageRoot));
+  assert.equal(storeResult.ok, true);
+  if (!storeResult.ok) return;
+
+  await assert.doesNotReject(storeResult.value.close(), 'nothing was ever opened, so there is nothing to close');
+});

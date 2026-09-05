@@ -975,6 +975,15 @@ export interface Store {
   // Remove the lock at clean shutdown. A failure here is logged and is not fatal: the next
   // boot's staleness path is what recovers from a lock nobody removed.
   releaseLock(): Promise<Result<void, StoreError>>;
+
+  // Releases the OS handles a `Store` owns (D202): the four server-wide append files each
+  // opened once and held for the store's life (`lazyHandle`). Returns no `Result` — it is
+  // called from shutdown, where best-effort is the rule and no error union gains a variant
+  // for it. Idempotent and writes nothing, so it establishes no durable state. Called only
+  // from `server.ts`'s shutdown path, behind the lock release: `close()` releases this
+  // process's own file handles, writes nothing, and is invisible to any other process, so it
+  // belongs behind the one act (lock release) a successor can observe, never in front of it.
+  close(): Promise<void>;
 }
 
 // ---------------------------------------------------------------------------
