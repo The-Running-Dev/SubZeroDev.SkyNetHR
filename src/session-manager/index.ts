@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { platform } from 'node:process';
 import { promisify } from 'node:util';
-import { createAdapter } from '../adapters/index.js';
+import { createAdapter as createRealAdapter } from '../adapters/index.js';
 import { pathsOverlap, resolveInsideRoot } from '../jail/index.js';
 import type {
   Adapter,
@@ -227,8 +227,15 @@ export function createSessionManager(deps: {
   readonly store: Store;
   readonly checkpoints: Checkpoints;
   readonly records: Records;
+  // Test seam only, the same reason `adapters/*`'s own executable-override options
+  // exist: a real deployment always gets the real `createAdapter` (the default).
+  // S28.11 needs an `Adapter` that is neither shipped vendor's own — one that reports
+  // its turn ended and deliberately does not kill its own child — to show that the
+  // tree-kill obligation is this manager's to enforce and not an accident of one
+  // vendor's own close handler.
+  readonly createAdapter?: typeof createRealAdapter;
 }): SessionManager {
-  const { config, store, checkpoints, records } = deps;
+  const { config, store, checkpoints, records, createAdapter: adapterFactory = createRealAdapter } = deps;
   const sessions = new Map<SessionId, SessionEntry>();
   // D178, I55: one-way, and `shutdown` is its only setter. Checked at `handleNotification`,
   // the one function every `AdapterNotification` already passes through (it is what an
@@ -954,7 +961,7 @@ export function createSessionManager(deps: {
       }
 
       const sessionId = randomUUID() as SessionId;
-      const adapterResult = createAdapter(input.vendor, {
+      const adapterResult = adapterFactory(input.vendor, {
         cwd,
         model: input.model,
         sandbox: input.sandbox,
@@ -1963,7 +1970,21 @@ export function createSessionManager(deps: {
         // reacting to the delivered `turn.ended` (e.g. sending the next message) must
         // already see the slot free — clearing it after `await emit` leaves a window
         // where that caller races the still-pending spill append (S5.1).
+        //
+        // S28.3/S28.4/S28.9/S28.11 (D184, D201, I59): the tree is surrendered here, on
+        // every path that reaches this notification unmuted — normal completion, an
+        // adapter reporting a schema mismatch, and an operator's interrupt (whose own
+        // `kill()` call already reached it, so this entry is S28.6's no-op) — using the
+        // same `Adapter.kill()` `interrupt()` and `shutdown()` already call. This is the
+        // manager's own obligation and not one vendor's close handler: it runs
+        // regardless of what the adapter that reported this `turn.ended` did on its own.
+        // It happens before the slot is cleared and before this envelope is emitted, so
+        // a caller reacting to `turn.ended` by requesting a restore cannot race a
+        // surviving descendant, and it happens synchronously in the same call stack as
+        // the notification that carried it — before the child's own `close`, which
+        // needs a real OS round trip to fire at all (S28.9).
         if (kind === 'turn.ended') {
+          await entry.adapter!.kill();
           entry.turn = null;
           entry.livePid = null;
         }

@@ -11,7 +11,27 @@ import { stripExtendedPrefix } from '../jail/index.js';
 import { createStore } from '../store/index.js';
 import { createCheckpoints } from '../checkpoints/index.js';
 import { createRecords } from '../records/index.js';
-import type { AuditRecord, Caps, ChecklistItemId, Checkpoints, Config, Envelope, IsoTimestamp, OperatorId, PermissionRequest, ProcessRecord, Records, SessionId, Store, TurnId } from '../contract/index.js';
+import type {
+  Adapter,
+  AdapterError,
+  AdapterOptions,
+  AuditRecord,
+  Caps,
+  ChecklistItemId,
+  Checkpoints,
+  Config,
+  Envelope,
+  IsoTimestamp,
+  OperatorId,
+  PermissionRequest,
+  ProcessRecord,
+  Records,
+  Result,
+  SessionId,
+  Store,
+  TurnId,
+  Vendor,
+} from '../contract/index.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -4134,4 +4154,387 @@ test('S27.13 — shutdown never reads pids.ndjson to choose what to kill: an unt
 
   assert.equal(isAlive(stray.pid), true, 'a process this manager never held live is not touched by shutdown — collecting it stays boot\'s reap (D177)');
   assert.equal((await store.readOpenPids()).some((r) => r.pid === stray.pid), true, 'and its pids.ndjson entry is untouched too');
+});
+
+// -----------------------------------------------------------------------------------
+// S28 — Nothing the agent starts outlives its turn.
+//
+// D201 moved the normal-completion kill to the `result` record, ahead of the child's
+// own exit, and put the obligation on this manager rather than on any one adapter's
+// close handler. `makeFixtureAdapterFactory` below is `createSessionManager`'s
+// `createAdapter` test seam (deliberately not Claude's or Codex's own code) — it lets
+// S28.11 show the manager enforces this generically, and lets S28.4/S28.5/S28.6 observe
+// the ordering and the no-op case without depending on a real CLI's own wire protocol.
+// -----------------------------------------------------------------------------------
+
+// Cross-platform: `taskkill /T /F` on Windows, a process-group SIGKILL on POSIX — the
+// same primitive `killProcessTree` (session-manager's own boot-reap helper) uses,
+// reimplemented here because this is a test fixture's own `kill()`, not production code.
+async function fixtureKillTree(pid: number, pgid: number | null): Promise<void> {
+  if (process.platform === 'win32') {
+    await new Promise<void>((resolve) => {
+      const p = spawn('taskkill', ['/PID', String(pid), '/T', '/F']);
+      p.once('error', () => resolve());
+      p.once('exit', () => resolve());
+    });
+    return;
+  }
+  try {
+    process.kill(-(pgid ?? pid), 'SIGKILL');
+  } catch {
+    // Already gone.
+  }
+}
+
+interface FixtureAdapterOptions {
+  // Whether `send` reports a real, tracked process tree via a `spawned` notification —
+  // `false` is S28.6's "a turn that spawned nothing".
+  readonly spawn: boolean;
+  readonly stopReason: 'completed' | 'error';
+  // S28.6's other case: the tracked tree is killed out of band, before this adapter's
+  // own `kill()` ever runs, simulating "a turn whose child is already gone".
+  readonly preKilled?: boolean;
+  // S28.4: gates this fixture's own `kill()` from returning until released, so a test
+  // can observe what the manager does (or refuses to do) while a kill is in flight.
+  readonly killGate?: () => Promise<void>;
+  readonly onKill?: () => void;
+  // Whether `send` emits the `turn.ended` event notification at all — `false` leaves
+  // the turn open, as a live turn awaiting `interrupt()` would.
+  readonly emitTurnEnded?: boolean;
+}
+
+function makeFixtureAdapterFactory(
+  opts: FixtureAdapterOptions,
+  onTree?: (tree: { pid: number; grandchildPid: number }) => void,
+): (vendor: Vendor, adapterOpts: AdapterOptions) => Result<Adapter, AdapterError> {
+  return (vendor, adapterOpts) => {
+    let tree: { pid: number; pgid: number | null } | null = null;
+    const adapter: Adapter = {
+      vendor,
+      policy: { mode: 'interactive', sandbox: null, banner: null },
+      acceptsAttachments: false,
+      async send() {
+        if (opts.spawn) {
+          const spawned = await spawnTrackedTree();
+          strayPids.push(spawned.pid, spawned.grandchildPid);
+          tree = { pid: spawned.pid, pgid: spawned.pgid };
+          onTree?.({ pid: spawned.pid, grandchildPid: spawned.grandchildPid });
+          adapterOpts.notify({ kind: 'spawned', pid: spawned.pid, pgid: spawned.pgid, image: 'node' });
+          if (opts.preKilled) {
+            await fixtureKillTree(spawned.pid, spawned.pgid);
+            await waitUntil(() => !isAlive(spawned.pid));
+          }
+        }
+        if (opts.emitTurnEnded ?? true) {
+          adapterOpts.notify({ kind: 'event', event: { kind: 'turn.ended', data: { stopReason: opts.stopReason, usage: null } } as never });
+        }
+        return { ok: true, value: undefined };
+      },
+      respond() {
+        return { ok: true, value: undefined };
+      },
+      async kill() {
+        opts.onKill?.();
+        if (opts.killGate) await opts.killGate();
+        if (!tree) return;
+        const { pid, pgid } = tree;
+        tree = null;
+        await fixtureKillTree(pid, pgid);
+      },
+    };
+    return { ok: true, value: adapter };
+  };
+}
+
+test('S28.3/S28.9/S28.10 — a normal turn completion ends the tree, not just the recorded pid, without waiting for the child\'s own exit, and the outcome the result established is not revised by how the child then died', async () => {
+  const { manager, workspaceRoot } = await makeManager('grandchild-then-result');
+  const owner = 'operator-1' as OperatorId;
+  const projectDir = path.join(workspaceRoot, 'proj-s283');
+  await mkdir(projectDir);
+  const markerDir = await mkdtemp(path.join(tmpdir(), 'skynet-marker-'));
+  const markerPath = path.join(markerDir, 'grandchild.json');
+  process.env['SKYNET_GRANDCHILD_MARKER'] = markerPath;
+
+  const created = await manager.create(owner, { vendor: 'claude', cwd: projectDir, model: null, sandbox: null, requisitionId: null });
+  assert.equal(created.ok, true);
+  if (!created.ok) return;
+  const { sessionId } = created.value;
+
+  const received: Envelope[] = [];
+  await manager.subscribe(sessionId, owner, 0, { deliver: (e) => { if ('seq' in e) received.push(e); }, close: () => {} });
+  const messaged = await manager.message(sessionId, owner, 'go', []);
+  assert.equal(messaged.ok, true);
+
+  let marker: { cliPid: number; grandchildPid: number } | null = null;
+  await waitUntil(async () => {
+    try {
+      marker = JSON.parse(await readFile(markerPath, 'utf8')) as { cliPid: number; grandchildPid: number };
+      return true;
+    } catch {
+      return false;
+    }
+  });
+  const { cliPid, grandchildPid } = marker!;
+  strayPids.push(cliPid, grandchildPid);
+  // Not asserted alive here: the manager's own kill (S28.9) is entered synchronously,
+  // in the same call stack as the notification that reports `result`, so by the time
+  // this test's own polling read of the marker file returns, the tree may already be
+  // gone — that speed is the criterion, not a race to guard against.
+
+  await waitUntil(() => received.some((e) => e.kind === 'turn.ended'));
+
+  // S28.3/S28.9: this fixture (`grandchild-then-result`) never exits and never kills
+  // its own child on its own — it sends `result` and then idles — so whatever ends the
+  // tree here is this manager's own tree-kill at completion, not a race against the
+  // fixture's own exit or a wait for the child to close naturally.
+  await waitUntil(() => !isAlive(cliPid) && !isAlive(grandchildPid), 5000);
+
+  // S28.10: the kill drives the CLI child to die under a signal, behind the `result`
+  // that already established this turn's outcome — that must not be reinterpreted as
+  // a failure, and must not produce a second, contradicting turn.ended.
+  const endedEnvelopes = received.filter((e) => e.kind === 'turn.ended');
+  assert.equal(endedEnvelopes.length, 1, 'exactly one turn.ended, not a second one from the close the kill produced');
+  assert.equal((endedEnvelopes[0]!.data as { stopReason: string }).stopReason, 'completed', 'the result already established completion; the kill signal that ended the child does not revise it');
+});
+
+test('S28.4 — the kill completes before turn.ended is emitted and before the turn slot is cleared', async () => {
+  const { config, store, checkpoints, workspaceRoot } = await makeManager('full');
+  const owner = 'operator-1' as OperatorId;
+  const projectDir = path.join(workspaceRoot, 'proj-s284');
+  await mkdir(projectDir);
+
+  const order: string[] = [];
+  let releaseKill: () => void = () => {};
+  const gate = new Promise<void>((resolve) => {
+    releaseKill = resolve;
+  });
+  const factory = makeFixtureAdapterFactory({
+    spawn: true,
+    stopReason: 'completed',
+    killGate: async () => {
+      order.push('kill:start');
+      await gate;
+      order.push('kill:done');
+    },
+  });
+
+  const manager = createSessionManager({ config, store, checkpoints, records: notImplementedProxy<Records>('records'), createAdapter: factory });
+
+  const created = await manager.create(owner, { vendor: 'claude', cwd: projectDir, model: null, sandbox: null, requisitionId: null });
+  assert.equal(created.ok, true);
+  if (!created.ok) return;
+  const { sessionId } = created.value;
+
+  const received: Envelope[] = [];
+  await manager.subscribe(sessionId, owner, 0, {
+    deliver: (e) => {
+      if ('seq' in e) {
+        order.push(`envelope:${e.kind}`);
+        received.push(e);
+      }
+    },
+    close: () => {},
+  });
+
+  const messaged = await manager.message(sessionId, owner, 'go', []);
+  assert.equal(messaged.ok, true);
+  assert.ok(order.includes('kill:start'), 'the kill was already entered by the time send() resolved');
+
+  // While the kill is still in flight: the slot is still held, and turn.ended has not
+  // been observed — "before" made checkable rather than assumed.
+  const concurrent = await manager.message(sessionId, owner, 'again', []);
+  assert.equal(concurrent.ok, false);
+  if (!concurrent.ok) assert.equal(concurrent.error.code, 'turn_in_flight', 'the slot is still held while the kill is in flight');
+  assert.equal(received.some((e) => e.kind === 'turn.ended'), false, 'turn.ended has not been delivered while the kill is in flight');
+
+  releaseKill();
+  await waitUntil(() => received.some((e) => e.kind === 'turn.ended'));
+
+  assert.deepEqual(
+    order.filter((o) => o === 'kill:start' || o === 'kill:done' || o === 'envelope:turn.ended'),
+    ['kill:start', 'kill:done', 'envelope:turn.ended'],
+    'the kill starts and completes before turn.ended is observable',
+  );
+
+  const after = await manager.message(sessionId, owner, 'once more', []);
+  assert.equal(after.ok, true, 'the slot is free again once the kill has completed and turn.ended has been observed');
+});
+
+test('S28.5 — the same Adapter.kill() interrupt and shutdown already call is entered on normal completion and adapter failure too', async () => {
+  const { config, store, checkpoints, workspaceRoot } = await makeManager('full');
+  const owner = 'operator-1' as OperatorId;
+
+  // Normal completion: `send` reports the turn ended itself, no prior kill call.
+  {
+    const projectDir = path.join(workspaceRoot, 'proj-s285-normal');
+    await mkdir(projectDir);
+    let kills = 0;
+    const factory = makeFixtureAdapterFactory({ spawn: true, stopReason: 'completed', onKill: () => { kills += 1; } });
+    const manager = createSessionManager({ config, store, checkpoints, records: notImplementedProxy<Records>('records'), createAdapter: factory });
+    const created = await manager.create(owner, { vendor: 'claude', cwd: projectDir, model: null, sandbox: null, requisitionId: null });
+    assert.equal(created.ok, true);
+    if (!created.ok) return;
+    const received: Envelope[] = [];
+    await manager.subscribe(created.value.sessionId, owner, 0, { deliver: (e) => { if ('seq' in e) received.push(e); }, close: () => {} });
+    assert.equal((await manager.message(created.value.sessionId, owner, 'go', [])).ok, true);
+    await waitUntil(() => received.some((e) => e.kind === 'turn.ended'));
+    assert.equal(kills, 1, 'normal completion enters the kill exactly once');
+  }
+
+  // Adapter failure: shaped exactly like normal completion from this manager's own
+  // point of view — a `turn.ended` event notification with no prior kill — because
+  // I59's obligation does not distinguish the two; both end a live-rooted tree.
+  {
+    const projectDir = path.join(workspaceRoot, 'proj-s285-failure');
+    await mkdir(projectDir);
+    let kills = 0;
+    const factory = makeFixtureAdapterFactory({ spawn: true, stopReason: 'error', onKill: () => { kills += 1; } });
+    const manager = createSessionManager({ config, store, checkpoints, records: notImplementedProxy<Records>('records'), createAdapter: factory });
+    const created = await manager.create(owner, { vendor: 'claude', cwd: projectDir, model: null, sandbox: null, requisitionId: null });
+    assert.equal(created.ok, true);
+    if (!created.ok) return;
+    const received: Envelope[] = [];
+    await manager.subscribe(created.value.sessionId, owner, 0, { deliver: (e) => { if ('seq' in e) received.push(e); }, close: () => {} });
+    assert.equal((await manager.message(created.value.sessionId, owner, 'go', [])).ok, true);
+    await waitUntil(() => received.some((e) => e.kind === 'turn.ended'));
+    assert.equal(kills, 1, 'a fatal adapter-reported error enters the kill exactly once, the same as normal completion');
+  }
+
+  // Interrupt: the turn stays open (no result), and `interrupt()` is what enters the
+  // kill — the pre-existing call this criterion says normal completion now shares.
+  {
+    const projectDir = path.join(workspaceRoot, 'proj-s285-interrupt');
+    await mkdir(projectDir);
+    let kills = 0;
+    const factory = makeFixtureAdapterFactory({ spawn: true, stopReason: 'completed', emitTurnEnded: false, onKill: () => { kills += 1; } });
+    const manager = createSessionManager({ config, store, checkpoints, records: notImplementedProxy<Records>('records'), createAdapter: factory });
+    const created = await manager.create(owner, { vendor: 'claude', cwd: projectDir, model: null, sandbox: null, requisitionId: null });
+    assert.equal(created.ok, true);
+    if (!created.ok) return;
+    const messaged = await manager.message(created.value.sessionId, owner, 'go', []);
+    assert.equal(messaged.ok, true);
+    if (!messaged.ok) return;
+    assert.equal(kills, 0, 'no kill yet: the turn is still open, exactly like a live turn awaiting an operator');
+    assert.equal((await manager.interrupt(created.value.sessionId, owner, messaged.value.turnId)).ok, true);
+    assert.equal(kills, 1, 'interrupt enters the kill exactly once');
+  }
+
+  // Shutdown: same shape as interrupt — the turn stays open, and shutdown's own pass
+  // over every live turn is what enters the kill.
+  {
+    const projectDir = path.join(workspaceRoot, 'proj-s285-shutdown');
+    await mkdir(projectDir);
+    let kills = 0;
+    const factory = makeFixtureAdapterFactory({ spawn: true, stopReason: 'completed', emitTurnEnded: false, onKill: () => { kills += 1; } });
+    const manager = createSessionManager({ config, store, checkpoints, records: notImplementedProxy<Records>('records'), createAdapter: factory });
+    const created = await manager.create(owner, { vendor: 'claude', cwd: projectDir, model: null, sandbox: null, requisitionId: null });
+    assert.equal(created.ok, true);
+    if (!created.ok) return;
+    assert.equal((await manager.message(created.value.sessionId, owner, 'go', [])).ok, true);
+    assert.equal(kills, 0);
+    await manager.shutdown();
+    assert.equal(kills, 1, 'shutdown enters the kill exactly once');
+  }
+});
+
+test('S28.6 — a turn that spawned nothing, and a turn whose child is already gone, both end normally with a no-op kill and no extra envelope or notice', async () => {
+  const { config, store, checkpoints, workspaceRoot } = await makeManager('full');
+  const owner = 'operator-1' as OperatorId;
+
+  for (const [label, opts] of [
+    ['spawned nothing', { spawn: false, stopReason: 'completed' as const }],
+    ['child already gone', { spawn: true, stopReason: 'completed' as const, preKilled: true }],
+  ] as const) {
+    const projectDir = path.join(workspaceRoot, `proj-s286-${label.replace(/\W+/g, '-')}`);
+    await mkdir(projectDir);
+    const factory = makeFixtureAdapterFactory(opts);
+    const manager = createSessionManager({ config, store, checkpoints, records: notImplementedProxy<Records>('records'), createAdapter: factory });
+    const created = await manager.create(owner, { vendor: 'claude', cwd: projectDir, model: null, sandbox: null, requisitionId: null });
+    assert.equal(created.ok, true, label);
+    if (!created.ok) continue;
+    const received: Envelope[] = [];
+    await manager.subscribe(created.value.sessionId, owner, 0, { deliver: (e) => { if ('seq' in e) received.push(e); }, close: () => {} });
+    const messaged = await manager.message(created.value.sessionId, owner, 'go', []);
+    assert.equal(messaged.ok, true, label);
+    await waitUntil(() => received.some((e) => e.kind === 'turn.ended'));
+
+    const kinds = received.map((e) => e.kind);
+    assert.equal(kinds.filter((k) => k === 'turn.ended').length, 1, `${label}: exactly one turn.ended`);
+    assert.equal(kinds.includes('error'), false, `${label}: no notice from a no-op kill`);
+    assert.equal(kinds.includes('session.notice'), false, `${label}: no notice from a no-op kill`);
+  }
+});
+
+test('S28.7 — the capability this costs is real: a turn that starts a server and reports its address ends with that server dead, with no new envelope kind, no new stopReason, and no notice', async () => {
+  const { manager, workspaceRoot } = await makeManager('grandchild-then-result');
+  const owner = 'operator-1' as OperatorId;
+  const projectDir = path.join(workspaceRoot, 'proj-s287');
+  await mkdir(projectDir);
+  const markerDir = await mkdtemp(path.join(tmpdir(), 'skynet-marker-'));
+  const markerPath = path.join(markerDir, 'grandchild.json');
+  process.env['SKYNET_GRANDCHILD_MARKER'] = markerPath;
+
+  const created = await manager.create(owner, { vendor: 'claude', cwd: projectDir, model: null, sandbox: null, requisitionId: null });
+  assert.equal(created.ok, true);
+  if (!created.ok) return;
+  const { sessionId } = created.value;
+
+  const received: Envelope[] = [];
+  const knownKinds = new Set([
+    'message', 'message.delta', 'thinking', 'tool.call', 'tool.result', 'permission.request', 'permission.resolved',
+    'turn.started', 'turn.ended', 'usage', 'checkpoint.created', 'session.started', 'session.ended',
+    'session.notice', 'checklist.item.completed', 'error',
+  ]);
+  await manager.subscribe(sessionId, owner, 0, { deliver: (e) => { if ('seq' in e) received.push(e); }, close: () => {} });
+  assert.equal((await manager.message(sessionId, owner, 'start a server and tell me its address', [])).ok, true);
+
+  let marker: { cliPid: number; grandchildPid: number } | null = null;
+  await waitUntil(async () => {
+    try {
+      marker = JSON.parse(await readFile(markerPath, 'utf8')) as { cliPid: number; grandchildPid: number };
+      return true;
+    } catch {
+      return false;
+    }
+  });
+  const { cliPid, grandchildPid } = marker!;
+  strayPids.push(cliPid, grandchildPid);
+
+  await waitUntil(() => received.some((e) => e.kind === 'turn.ended'));
+  await waitUntil(() => !isAlive(cliPid) && !isAlive(grandchildPid), 5000);
+
+  for (const e of received) assert.ok(knownKinds.has(e.kind), `no new envelope kind was invented: saw ${e.kind}`);
+  assert.equal(received.some((e) => e.kind === 'error' || e.kind === 'session.notice'), false, 'the loss is silent by decision (D184): no notice announces it');
+  const ended = received.find((e) => e.kind === 'turn.ended')!;
+  assert.equal((ended.data as { stopReason: string }).stopReason, 'completed', 'no new stopReason: the turn still just completed');
+});
+
+test('S28.11 — the tree-kill obligation is this manager\'s own, not one vendor\'s close handler: a fixture adapter that reports turn.ended and holds its child open has its tree killed just the same', async () => {
+  const { config, store, checkpoints, workspaceRoot } = await makeManager('full');
+  const owner = 'operator-1' as OperatorId;
+  const projectDir = path.join(workspaceRoot, 'proj-s2811');
+  await mkdir(projectDir);
+
+  let tracked: { pid: number; grandchildPid: number } | null = null;
+  // Deliberately never calls its own `kill()` from inside `send()` — proving the
+  // obligation is enforced by this manager, on its own, not by this adapter policing
+  // itself the way Claude's and Codex's own code happens to.
+  const factory = makeFixtureAdapterFactory({ spawn: true, stopReason: 'completed' }, (tree) => {
+    tracked = tree;
+  });
+
+  const manager = createSessionManager({ config, store, checkpoints, records: notImplementedProxy<Records>('records'), createAdapter: factory });
+  const created = await manager.create(owner, { vendor: 'claude', cwd: projectDir, model: null, sandbox: null, requisitionId: null });
+  assert.equal(created.ok, true);
+  if (!created.ok) return;
+
+  const received: Envelope[] = [];
+  await manager.subscribe(created.value.sessionId, owner, 0, { deliver: (e) => { if ('seq' in e) received.push(e); }, close: () => {} });
+  assert.equal((await manager.message(created.value.sessionId, owner, 'go', [])).ok, true);
+  await waitUntil(() => received.some((e) => e.kind === 'turn.ended'));
+
+  const tree = tracked as { pid: number; grandchildPid: number } | null;
+  assert.ok(tree, 'the fixture reported the tree it spawned');
+  strayPids.push(tree!.pid, tree!.grandchildPid);
+  await waitUntil(() => !isAlive(tree!.pid) && !isAlive(tree!.grandchildPid), 5000);
 });
