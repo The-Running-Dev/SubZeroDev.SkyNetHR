@@ -2009,12 +2009,25 @@ async function spawnTrackedTree(): Promise<{ pid: number; pgid: number | null; g
     stdio: 'ignore',
   });
   parent.unref();
-  await waitUntil(() => existsSync(markerPath));
-  const marker = JSON.parse(await readFile(markerPath, 'utf8')) as { grandchildPid: number };
+  // #295: `existsSync` alone only proves the directory entry appeared, not that the
+  // child's `writeFileSync` has landed every byte — a reader can observe the file
+  // between its creation and its content becoming visible. Reading and parsing inside
+  // the predicate itself (retrying on either failure), the same shape every other marker
+  // read in this file already uses, is what makes the wait cover the content too.
+  let marker: { grandchildPid: number } | null = null;
+  await waitUntil(async () => {
+    if (!existsSync(markerPath)) return false;
+    try {
+      marker = JSON.parse(await readFile(markerPath, 'utf8')) as { grandchildPid: number };
+      return true;
+    } catch {
+      return false;
+    }
+  });
   return {
     pid: parent.pid!,
     pgid: process.platform === 'win32' ? null : (parent.pid ?? null),
-    grandchildPid: marker.grandchildPid,
+    grandchildPid: marker!.grandchildPid, // waitUntil resolved, so a parse succeeded
   };
 }
 
@@ -2349,8 +2362,18 @@ async function spawnTrackedShellTree(): Promise<{ pid: number; actualImage: stri
   const proc = spawn(cmdPath, [], { shell: true, stdio: 'ignore' });
   proc.unref();
   const pid = proc.pid!;
-  await waitUntil(() => existsSync(markerPath));
-  const marker = JSON.parse(await readFile(markerPath, 'utf8')) as { grandchildPid: number };
+  // #295: read-and-parse inside the predicate, same as `spawnTrackedTree` above — a bare
+  // `existsSync` check races the child's `writeFileSync` landing its bytes.
+  let marker: { grandchildPid: number } | null = null;
+  await waitUntil(async () => {
+    if (!existsSync(markerPath)) return false;
+    try {
+      marker = JSON.parse(await readFile(markerPath, 'utf8')) as { grandchildPid: number };
+      return true;
+    } catch {
+      return false;
+    }
+  });
 
   const execFileAsync = promisify(execFile);
   const { stdout } = await execFileAsync('tasklist', ['/FI', `PID eq ${pid}`, '/FO', 'CSV', '/NH']);
@@ -2358,7 +2381,7 @@ async function spawnTrackedShellTree(): Promise<{ pid: number; actualImage: stri
   const match = firstLine ? /^"([^"]*)"/.exec(firstLine) : null;
   const actualImage = match ? match[1]!.replace(/\.exe$/i, '') : '';
 
-  return { pid, actualImage, grandchildPid: marker.grandchildPid };
+  return { pid, actualImage, grandchildPid: marker!.grandchildPid };
 }
 
 test('S7.11 — Windows: a shell-backed process tree is recorded under the shell\'s own image, and boot recovery reaps the whole tree', async (t) => {
