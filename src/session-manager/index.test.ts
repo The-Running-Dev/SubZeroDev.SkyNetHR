@@ -132,7 +132,7 @@ async function makeManager(
     bind: { host: '127.0.0.1', port: 3000 },
     auth: { mode: 'shared-secret', cookieName: 'skynet', secret: 'x' },
     workspaceRoots: [workspaceRoot as never],
-    storageRoot,
+    storageRoot: storageRoot as never,
     allowedOrigins: [],
     trustProxy: [],
     caps: {

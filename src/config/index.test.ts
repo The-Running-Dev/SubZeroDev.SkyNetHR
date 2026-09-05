@@ -1,17 +1,35 @@
 import assert from 'node:assert/strict';
+import { execFile } from 'node:child_process';
+import { mkdirSync, realpathSync } from 'node:fs';
+import { mkdir, mkdtemp, readFile, readdir, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
+import path from 'node:path';
 import { describe, it } from 'node:test';
+import { promisify } from 'node:util';
 import { loadConfig } from './index.js';
+import { stripExtendedPrefix } from '../jail/index.js';
 
-// A real directory, because WORKSPACE_ROOTS is canonicalised at load.
-const root = tmpdir();
+const execFileAsync = promisify(execFile);
+
+// Real, sibling directories — WORKSPACE_ROOTS is canonicalised at load, and STORAGE_ROOT
+// must not overlap it (S31, D185).
+const root = path.join(tmpdir(), `skynet-config-test-${process.pid}`);
+const storageDir = path.join(root, 'storage');
+const workspaceDir = path.join(root, 'workspace');
+mkdirSync(storageDir, { recursive: true });
+mkdirSync(workspaceDir, { recursive: true });
+// What `WORKSPACE_ROOTS` actually canonicalises to — the same normalisation `config/index.ts`
+// applies before comparing. A CI runner's temp directory can realpath to a different string
+// than the raw path this file built it from (a symlink, a case difference, an 8.3 short
+// name), so a detail-string assertion must compare against this, not the raw `workspaceDir`.
+const resolvedWorkspaceDir = stripExtendedPrefix(realpathSync.native(workspaceDir));
 
 function env(over: Record<string, string | undefined> = {}): Record<string, string | undefined> {
   return {
     AUTH_MODE: 'proxy-header',
     AUTH_USER_HEADER: 'x-forwarded-user',
-    WORKSPACE_ROOTS: root,
-    STORAGE_ROOT: root,
+    WORKSPACE_ROOTS: workspaceDir,
+    STORAGE_ROOT: storageDir,
     ...over,
   };
 }
@@ -204,5 +222,144 @@ describe('config — the payroll cost tile\'s rates and currency (D158)', () => 
   it('treats a whitespace-only CURRENCY as unset, taking null', () => {
     const r = loadConfig(env({ CURRENCY: '   ' }));
     assert.equal(r.ok && r.value.currency, null);
+  });
+});
+
+// Windows 8.3 short name for an entry inside `parentDir` — `dir /x`'s alias column,
+// blank when the long name already fits 8.3. `null` when it cannot be determined at all,
+// which callers treat as "skip this case" rather than a failure (mirrors the helper in
+// `src/session-manager/index.test.ts`, S1.6/S5.7).
+async function shortNameFor(parentDir: string, entryName: string): Promise<string | null> {
+  let stdout: string;
+  try {
+    ({ stdout } = await execFileAsync('cmd.exe', ['/c', 'dir', '/x', parentDir]));
+  } catch {
+    return null;
+  }
+  for (const line of stdout.split('\n')) {
+    const idx = line.indexOf(entryName);
+    if (idx === -1 || !line.includes('<DIR>')) continue;
+    const before = line.slice(0, idx).trim();
+    const token = before.split(/\s+/).pop();
+    return token && token !== entryName ? token : null;
+  }
+  return null;
+}
+
+describe('config — storage may not overlap a workspace root (S31, D185, I60)', () => {
+  it('refuses a storage root equal to a workspace root, naming the field and the colliding root', () => {
+    const r = loadConfig(env({ STORAGE_ROOT: workspaceDir }));
+    assert.equal(r.ok, false);
+    assert.equal(r.ok === false && r.error.code, 'invalid_field');
+    assert.equal(r.ok === false && r.error.code === 'invalid_field' && r.error.field, 'STORAGE_ROOT');
+    assert.ok(
+      r.ok === false && r.error.code === 'invalid_field' && r.error.detail.includes(resolvedWorkspaceDir),
+      'detail names the colliding root',
+    );
+  });
+
+  it('refuses a storage root that sits inside a workspace root', () => {
+    const nested = path.join(workspaceDir, 'nested-storage');
+    const r = loadConfig(env({ STORAGE_ROOT: nested }));
+    assert.equal(r.ok === false && r.error.code, 'invalid_field');
+    assert.equal(r.ok === false && r.error.code === 'invalid_field' && r.error.field, 'STORAGE_ROOT');
+  });
+
+  it('refuses a storage root that contains a workspace root', async () => {
+    const parent = path.join(root, 'container');
+    const nestedWorkspace = path.join(parent, 'workspace-inside-storage');
+    mkdirSync(nestedWorkspace, { recursive: true });
+    const r = loadConfig(env({ STORAGE_ROOT: parent, WORKSPACE_ROOTS: nestedWorkspace }));
+    assert.equal(r.ok === false && r.error.code, 'invalid_field');
+    assert.equal(r.ok === false && r.error.code === 'invalid_field' && r.error.field, 'STORAGE_ROOT');
+  });
+
+  it('refuses a ".." traversal that resolves to a workspace root', () => {
+    const viaTraversal = path.join(workspaceDir, '..', 'workspace');
+    const r = loadConfig(env({ STORAGE_ROOT: viaTraversal }));
+    assert.equal(r.ok === false && r.error.code, 'invalid_field');
+    assert.equal(r.ok === false && r.error.code === 'invalid_field' && r.error.field, 'STORAGE_ROOT');
+  });
+
+  it('refuses a symlink whose target sits inside a workspace root', async () => {
+    const targetDir = path.join(workspaceDir, 'symlink-target');
+    mkdirSync(targetDir, { recursive: true });
+    const linkPath = path.join(root, 'storage-via-symlink');
+    try {
+      await symlink(targetDir, linkPath, 'junction');
+    } catch {
+      await symlink(targetDir, linkPath, 'dir');
+    }
+    const r = loadConfig(env({ STORAGE_ROOT: linkPath }));
+    assert.equal(r.ok === false && r.error.code, 'invalid_field');
+    assert.equal(r.ok === false && r.error.code === 'invalid_field' && r.error.field, 'STORAGE_ROOT');
+  });
+
+  it('refuses a Windows case variation of a workspace root', (t) => {
+    if (process.platform !== 'win32') {
+      t.skip('Windows-only: case-insensitive path resolution');
+      return;
+    }
+    const r = loadConfig(env({ STORAGE_ROOT: workspaceDir.toUpperCase() }));
+    assert.equal(r.ok === false && r.error.code, 'invalid_field');
+  });
+
+  it('refuses a Windows 8.3 short name of a workspace root', async (t) => {
+    if (process.platform !== 'win32') {
+      t.skip('Windows-only: 8.3 short-name aliasing');
+      return;
+    }
+    const shortName = await shortNameFor(root, path.basename(workspaceDir));
+    if (shortName === null) {
+      t.skip('could not determine an 8.3 short name on this host (8.3 creation may be disabled)');
+      return;
+    }
+    const r = loadConfig(env({ STORAGE_ROOT: path.join(root, shortName) }));
+    assert.equal(r.ok === false && r.error.code, 'invalid_field');
+  });
+
+  it('mints no new ConfigError variant: every refusal above is invalid_field', () => {
+    const r = loadConfig(env({ STORAGE_ROOT: workspaceDir }));
+    assert.equal(r.ok === false && r.error.code, 'invalid_field');
+  });
+
+  it('leaves a non-overlapping configuration untouched: a sibling storage root starts normally', () => {
+    const r = loadConfig(env());
+    assert.equal(r.ok, true);
+    assert.equal(r.ok && r.value.storageRoot, realpathSync.native(storageDir));
+  });
+
+  it('is the jail\'s one containment predicate, with exactly two callers and no others', async () => {
+    const srcRoot = path.join(process.cwd(), 'src');
+    const entries = await readdir(srcRoot, { recursive: true });
+    const callers = new Map<string, number>();
+    for (const entry of entries) {
+      if (!entry.endsWith('.ts') || entry.endsWith('.test.ts')) continue;
+      const filePath = path.join(srcRoot, entry);
+      const contents = await readFile(filePath, 'utf8');
+      // Exclude the definition itself (`jail/index.ts`'s `export function pathsOverlap`)
+      // and the type-only import lines every caller also carries.
+      const calls = (contents.match(/(?<!function )pathsOverlap\(/g) ?? []).length;
+      if (calls > 0) callers.set(entry, calls);
+    }
+    const normalised = new Map([...callers.entries()].map(([k, v]) => [k.replace(/\\/g, '/'), v]));
+    assert.deepEqual(
+      normalised,
+      new Map([
+        ['config/index.ts', 1],
+        ['session-manager/index.ts', 1],
+      ]),
+      'pathsOverlap has exactly these two callers, each calling it once',
+    );
+  });
+
+  it('creates the storage root on first boot, same as before this change', async () => {
+    const fresh = await mkdtemp(path.join(tmpdir(), 'skynet-config-fresh-'));
+    const freshStorage = path.join(fresh, 'does-not-exist-yet');
+    const freshWorkspace = path.join(fresh, 'workspace');
+    await mkdir(freshWorkspace);
+    const r = loadConfig(env({ STORAGE_ROOT: freshStorage, WORKSPACE_ROOTS: freshWorkspace }));
+    assert.equal(r.ok, true);
+    assert.equal(r.ok && r.value.storageRoot, realpathSync.native(freshStorage));
   });
 });

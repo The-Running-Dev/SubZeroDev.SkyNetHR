@@ -636,7 +636,7 @@ export interface Config {
   readonly bind: { readonly host: string; readonly port: number };
   readonly auth: AuthConfig;
   readonly workspaceRoots: readonly ResolvedPath[];
-  readonly storageRoot: string;
+  readonly storageRoot: ResolvedPath;
   readonly allowedOrigins: readonly string[];
   readonly trustProxy: readonly string[]; // upstream addresses permitted to set the identity header
   readonly caps: Caps;

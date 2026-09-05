@@ -23,7 +23,7 @@ function baseConfig(storageRoot: string, requisitionTextBytes = 1024, reviewBody
     bind: { host: '127.0.0.1', port: 3000 },
     auth: { mode: 'shared-secret', cookieName: 'skynet', secret: 'x' },
     workspaceRoots: [],
-    storageRoot,
+    storageRoot: storageRoot as never,
     allowedOrigins: [],
     trustProxy: [],
     caps: {

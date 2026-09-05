@@ -63,7 +63,7 @@ async function makeSharedEdges(): Promise<Harness> {
     bind: { host: '127.0.0.1', port: 0 },
     auth: { mode: 'proxy-header', userHeader: 'x-forwarded-user' },
     workspaceRoots: [workspaceRoot as never],
-    storageRoot,
+    storageRoot: storageRoot as never,
     allowedOrigins: ['https://console.example'],
     trustProxy: [],
     caps: {
