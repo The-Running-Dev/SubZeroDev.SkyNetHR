@@ -7,6 +7,7 @@ import path from 'node:path';
 import { describe, it } from 'node:test';
 import { promisify } from 'node:util';
 import { loadConfig } from './index.js';
+import { stripExtendedPrefix } from '../jail/index.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -17,6 +18,11 @@ const storageDir = path.join(root, 'storage');
 const workspaceDir = path.join(root, 'workspace');
 mkdirSync(storageDir, { recursive: true });
 mkdirSync(workspaceDir, { recursive: true });
+// What `WORKSPACE_ROOTS` actually canonicalises to — the same normalisation `config/index.ts`
+// applies before comparing. A CI runner's temp directory can realpath to a different string
+// than the raw path this file built it from (a symlink, a case difference, an 8.3 short
+// name), so a detail-string assertion must compare against this, not the raw `workspaceDir`.
+const resolvedWorkspaceDir = stripExtendedPrefix(realpathSync.native(workspaceDir));
 
 function env(over: Record<string, string | undefined> = {}): Record<string, string | undefined> {
   return {
@@ -247,7 +253,7 @@ describe('config — storage may not overlap a workspace root (S31, D185, I60)',
     assert.equal(r.ok === false && r.error.code, 'invalid_field');
     assert.equal(r.ok === false && r.error.code === 'invalid_field' && r.error.field, 'STORAGE_ROOT');
     assert.ok(
-      r.ok === false && r.error.code === 'invalid_field' && r.error.detail.includes(workspaceDir),
+      r.ok === false && r.error.code === 'invalid_field' && r.error.detail.includes(resolvedWorkspaceDir),
       'detail names the colliding root',
     );
   });
