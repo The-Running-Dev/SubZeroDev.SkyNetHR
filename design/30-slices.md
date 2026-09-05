@@ -1816,11 +1816,6 @@ which D23 and D38 both accept; and re-asserting S7.6, which this slice leaves st
 this slice's suite on the second platform is S19's; S29.1's finding covers both platforms because the value it reads is the
 platform's own.
 
-## Outstanding
-
-Slices below have no closed issue, or an issue reopened because it was closed with unticked
-`Done when` boxes. `/track` syncs these normally.
-
 ## S30 — The storage lock becomes a lease
 
 **Tier one**, and the largest of the five. D180 decided it and D193 to D196 finished it; this builds
@@ -2035,6 +2030,15 @@ checkpointing or cleaning ignored paths, which the brief itself excludes and whi
 not touch in either direction; a git note or `meta.json` as the manifest's home, both rejected by
 D187; and reporting ignored paths anywhere but a restore. Running this slice's suite on the second
 platform is S19's.
+
+---
+
+## Outstanding
+
+Slices below have no closed issue, or an issue reopened because it was closed with unticked
+`Done when` boxes. `/track` syncs these normally.
+
+None at present — S30, S31 and S32 landed and moved above.
 
 ---
 
