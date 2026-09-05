@@ -1,5 +1,5 @@
-import { realpathSync } from 'node:fs';
-import { stripExtendedPrefix } from '../jail/index.js';
+import { mkdirSync, realpathSync } from 'node:fs';
+import { pathsOverlap, stripExtendedPrefix } from '../jail/index.js';
 import type {
   AuthConfig,
   Caps,
@@ -103,6 +103,34 @@ function parseWorkspaceRoots(env: Readonly<Record<string, string | undefined>>):
   return { ok: true, value: resolved };
 }
 
+// D185/I60: the storage root must be canonicalised with the same normalisation the jail
+// applies to workspace roots before `pathsOverlap` — the server's one containment
+// predicate — can compare it against them at all. Unlike a workspace root, the storage
+// root is created here rather than required to pre-exist: it is this deployment's own
+// directory, not an operator's project folder, and `createStore` has always made it on
+// first boot.
+function parseStorageRoot(
+  env: Readonly<Record<string, string | undefined>>,
+  workspaceRoots: readonly ResolvedPath[],
+): Result<ResolvedPath, ConfigError> {
+  const field = requireEnv(env, 'STORAGE_ROOT');
+  if (!field.ok) return field;
+  let resolved: string;
+  try {
+    mkdirSync(field.value, { recursive: true });
+    resolved = stripExtendedPrefix(realpathSync.native(field.value));
+  } catch (err) {
+    return invalid('STORAGE_ROOT', `cannot resolve '${field.value}': ${(err as Error).message}`);
+  }
+  const storageRoot = resolved as ResolvedPath;
+  for (const root of workspaceRoots) {
+    if (pathsOverlap(storageRoot, root)) {
+      return invalid('STORAGE_ROOT', `overlaps workspace root '${root}'`);
+    }
+  }
+  return { ok: true, value: storageRoot };
+}
+
 function parseChecklist(env: Readonly<Record<string, string | undefined>>): Result<readonly ChecklistItemTemplate[], ConfigError> {
   const raw = env['CHECKLIST_JSON'];
   if (raw === undefined || raw.trim() === '') return { ok: true, value: [] };
@@ -181,7 +209,7 @@ export function loadConfig(env: Readonly<Record<string, string | undefined>>): R
   const roots = parseWorkspaceRoots(env);
   if (!roots.ok) return roots;
 
-  const storageRoot = requireEnv(env, 'STORAGE_ROOT');
+  const storageRoot = parseStorageRoot(env, roots.value);
   if (!storageRoot.ok) return storageRoot;
 
   const allowedOrigins = parseList(env, 'ALLOWED_ORIGINS');

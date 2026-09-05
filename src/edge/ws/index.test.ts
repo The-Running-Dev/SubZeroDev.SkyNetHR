@@ -82,7 +82,7 @@ async function makeSharedEdges(
     bind: { host: '127.0.0.1', port: 0 },
     auth,
     workspaceRoots: [workspaceRoot as never],
-    storageRoot,
+    storageRoot: storageRoot as never,
     allowedOrigins: [ALLOWED_ORIGIN],
     trustProxy: [],
     caps: {
