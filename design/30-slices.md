@@ -1555,11 +1555,6 @@ while absent from `--help` — the probe records that, and what to do about an u
 permission path depends on is a decision, not a fix; inventing the shape of any surface a hook
 process would reach; and retiring the fixture CLI.
 
-## Outstanding
-
-Slices below have no closed issue, or an issue reopened because it was closed with unticked
-`Done when` boxes. `/track` syncs these normally.
-
 ## S27 — Stop the server without leaving an agent behind
 
 **Tier one**, and small. D174 to D178 decided it; this builds it. It exists because the stop path
@@ -1820,6 +1815,11 @@ and is the residual it accepts; closing the window between a spawn returning and
 which D23 and D38 both accept; and re-asserting S7.6, which this slice leaves standing. Running
 this slice's suite on the second platform is S19's; S29.1's finding covers both platforms because the value it reads is the
 platform's own.
+
+## Outstanding
+
+Slices below have no closed issue, or an issue reopened because it was closed with unticked
+`Done when` boxes. `/track` syncs these normally.
 
 ## S30 — The storage lock becomes a lease
 
