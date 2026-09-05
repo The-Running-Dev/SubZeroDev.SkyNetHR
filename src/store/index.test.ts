@@ -1136,8 +1136,10 @@ test('D202 — Store.close() releases the server-wide append handles, writes not
     pgid: null,
     sessionId: 'sess-1' as never,
     turnId: 't1' as never,
+    hostname: null,
     startedAt: new Date().toISOString() as never,
     image: 'node',
+    osCreatedAt: null,
     exitedAt: null,
   });
   assert.equal(appendedPid.ok, true);

@@ -1381,6 +1381,41 @@ function isAlive(pid: number): boolean {
   }
 }
 
+// Independent ground truth for a live pid's OS-reported creation time (S29), separate
+// from `session-manager`'s own `getOsCreatedAt` — the same pattern `spawnTrackedShellTree`
+// below already uses for the live image (its own `tasklist` call, not `getProcessImage`).
+// Matches `design/findings/S29-created-at-stability.md`'s method exactly.
+async function readOsCreatedAt(pid: number): Promise<string | null> {
+  if (process.platform === 'win32') {
+    try {
+      const { stdout } = await execFileAsync('powershell', [
+        '-NoProfile',
+        '-Command',
+        `(Get-Process -Id ${pid}).StartTime.ToUniversalTime().ToString('o')`,
+      ]);
+      const line = stdout.trim();
+      return line.length > 0 ? line : null;
+    } catch {
+      return null;
+    }
+  }
+  try {
+    const { stdout: clkTckOut } = await execFileAsync('getconf', ['CLK_TCK']);
+    const clkTck = Number(clkTckOut.trim());
+    const stat = await readFile('/proc/stat', 'utf8');
+    const btimeLine = stat.split('\n').find((l) => l.startsWith('btime '));
+    if (!btimeLine) return null;
+    const btime = Number(btimeLine.split(/\s+/)[1]);
+    const raw = await readFile(`/proc/${pid}/stat`, 'utf8');
+    const afterComm = raw.slice(raw.lastIndexOf(')') + 2).split(' ');
+    const startTicks = Number(afterComm[19]);
+    if (!Number.isFinite(btime) || !Number.isFinite(startTicks) || !clkTck) return null;
+    return new Date((btime + startTicks / clkTck) * 1000).toISOString();
+  } catch {
+    return null;
+  }
+}
+
 // Windows 8.3 short name for an entry inside `parentDir` — `dir /x`'s alias column,
 // blank when the long name already fits 8.3 (S1.6, S5.7). `null` when it cannot be
 // determined at all, which callers treat as "skip this case" rather than a failure.
@@ -2186,8 +2221,10 @@ test('S7.9 — pids.ndjson gains one line per spawn and one tombstone per exit; 
     pgid: null,
     sessionId: 'sess-s79' as SessionId,
     turnId: 'turn-s79' as TurnId,
+    hostname: hostname(),
     startedAt: new Date().toISOString() as IsoTimestamp,
     image: 'whatever',
+    osCreatedAt: null,
     exitedAt: null,
   };
   assert.equal((await store.appendPid(record)).ok, true);
@@ -2201,20 +2238,30 @@ test('S7.9 — pids.ndjson gains one line per spawn and one tombstone per exit; 
   assert.equal(lines.length, 2, 'one spawn line, one tombstone line');
 });
 
-test('S7.5 — a live process whose recorded image matches and started after the host boot is reaped: the whole tree is killed and the entry tombstoned', async () => {
+// S7.5 stated the three-limb guard: matching image and a `startedAt` after boot was
+// enough to reap. S29 gives the guard five limbs (a `hostname` gate ahead of it, and an
+// exact `osCreatedAt` match behind it); S7.5 is retired by S29 (`design/30-slices.md §
+// S29`), and this is also S29.6's positive control — a record passing every limb,
+// including the two S29 added, is still reaped.
+test('S7.5/S29.6 — a live process passing every limb (hostname, no exitedAt, startedAt, image, osCreatedAt) is reaped: the whole tree is killed and the entry tombstoned', async () => {
   const { manager, store } = await makeManager('full');
   const { pid, pgid, grandchildPid } = await spawnTrackedTree();
   strayPids.push(pid, grandchildPid);
   assert.equal(isAlive(pid), true, 'the parent is running before boot');
   assert.equal(isAlive(grandchildPid), true, 'the grandchild is running before boot');
 
+  const osCreatedAt = await readOsCreatedAt(pid);
+  assert.notEqual(osCreatedAt, null, 'ground truth: this platform can read the spawned process\'s own creation time');
+
   const record: ProcessRecord = {
     pid,
     pgid,
     sessionId: 'sess-reap-s75' as SessionId,
     turnId: 'turn-reap-s75' as TurnId,
+    hostname: hostname(),
     startedAt: new Date().toISOString() as IsoTimestamp,
     image: path.basename(process.execPath).replace(/\.exe$/i, ''),
+    osCreatedAt: osCreatedAt as IsoTimestamp,
     exitedAt: null,
   };
   assert.equal((await store.appendPid(record)).ok, true);
@@ -2238,8 +2285,10 @@ test('S7.6 — a live process whose image does not match the record is not reape
     pgid,
     sessionId: 'sess-reap-s76' as SessionId,
     turnId: 'turn-reap-s76' as TurnId,
+    hostname: hostname(),
     startedAt: new Date().toISOString() as IsoTimestamp,
     image: 'definitely-not-the-real-image',
+    osCreatedAt: null,
     exitedAt: null,
   };
   assert.equal((await store.appendPid(record)).ok, true);
@@ -2312,8 +2361,10 @@ test('S7.11 — Windows: a shell-backed process tree is recorded under the shell
     pgid: null,
     sessionId: 'sess-reap-s711' as SessionId,
     turnId: 'turn-reap-s711' as TurnId,
+    hostname: hostname(),
     startedAt: new Date().toISOString() as IsoTimestamp,
     image: actualImage,
+    osCreatedAt: (await readOsCreatedAt(pid)) as IsoTimestamp,
     exitedAt: null,
   };
   assert.equal((await store.appendPid(record)).ok, true);
@@ -2325,6 +2376,229 @@ test('S7.11 — Windows: a shell-backed process tree is recorded under the shell
 
   const open = await store.readOpenPids();
   assert.equal(open.some((r) => r.pid === pid), false, 'the reaped entry is tombstoned');
+});
+
+// --- S29 — The reaper knows whose process it is, and which one ------------------------
+
+test('S29.2 — a record naming another host is neither reaped nor tombstoned, even when pid, image and timings all name a live local process', async () => {
+  const { manager, store, storageRoot } = await makeManager('full');
+  const { pid, pgid, grandchildPid } = await spawnTrackedTree();
+  strayPids.push(pid, grandchildPid);
+
+  const osCreatedAt = await readOsCreatedAt(pid);
+  const record: ProcessRecord = {
+    pid,
+    pgid,
+    sessionId: 'sess-s292' as SessionId,
+    turnId: 'turn-s292' as TurnId,
+    hostname: 'some-other-host',
+    startedAt: new Date().toISOString() as IsoTimestamp,
+    image: path.basename(process.execPath).replace(/\.exe$/i, ''),
+    osCreatedAt: osCreatedAt as IsoTimestamp,
+    exitedAt: null,
+  };
+  assert.equal((await store.appendPid(record)).ok, true);
+  const pidsBefore = await readFile(path.join(storageRoot, 'pids.ndjson'), 'utf8');
+
+  const booted = await manager.boot();
+  assert.equal(booted.ok, true);
+
+  await new Promise((r) => setTimeout(r, 300));
+  assert.equal(isAlive(pid), true, 'a foreign host\'s coincidence is not this host\'s to kill');
+
+  const pidsAfter = await readFile(path.join(storageRoot, 'pids.ndjson'), 'utf8');
+  assert.equal(pidsAfter, pidsBefore, 'no tombstone was appended either — an exit record for a child this server never saw would be a lie');
+});
+
+test('S29.3 — a record written before the hostname field existed is read as this host\'s, and takes the ordinary (fail-closed) guard rather than being skipped as foreign', async () => {
+  const { manager, store, storageRoot } = await makeManager('full');
+  const { pid, pgid, grandchildPid } = await spawnTrackedTree();
+  strayPids.push(pid, grandchildPid);
+
+  // The previous shape: no `hostname`, no `osCreatedAt` at all — not `null`, simply
+  // absent, exactly as a pre-S29 line on disk would be.
+  const oldShapeLine = {
+    pid,
+    pgid,
+    sessionId: 'sess-s293',
+    turnId: 'turn-s293',
+    startedAt: new Date().toISOString(),
+    image: path.basename(process.execPath).replace(/\.exe$/i, ''),
+    exitedAt: null,
+  };
+  await writeFile(path.join(storageRoot, 'pids.ndjson'), JSON.stringify(oldShapeLine) + '\n');
+
+  const booted = await manager.boot();
+  assert.equal(booted.ok, true);
+
+  await new Promise((r) => setTimeout(r, 300));
+  assert.equal(isAlive(pid), true, 'no hostname means this host\'s guard runs, and osCreatedAt is absent so it fails closed rather than reaping');
+
+  const open = await store.readOpenPids();
+  assert.equal(
+    open.some((r) => r.pid === pid),
+    false,
+    'tombstoned — unlike S29.2\'s foreign-host skip, running the guard at all always ends in a tombstone',
+  );
+});
+
+test('S29.4 — the fourth limb rejects same-boot pid reuse: a live process passing image and timing but not the recorded osCreatedAt is logged and tombstoned, never killed', async () => {
+  const { manager, store } = await makeManager('full');
+  const { pid, pgid, grandchildPid } = await spawnTrackedTree();
+  strayPids.push(pid, grandchildPid);
+
+  const record: ProcessRecord = {
+    pid,
+    pgid,
+    sessionId: 'sess-s294' as SessionId,
+    turnId: 'turn-s294' as TurnId,
+    hostname: hostname(),
+    startedAt: new Date().toISOString() as IsoTimestamp,
+    image: path.basename(process.execPath).replace(/\.exe$/i, ''),
+    // A plausible but wrong creation time: what "the same pid and image, a different
+    // process" looks like on disk.
+    osCreatedAt: new Date(Date.now() - 3_600_000).toISOString() as IsoTimestamp,
+    exitedAt: null,
+  };
+  assert.equal((await store.appendPid(record)).ok, true);
+
+  const booted = await manager.boot();
+  assert.equal(booted.ok, true);
+
+  await new Promise((r) => setTimeout(r, 300));
+  assert.equal(isAlive(pid), true, 'a wrong kill is an incident, so the mismatched process is left alone');
+
+  const open = await store.readOpenPids();
+  assert.equal(open.some((r) => r.pid === pid), false, 'still tombstoned');
+});
+
+test('S29.5 — the guard fails closed at both new-limb ends, independently: a null recorded osCreatedAt, and a live counterpart that cannot be read, both tombstone without killing', async () => {
+  // End 1: the recorded value is null (a spawn-time capture failure, S29.7), everything
+  // else about the record is a genuine live match.
+  {
+    const { manager, store } = await makeManager('full');
+    const { pid, pgid, grandchildPid } = await spawnTrackedTree();
+    strayPids.push(pid, grandchildPid);
+    const record: ProcessRecord = {
+      pid,
+      pgid,
+      sessionId: 'sess-s295a' as SessionId,
+      turnId: 'turn-s295a' as TurnId,
+      hostname: hostname(),
+      startedAt: new Date().toISOString() as IsoTimestamp,
+      image: path.basename(process.execPath).replace(/\.exe$/i, ''),
+      osCreatedAt: null,
+      exitedAt: null,
+    };
+    assert.equal((await store.appendPid(record)).ok, true);
+    assert.equal((await manager.boot()).ok, true);
+    await new Promise((r) => setTimeout(r, 300));
+    assert.equal(isAlive(pid), true, 'a null recorded osCreatedAt never reaps');
+    assert.equal((await store.readOpenPids()).some((r) => r.pid === pid), false, 'tombstoned regardless');
+  }
+
+  // End 2: the recorded value is present and would match, but the live read fails —
+  // forced via the `getOsCreatedAt` test seam (S28's `createAdapter` precedent), since a
+  // real live process's own read practically never fails on the platforms this guard runs
+  // on. One always-null answer proves nothing on its own (S29.5's point exactly) — end 1
+  // shows the recorded side failing closed, this shows the live side failing closed too,
+  // with the recorded side otherwise correct.
+  {
+    const { config, store, checkpoints } = await makeManager('full');
+    const { pid, pgid, grandchildPid } = await spawnTrackedTree();
+    strayPids.push(pid, grandchildPid);
+    const realOsCreatedAt = await readOsCreatedAt(pid);
+    assert.notEqual(realOsCreatedAt, null);
+    const record: ProcessRecord = {
+      pid,
+      pgid,
+      sessionId: 'sess-s295b' as SessionId,
+      turnId: 'turn-s295b' as TurnId,
+      hostname: hostname(),
+      startedAt: new Date().toISOString() as IsoTimestamp,
+      image: path.basename(process.execPath).replace(/\.exe$/i, ''),
+      osCreatedAt: realOsCreatedAt as IsoTimestamp,
+      exitedAt: null,
+    };
+    assert.equal((await store.appendPid(record)).ok, true);
+
+    const manager = createSessionManager({
+      config,
+      store,
+      checkpoints,
+      records: notImplementedProxy<Records>('records'),
+      getOsCreatedAt: async () => null,
+    });
+    assert.equal((await manager.boot()).ok, true);
+    await new Promise((r) => setTimeout(r, 300));
+    assert.equal(isAlive(pid), true, 'an unreadable live counterpart never reaps, even though the recorded value was correct');
+    assert.equal((await store.readOpenPids()).some((r) => r.pid === pid), false, 'tombstoned regardless');
+  }
+});
+
+test('S29.7 — a capture failure at spawn costs nothing but the guard: the child runs, its line carries osCreatedAt: null, and no envelope or notice is emitted', async () => {
+  const { config, store, checkpoints, workspaceRoot } = await makeManager('full');
+  const manager = createSessionManager({
+    config,
+    store,
+    checkpoints,
+    records: notImplementedProxy<Records>('records'),
+    getOsCreatedAt: async () => null,
+  });
+  assert.equal((await manager.boot()).ok, true);
+
+  const owner = 'operator-1' as OperatorId;
+  const projectDir = path.join(workspaceRoot, 'proj-s297');
+  await mkdir(projectDir);
+  const created = await manager.create(owner, { vendor: 'claude', cwd: projectDir, model: null, sandbox: null, requisitionId: null });
+  assert.equal(created.ok, true);
+  if (!created.ok) return;
+
+  const events: string[] = [];
+  await manager.subscribe(created.value.sessionId, owner, 0, {
+    deliver: (e) => {
+      if ('kind' in e) events.push(e.kind);
+    },
+    close: () => {},
+  });
+
+  const messaged = await manager.message(created.value.sessionId, owner, 'go', []);
+  assert.equal(messaged.ok, true);
+
+  await waitUntil(() => (store.readOpenPids as unknown as () => Promise<ProcessRecord[]>)().then((open) => open.length > 0));
+  const open = await store.readOpenPids();
+  assert.equal(open.length, 1);
+  assert.equal(open[0]!.osCreatedAt, null, 'the capture failure landed on the record as an absent value, nothing more');
+
+  assert.equal(events.includes('error'), false, 'no envelope for a spawn-time capture failure');
+
+  await manager.shutdown();
+});
+
+test('S29.9 — the open-record fold never hands back a tombstone as an open record, with hostname and osCreatedAt now carried from the spawn line', async () => {
+  const { store } = await makeManager('full');
+  const pid = 999029;
+  const record: ProcessRecord = {
+    pid,
+    pgid: null,
+    sessionId: 'sess-s299' as SessionId,
+    turnId: 'turn-s299' as TurnId,
+    hostname: 'host-s299',
+    startedAt: new Date().toISOString() as IsoTimestamp,
+    image: 'whatever',
+    osCreatedAt: new Date().toISOString() as IsoTimestamp,
+    exitedAt: null,
+  };
+  assert.equal((await store.appendPid(record)).ok, true);
+  const openBefore = await store.readOpenPids();
+  const found = openBefore.find((r) => r.pid === pid);
+  assert.notEqual(found, undefined);
+  assert.equal(found!.hostname, record.hostname);
+  assert.equal(found!.osCreatedAt, record.osCreatedAt);
+
+  assert.equal((await store.tombstonePid(pid, new Date().toISOString() as IsoTimestamp)).ok, true);
+  const openAfter = await store.readOpenPids();
+  assert.equal(openAfter.some((r) => r.pid === pid), false, 'a pid whose latest line is a tombstone is absent from the open set');
 });
 
 test('S7.10 — a storage root that cannot be written at boot refuses to start with StartupError.storage_unwritable', async () => {
@@ -2361,8 +2635,10 @@ test('S22.1/S22.2/S22.7 — a second boot against a held storage root refuses be
     pgid,
     sessionId: 'sess-s22' as SessionId,
     turnId: 'turn-s22' as TurnId,
+    hostname: hostname(),
     startedAt: new Date().toISOString() as IsoTimestamp,
     image: path.basename(process.execPath).replace(/\.exe$/i, ''),
+    osCreatedAt: null,
     exitedAt: null,
   };
   assert.equal((await store.appendPid(record)).ok, true);
@@ -4144,8 +4420,10 @@ test('S27.13 — shutdown never reads pids.ndjson to choose what to kill: an unt
     pgid: stray.pgid,
     sessionId: 'not-a-real-session' as never,
     turnId: 'not-a-real-turn' as never,
+    hostname: hostname(),
     startedAt: new Date().toISOString() as never,
     image: 'test-stray',
+    osCreatedAt: null,
     exitedAt: null,
   });
   assert.equal(isAlive(stray.pid), true);
