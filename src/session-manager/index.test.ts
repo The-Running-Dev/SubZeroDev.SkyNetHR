@@ -4300,6 +4300,13 @@ test('S27.8 — the tombstone is written at kill time, not in response to an exi
     }
   });
   const { cliPid } = marker!;
+  // The marker is the child's own write; the pid record is the manager's, appended off its
+  // `spawned` notification. Nothing orders the two, so the marker is not a proxy for the
+  // append — and since #286 put `getOsCreatedAt` ahead of it, the gap is a whole PowerShell
+  // process on Windows against two `/proc` reads on Linux, wide enough that the marker
+  // routinely lands first there. Wait on the record itself. This is only the precondition;
+  // what S27.8 asserts is the tombstone below.
+  await waitUntil(async () => (await store.readOpenPids()).some((r) => r.pid === cliPid));
   assert.equal((await store.readOpenPids()).some((r) => r.pid === cliPid), true, 'the pid is recorded open before shutdown');
 
   await manager.shutdown();
