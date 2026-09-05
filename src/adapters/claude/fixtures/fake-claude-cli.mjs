@@ -44,6 +44,11 @@ import { spawn } from 'node:child_process';
 //                   writes its own pid to SKYNET_GRANDCHILD_MARKER and then idles
 //                   forever, and never sends a result — a turn that stays live until
 //                   something kills the tree (S5.2).
+//   grandchild-then-result — the same tracked grandchild as `grandchild`, but this
+//                   process then sends a normal `result` and does not exit on its own
+//                   afterward: whatever ends this turn's tree has to be the manager's own
+//                   tree-kill obligation at completion, not this fixture giving up its
+//                   own child voluntarily (S28.3, S28.4, S28.9).
 //   big-tool-result — one tool call whose result is SKYNET_BIG_TOOL_RESULT_BYTES bytes
 //                   of untruncated 'x' repeated, for S9's truncation-before-envelope
 //                   assertions.
@@ -394,6 +399,16 @@ function runScenario() {
       const grandchild = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
       writeFileSync(process.env.SKYNET_GRANDCHILD_MARKER, JSON.stringify({ cliPid: process.pid, grandchildPid: grandchild.pid }));
       // No result: the turn stays live until something kills the tree.
+      return;
+    }
+    case 'grandchild-then-result': {
+      const grandchild = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+      writeFileSync(process.env.SKYNET_GRANDCHILD_MARKER, JSON.stringify({ cliPid: process.pid, grandchildPid: grandchild.pid }));
+      line({ type: 'result', subtype: 'success' });
+      // Deliberately does not exit and does not close its own stdin's read loop: this
+      // process stays alive on its own until the manager's own tree-kill obligation
+      // (S28) reaches it, so a passing test here cannot be explained by this fixture
+      // giving up its own child voluntarily.
       return;
     }
     case 'usage-real': {
