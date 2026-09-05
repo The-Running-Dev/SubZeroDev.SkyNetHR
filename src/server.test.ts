@@ -84,6 +84,7 @@ async function startServer(overrideEnv: Record<string, string> = {}): Promise<{
   storageRoot: string;
   workspaceRoot: string;
   stderr: () => string;
+  stdout: () => string;
 }> {
   const storageRoot = overrideEnv['STORAGE_ROOT'] ?? (await mkdtemp(path.join(tmpdir(), 'skynet-server-storage-')));
   const workspaceRoot = await mkdtemp(path.join(tmpdir(), 'skynet-server-ws-'));
@@ -116,6 +117,13 @@ async function startServer(overrideEnv: Record<string, string> = {}): Promise<{
   child.stderr?.on('data', (c: Buffer) => {
     stderrBuf += c.toString('utf8');
   });
+  // Held for the child's life, alongside `waitForOutput`'s own short-lived listener on the
+  // same stream (both see every chunk) — S27.15 reads shutdown's ordering log lines back
+  // out of this after the process has exited.
+  let stdoutBuf = '';
+  child.stdout?.on('data', (c: Buffer) => {
+    stdoutBuf += c.toString('utf8');
+  });
   try {
     await waitForOutput(child, /listening on/);
   } catch (err) {
@@ -123,7 +131,7 @@ async function startServer(overrideEnv: Record<string, string> = {}): Promise<{
     // nowhere else, so a readiness failure without it names no cause at all.
     throw new Error(`${(err as Error).message}\nstderr:\n${stderrBuf}`);
   }
-  return { child, port, storageRoot, workspaceRoot, stderr: () => stderrBuf };
+  return { child, port, storageRoot, workspaceRoot, stderr: () => stderrBuf, stdout: () => stdoutBuf };
 }
 
 function request(
@@ -367,6 +375,47 @@ test('S27.4 — a subscriber force-closed by the drain loses nothing: after a re
   const restartedExit = waitForExit(restarted.child);
   restarted.child.kill('SIGTERM');
   await restartedExit;
+});
+
+test('S27.15 — the store close is step 5: entered only after step 4 (release) has returned, and the process still exits 0', async (t) => {
+  if (process.platform === 'win32') {
+    t.skip('Linux-only: SIGTERM cannot be delivered to a child process on Windows (#28)');
+    return;
+  }
+  const { child, storageRoot, stdout } = await startServer();
+
+  const exitPromise = waitForExit(child);
+  child.kill('SIGTERM');
+  const { code } = await exitPromise;
+  assert.equal(code, 0, 'a close entered behind a completed release still exits zero (D202, I53)');
+  assert.equal(existsSync(path.join(storageRoot, 'server.lock')), false, 'sanity: step 4 (release) did run');
+
+  // Both steps log unconditionally (`server.ts`'s `stop`), so a real subprocess's own stdout
+  // is the instrumentation this criterion asks for: the release line's position must precede
+  // the close line's, and both must be present — proving step 5 was entered, not merely that
+  // the process happened to exit zero regardless of ordering.
+  const out = stdout();
+  const releaseAt = out.indexOf('[server] shutdown: server.lock release step complete');
+  const closeAt = out.indexOf('[server] shutdown: store closed, exiting 0');
+  assert.ok(releaseAt !== -1, `expected the release-complete log line; saw:\n${out}`);
+  assert.ok(closeAt !== -1, `expected the store-closed log line; saw:\n${out}`);
+  assert.ok(releaseAt < closeAt, 'store.close() is entered only after the release step has returned');
+});
+
+test('S27.15 — a store close that throws is logged and changes neither the exit code nor any earlier step', async (t) => {
+  if (process.platform === 'win32') {
+    t.skip('Linux-only: SIGTERM cannot be delivered to a child process on Windows (#28)');
+    return;
+  }
+  const { child, storageRoot, stderr } = await startServer({ SKYNET_TEST_FORCE_STORE_CLOSE_ERROR: '1' });
+
+  const exitPromise = waitForExit(child);
+  child.kill('SIGTERM');
+  const { code } = await exitPromise;
+
+  assert.equal(code, 0, 'a failed close is best-effort, like every step past the guard — it never changes the exit code');
+  assert.equal(existsSync(path.join(storageRoot, 'server.lock')), false, 'a failed close does not undo step 4: the lock is still released');
+  assert.match(stderr(), /shutdown: closing the store failed/, 'the failure is logged, not swallowed silently');
 });
 
 // Cross-platform: unlike SIGTERM (#28, Windows has no real signals), a plain TCP bind
