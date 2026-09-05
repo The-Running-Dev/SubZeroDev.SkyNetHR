@@ -182,20 +182,23 @@ export interface ProcessTombstone {
 // Server lock
 // ---------------------------------------------------------------------------
 
-// `<storage>/server.lock`. Read at boot and reclaimed only when its holder fails D23's
-// liveness test, and never when `hostname` is another host. It carries no `exitedAt`:
-// `releaseLock` removes the file, so the file's absence is that limb of the test.
+// `<storage>/server.lock`. A lease (D180): liveness is decided by watching `instanceId` and
+// `renewals` change, never by interrogating a process table or comparing a clock. `pid`,
+// `hostname`, `startedAt` and `image` are retained and are informational only — no decision
+// reads them (I57); they are what a `storage_locked` refusal prints. It carries no
+// `exitedAt`: `releaseLock` removes the file, so the file's absence is an unheld root.
 export interface ServerLock {
+  readonly instanceId: string; // minted randomly at boot; identifies one run of one server
+  readonly renewals: number; // monotonic; incremented by the holder for as long as it holds the root
   readonly pid: number;
   readonly hostname: string;
   readonly startedAt: IsoTimestamp; // load-bearing, exactly as ProcessRecord.startedAt is
   readonly image: string;
 }
 
-// Supplied by the caller so that D23's three-part liveness test has exactly one
-// implementation and `store` acquires no dependency on process enumeration. `true` means
-// the named holder is a live server process on this host.
-export type LivenessProbe = (holder: ServerLock) => Promise<boolean>;
+// `'displaced'` is a success, not an error: the renewal found this process no longer holds
+// the root (D195). See `Store.renewLock`.
+export type LockRenewal = 'renewed' | 'displaced';
 
 // ---------------------------------------------------------------------------
 // Event envelope
@@ -980,12 +983,24 @@ export interface Store {
   // Claim `<storage>/server.lock` for `self`. Called as boot's step 0, before the reap step
   // and not merely before `listen`. Returns `StartupError` rather than `StoreError` because
   // `storage_locked` is a startup refusal and because `SessionManager.boot` already returns
-  // that union, so it composes with no wrapper.
-  claimLock(self: ServerLock, isLive: LivenessProbe): Promise<Result<void, StartupError>>;
+  // that union, so it composes with no wrapper. No `LivenessProbe` (D180): a present lock is
+  // decided by observing `(instanceId, renewals)` unchanged across one observation window, on
+  // this process's own monotonic clock, never by a process table or a wall clock.
+  claimLock(self: ServerLock): Promise<Result<void, StartupError>>;
 
-  // Remove the lock at clean shutdown. A failure here is logged and is not fatal: the next
-  // boot's staleness path is what recovers from a lock nobody removed.
+  // Remove the lock at clean shutdown. Ownership-checked (D180, I56): removes the file only
+  // while it still carries the `instanceId` this process claimed with. A mismatch or an
+  // absent file means this process has already been displaced and is a logged no-op, not an
+  // error — shutdown raises nothing.
   releaseLock(): Promise<Result<void, StoreError>>;
+
+  // Performs one ownership-checked renewal of `<storage>/server.lock` and reports which
+  // happened (D195). `store` owns no clock: this is called on demand, and `server.ts` drives
+  // the interval. `'displaced'` is a success, not an error — the lock is absent or names
+  // another `instanceId`, and this process must stop rather than go on writing server-wide
+  // state it no longer owns. A `StoreError.io` here means the renewal could not be attempted
+  // at all, which is not the same thing and does not by itself mean the root was lost.
+  renewLock(): Promise<Result<LockRenewal, StoreError>>;
 
   // Releases the OS handles a `Store` owns (D202): the four server-wide append files each
   // opened once and held for the store's life (`lazyHandle`). Returns no `Result` — it is
@@ -1073,6 +1088,10 @@ export type StartupError =
   // the value when an operator is looking at one, and is why an OS advisory lock was
   // rejected (D161).
   | { readonly code: 'storage_locked'; readonly path: string; readonly holder: ServerLock }
+  // `server.lock` is present and will not parse (D196). Not a renewal caught in flight —
+  // every write publishes the file whole (I61) — and not a lock predating the lease, which
+  // parses and simply carries no `renewals`, reaching the reclaim path instead (I61).
+  | { readonly code: 'storage_lock_corrupt'; readonly path: string; readonly detail: string }
   | ConfigError;
 
 export type IdentityError =

@@ -2622,9 +2622,18 @@ test('S22.6 — an unwritable storage root still refuses storage_unwritable, nev
   if (!booted.ok) assert.equal(booted.error.code, 'storage_unwritable');
 });
 
+// D180/S30: the lease deleted the OS-liveness probe the old refusal rested on — a held lock
+// is now recognised only by its (instanceId, renewals) counter still moving, which nothing
+// advances on its own (`store` owns no clock; `server.ts` does, per S30). So "the first
+// server is still alive" is simulated the way `server.ts` would drive it: a renewal loop
+// against the first server's own `Store`, running for the second boot's whole observation
+// window. Each server gets its own `Store` (its own OS handles), matching two independent
+// processes sharing one storage root — `manager2`'s claim must not share `manager1`'s
+// in-memory lock ownership.
 test('S22.1/S22.2/S22.7 — a second boot against a held storage root refuses before reaping, names the holder, and leaves the first server\'s children and every server-wide file untouched', async () => {
   const { manager: manager1, store, config, checkpoints, storageRoot } = await makeManager('full');
   assert.equal((await manager1.boot()).ok, true, 'the first server claims the lock as part of its own boot');
+  const renewer = setInterval(() => void store.renewLock(), 2000);
 
   // A live child the first server is responsible for, recorded exactly as a real turn
   // would (S7.5's fixture) — this is what a refused second boot must not touch.
@@ -2663,10 +2672,13 @@ test('S22.1/S22.2/S22.7 — a second boot against a held storage root refuses be
     metaBefore.set(sessionId, await readFile(path.join(storageRoot, 'sessions', sessionId, 'meta.json'), 'utf8'));
   }
 
-  // A genuinely live holder on this host: manager1's own boot claimed the lock naming
-  // this test process, which is alive with a matching image for the whole test.
-  const manager2 = createSessionManager({ config, store, checkpoints, records: notImplementedProxy<Records>('records') });
+  // A second server, its own `Store`, against the still-renewing first server's lock.
+  const store2Result = await createStore(config);
+  assert.equal(store2Result.ok, true);
+  if (!store2Result.ok) throw new Error('second store failed to init');
+  const manager2 = createSessionManager({ config, store: store2Result.value, checkpoints, records: notImplementedProxy<Records>('records') });
   const booted2 = await manager2.boot();
+  clearInterval(renewer);
   assert.equal(booted2.ok, false, 'a second boot against a held root refuses');
   if (!booted2.ok) {
     assert.equal(booted2.error.code, 'storage_locked');

@@ -1,6 +1,7 @@
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import { createReadStream } from 'node:fs';
 import { link, mkdir, open, readdir, readFile, rename, rm, stat, writeFile, type FileHandle } from 'node:fs/promises';
+import { setTimeout as delay } from 'node:timers/promises';
 import { createInterface } from 'node:readline';
 import path from 'node:path';
 import type {
@@ -13,7 +14,7 @@ import type {
   Config,
   Envelope,
   IsoTimestamp,
-  LivenessProbe,
+  LockRenewal,
   LoadedMeta,
   ProcessRecord,
   ProcessTombstone,
@@ -30,6 +31,13 @@ import type {
   TurnId,
   Result,
 } from '../contract/index.js';
+
+// D194, D195, I62: declared together so their relation — the interval strictly below the
+// window, with room to spare — is enforced by one file rather than requested of a second.
+// Neither is a `Config` field: no correct value here depends on how an operator mounted
+// anything, and promoting either to a deployment flag is a contract amendment.
+const LOCK_OBSERVATION_WINDOW_MS = 10_000;
+export const LOCK_RENEWAL_INTERVAL_MS = 2_000;
 
 function ioError(filePath: string, detail: string): Result<never, StoreError> {
   return { ok: false, error: { code: 'io', path: filePath, detail } };
@@ -132,6 +140,31 @@ async function tryClaimExclusive(targetPath: string, contents: string): Promise<
   } finally {
     await rm(tmpPath, { force: true });
   }
+}
+
+// A fresh open-read-close, never a handle held across the observation window (I50). Throws
+// on any read failure other than absence, so a caller's own `try`/`catch` decides whether
+// that is `StartupError.storage_unwritable`-shaped or `StoreError.io`.
+type LockSample = { readonly kind: 'present'; readonly holder: ServerLock } | { readonly kind: 'absent' } | { readonly kind: 'corrupt'; readonly detail: string };
+
+async function sampleLock(filePath: string): Promise<LockSample> {
+  let raw: string;
+  try {
+    raw = await readFile(filePath, 'utf8');
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return { kind: 'absent' };
+    throw err;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (err) {
+    return { kind: 'corrupt', detail: (err as Error).message };
+  }
+  if (parsed === null || typeof parsed !== 'object') return { kind: 'corrupt', detail: 'not a JSON object' };
+  // A lock predating the lease parses cleanly and simply carries no `instanceId`/`renewals`
+  // (I61) — not checked here, since that shape still reaches the ordinary reclaim rule.
+  return { kind: 'present', holder: parsed as ServerLock };
 }
 
 async function appendLine(filePath: string, line: string, fsync: boolean): Promise<Result<void, StoreError>> {
@@ -562,6 +595,12 @@ export async function createStore(config: Config): Promise<Result<Store, StoreEr
   const ring = new Map<SessionId, Envelope[]>();
   const auditCursorSecret = randomBytes(32);
 
+  // What this process believes it holds, so `releaseLock` and `renewLock` can be
+  // ownership-checked against `<storage>/server.lock` without a caller-supplied `self`
+  // (I56). Set on a successful `claimLock` or `renewLock`; cleared once this process is
+  // known to have been displaced.
+  let heldLock: ServerLock | null = null;
+
   const store: Store = {
     async createSession(record: SessionRecord) {
       const dir = sessionDir(storageRoot, record.id);
@@ -888,19 +927,21 @@ export async function createStore(config: Config): Promise<Result<Store, StoreEr
       return foldLatestById<Requisition>(requisitionsPath, 'requisitionId', false);
     },
 
-    // D161: the decision table this implements is `20-contract.md § store, claimLock's
-    // decision table` — absent → write `self`; another host's holder → always refuse; this
-    // host's live holder → refuse; this host's stale or unparseable holder → reclaim, logged.
-    // The claim precedes `session-manager.boot`'s reap step, so a failed claim must not have
-    // touched any server-wide file — this method only ever reads and (on success) rewrites
-    // `server.lock` itself.
+    // D180: the decision table this implements is `20-contract.md § store, claimLock's
+    // decision table` — absent → write `self`, no wait; present and (instanceId, renewals)
+    // changed across one observation window → refuse storage_locked; present and unchanged
+    // → reclaim, logged; present but unparseable → refuse storage_lock_corrupt (D196). No
+    // process table is consulted and no wall clock is compared anywhere in this method (I50,
+    // I57). The claim precedes `session-manager.boot`'s reap step, so a failed claim must not
+    // have touched any server-wide file — this method only ever reads and (on success)
+    // rewrites `server.lock` itself.
     //
     // The "absent" row is claimed via `tryClaimExclusive`, not a plain read-then-write: two
     // processes racing this method against the same absent/just-reclaimed lock must not both
     // observe "absent" and both succeed — that would silently defeat the one-server guarantee
     // this method exists to provide. The loop below only reclaims-and-retries; it never writes
-    // `self` except through the exclusive claim, so the property holds on every iteration.
-    async claimLock(self: ServerLock, isLive: LivenessProbe): Promise<Result<void, StartupError>> {
+    // `self` except through the exclusive claim or the reclaim's atomic rename (I61).
+    async claimLock(self: ServerLock): Promise<Result<void, StartupError>> {
       const filePath = lockPath(storageRoot);
       const payload = JSON.stringify(self);
 
@@ -911,58 +952,120 @@ export async function createStore(config: Config): Promise<Result<Store, StoreEr
         } catch (err) {
           return startupIoError(filePath, (err as Error).message);
         }
-        if (outcome === 'claimed') return { ok: true, value: undefined };
-
-        let existingRaw: string;
-        try {
-          existingRaw = await readFile(filePath, 'utf8');
-        } catch (err) {
-          if ((err as NodeJS.ErrnoException).code === 'ENOENT') continue; // reclaimed out from under us — retry the exclusive claim
-          return startupIoError(filePath, (err as Error).message);
+        if (outcome === 'claimed') {
+          heldLock = self;
+          return { ok: true, value: undefined };
         }
 
-        let holder: ServerLock | null = null;
+        let first: LockSample;
         try {
-          holder = JSON.parse(existingRaw) as ServerLock;
-        } catch {
-          holder = null;
-        }
-
-        if (holder !== null) {
-          // I50: the liveness test cannot see another machine's process table, so a lock
-          // naming a different host is never reclaimed, whatever its pid says.
-          if (holder.hostname !== self.hostname || (await isLive(holder))) {
-            return { ok: false, error: { code: 'storage_locked', path: filePath, holder } };
-          }
-          console.warn(
-            `[store] reclaiming stale server.lock: pid ${holder.pid} on ${holder.hostname}, started ${holder.startedAt}, image ${holder.image}`,
-          );
-        } else {
-          // D161: a file nothing can read names no holder — refusing on it would make every
-          // unclean shutdown need manual intervention.
-          console.warn(`[store] server.lock at ${filePath} is unparseable; reclaiming it as a stale holder`);
-        }
-
-        try {
-          await rm(filePath, { force: true });
+          first = await sampleLock(filePath);
         } catch (err) {
           return startupIoError(filePath, (err as Error).message);
         }
-        // Loop back to retry the exclusive claim now that the stale/unparseable lock is
-        // gone. A concurrent claimant racing this same window can only win one of the two
-        // exclusive creates — the loser correctly re-reads and refuses.
+        if (first.kind === 'absent') continue; // released between the exists-check and our read — retry the exclusive claim
+        if (first.kind === 'corrupt') {
+          return { ok: false, error: { code: 'storage_lock_corrupt', path: filePath, detail: first.detail } };
+        }
+
+        // I50/D180: the observation itself, on this process's own monotonic clock. No wall
+        // clock is compared, and nothing here reads a process table.
+        await delay(LOCK_OBSERVATION_WINDOW_MS);
+
+        let second: LockSample;
+        try {
+          second = await sampleLock(filePath);
+        } catch (err) {
+          return startupIoError(filePath, (err as Error).message);
+        }
+        if (second.kind === 'absent') continue; // released mid-window — retry the exclusive claim
+        if (second.kind === 'corrupt') {
+          return { ok: false, error: { code: 'storage_lock_corrupt', path: filePath, detail: second.detail } };
+        }
+
+        const unchanged = first.holder.instanceId === second.holder.instanceId && first.holder.renewals === second.holder.renewals;
+        if (!unchanged) {
+          return { ok: false, error: { code: 'storage_locked', path: filePath, holder: second.holder } };
+        }
+
+        console.warn(
+          `[store] reclaiming stale server.lock: pid ${second.holder.pid} on ${second.holder.hostname}, started ${second.holder.startedAt}, image ${second.holder.image}`,
+        );
+        try {
+          await atomicWrite(filePath, payload);
+        } catch (err) {
+          return startupIoError(filePath, (err as Error).message);
+        }
+        heldLock = self;
+        return { ok: true, value: undefined };
+        // Loop back only on the "absent" rows above; a reclaim never retries.
       }
     },
 
+    // D180, I56: ownership-checked. Removes the file only while it still carries this
+    // process's own `instanceId` — an absent file, an unparseable one, or one naming another
+    // instance means this process has already been displaced, and removing nothing is what
+    // keeps a stalled-then-reclaimed holder's tidy shutdown from deleting its successor's
+    // claim. Never fatal: the next boot's staleness path recovers from a lock nobody removed.
     async releaseLock(): Promise<Result<void, StoreError>> {
       const filePath = lockPath(storageRoot);
+      if (heldLock === null) return { ok: true, value: undefined }; // nothing this process believes it holds
+
+      let sample: LockSample;
+      try {
+        sample = await sampleLock(filePath);
+      } catch (err) {
+        console.warn(`[store] releaseLock: failed to read ${filePath}: ${(err as Error).message}`);
+        return ioError(filePath, (err as Error).message);
+      }
+      if (sample.kind === 'absent') {
+        heldLock = null;
+        return { ok: true, value: undefined };
+      }
+      if (sample.kind === 'corrupt' || sample.holder.instanceId !== heldLock.instanceId) {
+        console.warn(`[store] releaseLock: ${filePath} no longer names this instance; leaving it for its holder`);
+        heldLock = null;
+        return { ok: true, value: undefined };
+      }
+
       try {
         await rm(filePath, { force: true });
       } catch (err) {
         console.warn(`[store] releaseLock: failed to remove ${filePath}: ${(err as Error).message}`);
         return ioError(filePath, (err as Error).message);
       }
+      heldLock = null;
       return { ok: true, value: undefined };
+    },
+
+    // D195: one ownership-checked write, reporting which happened. `store` owns no clock —
+    // `server.ts` drives `LOCK_RENEWAL_INTERVAL_MS`'s timer. `'displaced'` covers every case
+    // this process no longer holds the root: absent, unparseable, or naming another
+    // `instanceId` (I56) — a caller must stop rather than carry on writing state it no
+    // longer owns. A `StoreError.io` means the renewal itself could not be attempted.
+    async renewLock(): Promise<Result<LockRenewal, StoreError>> {
+      const filePath = lockPath(storageRoot);
+      if (heldLock === null) return { ok: true, value: 'displaced' };
+
+      let sample: LockSample;
+      try {
+        sample = await sampleLock(filePath);
+      } catch (err) {
+        return ioError(filePath, (err as Error).message);
+      }
+      if (sample.kind === 'absent' || sample.kind === 'corrupt' || sample.holder.instanceId !== heldLock.instanceId) {
+        heldLock = null;
+        return { ok: true, value: 'displaced' };
+      }
+
+      const renewed: ServerLock = { ...heldLock, renewals: sample.holder.renewals + 1 };
+      try {
+        await atomicWrite(filePath, JSON.stringify(renewed));
+      } catch (err) {
+        return ioError(filePath, (err as Error).message);
+      }
+      heldLock = renewed;
+      return { ok: true, value: 'renewed' };
     },
 
     async close(): Promise<void> {

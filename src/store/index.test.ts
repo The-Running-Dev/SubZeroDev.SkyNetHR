@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, readdir, writeFile } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
-import { createStore } from './index.js';
+import { createStore, LOCK_RENEWAL_INTERVAL_MS } from './index.js';
 import type { AuditCursor, AuditRecord, Config, Envelope, ServerLock, SessionRecord, Store } from '../contract/index.js';
 
 function baseConfig(storageRoot: string): Config {
@@ -869,8 +870,14 @@ test('S12.9 — no read scans the whole file: first-page elapsed time at 100,000
   assert.ok(elapsed100k < elapsed10k * 5 + 50, `first-page time grew with file size: 10k=${elapsed10k}ms, 100k=${elapsed100k}ms`);
 });
 
+// D194: the module constant `claimLock` waits on. Not exported (only the interval is,
+// I62) — tests rely on the literal value the contract fixes it at.
+const LOCK_OBSERVATION_WINDOW_MS = 10_000;
+
 function lock(overrides: Partial<ServerLock> = {}): ServerLock {
   return {
+    instanceId: randomUUID(),
+    renewals: 0,
     pid: 4242,
     hostname: 'holder-host',
     startedAt: new Date().toISOString() as never,
@@ -887,144 +894,298 @@ async function newStore(): Promise<{ storageRoot: string; store: Store }> {
   return { storageRoot, store: storeResult.value };
 }
 
-// D161's decision table, row 1: absent → write `self`, claimed.
-test('S22 — claimLock against an absent server.lock writes self and claims, without consulting the liveness probe', async () => {
+// D180's decision table, row 1: absent → write `self`, claimed with no wait.
+test('S30.1a — claimLock against an absent server.lock writes self and claims immediately', async () => {
   const { storageRoot, store } = await newStore();
-  let probed = false;
   const self = lock({ pid: process.pid, hostname: 'self-host' });
-  const claimed = await store.claimLock(self, async () => {
-    probed = true;
-    return true;
-  });
+  const t0 = Date.now();
+  const claimed = await store.claimLock(self);
   assert.equal(claimed.ok, true);
-  assert.equal(probed, false, 'nothing to probe: there was no holder');
+  assert.ok(Date.now() - t0 < 1000, 'an absent lock claims well under one observation window');
 
   const raw = await readFile(path.join(storageRoot, 'server.lock'), 'utf8');
   assert.deepEqual(JSON.parse(raw), self);
 });
 
-// D161's decision table, row 2 / I50: a lock naming a different host is never reclaimed,
-// whatever its pid says — asserted with a probe that would say "live" if consulted, so a
-// bug that skips the hostname check and reclaims anyway is caught by the probe having run.
-test('S22.4 — a lock naming a different hostname always refuses, and the liveness probe is never consulted', async () => {
+// D180's decision table, row 2: present, unparseable → refuse storage_lock_corrupt. This is
+// corruption, not a race (I61), so it is refused without waiting out the window.
+test('S30.1b — a server.lock that will not parse refuses storage_lock_corrupt, naming the path, with no wait', async () => {
   const { storageRoot, store } = await newStore();
-  const holder = lock({ hostname: 'other-host' });
-  await writeFile(path.join(storageRoot, 'server.lock'), JSON.stringify(holder));
+  await writeFile(path.join(storageRoot, 'server.lock'), 'not json at all');
 
-  let probed = false;
-  const claimed = await store.claimLock(lock({ hostname: 'self-host' }), async () => {
-    probed = true;
-    return true; // if this were consulted, the wrong answer would let the claim through
-  });
+  const filePath = path.join(storageRoot, 'server.lock');
+  const t0 = Date.now();
+  const claimed = await store.claimLock(lock({ pid: process.pid }));
+  assert.ok(Date.now() - t0 < 1000, 'corruption is detected without waiting out the observation window');
   assert.equal(claimed.ok, false);
   if (!claimed.ok) {
-    assert.equal(claimed.error.code, 'storage_locked');
-    if (claimed.error.code === 'storage_locked') assert.deepEqual(claimed.error.holder, holder);
+    assert.equal(claimed.error.code, 'storage_lock_corrupt');
+    if (claimed.error.code === 'storage_lock_corrupt') assert.equal(claimed.error.path, filePath);
   }
-  assert.equal(probed, false, 'the liveness test cannot see another machine\'s process table');
 
-  const raw = await readFile(path.join(storageRoot, 'server.lock'), 'utf8');
-  assert.deepEqual(JSON.parse(raw), holder, 'the lock file is untouched by a refused claim');
+  const raw = await readFile(filePath, 'utf8');
+  assert.equal(raw, 'not json at all', 'the lock file is untouched by a refused claim');
 });
 
-// D161's decision table, row 3: present, this host, isLive true → refuse, naming the holder.
-test('S22.1 — a live holder on this host refuses with storage_locked, naming pid, hostname and startedAt', async () => {
+// D180's decision table, row 3: present, (instanceId, renewals) changed across the window →
+// refuse storage_locked, naming the holder's informational fields.
+test('S30.1c — a lock whose (instanceId, renewals) changes across the window refuses storage_locked, naming pid, hostname and startedAt', async () => {
   const { storageRoot, store } = await newStore();
-  const holder = lock({ pid: 777, hostname: 'self-host', startedAt: '2026-01-01T00:00:00.000Z' as never });
-  await writeFile(path.join(storageRoot, 'server.lock'), JSON.stringify(holder));
+  const filePath = path.join(storageRoot, 'server.lock');
+  const holder = lock({ pid: 777, hostname: 'holder-host', startedAt: '2026-01-01T00:00:00.000Z' as never, renewals: 0 });
+  await writeFile(filePath, JSON.stringify(holder));
+  // A renewal partway through the window: the holder is alive and renewing.
+  const renewedHolder = { ...holder, renewals: 1 };
+  const renewTimer = setTimeout(() => writeFile(filePath, JSON.stringify(renewedHolder)), LOCK_OBSERVATION_WINDOW_MS / 3);
 
-  const claimed = await store.claimLock(lock({ hostname: 'self-host' }), async () => true);
+  const claimed = await store.claimLock(lock({ pid: process.pid }));
+  clearTimeout(renewTimer);
   assert.equal(claimed.ok, false);
   if (!claimed.ok) {
     assert.equal(claimed.error.code, 'storage_locked');
     if (claimed.error.code === 'storage_locked') {
       assert.equal(claimed.error.holder.pid, 777);
-      assert.equal(claimed.error.holder.hostname, 'self-host');
+      assert.equal(claimed.error.holder.hostname, 'holder-host');
       assert.equal(claimed.error.holder.startedAt, '2026-01-01T00:00:00.000Z');
     }
   }
 });
 
-// D161's decision table, row 4 (S22.3): present, this host, isLive false → reclaim: the
-// stale holder is logged, self is written, and the claim succeeds.
-test('S22.3 — a stale holder on this host is reclaimed automatically, logged, and self takes the lock', async () => {
+// D180's decision table, row 4: present, (instanceId, renewals) unchanged across the window
+// → reclaim: log the holder, overwrite with self, claimed.
+test('S30.1d — a lock whose (instanceId, renewals) is unchanged across the window is reclaimed, logged, and self takes it', async () => {
   const { storageRoot, store } = await newStore();
-  const holder = lock({ pid: 555, hostname: 'self-host' });
-  await writeFile(path.join(storageRoot, 'server.lock'), JSON.stringify(holder));
+  const filePath = path.join(storageRoot, 'server.lock');
+  const holder = lock({ pid: 555, hostname: 'holder-host' });
+  await writeFile(filePath, JSON.stringify(holder));
 
   const originalWarn = console.warn;
   const warnings: string[] = [];
-  console.warn = (...args: unknown[]) => {
-    warnings.push(args.map(String).join(' '));
-  };
+  console.warn = (...args: unknown[]) => warnings.push(args.map(String).join(' '));
   let claimed;
   try {
-    claimed = await store.claimLock(lock({ pid: process.pid, hostname: 'self-host' }), async () => false);
+    claimed = await store.claimLock(lock({ pid: process.pid }));
   } finally {
     console.warn = originalWarn;
   }
   assert.equal(claimed.ok, true);
   assert.ok(
-    warnings.some((w) => w.includes('555') && w.includes('self-host')),
+    warnings.some((w) => w.includes('555') && w.includes('holder-host')),
     `expected a reclaim log naming the stale holder; got: ${JSON.stringify(warnings)}`,
   );
 
-  const raw = await readFile(path.join(storageRoot, 'server.lock'), 'utf8');
+  const raw = await readFile(filePath, 'utf8');
   assert.equal(JSON.parse(raw).pid, process.pid, 'self now holds the lock');
 });
 
-// D161's decision table, row 5: unparseable → treated as a stale holder and reclaimed,
-// logged — refusing on it would make every unclean shutdown need manual intervention.
-test('S22 — an unparseable server.lock is treated as a stale holder: reclaimed, logged, and boot proceeds', async () => {
+// S30.2: the criterion the slice exists for (#206) — a lock naming a different hostname,
+// with an unmoving counter, is reclaimed and boot proceeds. The holding host is deleted from
+// the decision entirely (D180); a hostname mismatch is an ordinary, expected observation.
+test('S30.2 — a lock naming a different hostname whose counter is not moving is reclaimed, and boot proceeds', async () => {
   const { storageRoot, store } = await newStore();
-  await writeFile(path.join(storageRoot, 'server.lock'), 'not json at all');
+  const filePath = path.join(storageRoot, 'server.lock');
+  const holder = lock({ pid: 42, hostname: 'a-different-container' });
+  await writeFile(filePath, JSON.stringify(holder));
 
-  const originalWarn = console.warn;
-  const warnings: string[] = [];
-  console.warn = (...args: unknown[]) => {
-    warnings.push(args.map(String).join(' '));
-  };
-  let claimed;
-  try {
-    claimed = await store.claimLock(lock({ pid: process.pid, hostname: 'self-host' }), async () => {
-      throw new Error('must not be consulted for an unparseable lock');
-    });
-  } finally {
-    console.warn = originalWarn;
-  }
+  const claimed = await store.claimLock(lock({ pid: process.pid, hostname: 'this-container' }));
   assert.equal(claimed.ok, true);
-  assert.ok(warnings.some((w) => w.toLowerCase().includes('unparseable') || w.toLowerCase().includes('reclaim')));
-
-  const raw = await readFile(path.join(storageRoot, 'server.lock'), 'utf8');
+  const raw = await readFile(filePath, 'utf8');
   assert.equal(JSON.parse(raw).pid, process.pid);
 });
 
-// S22.5: a clean shutdown removes the lock, and the next boot takes it without invoking
-// the staleness path at all.
-test('S22.5 — releaseLock removes the lock; the next claim against an absent lock never consults the liveness probe', async () => {
+// S30.3: a lock written before the lease — well-formed, carrying no counter — reaches the
+// reclaim path by the ordinary rule and is not treated as corruption (I61).
+test('S30.3 — a legacy lock with no instanceId/renewals is not corruption and reclaims by the ordinary rule', async () => {
+  const { storageRoot, store } = await newStore();
+  const filePath = path.join(storageRoot, 'server.lock');
+  const legacyHolder = { pid: 88, hostname: 'holder-host', startedAt: new Date().toISOString(), image: 'node' };
+  await writeFile(filePath, JSON.stringify(legacyHolder));
+
+  const claimed = await store.claimLock(lock({ pid: process.pid }));
+  assert.equal(claimed.ok, true, 'a legacy lock reclaims rather than refusing storage_lock_corrupt');
+  const raw = await readFile(filePath, 'utf8');
+  assert.equal(JSON.parse(raw).pid, process.pid);
+});
+
+// S30.4: no wall clock is compared anywhere in the decision — stepping the system clock
+// during the observation window must not change either outcome.
+test('S30.4 — no wall clock is compared: stepping the system clock during the window leaves both decisions unchanged', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: Date.now() });
+  try {
+    const { storageRoot, store } = await newStore();
+    const filePath = path.join(storageRoot, 'server.lock');
+
+    // Backwards, during a window that ends in reclaim (counter never moves).
+    await writeFile(filePath, JSON.stringify(lock({ pid: 1 })));
+    const backwards = store.claimLock(lock({ pid: process.pid }));
+    t.mock.timers.setTime(Date.now() - 3600_000);
+    const reclaimed = await backwards;
+    assert.equal(reclaimed.ok, true, 'reclaimed despite the wall clock jumping backwards');
+
+    // Forwards, during a window that ends in refusal (counter moves).
+    const holder = lock({ pid: 2, renewals: 0 });
+    await writeFile(filePath, JSON.stringify(holder));
+    setTimeout(() => writeFile(filePath, JSON.stringify({ ...holder, renewals: 1 })), LOCK_OBSERVATION_WINDOW_MS / 3);
+    const forwards = store.claimLock(lock({ pid: process.pid }));
+    t.mock.timers.setTime(Date.now() + 3600_000);
+    const refused = await forwards;
+    assert.equal(refused.ok, false, 'still refused despite the wall clock jumping forwards');
+  } finally {
+    t.mock.timers.reset();
+  }
+});
+
+// S30.5: a live holder — one whose counter keeps moving — is never declared dead, across
+// three separate boots each independently observing it.
+test('S30.5 — a live holder is never declared dead across three consecutive boots each observing the counter move', async () => {
+  const { storageRoot, store } = await newStore();
+  const filePath = path.join(storageRoot, 'server.lock');
+  let renewals = 0;
+  const renew = () => writeFile(filePath, JSON.stringify(lock({ pid: 333, renewals: renewals++ })));
+  await renew();
+  const renewer = setInterval(renew, LOCK_RENEWAL_INTERVAL_MS);
+  try {
+    for (let i = 0; i < 3; i++) {
+      const claimed = await store.claimLock(lock({ pid: process.pid }));
+      assert.equal(claimed.ok, false, `boot ${i + 1} must not declare a renewing holder dead`);
+    }
+  } finally {
+    clearInterval(renewer);
+  }
+});
+
+// S30.6: the interval stays comfortably below the window — declared together (I62) so a
+// violation is caught here rather than discovered as two servers over one storage root.
+test('S30.6 — LOCK_RENEWAL_INTERVAL_MS stays at most a third of LOCK_OBSERVATION_WINDOW_MS', () => {
+  assert.ok(
+    LOCK_RENEWAL_INTERVAL_MS * 3 <= LOCK_OBSERVATION_WINDOW_MS,
+    `interval ${LOCK_RENEWAL_INTERVAL_MS}ms must leave room for at least 3 renewals inside the ${LOCK_OBSERVATION_WINDOW_MS}ms window`,
+  );
+});
+
+// S30.7: two boots racing one absent lock cannot both make the "absent" observation and
+// both write via the exclusive create — exactly one wins it immediately, and the other
+// necessarily falls back to the reclaim path (and, since nothing renews here, reclaims too).
+test('S30.7 — two boots racing an absent lock: exactly one claims immediately, the other pays the reclaim path', async () => {
+  const { store } = await newStore();
+  const t0 = Date.now();
+  const [a, b] = await Promise.all([
+    store.claimLock(lock({ pid: 1 })).then((r) => ({ r, ms: Date.now() - t0 })),
+    store.claimLock(lock({ pid: 2 })).then((r) => ({ r, ms: Date.now() - t0 })),
+  ]);
+  const immediate = [a, b].filter((x) => x.ms < 1000);
+  const delayed = [a, b].filter((x) => x.ms >= 1000);
+  assert.equal(immediate.length, 1, 'exactly one boot claims the absent lock without waiting');
+  assert.equal(delayed.length, 1, 'the other observes a present lock and pays the observation window');
+  assert.equal(a.r.ok, true);
+  assert.equal(b.r.ok, true);
+});
+
+// S30.8/I56: release is an ownership check. A server whose lock was reclaimed and rewritten
+// by a successor removes nothing at shutdown.
+test('S30.8 — releaseLock is a no-op once the lock names a successor, and removes nothing of theirs', async () => {
+  const { storageRoot, store } = await newStore();
+  const filePath = path.join(storageRoot, 'server.lock');
+  assert.equal((await store.claimLock(lock({ pid: process.pid }))).ok, true);
+
+  const successor = lock({ pid: 999, hostname: 'other-host' });
+  await writeFile(filePath, JSON.stringify(successor));
+
+  const released = await store.releaseLock();
+  assert.equal(released.ok, true);
+  const raw = await readFile(filePath, 'utf8');
+  assert.deepEqual(JSON.parse(raw), successor, "the successor's claim is untouched");
+});
+
+// S22.5 (re-run unchanged per S30.13): a clean shutdown removes the lock, and the next claim
+// against the now-absent lock takes it immediately, without paying the observation window.
+test('S22.5 — releaseLock removes the lock; the next claim against the absent lock claims with no wait', async () => {
   const { storageRoot, store } = await newStore();
   const self = lock({ pid: process.pid, hostname: 'self-host' });
-  assert.equal((await store.claimLock(self, async () => true)).ok, true);
+  assert.equal((await store.claimLock(self)).ok, true);
 
   const released = await store.releaseLock();
   assert.equal(released.ok, true);
   await assert.rejects(readFile(path.join(storageRoot, 'server.lock'), 'utf8'), /ENOENT/);
 
-  let probed = false;
-  const claimed = await store.claimLock(self, async () => {
-    probed = true;
-    return false;
-  });
+  const t0 = Date.now();
+  const claimed = await store.claimLock(self);
   assert.equal(claimed.ok, true);
-  assert.equal(probed, false, 'no holder to test the staleness of');
+  assert.ok(Date.now() - t0 < 1000, 'no staleness path invoked: the reclaim is immediate on an absent lock');
 });
 
-// releaseLock on an already-absent lock is not an error — a repeat clean shutdown, or a
-// process that never claimed, must not fail here.
-test('S22.5 — releaseLock is a no-op, not an error, when there is no lock to remove', async () => {
+// releaseLock on an already-absent lock, or one this process never claimed, is not an error.
+test('S30.8b — releaseLock is a no-op, not an error, when there is no lock to remove or none was ever claimed', async () => {
   const { store } = await newStore();
   const released = await store.releaseLock();
   assert.equal(released.ok, true);
+});
+
+// S30.9: renewLock reports 'displaced' — a success — on an absent lock and on one naming
+// another instance, and a storage error only when the renewal itself could not be attempted.
+test('S30.9a — renewLock reports displaced when the lock is absent', async () => {
+  const { storageRoot, store } = await newStore();
+  assert.equal((await store.claimLock(lock({ pid: process.pid }))).ok, true);
+  await rm(path.join(storageRoot, 'server.lock'), { force: true });
+
+  const renewed = await store.renewLock();
+  assert.equal(renewed.ok, true);
+  if (renewed.ok) assert.equal(renewed.value, 'displaced');
+});
+
+test('S30.9b — renewLock reports displaced when the lock names another instance', async () => {
+  const { storageRoot, store } = await newStore();
+  const filePath = path.join(storageRoot, 'server.lock');
+  assert.equal((await store.claimLock(lock({ pid: process.pid }))).ok, true);
+  await writeFile(filePath, JSON.stringify(lock({ pid: 555 })));
+
+  const renewed = await store.renewLock();
+  assert.equal(renewed.ok, true);
+  if (renewed.ok) assert.equal(renewed.value, 'displaced');
+});
+
+test('S30.9c — renewLock reports a storage error, not a displacement, when the renewal cannot be attempted at all', async () => {
+  const { storageRoot, store } = await newStore();
+  const filePath = path.join(storageRoot, 'server.lock');
+  assert.equal((await store.claimLock(lock({ pid: process.pid }))).ok, true);
+  // Replace the lock file with a directory of the same name: the read this renewal needs
+  // fails outright, rather than observing an absent or foreign lock.
+  await rm(filePath, { force: true });
+  await mkdir(filePath);
+  try {
+    const renewed = await store.renewLock();
+    assert.equal(renewed.ok, false);
+    if (!renewed.ok) assert.equal(renewed.error.code, 'io');
+  } finally {
+    await rm(filePath, { recursive: true, force: true });
+  }
+});
+
+// S30.12: no decision reads pid, hostname, startedAt or image (I57) — only (instanceId,
+// renewals). Every informational field can change mid-window and the reclaim still happens.
+test('S30.12 — the reclaim decision ignores pid, hostname, startedAt and image; only instanceId/renewals are compared', async () => {
+  const { storageRoot, store } = await newStore();
+  const filePath = path.join(storageRoot, 'server.lock');
+  const instanceId = randomUUID();
+  await writeFile(filePath, JSON.stringify(lock({ instanceId, renewals: 5, pid: 111, hostname: 'a', image: 'x' })));
+  setTimeout(() => writeFile(filePath, JSON.stringify(lock({ instanceId, renewals: 5, pid: 222, hostname: 'b', image: 'y' }))), LOCK_OBSERVATION_WINDOW_MS / 3);
+
+  const claimed = await store.claimLock(lock({ pid: process.pid }));
+  assert.equal(claimed.ok, true, 'unchanged (instanceId, renewals) reclaims even though every informational field changed');
+});
+
+// S30.14: a refused boot has written nothing server-wide, on the corrupt-lock row as well as
+// the held one (S22.7 already covers the held row via session-manager's own boot test).
+test('S30.14 — a corrupt-lock refusal leaves every other server-wide file untouched', async () => {
+  const { storageRoot, store } = await newStore();
+  await writeFile(path.join(storageRoot, 'audit.ndjson'), 'unrelated line\n');
+  await writeFile(path.join(storageRoot, 'server.lock'), 'not json');
+  const before = await readFile(path.join(storageRoot, 'audit.ndjson'), 'utf8');
+
+  const claimed = await store.claimLock(lock({ pid: process.pid }));
+  assert.equal(claimed.ok, false);
+  const after = await readFile(path.join(storageRoot, 'audit.ndjson'), 'utf8');
+  assert.equal(after, before);
 });
 
 async function newStoreWithToolOutputCap(sessionToolOutputBytes: number): Promise<{ storageRoot: string; store: Store }> {
