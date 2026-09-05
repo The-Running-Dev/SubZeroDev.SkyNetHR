@@ -3,9 +3,27 @@ import { randomUUID } from 'node:crypto';
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { test } from 'node:test';
-import { createStore, LOCK_RENEWAL_INTERVAL_MS } from './index.js';
-import type { AuditCursor, AuditRecord, Config, Envelope, ServerLock, SessionRecord, Store } from '../contract/index.js';
+import { after, test } from 'node:test';
+import { createStore as createStoreRaw, LOCK_RENEWAL_INTERVAL_MS } from './index.js';
+import type { AuditCursor, AuditRecord, Config, Envelope, Result, ServerLock, SessionRecord, Store, StoreError } from '../contract/index.js';
+
+// #292: every `Store` opened by this suite must be closed, or its append-mode `FileHandle`s
+// (`audit.ndjson`/`pids.ndjson`/`reviews.ndjson`/`requisitions.ndjson`) are left for the GC to
+// reclaim, which surfaces as an uncaught async exception attributed to whatever test happens to
+// be running when it fires. Wrapping the constructor here, rather than editing every call site,
+// is what makes that true without touching the ~30 individual tests below. `Store.close()` is
+// documented idempotent (D202), so closing a store a test already closed itself is harmless.
+const createdStores: Store[] = [];
+
+async function createStore(config: Config): Promise<Result<Store, StoreError>> {
+  const result = await createStoreRaw(config);
+  if (result.ok) createdStores.push(result.value);
+  return result;
+}
+
+after(async () => {
+  await Promise.all(createdStores.map((s) => s.close()));
+});
 
 function baseConfig(storageRoot: string): Config {
   return {
@@ -1219,6 +1237,7 @@ test('S23.1/S23.3 — many small blobs summing past the budget: earlier ones kee
   }
   const openedSecond = await store.openToolOutput(record.id, 't1' as never, 'call-2' as never);
   assert.equal(openedSecond.ok, true);
+  if (openedSecond.ok) for await (const _chunk of openedSecond.value) void _chunk; // drain: closes the handle (#292)
 
   const openedThird = await store.openToolOutput(record.id, 't1' as never, 'call-3' as never);
   assert.equal(openedThird.ok, false, 'S23.2: the refused blob was never written, so the fetch is not_found');
@@ -1275,6 +1294,7 @@ test('S23.6 — attachments are not bounded by the tool-output budget', async ()
   assert.equal(attached.ok, true);
   const openedAttachment = await store.openAttachment(record.id, 't1' as never, 'att-1' as never);
   assert.equal(openedAttachment.ok, true);
+  if (openedAttachment.ok) for await (const _chunk of openedAttachment.value.stream) void _chunk; // drain: closes the handle (#292)
 });
 
 // D202: a `Store` owns OS handles (the four server-wide append files) and must be closed.

@@ -8,7 +8,7 @@ import { after, test } from 'node:test';
 import { promisify } from 'node:util';
 import { createSessionManager, match, parseStandingRule } from './index.js';
 import { stripExtendedPrefix } from '../jail/index.js';
-import { createStore } from '../store/index.js';
+import { createStore as createStoreRaw } from '../store/index.js';
 import { createCheckpoints } from '../checkpoints/index.js';
 import { createRecords } from '../records/index.js';
 import type {
@@ -29,9 +29,29 @@ import type {
   Result,
   SessionId,
   Store,
+  StoreError,
   TurnId,
   Vendor,
 } from '../contract/index.js';
+
+// #292: every `Store` this suite opens must be closed, or its append-mode `FileHandle`s
+// (`audit.ndjson`/`pids.ndjson`/`reviews.ndjson`/`requisitions.ndjson`) are left for the GC to
+// reclaim, which surfaces as an uncaught async exception attributed to whatever test happens to
+// be running when it fires. Wrapping the constructor, rather than editing every call site, is
+// what makes that true for both of this file's `createStore` call sites (inside `makeManager`
+// and the second-server contention test) without touching either. `Store.close()` is documented
+// idempotent (D202).
+const createdStores: Store[] = [];
+
+async function createStore(config: Config): Promise<Result<Store, StoreError>> {
+  const result = await createStoreRaw(config);
+  if (result.ok) createdStores.push(result.value);
+  return result;
+}
+
+after(async () => {
+  await Promise.all(createdStores.map((s) => s.close()));
+});
 
 const execFileAsync = promisify(execFile);
 
