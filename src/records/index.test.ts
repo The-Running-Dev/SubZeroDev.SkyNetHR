@@ -2,10 +2,21 @@ import assert from 'node:assert/strict';
 import { appendFile, mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { test } from 'node:test';
+import { after, test } from 'node:test';
 import { createRecords } from './index.js';
 import { createStore } from '../store/index.js';
 import type { Config, OperatorId, SessionId, SessionSnapshot, Store } from '../contract/index.js';
+
+// #292: every `Store` this suite opens must be closed, or its append-mode `FileHandle`s
+// (`requisitions.ndjson`/`reviews.ndjson`) are left for the GC to reclaim, which surfaces as an
+// uncaught async exception attributed to whatever test happens to be running when it fires.
+// `makeStore` is the one chokepoint every test in this file goes through. `Store.close()` is
+// documented idempotent (D202).
+const createdStores: Store[] = [];
+
+after(async () => {
+  await Promise.all(createdStores.map((s) => s.close()));
+});
 
 function baseConfig(storageRoot: string, requisitionTextBytes = 1024, reviewBodyBytes = 1024): Config {
   return {
@@ -49,6 +60,7 @@ function snapshot(sessionId: string, owner: OperatorId = OP1): SessionSnapshot {
 async function makeStore(config: Config): Promise<Store> {
   const created = await createStore(config);
   if (!created.ok) throw new Error('store failed to init');
+  createdStores.push(created.value);
   return created.value;
 }
 
