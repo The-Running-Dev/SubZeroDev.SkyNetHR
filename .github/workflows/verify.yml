@@ -21,6 +21,10 @@ jobs:
 
       - run: npm ci
 
+      # S29.1 measurement only — temporary, removed before this slice's PR merges.
+      - name: S29.1 osCreatedAt probe
+        run: node harness/s29-created-at-probe.mjs
+
       # verification: true
       - name: Run tests
         run: npm test
