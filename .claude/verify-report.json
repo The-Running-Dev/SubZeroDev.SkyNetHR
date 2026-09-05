@@ -2,18 +2,18 @@
   "gates": [
     {
       "name": "Run tests",
-      "status": "Passed",
-      "detail": "npm test: 449 tests, 446 pass, 0 fail, 3 skipped, 64 suites."
+      "status": "Failed",
+      "detail": "480 tests, 472 pass, 3 fail, 5 skipped. All three failures are file-level synthetic entries (dist/records/index.test.js, dist/session-manager/index.test.js, dist/store/index.test.js), each wrapping the identical pre-existing Windows issue: 'Error: A resource generated asynchronous activity after the test ended. This activity created the error \"Error: A FileHandle object was closed during garbage collection...\" which triggered an uncaughtException event, caught by the test runner.' No individual named assertion failed in any of the three files. records/index.test.js is untouched by this slice and fails identically, confirming this is pre-existing environment flakiness (matches the fix-257 blob-write/GC synchronization issue already on record for this repo), not a regression introduced here."
     },
     {
       "name": "Parse-check PowerShell scripts",
       "status": "Passed",
-      "detail": "OK: 0 failures"
+      "detail": "Every *.ps1 parsed with [System.Management.Automation.Language.Parser]::ParseFile; 0 errors."
     },
     {
       "name": "Run Pester tests",
       "status": "Passed",
-      "detail": "Tests completed in 32.67s\nTests Passed: 328, Failed: 0, Skipped: 22, NotRun: 0"
+      "detail": "Invoke-Pester -Path tools: Tests Passed: 336, Failed: 0, Skipped: 22, NotRun: 0. Result: Passed."
     },
     {
       "name": "Check design/10-design.md references resolve",
