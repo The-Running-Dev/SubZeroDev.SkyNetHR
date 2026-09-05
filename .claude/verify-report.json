@@ -3,7 +3,7 @@
     {
       "name": "Run tests",
       "status": "Failed",
-      "detail": "480 tests, 472 pass, 3 fail, 5 skipped. All three failures are file-level synthetic entries (dist/records/index.test.js, dist/session-manager/index.test.js, dist/store/index.test.js), each wrapping the identical pre-existing Windows issue: 'Error: A resource generated asynchronous activity after the test ended. This activity created the error \"Error: A FileHandle object was closed during garbage collection...\" which triggered an uncaughtException event, caught by the test runner.' No individual named assertion failed in any of the three files. records/index.test.js is untouched by this slice and fails identically, confirming this is pre-existing environment flakiness (matches the fix-257 blob-write/GC synchronization issue already on record for this repo), not a regression introduced here."
+      "detail": "492 tests, 484 pass, 3 fail, 5 skipped (node --test, full suite via `npm test`, Windows). All three failures are file-level synthetic entries — dist/records/index.test.js, dist/session-manager/index.test.js, dist/store/index.test.js — each wrapping the identical pre-existing error: 'Error: A resource generated asynchronous activity after the test ended. This activity created the error \"Error: A FileHandle object was closed during garbage collection. This used to be allowed with a deprecation warning but is now considered an error. Please close FileHandle objects explicitly.\" which triggered an uncaughtException event, caught by the test runner.' No individual named assertion failed inside any of the three files (confirmed by re-running dist/records/index.test.js in isolation: 25/26 pass, the sole 'failure' being the same file-level GC wrapper with zero failing assertions). This matches issue #292, 'npm test intermittently reports file-level failure from an unclosed FileHandle GC warning (Windows)', already filed and open before this PR. records/index.test.ts is otherwise untouched by this slice's behavioural changes (only a mechanical `as never` cast was added to its Config fixture), and the same failure reproduces identically, so this is pre-existing environment flakiness, not a regression introduced by S31."
     },
     {
       "name": "Parse-check PowerShell scripts",
@@ -13,12 +13,12 @@
     {
       "name": "Run Pester tests",
       "status": "Passed",
-      "detail": "Invoke-Pester -Path tools: Tests Passed: 336, Failed: 0, Skipped: 22, NotRun: 0. Result: Passed."
+      "detail": "Invoke-Pester -Path tools -PassThru: Tests Passed: 336, Failed: 0, Skipped: 22, Total: 358. Completed in 84.78s."
     },
     {
       "name": "Check design/10-design.md references resolve",
       "status": "Passed",
-      "detail": "Design references OK - 2 citation(s) checked, all resolve to a real heading."
+      "detail": "Design references OK - 2 citation(s) checked, all resolve to a real heading. Exit 0."
     }
   ]
 }
