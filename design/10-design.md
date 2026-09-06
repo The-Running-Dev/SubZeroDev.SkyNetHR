@@ -563,15 +563,9 @@ transport rather than inventing an alias for it; the choice is reserved in
 mirror is kept. Git is the store, and a second copy would be a second thing to fall out of
 sync.
 
-**Restore is five operations, and the second is not the one D31 named** (D112, D182):
-
-```
-commit   --allow-empty -m "before restore to <sha>"   a way back
-read-tree --reset -u <sha>                            make the work-tree match, exactly
-clean    -fd                                          remove directories read-tree emptied
-verify   diff --quiet <sha>, ls-files --others        prove it, do not infer it
-report   <sha>'s manifest vs status --ignored=matching   say what was not reached
-```
+**The sequence is `20-contract.md § checkpoints`'s and is not restated here** — what follows is
+why the second operation is not the one D31 named (D112), and why a fifth was added to report
+what the restore did not reach (D182).
 
 **D31 specified `checkout <sha> -- .` here, and that sequence cannot do what D31 says it
 does.** The argument was that `clean -fd` removes what the agent created since the target.
@@ -2291,23 +2285,13 @@ cleaned up automatically.
 
 ### Shutdown ordering
 
-Six steps, and the first thing to say about them is what is **not** among them.
+**The steps themselves are `20-contract.md § server`'s and are not restated here.** This section
+owns why they are those steps, in that order; that one owns what they are. The two were kept in
+parallel until a reconciliation found this copy three landed slices behind the other, which is the
+duplication *Single ownership* exists to refuse — the list is a sequence a reader can recover from
+the tree and the contract, and the argument below is not.
 
-```
-0. guard    a second signal exits immediately, non-zero                       (D174)
-            the operator saying they are done waiting; nothing below is retried
-1. quiesce  close the listener. No new connection, so no new session and no
-            new turn; in-flight requests finish
-2. drain    bounded. Whatever is still connected when the window closes is
-            closed — a subscriber's stream is not idle and never drains       (D176)
-3. kill     the live turn's child TREE, then tombstone it                     (D177)
-            D38's mechanism — the one interrupt and boot's reap already share
-            NOT routed through interrupt: no turn.ended, no stop reason here
-            the manager mutes its own notify sink before killing              (D178)
-4. release  stop renewing, then remove <storage>/server.lock if still ours,
-            bounded                                                   (D175, D195)
-5. close    store.close(): the four server-wide append handles, then exit (D202)
-```
+The first thing to say about them is what is **not** among them.
 
 **Nothing here repairs anything, and that is the design** (D174). Sessions are not marked
 ended, an open turn is not closed on disk, no `session.notice / server_restart` is written.

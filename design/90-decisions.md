@@ -5085,6 +5085,29 @@ milestones and deliberately does not close issues; #57 and #115 would have staye
 something else noticed, which is how they reached this pass.
 Reversibility: cheap in both directions — an issue reopens as easily as it closes.
 
+### 2026-09-06 — D205 `10-design.md` stops restating the two sequences `20-contract.md` owns
+Context: a reconciliation against `af5c482` found four descriptive drifts in `10-design.md` and
+nothing else. All four were in its numbered summary blocks — the shutdown step list and the
+restore operation list — both of which `20-contract.md` also carries. The contract's copies were
+correct; the design's were three landed slices behind (S27.15/D202 added shutdown's `close` step,
+S32/D182 added restore's `report` step, S30/D180 removed the lock's staleness test). This is
+*Single ownership*'s failure case reached twice by the same route: a sequence is something a
+reader can recover from the tree and the contract, so a second copy in a document nothing executes
+is a copy that rots, and the pass that finds it is the whole cost.
+Chosen: **`10-design.md` states why the steps are those steps and in that order, and points at
+`20-contract.md` for what they are.** Both code blocks are deleted; the argument around them —
+what is deliberately *not* among shutdown's steps, why release is last and `close` behind it, why
+`read-tree --reset -u` replaces D31's `checkout`, why the ignored-path report runs last — stays
+where it is, because none of it is recoverable from the tree.
+Rejected: **keeping both copies and naming the contract as canonical.** `AGENTS.md` permits this
+where a document must stand alone, and it is what was in place implicitly. It requires both to
+change in the same commit, which is exactly the discipline that failed here, twice, in one
+document, over three slices.
+Rejected: **moving the reasoning into `20-contract.md` and deleting the design section.** One home
+for list and argument alike, at the cost of putting narrative design reasoning into the document
+whose job is the surface the tree cannot state. Larger than the drift warrants.
+Reversibility: cheap — the blocks paste back from the contract in one edit.
+
 ## Open
 
 Staging only. Once an item becomes an issue it leaves this list.
