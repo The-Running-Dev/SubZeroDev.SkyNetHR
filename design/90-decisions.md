@@ -5108,6 +5108,28 @@ for list and argument alike, at the cost of putting narrative design reasoning i
 whose job is the surface the tree cannot state. Larger than the drift warrants.
 Reversibility: cheap — the blocks paste back from the contract in one edit.
 
+### 2026-09-06 — D206 The shutdown test seam is part of the process's stated input surface
+Context: `src/server.ts` reads `SKYNET_TEST_FORCE_STORE_CLOSE_ERROR` and, where it is `'1'`, wraps
+`Store.close()` so that it still closes and then throws. It exists because shutdown's step 5 has a
+catch that nothing else can reach: `Store.close()`'s own contract says it never rejects, so the
+one branch standing between a failed close and a changed exit code is unexercised without a seam.
+`20-contract.md § server` states the process contract — "what it accepts on the way in, what it
+does on the way out" — and says it does so *in full*, and this variable is accepted on the way in
+and is not there. A reconciliation found it; nothing else would have.
+Chosen: **the contract names it, and names the constraint that keeps it honest.** A test seam here
+may only make an already-best-effort step fail. It may not change what shutdown writes, what it
+kills, its ordering, or its exit code — which is what keeps I52 and I54 true with the variable set
+as well as unset. Writing that down is what makes the seam checkable rather than merely present.
+Rejected: **moving the seam out of `server.ts`** — injecting the store into `main`, or giving up
+the assertion. The principle is stronger and the cost is not the seam but the refactor: `server.ts`
+is the composition root and has no injection point, so this rebuilds how the process is
+constructed to test one catch, and S27.11 is either re-satisfied differently or abandoned.
+Rejected: **leaving it undocumented and recording that as deliberate.** Cheapest, and it leaves
+`§ server`'s "in full" false — the class of small untruth a reconciliation exists to find, kept on
+purpose.
+Owed: the amendment to `20-contract.md § server` is `/contract`'s (`opus`, `high`), not this
+pass's. This entry is the ruling it implements against.
+
 ## Open
 
 Staging only. Once an item becomes an issue it leaves this list.
