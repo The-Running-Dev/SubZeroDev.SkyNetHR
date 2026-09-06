@@ -3,22 +3,22 @@
     {
       "name": "Run tests",
       "status": "Passed",
-      "detail": "499 tests, 494 pass, 0 fail, 5 skipped (node --test, full suite via `npm test`, Windows), run fresh on slice/S32 (S32 - Say what the rollback did not reach). Exit code 0."
+      "detail": "npm test — node --test, 499 tests, 66 suites: 494 pass, 0 fail, 5 skipped, 0 cancelled, duration 158291.3077ms."
     },
     {
       "name": "Parse-check PowerShell scripts",
       "status": "Passed",
-      "detail": "Every *.ps1 parsed with [System.Management.Automation.Language.Parser]::ParseFile; 0 errors. Output: 'All PowerShell files parsed cleanly.'"
+      "detail": "Every *.ps1 file recursively parsed with [System.Management.Automation.Language.Parser]::ParseFile; 0 parse errors. Output: PASSED: parse-check clean"
     },
     {
       "name": "Run Pester tests",
       "status": "Passed",
-      "detail": "Invoke-Pester -Path tools -PassThru: Tests Passed: 336, Failed: 0, Skipped: 22, Total: 358. Tests completed in 68.73s."
+      "detail": "Invoke-Pester -Path tools -Output Detailed -PassThru — Tests completed in 57.34s. Tests Passed: 336, Failed: 0, Skipped: 22, NotRun: 0. Total: 358."
     },
     {
       "name": "Check design/10-design.md references resolve",
       "status": "Passed",
-      "detail": "Design references OK - 2 citation(s) checked, all resolve to a real heading. Exit 0."
+      "detail": "./tools/Test-DesignReferences.ps1 — Design references OK - 2 citation(s) checked, all resolve to a real heading. State: Valid, Findings: {}, CitationCount: 2."
     }
   ]
 }
