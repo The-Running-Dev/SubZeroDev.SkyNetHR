@@ -393,8 +393,8 @@ that cannot read the live process's creation time has nothing to compare it with
 creation time cannot be established at either end the entry is **tombstoned and logged, never
 reaped**. The cost is a real orphan an operator ends by hand, which is exactly the cost the
 spawn-window paragraph below already accepts and for the same reason: this design would
-rather leak a process than end the wrong one. The same helper serves the `server.lock`
-staleness test, whose same-container reuse failure is #206's second bullet.
+rather leak a process than end the wrong one. The helper serves this guard alone; D180 removed
+the `server.lock` staleness test that once shared it (D193, *Concurrency § Boot ordering*).
 
 **A pid is meaningless off the machine that issued it, which is why the record names one** (D181).
 Every test above reads *this* host's process table, so running them against a record another host
@@ -563,13 +563,14 @@ transport rather than inventing an alias for it; the choice is reserved in
 mirror is kept. Git is the store, and a second copy would be a second thing to fall out of
 sync.
 
-**Restore is four operations, and the middle one is not the one D31 named** (D112):
+**Restore is five operations, and the second is not the one D31 named** (D112, D182):
 
 ```
 commit   --allow-empty -m "before restore to <sha>"   a way back
 read-tree --reset -u <sha>                            make the work-tree match, exactly
 clean    -fd                                          remove directories read-tree emptied
 verify   diff --quiet <sha>, ls-files --others        prove it, do not infer it
+report   <sha>'s manifest vs status --ignored=matching   say what was not reached
 ```
 
 **D31 specified `checkout <sha> -- .` here, and that sequence cannot do what D31 says it
@@ -2290,7 +2291,7 @@ cleaned up automatically.
 
 ### Shutdown ordering
 
-Five steps, and the first thing to say about them is what is **not** among them.
+Six steps, and the first thing to say about them is what is **not** among them.
 
 ```
 0. guard    a second signal exits immediately, non-zero                       (D174)
@@ -2303,7 +2304,9 @@ Five steps, and the first thing to say about them is what is **not** among them.
             D38's mechanism — the one interrupt and boot's reap already share
             NOT routed through interrupt: no turn.ended, no stop reason here
             the manager mutes its own notify sink before killing              (D178)
-4. release  remove <storage>/server.lock, bounded, then exit zero             (D175)
+4. release  stop renewing, then remove <storage>/server.lock if still ours,
+            bounded                                                   (D175, D195)
+5. close    store.close(): the four server-wide append handles, then exit (D202)
 ```
 
 **Nothing here repairs anything, and that is the design** (D174). Sessions are not marked
@@ -2436,7 +2439,7 @@ What is left behind, by the way the server was stopped:
 |---|---|---|---|---|
 | One signal, drain completes | Removed | Ends on an unpaired `turn.started` | Killed and tombstoned | Reclaim not invoked, reap finds nothing. D39 still closes the turn, D130 still marks the outage |
 | One signal, drain times out | Removed | As above | As above | As above |
-| A second signal | **Left** | As above | **Still running** — the guard exits before step 3 | Reclaimed on D23's test and logged; D23 reaps the tree; the rest as above |
+| A second signal | **Left** | As above | **Still running** — the guard exits before step 3 | Reclaimed after one observation window and logged (D180); D23 reaps the tree; the rest as above |
 | `SIGKILL`, OOM, power cut | **Left** | As above | Still running, or gone with the container | As above — except after a host crash, where the `startedAt` limb tombstones the entry rather than killing anything |
 
 **Two of the four rows still leave a tree for boot to reap**, and both are ways of stopping
