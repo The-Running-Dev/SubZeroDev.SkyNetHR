@@ -1306,15 +1306,18 @@ describe('S9.2/S9.3/S9.5 — GET .../tool-output/:turnId/:callId', () => {
     const sent = await post(h, `/api/sessions/${id}/message`, { text: 'go' });
     const { turnId } = (await sent.json()) as { turnId: string };
 
-    const { frames: reqFrames } = await readFrames(events, (f) => findOwnFrame(f, 'permission.request', turnId) !== undefined);
+    const { frames: reqFrames } = await readFrames(events, (f) => findOwnFrame(f, 'permission.request', turnId) !== undefined, 15000);
     const reqFrame = findOwnFrame(reqFrames, 'permission.request', turnId);
     const requestId = (JSON.parse(reqFrame.split('\n').find((l) => l.startsWith('data: '))!.slice(6)) as { data: { requestId: string } }).data.requestId;
     await post(h, `/api/sessions/${id}/permission`, { requestId, decision: 'allow', scope: 'once', rule: null, reason: null });
 
     // `readFrames` cancels the reader it hands back, so the same connection cannot be
     // read twice — this is a fresh one, replaying history filtered by `turnId` again.
+    // Replays the whole spill (D40), so on the second call in a test running two turns
+    // this retransmits the first turn's history before the second's own frames arrive —
+    // widen the deadline past the 10s default so a slow runner has room for that (#299).
     const events2 = await get(h, `/api/sessions/${id}/events`);
-    const { frames } = await readFrames(events2, (f) => findOwnFrame(f, 'tool.result', turnId) !== undefined);
+    const { frames } = await readFrames(events2, (f) => findOwnFrame(f, 'tool.result', turnId) !== undefined, 15000);
     const frame = findOwnFrame(frames, 'tool.result', turnId);
     const dataLine = frame.split('\n').find((l) => l.startsWith('data: '))!;
     const envelope = JSON.parse(dataLine.slice('data: '.length)) as { data: { turnId: string; callId: string; truncated: boolean; bytes: number } };
