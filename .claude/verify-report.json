@@ -3,22 +3,22 @@
     {
       "name": "Run tests",
       "status": "Passed",
-      "detail": "npm test — node --test, 499 tests, 66 suites: 494 pass, 0 fail, 5 skipped, 0 cancelled, duration 158291.3077ms."
+      "detail": "npm test — node --test, 499 tests, 66 suites: 494 pass, 0 fail, 5 skipped, 0 cancelled, duration 254625.3673ms."
     },
     {
       "name": "Parse-check PowerShell scripts",
       "status": "Passed",
-      "detail": "Every *.ps1 file recursively parsed with [System.Management.Automation.Language.Parser]::ParseFile; 0 parse errors. Output: PASSED: parse-check clean"
+      "detail": "Every *.ps1 file recursively parsed with [System.Management.Automation.Language.Parser]::ParseFile (node_modules and dist excluded); 0 parse errors. Output: PARSE-CHECK PASS: all .ps1 files parsed cleanly"
     },
     {
       "name": "Run Pester tests",
       "status": "Passed",
-      "detail": "Invoke-Pester -Path tools -Output Detailed -PassThru — Tests completed in 57.34s. Tests Passed: 336, Failed: 0, Skipped: 22, NotRun: 0. Total: 358."
+      "detail": "Invoke-Pester -Path tools -Output Detailed -PassThru — 22 files, Tests completed in 80.12s. Tests Passed: 401, Failed: 0, Skipped: 35, NotRun: 0. Total: 436."
     },
     {
       "name": "Check design/10-design.md references resolve",
       "status": "Passed",
-      "detail": "./tools/Test-DesignReferences.ps1 — Design references OK - 2 citation(s) checked, all resolve to a real heading. State: Valid, Findings: {}, CitationCount: 2."
+      "detail": "./tools/Test-DesignReferences.ps1 — Design references OK - 2 citation(s) checked, all resolve to a real heading. State: Valid, Findings: {}, CitationCount: 2. Exit: 0."
     }
   ]
 }
