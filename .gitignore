@@ -3,3 +3,5 @@ dist/
 .data/
 .claude/gates.json
 .claude/session-costs.tsv
+.claude/settings.local.json
+.claude/verify-report.json
