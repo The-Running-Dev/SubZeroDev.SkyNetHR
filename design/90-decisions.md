@@ -5153,6 +5153,35 @@ script for every consuming repo.
 Reversibility: cheap — reversible by later adapting the script or `design/30-slices.md`'s shape,
 should this stop being maintenance-free.
 
+### 2026-09-07 — D208 `Update-DesignProjection.ps1` does not run against this repo; there is no `state-index.md` to project into
+Context: `tools/Update-DesignProjection.ps1` assumes the full design-state apparatus — a
+`design/state-index.md` carrying `units`, `bound-by`, `consumers`, `decision-affects`,
+`question-affects` and `outstanding` projected regions, plus an `invariants` region in
+`design/20-contract.md`. This repository adopted only the `WorkRef` mirror under
+`design/state/work/`, and `design/state-index.md` has never existed in its git history
+(`git log --all -- design/state-index.md` returns nothing). Every run therefore refuses all seven
+regions with `DocumentMissing`/`RegionMissing` and exits 1, which means `/track`'s "regenerate the
+projection in the same breath" step has been silently failing since this repo's inception — every
+past refresh commit (#297, #290, #280, #275) touched `design/state/work/*.md` and nothing else.
+#312 filed this as a permanent structural absence, not a one-off malformation, and asked which of
+two options to take.
+Chosen: **accept the gap.** There is no projection in this repository, so there is nothing for the
+script to regenerate and nothing that can go `ProjectionStale`. `/track`'s projection step does not
+run `Update-DesignProjection.ps1` here; its exit 1 against this layout is the expected, permanent
+result rather than a finding. Recorded in `.claude/commands/track-local.md`'s `document-map`
+override so future `/track` runs don't rediscover it. This is the same resolution D207 took for
+`Update-SlicesDocument.ps1`, for the same reason — a kit script assuming an apparatus this repo
+never built.
+Rejected: **adopting the apparatus** — building `design/state-index.md` and an `invariants` region
+so the script has targets. That requires deciding what "unit", "bound-by", "consumers" and
+"decision-affects" mean for *these* design documents, which is design work belonging to a `/design`
+or `/reconcile` pass, not a bug fix; #312's own **Stop if** clause names exactly that boundary.
+Also rejected: **changing the shared script** so it tolerates a missing projection target, which is
+out of scope per `AGENTS.md`, *Single ownership* — whatever this repo needs stays local rather than
+altering the kit for every consuming repo.
+Reversibility: cheap — reversible by later building `design/state-index.md` and deleting the
+`document-map` override, should this repo adopt the fuller apparatus.
+
 ## Open
 
 Staging only. Once an item becomes an issue it leaves this list.
