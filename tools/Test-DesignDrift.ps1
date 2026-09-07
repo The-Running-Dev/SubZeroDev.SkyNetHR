@@ -271,7 +271,13 @@ function Invoke-DriftCheck {
 
     foreach ($number in ($doc.Slices.Keys | Sort-Object)) {
         $docIds = @($doc.Slices[$number] | Sort-Object -Unique)
-        $issue  = $tracker.Issues | Where-Object { $_.title -match "^S$number\b" } | Select-Object -First 1
+        # A slice's own tracking issue is always titled "S<n> - <name>" or bare "S<n>", so the
+        # number must be followed by whitespace or the end of the title. Anything else is a
+        # bug issue naming a criterion or the slice in prose, not the slice's own issue -
+        # "S5.1's interrupt test is flaky..." (a period), "S2a - Refuse to start insecurely"
+        # (a letter), and "S27's backpressure test times out..." (an apostrophe) are all
+        # excluded by requiring `\s` or `$` rather than trying to enumerate what follows.
+        $issue  = $tracker.Issues | Where-Object { $_.title -match "^S$number(?:\s|$)" } | Select-Object -First 1
 
         if (-not $issue) {
             $findings.Add((New-Finding -Kind 'NoIssue' -Slice "S$number" -Detail 'slice has no issue; /track opens one' -Issue 0))
