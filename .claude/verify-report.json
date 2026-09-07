@@ -3,17 +3,17 @@
     {
       "name": "Run tests",
       "status": "Passed",
-      "detail": "npm test — node --test, 499 tests, 66 suites: 494 pass, 0 fail, 5 skipped, 0 cancelled, duration 254625.3673ms."
+      "detail": "npm test — node --test, 499 tests, 66 suites: 494 pass, 0 fail, 5 skipped, 0 cancelled, duration 276980.0262ms."
     },
     {
       "name": "Parse-check PowerShell scripts",
       "status": "Passed",
-      "detail": "Every *.ps1 file recursively parsed with [System.Management.Automation.Language.Parser]::ParseFile (node_modules and dist excluded); 0 parse errors. Output: PARSE-CHECK PASS: all .ps1 files parsed cleanly"
+      "detail": "Every *.ps1 file recursively parsed with [System.Management.Automation.Language.Parser]::ParseFile; 0 parse errors. Output: All PowerShell files parsed cleanly"
     },
     {
       "name": "Run Pester tests",
-      "status": "Passed",
-      "detail": "Invoke-Pester -Path tools -Output Detailed -PassThru — 22 files, Tests completed in 80.12s. Tests Passed: 401, Failed: 0, Skipped: 35, NotRun: 0. Total: 436."
+      "status": "Failed",
+      "detail": "Invoke-Pester -Path tools -Output Detailed -PassThru — 22 files. Tests Passed: 401, Failed: 2, Skipped: 35, NotRun: 0. Total: 438. Both failures in tools/Invoke-CodexCommand.Tests.ps1:\n\n[FAILED] Invoke-CodexCommand command map.has a mapping for every command file in .claude/commands/\nExpected no exception to be thrown, because /track-local has no profile mapping, but an exception \"No profile mapping for '/track-local'. Known commands: /brief-check, /design, /contract, /slices, /redteam, /slice, /reconcile, /make-human-docs, /track, /verify, /pr, /resolve, /fix, /refine, /install, /install-all, /kit-sync, /kit-help, /next, /clean, /install-code-review-agent, /freeze, /unfreeze. Pass --profile to codex directly for anything else.\" was thrown from tools/Invoke-CodexCommand.ps1:164 char:5\n\n[FAILED] Invoke-CodexCommand tier stamping.stamps a tier for every command file in .claude/commands/\nNo profile mapping for '/track-local'. Known commands: /brief-check, /design, /contract, /slices, /redteam, /slice, /reconcile, /make-human-docs, /track, /verify, /pr, /resolve, /fix, /refine, /install, /install-all, /kit-sync, /kit-help, /next, /clean, /install-code-review-agent, /freeze, /unfreeze. Pass --profile to codex directly for anything else.\n\nRoot cause: both tests glob every *.md file directly under .claude/commands/ (Invoke-CodexCommand.Tests.ps1:16, Get-ChildItem '.claude/commands/*.md') and assert each one is an invokable Codex command with a profile mapping. That glob has never before matched a companion file, because this repository had none until this PR added .claude/commands/track-local.md (the accepted-gap fix for #305). The defect is pre-existing in Invoke-CodexCommand.ps1/.Tests.ps1 — neither excludes *-local.md companion files, which are never invoked directly as a slash command — and this PR is simply the first change to exercise it."
     },
     {
       "name": "Check design/10-design.md references resolve",
