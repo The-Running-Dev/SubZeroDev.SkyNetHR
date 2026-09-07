@@ -1,5 +1,4 @@
 node_modules/
 dist/
 .data/
-.claude/gates.json
-.claude/session-costs.tsv
+.claude/
