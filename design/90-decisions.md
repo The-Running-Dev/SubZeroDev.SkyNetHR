@@ -5130,6 +5130,29 @@ purpose.
 Owed: the amendment to `20-contract.md § server` is `/contract`'s (`opus`, `high`), not this
 pass's. This entry is the ruling it implements against.
 
+### 2026-09-07 — D207 `Update-SlicesDocument.ps1` does not run against this repo; slice retirement stays manual
+Context: `tools/Update-SlicesDocument.ps1` assumes slices start under `## Outstanding` and retire
+to a bare index row under `## Landed` once their issue closes. This repo's `design/30-slices.md`
+deliberately inverts that order — `## Landed` sits near the top holding every landed slice's full
+body, `## Outstanding` sits at the end — because `10-design.md`, `90-decisions.md`, and other
+slices cite specific criterion ids (S1.6, S3.3, S7.5, ...) by text, and a bare index would lose
+it. The script reports `NoLandedSection` on every run against this shape; #305 filed this as a
+permanent structural mismatch, not a one-off malformation, and asked which of two options to take.
+Chosen: **accept the gap.** Slice retirement in this repo is a manual, no-op step. `/track`'s
+"Landed slices → retired" phase does not run `Update-SlicesDocument.ps1` here; its
+`NoLandedSection` exit is expected against this document's shape, not a finding. Recorded in
+`.claude/commands/track-local.md`'s `document-map` override so future `/track` runs don't
+rediscover this. Cheapest option, and there is no operational cost today — `## Outstanding`
+currently holds no slices, so nothing was actually blocked from retiring.
+Rejected: **adapting the script to recognize a Landed-first, full-body layout.** This changes what
+"retirement" even means for this repo (there would be no body left to trim once a slice already
+carries its full text under `## Landed`), which is real design work belonging to a future
+`/design` or `/reconcile` pass, not a mechanical tooling fix. Also out of scope per `AGENTS.md`,
+*Single ownership*: whatever this repo needs stays local, not a rewrite of the kit's shared
+script for every consuming repo.
+Reversibility: cheap — reversible by later adapting the script or `design/30-slices.md`'s shape,
+should this stop being maintenance-free.
+
 ## Open
 
 Staging only. Once an item becomes an issue it leaves this list.

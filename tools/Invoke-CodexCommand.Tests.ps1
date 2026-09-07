@@ -8,12 +8,16 @@
   "no profile mapping" error - exactly the manual profile selection the script exists to
   remove. Runs against this repository's own .claude/commands/ rather than a fixture,
   since the defect is staleness against the real command set.
+
+  Excludes *-local.md companion files (.claude/COMPANIONS.md) from that command set (issue
+  #309): a companion is read by the core command it sits beside and is never invoked as a
+  slash command in its own right, so it has no business needing its own profile mapping.
 #>
 
 BeforeAll {
     $script:ScriptPath = Join-Path $PSScriptRoot 'Invoke-CodexCommand.ps1'
     $script:RepoRoot = Split-Path $PSScriptRoot -Parent
-    $script:CommandNames = Get-ChildItem (Join-Path $script:RepoRoot '.claude/commands/*.md') |
+    $script:CommandNames = Get-ChildItem (Join-Path $script:RepoRoot '.claude/commands/*.md') -Exclude '*-local.md' |
         ForEach-Object { $_.BaseName }
 }
 
