@@ -267,8 +267,8 @@ function ConvertTo-WorkRefLines {
     $lines.Add("State: $($Issue.state)")
     $lines.Add("Rank: $Rank")
     $lines.Add("MirroredAt: $Sha")
-    $criteriaJoined = $criteria -join ', '
-    $lines.Add(("Criteria:" + $(if ($criteriaJoined) { " $criteriaJoined" } else { '' })))
+    $criteriaLine = if (@($criteria).Count -gt 0) { "Criteria: $($criteria -join ', ')" } else { 'Criteria:' }
+    $lines.Add($criteriaLine)
     ,@($lines)
 }
 

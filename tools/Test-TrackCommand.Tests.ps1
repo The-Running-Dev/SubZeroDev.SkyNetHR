@@ -45,3 +45,31 @@ Describe 'track.md: the work-mirror refresh also regenerates the projection (#62
         $projectionInvocation | Where-Object { $_ -match '-DryRun' } | Should -BeNullOrEmpty
     }
 }
+
+Describe 'track.md: landed slice bodies are retired (#120)' {
+
+    BeforeAll {
+        $script:TrackPath = Join-Path (Split-Path $PSScriptRoot -Parent) '.claude/commands/track.md'
+        $script:Lines = Get-Content -LiteralPath $script:TrackPath
+    }
+
+    It 'runs Update-SlicesDocument.ps1 after the slice-to-issue sync, and it is not the mirror-refresh carve-out' {
+        $slicesIndex = ($script:Lines | Select-String -Pattern '^### Slices → issues$').LineNumber
+        $retireIndex = ($script:Lines | Select-String -Pattern '^### Landed slices → retired$').LineNumber
+        $slicesIndex | Should -Not -BeNullOrEmpty
+        $retireIndex | Should -Not -BeNullOrEmpty
+        $retireIndex | Should -BeGreaterThan $slicesIndex
+
+        $nextSectionIndex = ($script:Lines | Select-String -Pattern '^### ' |
+            Where-Object { $_.LineNumber -gt $retireIndex } |
+            Select-Object -First 1).LineNumber
+        $endIndex = if ($nextSectionIndex) { $nextSectionIndex - 1 } else { $script:Lines.Count }
+        $sectionBody = ($script:Lines[($retireIndex - 1)..($endIndex - 1)] -join "`n")
+
+        $sectionBody | Should -Match 'Update-SlicesDocument\.ps1'
+        # This document is not a WorkRef or the outstanding projection, so the direct-to-default-
+        # branch carve-out AGENTS.md scopes to those two paths does not cover it (AGENTS.md,
+        # "Git and delivery") - the section must say so rather than let a reader assume it does.
+        $sectionBody | Should -Match 'not the mirror-refresh carve-out'
+    }
+}

@@ -176,4 +176,26 @@ Describe 'Invoke-DoneHousekeeping' {
             $refusal | Should -Not -BeNullOrEmpty
         }
     }
+
+    Context 'the default branch is already checked out in another worktree' {
+
+        It 'reports Stopped/CheckoutFailed instead of a false success when git checkout fails' {
+            # main stays checked out in $repo itself; a second worktree is added on a
+            # branch that is not ahead of main (so the UnmergedCurrentBranch stop never
+            # triggers), then the script is run from that second worktree - its
+            # `git checkout main` collides with main already being checked out in $repo,
+            # exactly the "fatal: 'main' is already used by worktree at ..." case #166
+            # reports being silently swallowed by `| Out-Null`.
+            $repo = New-GitRepo -Path (Join-Path $TestDrive 'repo-checkout-conflict')
+            $wt = Join-Path $TestDrive 'wt-checkout-conflict'
+            & git -C $repo worktree add --quiet -b fix/foo $wt main | Out-Null
+
+            $result = & $script:ScriptPath -RepoRoot $wt -DefaultBranch main -SkipPull
+
+            $result.Stopped | Should -Be $true
+            $result.Reason | Should -Be 'CheckoutFailed'
+            $result.Detail | Should -Match "used by worktree"
+            (& git -C $wt branch --show-current).Trim() | Should -Be 'fix/foo'
+        }
+    }
 }

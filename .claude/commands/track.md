@@ -108,6 +108,22 @@ Where the script is unavailable — no `pwsh`, or `gh` unauthenticated — say s
 
 `design/30-slices.md` stays authoritative for what a slice *is*. The issue tracks whether it is *done*.
 
+### Landed slices → retired
+
+`design/30-slices.md` § *How this document is kept* says a slice's full body lives under `## Outstanding` only until its issue closes, at which point it retires to a row under `## Landed`. Nothing else in this command writes to that document's body — the sync above only opens and closes issues — so run the retirement in the same breath, after the issue sync above:
+
+```powershell
+pwsh ./tools/Update-SlicesDocument.ps1
+```
+
+Mechanical only, on the same ground as `Test-DesignDrift.ps1` above (`AGENTS.md`, *What should stop being model work* — moving a slice's body and reading an id range is set arithmetic over one file). It never opens, closes, or edits an issue — read-only against the tracker (I13) — and it never touches this document's hand-authored prose: the overview blockquote, a slice's own narrative preamble, and the "What each delivered" list are all judgement, not derivable from the tracker.
+
+- Exit 0 with nothing retired — say so; this is the ordinary no-op case, not a finding.
+- Exit 0 with slices retired — say which ones, by number, issue, and criteria range.
+- Exit 2 — `gh` missing or unauthenticated, or the document's `## Outstanding`/`## Landed` markers are missing or malformed. Say what could not be read and do not report the retirement as having run.
+- **Read what retirement left behind.** A slice's own narrative preamble — a top-of-document overview naming it as outstanding, an `## Outstanding` section paragraph describing a set that just emptied — can go stale the moment its body is retired. That is descriptive drift, corrected on the spot in the same commit (`AGENTS.md`, *Descriptive drift is corrected where it is found*), not a decision to bring back to the user.
+- **This is not the mirror-refresh carve-out.** `design/30-slices.md` is not `design/state/work/` or `design/state-index.md`, so a retirement (and any prose correction alongside it) goes on a branch with a pull request, per the ordinary delegation (`AGENTS.md`, *Git and delivery*) — never committed straight to the default branch.
+
 ### Open items → issues
 
 For each bullet under `## Open` in `design/90-decisions.md`:

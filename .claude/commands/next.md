@@ -50,6 +50,12 @@ pwsh ./tools/Test-DesignDrift.ps1
 pwsh ./tools/Test-DesignState.ps1
 ```
 
+These six reads carry no judgement of their own and can be gathered with no model call at all —
+`tools/Get-NextOrientation.ps1` (or `Get-AgentKitNext` after dot-sourcing `tools/RepoAliases.ps1`
+into a PowerShell profile) runs them and returns one object. It does not pick a row; *Decide, in
+this order* below still does, whether picked by a person reading that object or by a session
+(`design/90-decisions.md`, 2026-09-06, issue #183).
+
 **Say which signal you used.** A step taken on evidence nobody can see reads the same as a step
 taken from habit.
 

@@ -71,10 +71,14 @@ $PSNativeCommandUseErrorActionPreference = $false
 $script:BlockingClasses = @(
     'UnresolvedId', 'AnchorMissing', 'OwnerMismatch', 'UnrecordedArtifact', 'ProjectionStale',
     'RegionMalformed', 'IdCollision', 'DecisionAnchorAmbiguous', 'LogEntryUnrecorded',
-    'EnforcementUnevidenced', 'ClosureOverBudget', 'ClassListDisagreement', 'GlobDisagreement'
+    'EnforcementUnevidenced', 'ClosureOverBudget', 'ClassListDisagreement', 'GlobDisagreement',
+    'RecordPairMalformed', 'HalfStatusMismatch', 'HalfOverlap',
+    'SiteAmbiguous', 'SiteOutOfReach', 'SiteContradictsLive',
+    'DecisionUnplaced', 'SupersessionCycle'
 )
 $script:ReportedClasses = @(
-    'MirrorStale', 'WorkStateDivergence', 'PinAncestry', 'SemanticDisagreement'
+    'MirrorStale', 'WorkStateDivergence', 'PinAncestry', 'SemanticDisagreement',
+    'LiveAlreadyStated'
 )
 $script:CouldNotEvaluateClasses = @(
     'StateSetAbsent', 'RecordUnparseable', 'TrackerUnavailable', 'ShallowCheckout',
@@ -850,11 +854,430 @@ function Test-EnforcementUnevidenced {
 }
 
 # ---------------------------------------------------------------------------------------------
+# RecordPairMalformed, HalfStatusMismatch, HalfOverlap: the three checks the 2026-08-29 revision
+# adds for the retired-companion split (design/10-design.md §§ "A unit is one record in two
+# files", "Every reference sits in the half its referent's state requires"; design/20-contract.md
+# § "The divergence classes"). All three are Unit-only - a companion exists only for that kind
+# (S20's Out of scope: invariant records stay single-file).
+# ---------------------------------------------------------------------------------------------
+
+<#
+    Which file each Unit field belongs in - the pairing rule design/20-contract.md describes
+    ("which file a field may appear in is a pairing rule rather than a second field table")
+    rather than a second field table the reader would have to duplicate. Kind/Status/Anchor/Owns
+    have no companion counterpart at all, so a companion carrying any of them is exactly the same
+    defect shape as a companion carrying Archival etc. - "an active field written into the
+    companion" either way.
+#>
+$script:UnitFieldHalf = @{
+    Kind = 'Active'; Status = 'Active'; Anchor = 'Active'; Owns = 'Active'
+    Consumes  = 'Active'; Consumed = 'Companion'
+    Exposes   = 'Active'; Exposed  = 'Companion'
+    Binds     = 'Active'; Bound    = 'Companion'
+    Live      = 'Active'; Archival = 'Companion'
+    Questions = 'Active'; Answered = 'Companion'
+    Work      = 'Active'; Worked   = 'Companion'
+    Evidence  = 'Active'
+}
+
+<#
+    RecordPairMalformed. Three shapes (design/20-contract.md): a companion with no active record
+    beside it (from the reader's own CompanionOnly list - the reader parses a companion whether
+    or not its active half exists, so this is not could-not-evaluate, it is a real pair defect);
+    a retired-half field written into the active record; an active-half field written into the
+    companion. The last two both read off FieldOrigin, which the reader stamps per field with
+    the file it was actually read from - a field misplaced this way still parses cleanly under
+    the one Unit vocabulary, so nothing else on the closed list would ever see it.
+#>
+function Test-RecordPairMalformed {
+    param(
+        [Parameter(Mandatory)][AllowEmptyCollection()][object[]] $Records,
+        [Parameter(Mandatory)][AllowEmptyCollection()][object[]] $CompanionOnly
+    )
+
+    $findings = [System.Collections.Generic.List[object]]::new()
+
+    foreach ($orphan in $CompanionOnly) {
+        $findings.Add((New-DesignFinding -Class 'RecordPairMalformed' -Subject $orphan.Id `
+            -Detail "companion '$($orphan.Path)' exists with no active record beside it" -Blocking $true))
+    }
+
+    foreach ($record in $Records) {
+        if ($record.Kind -ne 'Unit') { continue }
+        if (-not $record.FieldOrigin) { continue }
+        $activePath = $record.Path
+        $companionPath = if ($record.CompanionPath) { $record.CompanionPath } else { '(no companion file)' }
+
+        foreach ($field in $record.FieldOrigin.Keys) {
+            if (-not $script:UnitFieldHalf.ContainsKey($field)) { continue }
+            $expected = $script:UnitFieldHalf[$field]
+            $actual = $record.FieldOrigin[$field]
+            if ($actual -eq $expected) { continue }
+
+            $side = if ($expected -eq 'Companion') { 'the retired companion' } else { 'the active record' }
+            $findings.Add((New-DesignFinding -Class 'RecordPairMalformed' -Subject $record.Id `
+                -Detail "field '$field' belongs in $side; active='$activePath', companion='$companionPath'" -Blocking $true))
+        }
+    }
+    ,@($findings)
+}
+
+<#
+    HalfStatusMismatch. design/10-design.md's half/status table, checked in both directions for
+    every row it states. Work/Worked name a WorkRef by issue number rather than a design-state id
+    (design/20-contract.md, "Work... issue numbers, not a design-state id"), so this resolves
+    them against 'work/<issue>' itself rather than reusing $script:IdListFields' resolution - the
+    same construction WorkRef's own id form uses. A `StatedIn` site is the table's eleventh row
+    and is out of scope here: the field does not exist until S21.
+#>
+function Test-HalfStatusMismatch {
+    param([Parameter(Mandatory)][AllowEmptyCollection()][object[]] $Records, [Parameter(Mandatory)][hashtable] $ById)
+
+    $findings = [System.Collections.Generic.List[object]]::new()
+    $units = @($Records | Where-Object { $_.Kind -eq 'Unit' })
+
+    $pairs = @(
+        @{ Active = 'Consumes';  Companion = 'Consumed'; ActiveStatus = 'active';   CompanionStatus = 'retired' }
+        @{ Active = 'Exposes';   Companion = 'Exposed';  ActiveStatus = 'active';   CompanionStatus = 'retired' }
+        @{ Active = 'Binds';     Companion = 'Bound';    ActiveStatus = 'active';   CompanionStatus = 'retired' }
+        @{ Active = 'Live';      Companion = 'Archival'; ActiveStatus = 'accepted'; CompanionStatus = 'superseded' }
+        @{ Active = 'Questions'; Companion = 'Answered'; ActiveStatus = 'open';     CompanionStatus = 'answered' }
+    )
+
+    foreach ($unit in $units) {
+        foreach ($pair in $pairs) {
+            foreach ($half in 'Active', 'Companion') {
+                $field = $pair[$half]
+                if (-not $unit.Lists.ContainsKey($field)) { continue }
+                $requiredStatus = $pair["${half}Status"]
+                foreach ($id in $unit.Lists[$field]) {
+                    if ([string]::IsNullOrWhiteSpace($id)) { continue }
+                    if (-not $ById.ContainsKey($id)) { continue }
+                    $status = $ById[$id].Scalars['Status']
+                    if ($status -ne $requiredStatus) {
+                        $findings.Add((New-DesignFinding -Class 'HalfStatusMismatch' -Subject $unit.Id `
+                            -Detail "$field names '$id', whose Status is '$status', not '$requiredStatus'" -Blocking $true))
+                    }
+                }
+            }
+        }
+
+        foreach ($pair in @(
+                @{ Field = 'Work';   RequiredState = 'OPEN' }
+                @{ Field = 'Worked'; RequiredState = 'CLOSED' }
+            )) {
+            if (-not $unit.Lists.ContainsKey($pair.Field)) { continue }
+            foreach ($issue in $unit.Lists[$pair.Field]) {
+                if ([string]::IsNullOrWhiteSpace($issue)) { continue }
+                $workId = "work/$issue"
+                if (-not $ById.ContainsKey($workId)) { continue }
+                $state = $ById[$workId].Scalars['State']
+                if ($state -ne $pair.RequiredState) {
+                    $findings.Add((New-DesignFinding -Class 'HalfStatusMismatch' -Subject $unit.Id `
+                        -Detail "$($pair.Field) names issue '$issue', whose WorkRef State is '$state', not '$($pair.RequiredState)'" -Blocking $true))
+                }
+            }
+        }
+    }
+    ,@($findings)
+}
+
+<#
+    HalfOverlap. design/10-design.md, "Relocation is reversible and the halves are disjoint" - an
+    id sitting in both halves of one edge on the same unit, e.g. named by both Live and Archival.
+    The same id in two different edges (Live and Binds, say) is not this class's - it is not even
+    a defect, since they are different fields entirely.
+#>
+function Test-HalfOverlap {
+    param([Parameter(Mandatory)][AllowEmptyCollection()][object[]] $Records)
+
+    $findings = [System.Collections.Generic.List[object]]::new()
+    $units = @($Records | Where-Object { $_.Kind -eq 'Unit' })
+
+    $pairs = @(
+        @{ Active = 'Consumes';  Companion = 'Consumed' }
+        @{ Active = 'Exposes';   Companion = 'Exposed' }
+        @{ Active = 'Binds';     Companion = 'Bound' }
+        @{ Active = 'Live';      Companion = 'Archival' }
+        @{ Active = 'Questions'; Companion = 'Answered' }
+        @{ Active = 'Work';      Companion = 'Worked' }
+    )
+
+    foreach ($unit in $units) {
+        foreach ($pair in $pairs) {
+            $activeIds = @(if ($unit.Lists.ContainsKey($pair.Active)) { @($unit.Lists[$pair.Active] | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }) } else { @() })
+            $companionIds = @(if ($unit.Lists.ContainsKey($pair.Companion)) { @($unit.Lists[$pair.Companion] | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }) } else { @() })
+            foreach ($id in $activeIds) {
+                if ($id -in $companionIds) {
+                    $findings.Add((New-DesignFinding -Class 'HalfOverlap' -Subject $unit.Id `
+                        -Detail "'$id' sits in both $($pair.Active) and $($pair.Companion)" -Blocking $true))
+                }
+            }
+        }
+    }
+    ,@($findings)
+}
+
+# ---------------------------------------------------------------------------------------------
+# SiteAmbiguous, SiteOutOfReach, SiteContradictsLive: the three checks the 2026-08-30 revision's
+# S21 slice adds for absorption (design/10-design.md § "Absorption - where a decision's terms
+# come to stand"; design/20-contract.md § "The state set", "The divergence classes"). Malformed
+# StatedIn entries never reach these three - Read-DesignState.ps1 drops them as parse failures
+# (S21.1) - so every entry seen here is already `<id> § <heading>`.
+# ---------------------------------------------------------------------------------------------
+
+<#
+    Splits one already-validated `<id> § <heading>` site into its two parts. Never returns $null
+    for an entry that reached this point, because the reader's own grammar guarantees the shape.
+#>
+function ConvertFrom-StatedInSite {
+    param([Parameter(Mandatory)][string] $Site)
+    if ($Site -notmatch '^(?<id>\S+) § (?<heading>.+)$') { return $null }
+    [pscustomobject]@{ Id = $Matches['id']; Heading = $Matches['heading'] }
+}
+
+<#
+    The file a site's id stands for - design/20-contract.md, "resolved against the file the
+    site's id stands for - a unit's Anchor, or the record file of a contract". A Unit resolves to
+    the tree file its own Anchor names (a script's Anchor has no Markdown headings, which is what
+    keeps a direct script absorption from ever resolving - design/10-design.md's own reasoning,
+    not a rule enforced here). A Contract resolves to its own record file, which is real Markdown
+    carrying `## Semantics`. Any other kind, or an id with no record at all, resolves to nothing -
+    SiteAmbiguous reports that as zero headings rather than this function guessing a file.
+#>
+function Resolve-StatedInSiteFile {
+    param(
+        [Parameter(Mandatory)][string] $SiteId,
+        [Parameter(Mandatory)][hashtable] $ById,
+        [Parameter(Mandatory)][string] $RepoPath
+    )
+    if (-not $ById.ContainsKey($SiteId)) { return $null }
+    $record = $ById[$SiteId]
+    if ($record.Kind -eq 'Unit') {
+        $anchor = $record.Scalars['Anchor']
+        if ([string]::IsNullOrWhiteSpace($anchor)) { return $null }
+        return (Join-Path $RepoPath $anchor)
+    }
+    if ($record.Kind -eq 'Contract') {
+        return (Join-Path $RepoPath $record.Path)
+    }
+    return $null
+}
+
+function Get-MarkdownHeadingCount {
+    param([Parameter(Mandatory)][AllowNull()][string] $FilePath, [Parameter(Mandatory)][string] $Heading)
+    if (-not $FilePath -or -not (Test-Path -LiteralPath $FilePath -PathType Leaf)) { return 0 }
+    $count = 0
+    foreach ($line in (Get-Content -LiteralPath $FilePath)) {
+        if ($line -match '^#{1,6}\s+(.+?)\s*$' -and $Matches[1] -eq $Heading) { $count++ }
+    }
+    $count
+}
+
+<#
+    SiteAmbiguous. A site's heading must resolve to exactly one heading in the file its id
+    stands for; zero or two is a finding (design/20-contract.md § "The divergence classes").
+#>
+function Test-SiteAmbiguous {
+    param(
+        [Parameter(Mandatory)][AllowEmptyCollection()][object[]] $Records,
+        [Parameter(Mandatory)][hashtable] $ById,
+        [Parameter(Mandatory)][string] $RepoPath
+    )
+
+    $findings = [System.Collections.Generic.List[object]]::new()
+    foreach ($decision in @($Records | Where-Object { $_.Kind -eq 'Decision' })) {
+        if (-not $decision.Lists.ContainsKey('StatedIn')) { continue }
+        foreach ($site in $decision.Lists['StatedIn']) {
+            if ([string]::IsNullOrWhiteSpace($site)) { continue }
+            $parsed = ConvertFrom-StatedInSite -Site $site
+            if (-not $parsed) { continue }
+            $file = Resolve-StatedInSiteFile -SiteId $parsed.Id -ById $ById -RepoPath $RepoPath
+            $count = Get-MarkdownHeadingCount -FilePath $file -Heading $parsed.Heading
+            if ($count -ne 1) {
+                $findings.Add((New-DesignFinding -Class 'SiteAmbiguous' -Subject $decision.Id -Detail "site '$site' resolves to $count heading(s)" -Blocking $true))
+            }
+        }
+    }
+    ,@($findings)
+}
+
+<#
+    SiteOutOfReach. A site is in reach when some unit's own identity, or some unit's one-hop
+    closure (Consumes, Exposes, Binds, Live, Questions), names the site's id - design/10-design.md
+    § "Absorption", "somewhere that unit's reader already reaches: a section of the unit's own
+    Anchor, or a section of a record already one hop from it". "A site naming a contract at
+    least one unit consumes or exposes is silent" (design/20-contract.md) is the second half of
+    this test; the first half - a site naming a unit that is itself in the set - is what makes a
+    document able to absorb a decision into its own Anchor.
+#>
+function Test-SiteOutOfReach {
+    param(
+        [Parameter(Mandatory)][AllowEmptyCollection()][object[]] $Records
+    )
+
+    $findings = [System.Collections.Generic.List[object]]::new()
+    $units = @($Records | Where-Object { $_.Kind -eq 'Unit' })
+    $closureFields = @('Consumes', 'Exposes', 'Binds', 'Live', 'Questions')
+
+    foreach ($decision in @($Records | Where-Object { $_.Kind -eq 'Decision' })) {
+        if (-not $decision.Lists.ContainsKey('StatedIn')) { continue }
+        foreach ($site in $decision.Lists['StatedIn']) {
+            if ([string]::IsNullOrWhiteSpace($site)) { continue }
+            $parsed = ConvertFrom-StatedInSite -Site $site
+            if (-not $parsed) { continue }
+
+            $reached = $false
+            foreach ($unit in $units) {
+                if ($unit.Id -eq $parsed.Id) { $reached = $true; break }
+                foreach ($field in $closureFields) {
+                    if ($unit.Lists.ContainsKey($field) -and $unit.Lists[$field] -contains $parsed.Id) { $reached = $true; break }
+                }
+                if ($reached) { break }
+            }
+            if (-not $reached) {
+                $findings.Add((New-DesignFinding -Class 'SiteOutOfReach' -Subject $decision.Id -Detail "site '$site' names '$($parsed.Id)', which no unit's own identity or one-hop closure reaches" -Blocking $true))
+            }
+        }
+    }
+    ,@($findings)
+}
+
+<#
+    SiteContradictsLive. A decision may not be both named by a unit's Live and stated in that
+    same unit (design/10-design.md § "Absorption", "A decision may not be both Live on a unit
+    and stated in it").
+#>
+function Test-SiteContradictsLive {
+    param(
+        [Parameter(Mandatory)][AllowEmptyCollection()][object[]] $Records
+    )
+
+    $findings = [System.Collections.Generic.List[object]]::new()
+    $units = @($Records | Where-Object { $_.Kind -eq 'Unit' })
+
+    foreach ($decision in @($Records | Where-Object { $_.Kind -eq 'Decision' })) {
+        if (-not $decision.Lists.ContainsKey('StatedIn')) { continue }
+        $siteUnitIds = [System.Collections.Generic.HashSet[string]]::new()
+        foreach ($site in $decision.Lists['StatedIn']) {
+            if ([string]::IsNullOrWhiteSpace($site)) { continue }
+            $parsed = ConvertFrom-StatedInSite -Site $site
+            if (-not $parsed) { continue }
+            [void]$siteUnitIds.Add($parsed.Id)
+        }
+        if ($siteUnitIds.Count -eq 0) { continue }
+
+        foreach ($unit in $units) {
+            if (-not $unit.Lists.ContainsKey('Live')) { continue }
+            if ($unit.Lists['Live'] -notcontains $decision.Id) { continue }
+            if ($siteUnitIds.Contains($unit.Id)) {
+                $findings.Add((New-DesignFinding -Class 'SiteContradictsLive' -Subject $unit.Id -Detail "decision '$($decision.Id)' is both named by Live and stated in this unit via a site" -Blocking $true))
+            }
+        }
+    }
+    ,@($findings)
+}
+
+<#
+    DecisionUnplaced (design/10-design.md § "A decision nothing names is an interrupted write";
+    design/20-contract.md's own row). An accepted decision must be named by at least one unit's
+    Live, or place at least one site in its own StatedIn - "place" is presence, not resolution;
+    whether a site actually resolves is SiteAmbiguous's and SiteOutOfReach's to say, and a site
+    that fails one of those still keeps this class silent, exactly as "a decision placed by a
+    site alone is silent" states. A superseded decision must be named by at least one Archival.
+    Status values other than the two the design/data model declares are outside this check's
+    scope - a decision record's Status is otherwise-unvalidated free text here, same as every
+    other scalar this checker resolves rather than type-checks.
+#>
+function Test-DecisionUnplaced {
+    param([Parameter(Mandatory)][AllowEmptyCollection()][object[]] $Records)
+
+    $findings = [System.Collections.Generic.List[object]]::new()
+    $units = @($Records | Where-Object { $_.Kind -eq 'Unit' })
+
+    foreach ($decision in @($Records | Where-Object { $_.Kind -eq 'Decision' })) {
+        $status = $decision.Scalars['Status']
+        if ($status -eq 'accepted') {
+            $hasLive = [bool]@($units | Where-Object { $_.Lists.ContainsKey('Live') -and $decision.Id -in $_.Lists['Live'] }).Count
+            $hasSite = $decision.Lists.ContainsKey('StatedIn') -and [bool]@($decision.Lists['StatedIn'] | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }).Count
+            if (-not $hasLive -and -not $hasSite) {
+                $findings.Add((New-DesignFinding -Class 'DecisionUnplaced' -Subject $decision.Id -Detail "status 'accepted', named by no unit's Live and placing no site - an interrupted write" -Blocking $true))
+            }
+        } elseif ($status -eq 'superseded') {
+            $hasArchival = [bool]@($units | Where-Object { $_.Lists.ContainsKey('Archival') -and $decision.Id -in $_.Lists['Archival'] }).Count
+            if (-not $hasArchival) {
+                $findings.Add((New-DesignFinding -Class 'DecisionUnplaced' -Subject $decision.Id -Detail "status 'superseded', named by no unit's Archival - an interrupted write" -Blocking $true))
+            }
+        }
+    }
+    ,@($findings)
+}
+
+<#
+    SupersessionCycle (design/10-design.md § "SupersededBy chains terminate, and they terminate
+    in an accepted decision"). Walks each decision's own SupersededBy chain with a visited set;
+    a chain that revisits a decision it has already walked - including naming itself - is a
+    cycle, reported in the order the walk found it. A chain that reaches a decision with no
+    record, or a superseded decision with no SupersededBy, stops without a finding here - those
+    are UnresolvedId's and EnforcementUnevidenced's respectively, not a cycle. Reported once per
+    distinct cycle regardless of how many decisions feed into it or which member the walk
+    started from: the finding names the cycle, not the walk that found it.
+#>
+function Test-SupersessionCycle {
+    param(
+        [Parameter(Mandatory)][AllowEmptyCollection()][object[]] $Records,
+        [Parameter(Mandatory)][hashtable] $ById
+    )
+
+    $findings = [System.Collections.Generic.List[object]]::new()
+    $reportedCycles = [System.Collections.Generic.HashSet[string]]::new()
+
+    foreach ($start in @($Records | Where-Object { $_.Kind -eq 'Decision' })) {
+        $path = [System.Collections.Generic.List[string]]::new()
+        $seen = @{}
+        $current = $start.Id
+        $cycle = $null
+
+        while ($true) {
+            if ($seen.ContainsKey($current)) {
+                $cycleStart = $path.IndexOf($current)
+                $cycle = @($path[$cycleStart..($path.Count - 1)]) + @($current)
+                break
+            }
+            $seen[$current] = $true
+            $path.Add($current)
+
+            if (-not $ById.ContainsKey($current)) { break }
+            $record = $ById[$current]
+            if ($record.Kind -ne 'Decision' -or $record.Scalars['Status'] -ne 'superseded') { break }
+            $next = $record.Scalars['SupersededBy']
+            if ([string]::IsNullOrWhiteSpace($next)) { break }
+            $current = $next
+        }
+
+        # Only report from a start that is itself inside the cycle just found - a decision whose
+        # own chain merely leads into someone else's cycle is not itself unterminated in a way
+        # this class exists to say; every member of the cycle will independently find it too.
+        if ($cycle -and $cycle[0] -eq $start.Id) {
+            $dedupeKey = (@($cycle | Select-Object -Unique) | Sort-Object) -join '|'
+            if ($reportedCycles.Add($dedupeKey)) {
+                $findings.Add((New-DesignFinding -Class 'SupersessionCycle' -Subject $start.Id -Detail "cycle: $($cycle -join ' -> ')" -Blocking $true))
+            }
+        }
+    }
+    ,@($findings)
+}
+
+# ---------------------------------------------------------------------------------------------
 # The budget meter. closure(U) = record(U), plus the record of every id record(U) names
-# directly, excluding Archival and excluding any named record whose Status is retired
-# (design/10-design.md § "The orientation closure"; S5.5). Size is the sum of the closure
-# members' own file sizes on disk, because the measurement must equal what a reader actually
-# opens.
+# directly - records only (I23; S23.1). The unit's own artifact is not a closure member: it is
+# measured separately, by the byte length of the file its Anchor names, and reported beside the
+# bounded figure rather than folded into it (design/20-contract.md § tools/Test-DesignState.ps1,
+# "the unit's own artifact is not one of them"). Nothing is filtered at measurement time
+# (S20.8): the half/status table above is what keeps a retired record out of an active edge in
+# the first place, so the meter no longer needs an exclusion clause of its own. Size is the sum
+# of the closure members' own file sizes on disk, because the measurement must equal what a
+# reader actually opens.
 # ---------------------------------------------------------------------------------------------
 function Get-RecordFileBytes {
     param([Parameter(Mandatory)][string] $RepoPath, [Parameter(Mandatory)]$Record)
@@ -871,17 +1294,19 @@ function Get-DesignClosure {
     $seen = [System.Collections.Generic.HashSet[string]]::new()
     [void]$seen.Add($Root.Id)
 
+    # Filters nothing (S20.8): the half/status table (design/10-design.md, "Every reference sits
+    # in the half its referent's state requires") already keeps a retired referent out of an
+    # active edge - HalfStatusMismatch is what catches the reference that shouldn't be here, not
+    # a skip at measurement time. A named id that reaches this point is therefore trusted as-is.
     $namedFields = @('Consumes', 'Exposes', 'Binds', 'Live', 'Questions')
     foreach ($field in $namedFields) {
         if (-not $Root.Lists.ContainsKey($field)) { continue }
         foreach ($id in $Root.Lists[$field]) {
             if ([string]::IsNullOrWhiteSpace($id)) { continue }
             if (-not $ById.ContainsKey($id)) { continue }
-            $named = $ById[$id]
-            if ($named.Scalars.ContainsKey('Status') -and $named.Scalars['Status'] -eq 'retired') { continue }
             if ($seen.Contains($id)) { continue }
             [void]$seen.Add($id)
-            $members.Add($named)
+            $members.Add($ById[$id])
         }
     }
     foreach ($field in $script:IdScalarFields) {
@@ -889,14 +1314,29 @@ function Get-DesignClosure {
         $id = $Root.Scalars[$field]
         if ([string]::IsNullOrWhiteSpace($id)) { continue }
         if (-not $ById.ContainsKey($id)) { continue }
-        $named = $ById[$id]
-        if ($named.Scalars.ContainsKey('Status') -and $named.Scalars['Status'] -eq 'retired') { continue }
         if ($seen.Contains($id)) { continue }
         [void]$seen.Add($id)
-        $members.Add($named)
+        $members.Add($ById[$id])
     }
 
     ,@($members)
+}
+
+# The unit's own artifact, measured on its own (I23; S23.2). A Unit's Anchor is a tree path
+# (design/20-contract.md § "Ids", "A unit of kind invariant is one record, not two" - the one
+# exemption, where Anchor is the invariant number rather than a path). No other kind's Anchor is
+# a tree pointer: Contract has no Anchor at all (Declaration instead), and Decision's Anchor is a
+# dated heading label, never a path. A root whose Anchor names a path not in the tree yields zero
+# and raises no finding for it (S19.6, preserved).
+function Get-UnitArtifactBytes {
+    param([Parameter(Mandatory)][string] $RepoPath, [Parameter(Mandatory)]$Root)
+
+    if ($Root.Kind -ne 'Unit' -or -not $Root.Scalars.ContainsKey('Anchor')) { return 0 }
+    $anchor = $Root.Scalars['Anchor']
+    if ([string]::IsNullOrWhiteSpace($anchor)) { return 0 }
+    $full = Join-Path $RepoPath $anchor
+    if (-not (Test-Path -LiteralPath $full)) { return 0 }
+    (Get-Item -LiteralPath $full).Length
 }
 
 function Test-ClosureBudget {
@@ -915,17 +1355,24 @@ function Test-ClosureBudget {
         $sized = @($members | ForEach-Object { [pscustomobject]@{ Record = $_; Bytes = (Get-RecordFileBytes -RepoPath $RepoPath -Record $_) } })
         $total = ($sized | Measure-Object -Property Bytes -Sum).Sum
         $biggest = $sized | Sort-Object Bytes -Descending | Select-Object -First 1
+        # S23.4: the closure has no artifact member any more, so the largest contributor is
+        # always a record - naming it by id is what makes it something a reader can act on.
+        $biggestLabel = $biggest.Record.Id
+        $artifactBytes = Get-UnitArtifactBytes -RepoPath $RepoPath -Root $root
 
         if (-not $largest -or $total -gt $largest.Bytes) {
             $largest = [pscustomobject]@{
                 Unit               = $root.Id
                 Bytes              = $total
-                LargestContributor = $biggest.Record.Id
+                LargestContributor = $biggestLabel
+                ArtifactBytes      = $artifactBytes
             }
         }
 
         if ($total -gt $script:ClosureBudgetBytes) {
-            $findings.Add((New-DesignFinding -Class 'ClosureOverBudget' -Subject $root.Id -Detail "closure is $total bytes (ceiling $($script:ClosureBudgetBytes)); largest contributor '$($biggest.Record.Id)'" -Blocking $true))
+            # S23.3: four parts, the artifact figure named separately and never added into the
+            # bounded one.
+            $findings.Add((New-DesignFinding -Class 'ClosureOverBudget' -Subject $root.Id -Detail "closure is $total bytes (ceiling $($script:ClosureBudgetBytes)); largest contributor '$biggestLabel'; unit's own artifact is $artifactBytes bytes, excluded from the bound" -Blocking $true))
         }
     }
 
@@ -1131,7 +1578,9 @@ function Test-TrackerClasses {
         foreach ($ref in $workRefs) {
             $number = $ref.Scalars['Issue']
             if ([string]::IsNullOrWhiteSpace($number)) { continue }
-            $issueResult = Invoke-GhRaw -GhArgs @('issue', 'view', $number, '--json', 'title,state')
+            $issueViewArgs = @('issue', 'view', $number, '--json', 'title,state')
+            if ($Repository) { $issueViewArgs += @('-R', $Repository) }
+            $issueResult = Invoke-GhRaw -GhArgs $issueViewArgs
             if ($issueResult.ExitCode -ne 0 -or -not $issueResult.Output) {
                 $couldNotEvaluate.Add((New-CouldNotEvaluate -Reason 'TrackerUnavailable' -Detail "could not read issue #$number for $($ref.Id)"))
                 continue
@@ -1221,7 +1670,7 @@ function Invoke-DesignStateCheck {
     $adoptedRecordCount = @($graph.Records | Where-Object { $_.Kind -ne 'WorkRef' }).Count
     if ($graph.Root -eq '' -or $adoptedRecordCount -eq 0) {
         $couldNotEvaluate.Add((New-CouldNotEvaluate -Reason 'StateSetAbsent' -Detail 'design/state/ is missing or holds no records other than WorkRef mirrors'))
-        return New-DesignStateResult -Findings @() -Reported @() -CouldNotEvaluate @($couldNotEvaluate) -ExitCode 2 -LargestClosure $null -ReportLines @('StateSetAbsent: nothing to check.')
+        return New-DesignStateResult -Findings @($blockingFindings) -Reported @() -CouldNotEvaluate @($couldNotEvaluate) -ExitCode 2 -LargestClosure $null -ReportLines @('StateSetAbsent: nothing to check.')
     }
 
     $records = @($graph.Records)
@@ -1239,6 +1688,14 @@ function Invoke-DesignStateCheck {
     $blockingFindings.AddRange((Test-RecordIdCollision -Records $records))
     $blockingFindings.AddRange((Test-DecisionAnchors -Records $records -LogPath (Join-Path $RepoPath 'design/90-decisions.md')))
     $blockingFindings.AddRange((Test-EnforcementUnevidenced -Records $records))
+    $blockingFindings.AddRange((Test-RecordPairMalformed -Records $records -CompanionOnly $graph.CompanionOnly))
+    $blockingFindings.AddRange((Test-HalfStatusMismatch -Records $records -ById $byId))
+    $blockingFindings.AddRange((Test-HalfOverlap -Records $records))
+    $blockingFindings.AddRange((Test-SiteAmbiguous -Records $records -ById $byId -RepoPath $RepoPath))
+    $blockingFindings.AddRange((Test-SiteOutOfReach -Records $records))
+    $blockingFindings.AddRange((Test-SiteContradictsLive -Records $records))
+    $blockingFindings.AddRange((Test-DecisionUnplaced -Records $records))
+    $blockingFindings.AddRange((Test-SupersessionCycle -Records $records -ById $byId))
 
     $globResult = Test-GlobDisagreement -RepoPath $RepoPath -ContractPath $contractPath
     if ($globResult.CouldNotEvaluate) { $couldNotEvaluate.Add($globResult.CouldNotEvaluate) }
@@ -1283,7 +1740,7 @@ function Invoke-DesignStateCheck {
 
     $reportLines = [System.Collections.Generic.List[string]]::new()
     if ($budget.Largest) {
-        $reportLines.Add("Largest closure: $($budget.Largest.Unit), $($budget.Largest.Bytes) bytes (ceiling $($script:ClosureBudgetBytes)), largest contributor $($budget.Largest.LargestContributor)")
+        $reportLines.Add("Largest closure: $($budget.Largest.Unit), $($budget.Largest.Bytes) bytes (ceiling $($script:ClosureBudgetBytes)), largest contributor $($budget.Largest.LargestContributor), unit's own artifact $($budget.Largest.ArtifactBytes) bytes")
     }
     if ($freeze) {
         $reportLines.Add("Freeze active: $downgraded blocking finding(s) downgraded to reported.")
