@@ -94,6 +94,48 @@ Describe 'Update-DesignProjection: rendering' {
         (Get-QuestionAffectsProjectionContent -Records $graph.Records) -join "`n" | Should -Match 'no question records yet'
     }
 
+    It 'S22.1: decision-affects unions the units whose Live names a decision, whose Archival does, and whose StatedIn site resolves to it' {
+        $liveUnit = New-DesignRecord -Id 'unit/document/target' -Kind 'Unit' -Path 'design/state/units/document/target.md' `
+            -Scalars @{ Status = 'active' } -Lists @{ Live = @('decision/live-one') } -Prose @{}
+        $archivalUnit = New-DesignRecord -Id 'unit/command/archiver' -Kind 'Unit' -Path 'design/state/units/command/archiver.md' `
+            -Scalars @{ Status = 'active' } -Lists @{ Archival = @('decision/archival-one') } -Prose @{}
+        $holderUnit = New-DesignRecord -Id 'unit/script/holder' -Kind 'Unit' -Path 'design/state/units/script/holder.md' `
+            -Scalars @{ Status = 'active' } -Lists @{ Exposes = @('contract/held') } -Prose @{}
+        $contract = New-DesignRecord -Id 'contract/held' -Kind 'Contract' -Path 'design/state/contracts/held.md' `
+            -Scalars @{ Status = 'active'; Owner = 'unit/script/holder' } -Lists @{} -Prose @{}
+        $liveDecision = New-DesignRecord -Id 'decision/live-one' -Kind 'Decision' -Path 'design/state/decisions/live-one.md' `
+            -Scalars @{ Status = 'accepted' } -Lists @{} -Prose @{}
+        $archivalDecision = New-DesignRecord -Id 'decision/archival-one' -Kind 'Decision' -Path 'design/state/decisions/archival-one.md' `
+            -Scalars @{ Status = 'superseded'; SupersededBy = 'decision/live-one' } -Lists @{} -Prose @{}
+        $siteDecision = New-DesignRecord -Id 'decision/site-one' -Kind 'Decision' -Path 'design/state/decisions/site-one.md' `
+            -Scalars @{ Status = 'accepted' } -Lists @{ StatedIn = @('contract/held § Semantics') } -Prose @{}
+
+        $records = @($liveUnit, $archivalUnit, $holderUnit, $contract, $liveDecision, $archivalDecision, $siteDecision)
+        $content = (Get-DecisionAffectsProjectionContent -Records $records) -join "`n"
+        $content | Should -Match '\| decision/live-one \| `unit/document/target` \|'
+        $content | Should -Match '\| decision/archival-one \| `unit/command/archiver` \|'
+        # A site naming a contract resolves to the contract's Owner - a script cannot be
+        # absorbed into directly (design/10-design.md § Absorption) - so decision/site-one
+        # renders against unit/script/holder, not against contract/held itself.
+        $content | Should -Match '\| decision/site-one \| `unit/script/holder` \|'
+    }
+
+    It 'S22.2: question-affects distinguishes Blocks from Answered - an answered question renders under Answered, not Blocks' {
+        $blockedUnit = New-DesignRecord -Id 'unit/command/blocked' -Kind 'Unit' -Path 'design/state/units/command/blocked.md' `
+            -Scalars @{ Status = 'active' } -Lists @{ Questions = @('question/open-one') } -Prose @{}
+        $answeredUnit = New-DesignRecord -Id 'unit/command/answered' -Kind 'Unit' -Path 'design/state/units/command/answered.md' `
+            -Scalars @{ Status = 'active' } -Lists @{ Answered = @('question/answered-one') } -Prose @{}
+        $openQuestion = New-DesignRecord -Id 'question/open-one' -Kind 'Question' -Path 'design/state/questions/open-one.md' `
+            -Scalars @{ Status = 'open' } -Lists @{} -Prose @{}
+        $answeredQuestion = New-DesignRecord -Id 'question/answered-one' -Kind 'Question' -Path 'design/state/questions/answered-one.md' `
+            -Scalars @{ Status = 'answered'; AnsweredBy = 'decision/x' } -Lists @{} -Prose @{}
+
+        $records = @($blockedUnit, $answeredUnit, $openQuestion, $answeredQuestion)
+        $content = (Get-QuestionAffectsProjectionContent -Records $records) -join "`n"
+        $content | Should -Match '\| question/open-one \| `unit/command/blocked` \| — \|'
+        $content | Should -Match '\| question/answered-one \| — \| `unit/command/answered` \|'
+    }
+
     It 'S7.1: invariants renders Statement, Owner, Enforcement and Evidence from the record' {
         New-UnitFixture
         $graph = Read-DesignStateGraph -Path $TestDrive

@@ -101,10 +101,13 @@ function Get-SliceCriteria {
     $current = $null
 
     foreach ($line in (Get-Content -LiteralPath $Path)) {
-        if ($line -match '^##\s') {
-            # A new second-level heading always ends the previous slice's body, so an
-            # Acceptance line can never be attributed across a section boundary.
-            $current = if ($line -match '^##\s+S(?<n>\d+)\b') { [int]$Matches['n'] } else { $null }
+        if ($line -match '^#{2,3}\s') {
+            # A new second- or third-level heading always ends the previous slice's body, so an
+            # Acceptance line can never be attributed across a section boundary. Slices sit at
+            # `##` when they are top-level sections (S1-S18) and at `###` when nested under
+            # `## Outstanding` (S19 onward, design/90-decisions.md, 2026-08-30 revision) - both
+            # depths name the same thing and are compared the same way.
+            $current = if ($line -match '^#{2,3}\s+S(?<n>\d+)\b') { [int]$Matches['n'] } else { $null }
             if ($null -ne $current -and -not $slices.ContainsKey($current)) {
                 $slices[$current] = [System.Collections.Generic.List[string]]::new()
             }
@@ -268,13 +271,7 @@ function Invoke-DriftCheck {
 
     foreach ($number in ($doc.Slices.Keys | Sort-Object)) {
         $docIds = @($doc.Slices[$number] | Sort-Object -Unique)
-        # A slice's own tracking issue is always titled "S<n> - <name>" or bare "S<n>", so the
-        # number must be followed by whitespace or the end of the title. Anything else is a
-        # bug issue naming a criterion or the slice in prose, not the slice's own issue -
-        # "S5.1's interrupt test is flaky..." (a period), "S2a - Refuse to start insecurely"
-        # (a letter), and "S27's backpressure test times out..." (an apostrophe) are all
-        # excluded by requiring `\s` or `$` rather than trying to enumerate what follows.
-        $issue  = $tracker.Issues | Where-Object { $_.title -match "^S$number(?:\s|$)" } | Select-Object -First 1
+        $issue  = $tracker.Issues | Where-Object { $_.title -match "^S$number\b" } | Select-Object -First 1
 
         if (-not $issue) {
             $findings.Add((New-Finding -Kind 'NoIssue' -Slice "S$number" -Detail 'slice has no issue; /track opens one' -Issue 0))

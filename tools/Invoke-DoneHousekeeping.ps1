@@ -180,7 +180,25 @@ if ($currentBranch -and $currentBranch -ne $DefaultBranch) {
     }
 }
 
-Invoke-Git -GitArgs @('checkout', $DefaultBranch) -WorkingDir $repoRootResolved | Out-Null
+$checkoutResult = Invoke-Git -GitArgs @('checkout', $DefaultBranch) -WorkingDir $repoRootResolved
+if ($checkoutResult.ExitCode -ne 0) {
+    [pscustomobject]@{
+        Stopped        = $true
+        Reason         = 'CheckoutFailed'
+        Detail         = $checkoutResult.Output
+        DefaultBranch  = $DefaultBranch
+        Pulled         = $false
+        PrunedCount    = 0
+        Candidates     = @()
+        SquashMergeCandidates = @()
+        TipAheadOfMergedPr    = @()
+        Deleted        = @()
+        Refused        = @()
+        Stashed        = $stashed
+        StashRef       = $stashRef
+    }
+    return
+}
 $pulled = $false
 if (-not $SkipPull) {
     $pullResult = Invoke-Git -GitArgs @('pull') -WorkingDir $repoRootResolved

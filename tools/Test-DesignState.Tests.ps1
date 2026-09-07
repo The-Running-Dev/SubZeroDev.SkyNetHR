@@ -66,7 +66,7 @@ BeforeAll {
     }
 
     # A minimal but exact stand-in for the two sections of design/20-contract.md the checker
-    # parses about itself - the same 23 class ids Test-DesignState.ps1 declares, and a verbatim
+    # parses about itself - the same 32 class ids Test-DesignState.ps1 declares, and a verbatim
     # copy of § "Artifacts of a unit kind"'s table - so end-to-end tests below do not spuriously
     # raise ClassListDisagreement or GlobDisagreement while exercising something else entirely.
     # The glob table agrees with the enumeration over any tree by construction, which is exactly
@@ -102,6 +102,14 @@ BeforeAll {
 | `ClosureOverBudget` | x | x |
 | `ClassListDisagreement` | x | x |
 | `GlobDisagreement` | x | x |
+| `RecordPairMalformed` | x | x |
+| `HalfStatusMismatch` | x | x |
+| `HalfOverlap` | x | x |
+| `SiteAmbiguous` | x | x |
+| `SiteOutOfReach` | x | x |
+| `SiteContradictsLive` | x | x |
+| `DecisionUnplaced` | x | x |
+| `SupersessionCycle` | x | x |
 
 **Reported, never blocking.**
 
@@ -111,6 +119,7 @@ BeforeAll {
 | `WorkStateDivergence` | x | x |
 | `PinAncestry` | x | x |
 | `SemanticDisagreement` | x | x |
+| `LiveAlreadyStated` | x | x |
 
 **Could not evaluate.**
 
@@ -540,42 +549,6 @@ Describe 'Test-DesignState: Get-ContractInvariantIds' {
 
 Describe 'Test-DesignState: the budget meter (S5.5, S5.7)' {
 
-    It 'S5.5: closure excludes Archival and excludes any named record whose Status is retired' {
-        New-StateFile -RelativePath 'units/command/root.md' -Content @'
-# unit/command/root
-Kind: command
-Status: active
-Live: decision/live-one
-Archival: decision/archival-one
-Binds: I1
-'@
-        New-StateFile -RelativePath 'decisions/live-one.md' -Content @'
-# decision/live-one
-Status: accepted
-'@
-        New-StateFile -RelativePath 'decisions/archival-one.md' -Content @'
-# decision/archival-one
-Status: accepted
-'@
-        New-StateFile -RelativePath 'invariants/I1.md' -Content @'
-# I1
-Kind: invariant
-Status: retired
-'@
-        $graph = Read-DesignStateGraph -Path $TestDrive
-        $byId = @{}
-        foreach ($r in $graph.Records) { $byId[$r.Id] = $r }
-        $root = $byId['unit/command/root']
-
-        $members = Get-DesignClosure -Root $root -ById $byId
-        $ids = @($members | ForEach-Object { $_.Id })
-
-        $ids | Should -Contain 'unit/command/root'
-        $ids | Should -Contain 'decision/live-one'
-        $ids | Should -Not -Contain 'decision/archival-one'
-        $ids | Should -Not -Contain 'I1'
-    }
-
     It 'S5.5: a live record naming a retired one raises no UnresolvedId finding' {
         New-StateFile -RelativePath 'units/command/root.md' -Content @'
 # unit/command/root
@@ -634,9 +607,584 @@ Kind: command
     }
 }
 
+Describe 'Test-DesignState: the records-bounded closure (S23)' {
+
+    It 'S23.1: a Unit root whose Anchor is a tree path returns the same member set as the same root with the Anchor removed, and no member carries Kind = Artifact' {
+        New-StateFile -RelativePath 'units/document/s23-with-anchor.md' -Content @'
+# unit/document/s23-with-anchor
+Kind: document
+Status: active
+Anchor: s23-artifact.md
+'@
+        New-TreeFile -RelativePath 's23-artifact.md' -Content ('a' * 250)
+        $graph = Read-DesignStateGraph -Path $TestDrive
+        $byId = @{}
+        foreach ($r in $graph.Records) { $byId[$r.Id] = $r }
+        $root = $byId['unit/document/s23-with-anchor']
+
+        $members = Get-DesignClosure -Root $root -ById $byId
+        @($members | Where-Object { $_.Kind -eq 'Artifact' }).Count | Should -Be 0
+
+        $withoutAnchor = New-DesignRecord -Id $root.Id -Kind $root.Kind -Path $root.Path `
+            -Scalars ($root.Scalars.Clone()) -Lists $root.Lists -Prose $root.Prose
+        $withoutAnchor.Scalars.Remove('Anchor')
+        $membersWithoutAnchor = Get-DesignClosure -Root $withoutAnchor -ById $byId
+
+        @($members | ForEach-Object { $_.Id }) | Should -Be @($membersWithoutAnchor | ForEach-Object { $_.Id })
+    }
+
+    It 'S23.1: a root with no Anchor counts records only' {
+        New-StateFile -RelativePath 'units/command/s23-no-anchor.md' -Content @'
+# unit/command/s23-no-anchor
+Kind: command
+Status: active
+'@
+        $graph = Read-DesignStateGraph -Path $TestDrive
+        $byId = @{}
+        foreach ($r in $graph.Records) { $byId[$r.Id] = $r }
+        $root = $byId['unit/command/s23-no-anchor']
+
+        $members = Get-DesignClosure -Root $root -ById $byId
+        @($members | Where-Object { $_.Kind -eq 'Artifact' }).Count | Should -Be 0
+    }
+
+    It 'S23.1: an Invariant root, whose Anchor is the invariant number rather than a path, counts records only' {
+        New-StateFile -RelativePath 'invariants/I900.md' -Content @'
+# I900
+Kind: invariant
+Status: active
+Anchor: I900
+Owner: unit/command/s23-no-anchor
+Enforcement: instruction
+'@
+        $graph = Read-DesignStateGraph -Path $TestDrive
+        $byId = @{}
+        foreach ($r in $graph.Records) { $byId[$r.Id] = $r }
+        $root = $byId['I900']
+
+        $members = Get-DesignClosure -Root $root -ById $byId
+        @($members | Where-Object { $_.Kind -eq 'Artifact' }).Count | Should -Be 0
+    }
+
+    It 'S23.2: the unit''s own artifact is measured separately, by the byte length of the file its Anchor names, and is never a closure member' {
+        New-StateFile -RelativePath 'units/document/s23-dominant-artifact.md' -Content @'
+# unit/document/s23-dominant-artifact
+Kind: document
+Status: active
+Anchor: s23-big-artifact.md
+'@
+        $artifactPath = New-TreeFile -RelativePath 's23-big-artifact.md' -Content ('b' * 20000)
+        $artifactBytes = (Get-Item -LiteralPath $artifactPath).Length
+        $graph = Read-DesignStateGraph -Path $TestDrive
+        $byId = @{}
+        foreach ($r in $graph.Records) { $byId[$r.Id] = $r }
+        $root = $byId['unit/document/s23-dominant-artifact']
+
+        Get-UnitArtifactBytes -RepoPath $TestDrive -Root $root | Should -Be $artifactBytes
+
+        $result = Test-ClosureBudget -Records $graph.Records -ById $byId -RepoPath $TestDrive
+        $finding = @($result.Findings | Where-Object { $_.Subject -eq 'unit/document/s23-dominant-artifact' })
+        # The 20,000-byte artifact is excluded from the bound (S23.1), so the record-only
+        # closure - the record itself, well under the ceiling - does not breach.
+        $finding.Count | Should -Be 0
+    }
+
+    It 'S23.4: LargestContributor names a record by id, never the artifact - the closure has no artifact member to name' {
+        New-StateFile -RelativePath 'units/document/s23-record-dominant.md' -Content @'
+# unit/document/s23-record-dominant
+Kind: document
+Status: active
+Anchor: s23-tiny-artifact.md
+Live: decision/s23-record-dominant-live
+'@
+        $tinyArtifactPath = New-TreeFile -RelativePath 's23-tiny-artifact.md' -Content 'x'
+        $tinyArtifactBytes = (Get-Item -LiteralPath $tinyArtifactPath).Length
+        New-StateFile -RelativePath 'decisions/s23-record-dominant-live.md' -Content @"
+# decision/s23-record-dominant-live
+Status: accepted
+
+## Claim
+$('y' * 500)
+"@
+        $graph = Read-DesignStateGraph -Path $TestDrive
+        $byId = @{}
+        foreach ($r in $graph.Records) { $byId[$r.Id] = $r }
+        $root = $byId['unit/document/s23-record-dominant']
+
+        $members = Get-DesignClosure -Root $root -ById $byId
+        $sized = @($members | ForEach-Object { [pscustomobject]@{ Record = $_; Bytes = (Get-RecordFileBytes -RepoPath $TestDrive -Record $_) } })
+        $biggest = $sized | Sort-Object Bytes -Descending | Select-Object -First 1
+        $biggest.Record.Id | Should -Be 'decision/s23-record-dominant-live'
+
+        $result = Test-ClosureBudget -Records $graph.Records -ById $byId -RepoPath $TestDrive
+        $result.Largest.LargestContributor | Should -Be 'decision/s23-record-dominant-live'
+        $result.Largest.ArtifactBytes | Should -Be $tinyArtifactBytes
+    }
+
+    It 'S23.2: a Unit root whose Anchor names a path not in the tree yields zero artifact bytes rather than throwing, and raises no closure finding for it' {
+        New-StateFile -RelativePath 'units/document/s23-missing-anchor.md' -Content @'
+# unit/document/s23-missing-anchor
+Kind: document
+Status: active
+Anchor: s23-does-not-exist.md
+'@
+        $graph = Read-DesignStateGraph -Path $TestDrive
+        $byId = @{}
+        foreach ($r in $graph.Records) { $byId[$r.Id] = $r }
+        $root = $byId['unit/document/s23-missing-anchor']
+
+        { Get-UnitArtifactBytes -RepoPath $TestDrive -Root $root } | Should -Not -Throw
+        Get-UnitArtifactBytes -RepoPath $TestDrive -Root $root | Should -Be 0
+
+        { Test-ClosureBudget -Records $graph.Records -ById $byId -RepoPath $TestDrive } | Should -Not -Throw
+        $result = Test-ClosureBudget -Records $graph.Records -ById $byId -RepoPath $TestDrive
+        (@($result.Findings | Where-Object { $_.Subject -eq 'unit/document/s23-missing-anchor' })).Count | Should -Be 0
+    }
+
+    It 'S23.3: a ClosureOverBudget finding''s detail carries the unit''s own artifact size, named separately and never added into the bounded figure' {
+        $overPath = New-ExactSizeRecord -Slug 's23-over' -TotalBytes 16385
+        (Get-Item $overPath).Length | Should -Be 16385
+
+        $graph = Read-DesignStateGraph -Path $TestDrive
+        $byId = @{}
+        foreach ($r in $graph.Records) { $byId[$r.Id] = $r }
+        $result = Test-ClosureBudget -Records $graph.Records -ById $byId -RepoPath $TestDrive
+
+        $finding = @($result.Findings | Where-Object { $_.Subject -eq 'unit/command/s23-over' })
+        $finding.Count | Should -Be 1
+        $finding[0].Detail | Should -Match "closure is 16385 bytes"
+        $finding[0].Detail | Should -Match "artifact is 0 bytes"
+    }
+
+    It 'S23.5: Largest always carries the unit, its largest contributor, and that unit''s own artifact size, whether or not any closure breaches' {
+        New-StateFile -RelativePath 'units/command/s23-clean.md' -Content @'
+# unit/command/s23-clean
+Kind: command
+Status: active
+'@
+        $graph = Read-DesignStateGraph -Path $TestDrive
+        $byId = @{}
+        foreach ($r in $graph.Records) { $byId[$r.Id] = $r }
+        $result = Test-ClosureBudget -Records $graph.Records -ById $byId -RepoPath $TestDrive
+
+        $result.Largest | Should -Not -BeNullOrEmpty
+        $result.Largest.Unit | Should -Not -BeNullOrEmpty
+        $result.Largest.LargestContributor | Should -Not -BeNullOrEmpty
+        $result.Largest.ArtifactBytes | Should -Not -BeNullOrEmpty
+    }
+}
+
+Describe 'Test-DesignState: the retired-companion split (S20)' {
+
+    BeforeEach {
+        Get-ChildItem $TestDrive -ErrorAction SilentlyContinue -Recurse -File |
+            Remove-Item -Force -ErrorAction SilentlyContinue
+    }
+
+    It 'S20.1: a companion joins into the active record as one record, and FieldOrigin names each field''s source file' {
+        New-StateFile -RelativePath 'units/command/paired.md' -Content @'
+# unit/command/paired
+Kind: command
+Status: active
+Live: decision/paired-live
+'@
+        New-StateFile -RelativePath 'units/command/retired/paired.md' -Content @'
+Archival: decision/paired-archival
+'@
+        $graph = Read-DesignStateGraph -Path $TestDrive
+
+        $matches = @($graph.Records | Where-Object { $_.Id -eq 'unit/command/paired' })
+        $matches.Count | Should -Be 1 -Because 'the reader emits one record per unit and never two'
+        $r = $matches[0]
+        $r.CompanionPath | Should -Be 'design/state/units/command/retired/paired.md'
+        $r.Lists['Live'] | Should -Be @('decision/paired-live')
+        $r.Lists['Archival'] | Should -Be @('decision/paired-archival')
+        $r.FieldOrigin['Live'] | Should -Be 'Active'
+        $r.FieldOrigin['Archival'] | Should -Be 'Companion'
+    }
+
+    It 'S20.2: a unit with no companion file parses as a unit whose every retired half is empty - not a missing file, not a finding' {
+        New-StateFile -RelativePath 'units/command/solo.md' -Content @'
+# unit/command/solo
+Kind: command
+Status: active
+'@
+        $graph = Read-DesignStateGraph -Path $TestDrive
+
+        $graph.CompanionOnly.Count | Should -Be 0
+        $r = @($graph.Records | Where-Object { $_.Id -eq 'unit/command/solo' })[0]
+        $r.CompanionPath | Should -BeNullOrEmpty
+        $r.Lists.ContainsKey('Archival') | Should -BeFalse
+
+        $findings = Test-RecordPairMalformed -Records @($r) -CompanionOnly $graph.CompanionOnly
+        $findings.Count | Should -Be 0
+    }
+
+    It 'S20.3: a companion path resolves its kind segment against the four unit kinds' {
+        $info = Get-DesignPathInfo -RelativeToState 'units/command/retired/x.md'
+        $info.PathId | Should -Be 'unit/command/x'
+        $info.IsCompanion | Should -BeTrue
+    }
+
+    It 'S20.3: a path naming "retired" where the kind belongs is a parse failure - retired never resolves as a kind' {
+        Get-DesignPathInfo -RelativeToState 'units/retired/x.md' | Should -BeNullOrEmpty
+    }
+
+    It 'S20.4: RecordPairMalformed fires for a companion with no active record beside it' -Tag 'Fires', 'RecordPairMalformed' {
+        New-StateFile -RelativePath 'units/command/retired/orphan.md' -Content @'
+Archival: decision/x
+'@
+        $graph = Read-DesignStateGraph -Path $TestDrive
+        $findings = Test-RecordPairMalformed -Records $graph.Records -CompanionOnly $graph.CompanionOnly
+        $findings.Count | Should -Be 1
+        $findings[0].Subject | Should -Be 'unit/command/orphan'
+    }
+
+    It 'S20.4: RecordPairMalformed fires when a retired-half field is written into the active record' -Tag 'Fires', 'RecordPairMalformed' {
+        New-StateFile -RelativePath 'units/command/misfiled.md' -Content @'
+# unit/command/misfiled
+Kind: command
+Status: active
+Archival: decision/x
+'@
+        $graph = Read-DesignStateGraph -Path $TestDrive
+        $findings = Test-RecordPairMalformed -Records $graph.Records -CompanionOnly $graph.CompanionOnly
+        $findings.Count | Should -Be 1
+        $findings[0].Subject | Should -Be 'unit/command/misfiled'
+        $findings[0].Detail | Should -Match "field 'Archival' belongs in the retired companion"
+        $findings[0].Detail | Should -Match 'active='
+        $findings[0].Detail | Should -Match 'companion='
+    }
+
+    It 'S20.4: RecordPairMalformed fires when an active-half field is written into the companion' -Tag 'Fires', 'RecordPairMalformed' {
+        New-StateFile -RelativePath 'units/command/misfiled2.md' -Content @'
+# unit/command/misfiled2
+Kind: command
+Status: active
+'@
+        New-StateFile -RelativePath 'units/command/retired/misfiled2.md' -Content @'
+Live: decision/x
+'@
+        $graph = Read-DesignStateGraph -Path $TestDrive
+        $findings = Test-RecordPairMalformed -Records $graph.Records -CompanionOnly $graph.CompanionOnly
+        $findings.Count | Should -Be 1
+        $findings[0].Subject | Should -Be 'unit/command/misfiled2'
+        $findings[0].Detail | Should -Match "field 'Live' belongs in the active record"
+    }
+
+    It 'S20.4: a unit with an empty companion, and a unit with none, are both silent' -Tag 'NearMiss', 'RecordPairMalformed' {
+        New-StateFile -RelativePath 'units/command/empty-companion.md' -Content @'
+# unit/command/empty-companion
+Kind: command
+Status: active
+'@
+        New-StateFile -RelativePath 'units/command/retired/empty-companion.md' -Content "`n"
+        New-StateFile -RelativePath 'units/command/no-companion.md' -Content @'
+# unit/command/no-companion
+Kind: command
+Status: active
+'@
+        $graph = Read-DesignStateGraph -Path $TestDrive
+        $findings = Test-RecordPairMalformed -Records $graph.Records -CompanionOnly $graph.CompanionOnly
+        $findings.Count | Should -Be 0
+    }
+
+    It 'S20.5: HalfStatusMismatch fires when an active edge names a referent whose status the edge forbids' -Tag 'Fires', 'HalfStatusMismatch' {
+        $live = New-Record -Id 'unit/command/bad-live' -Scalars @{ Status = 'active' } -Lists @{ Live = @('decision/superseded-one') }
+        $decision = New-Record -Id 'decision/superseded-one' -Kind 'Decision' -Scalars @{ Status = 'superseded' }
+        $byId = @{ 'unit/command/bad-live' = $live; 'decision/superseded-one' = $decision }
+        $findings = Test-HalfStatusMismatch -Records @($live, $decision) -ById $byId
+        $findings.Count | Should -Be 1
+        $findings[0].Subject | Should -Be 'unit/command/bad-live'
+    }
+
+    It 'S20.5: HalfStatusMismatch fires when a retired half names a referent whose status the half forbids' -Tag 'Fires', 'HalfStatusMismatch' {
+        $unit = New-Record -Id 'unit/command/bad-archival' -Scalars @{ Status = 'active' } -Lists @{ Archival = @('decision/still-live') }
+        $decision = New-Record -Id 'decision/still-live' -Kind 'Decision' -Scalars @{ Status = 'accepted' }
+        $byId = @{ 'unit/command/bad-archival' = $unit; 'decision/still-live' = $decision }
+        $findings = Test-HalfStatusMismatch -Records @($unit, $decision) -ById $byId
+        $findings.Count | Should -Be 1
+        $findings[0].Subject | Should -Be 'unit/command/bad-archival'
+    }
+
+    It 'S20.5: HalfStatusMismatch also checks Work/Worked against a WorkRef''s State, in both directions' -Tag 'Fires', 'HalfStatusMismatch' {
+        $unit = New-Record -Id 'unit/command/bad-work' -Scalars @{ Status = 'active' } -Lists @{ Work = @('999') }
+        $work = New-Record -Id 'work/999' -Kind 'WorkRef' -Scalars @{ Issue = '999'; State = 'CLOSED' }
+        $byId = @{ 'unit/command/bad-work' = $unit; 'work/999' = $work }
+        $findings = Test-HalfStatusMismatch -Records @($unit, $work) -ById $byId
+        $findings.Count | Should -Be 1
+        $findings[0].Detail | Should -Match 'Work'
+    }
+
+    It 'S20.5: an active edge naming an active/open referent, and a retired half naming a retired/superseded/answered/closed one, are silent' -Tag 'NearMiss', 'HalfStatusMismatch' {
+        $unit = New-Record -Id 'unit/command/good-pair' -Scalars @{ Status = 'active' } -Lists @{
+            Live = @('decision/good-live'); Archival = @('decision/good-archival')
+            Questions = @('question/good-open'); Answered = @('question/good-answered')
+            Work = @('1'); Worked = @('2')
+        }
+        $goodLive = New-Record -Id 'decision/good-live' -Kind 'Decision' -Scalars @{ Status = 'accepted' }
+        $goodArchival = New-Record -Id 'decision/good-archival' -Kind 'Decision' -Scalars @{ Status = 'superseded' }
+        $goodOpen = New-Record -Id 'question/good-open' -Kind 'Question' -Scalars @{ Status = 'open' }
+        $goodAnswered = New-Record -Id 'question/good-answered' -Kind 'Question' -Scalars @{ Status = 'answered' }
+        $workOpen = New-Record -Id 'work/1' -Kind 'WorkRef' -Scalars @{ Issue = '1'; State = 'OPEN' }
+        $workClosed = New-Record -Id 'work/2' -Kind 'WorkRef' -Scalars @{ Issue = '2'; State = 'CLOSED' }
+        $records = @($unit, $goodLive, $goodArchival, $goodOpen, $goodAnswered, $workOpen, $workClosed)
+        $byId = @{}
+        foreach ($r in $records) { $byId[$r.Id] = $r }
+
+        $findings = Test-HalfStatusMismatch -Records $records -ById $byId
+        $findings.Count | Should -Be 0
+    }
+
+    It 'S20.6: HalfOverlap fires when one id sits in both halves of one edge' -Tag 'Fires', 'HalfOverlap' {
+        $unit = New-Record -Id 'unit/command/overlap' -Lists @{ Live = @('decision/x'); Archival = @('decision/x') }
+        $findings = Test-HalfOverlap -Records @($unit)
+        $findings.Count | Should -Be 1
+        $findings[0].Subject | Should -Be 'unit/command/overlap'
+        $findings[0].Detail | Should -Match 'decision/x'
+    }
+
+    It 'S20.6: the same id in two different edges is silent' -Tag 'NearMiss', 'HalfOverlap' {
+        $unit = New-Record -Id 'unit/command/nooverlap' -Lists @{ Live = @('decision/x'); Binds = @('decision/x') }
+        $findings = Test-HalfOverlap -Records @($unit)
+        $findings.Count | Should -Be 0
+    }
+
+    It 'S20.8: Get-DesignClosure no longer skips a named record whose Status is retired' {
+        New-StateFile -RelativePath 'units/command/root2.md' -Content @'
+# unit/command/root2
+Kind: command
+Status: active
+Live: decision/retired-target
+'@
+        New-StateFile -RelativePath 'decisions/retired-target.md' -Content @'
+# decision/retired-target
+Status: retired
+'@
+        $graph = Read-DesignStateGraph -Path $TestDrive
+        $byId = @{}
+        foreach ($r in $graph.Records) { $byId[$r.Id] = $r }
+        $root = $byId['unit/command/root2']
+
+        $members = Get-DesignClosure -Root $root -ById $byId
+        @($members | ForEach-Object { $_.Id }) | Should -Contain 'decision/retired-target'
+    }
+
+    It 'S20.8: the retired companion is never a closure member, and the closure size does not grow with it' {
+        New-StateFile -RelativePath 'units/command/sized.md' -Content @'
+# unit/command/sized
+Kind: command
+Status: active
+'@
+        New-StateFile -RelativePath 'units/command/retired/sized.md' -Content ("Archival:`n" + ('z' * 5000))
+        $graph = Read-DesignStateGraph -Path $TestDrive
+        $byId = @{}
+        foreach ($r in $graph.Records) { $byId[$r.Id] = $r }
+        $root = $byId['unit/command/sized']
+
+        $members = Get-DesignClosure -Root $root -ById $byId
+        @($members | ForEach-Object { $_.Path }) | Should -Not -Contain 'design/state/units/command/retired/sized.md'
+
+        $result = Test-ClosureBudget -Records $graph.Records -ById $byId -RepoPath $TestDrive
+        (@($result.Findings | Where-Object { $_.Subject -eq 'unit/command/sized' })).Count | Should -Be 0
+    }
+}
+
+Describe 'Test-DesignState: absorption sites (S21)' {
+
+    BeforeEach {
+        Get-ChildItem $TestDrive -ErrorAction SilentlyContinue -Recurse -File |
+            Remove-Item -Force -ErrorAction SilentlyContinue
+    }
+
+    It 'S21.2: SiteAmbiguous fires when a site resolves to zero headings' -Tag 'Fires', 'SiteAmbiguous' {
+        New-TreeFile -RelativePath 'TARGET.md' -Content @'
+# Title
+
+## Something Else
+'@
+        $unit = New-Record -Id 'unit/document/target' -Scalars @{ Kind = 'document'; Status = 'active'; Anchor = 'TARGET.md' }
+        $decision = New-Record -Id 'decision/zero-heading' -Kind 'Decision' -Scalars @{ Status = 'accepted' } -Lists @{ StatedIn = @('unit/document/target § Missing Heading') }
+        $byId = @{ 'unit/document/target' = $unit; 'decision/zero-heading' = $decision }
+
+        $findings = Test-SiteAmbiguous -Records @($unit, $decision) -ById $byId -RepoPath $TestDrive
+        $findings.Count | Should -Be 1
+        $findings[0].Subject | Should -Be 'decision/zero-heading'
+        $findings[0].Detail | Should -Match '0 heading'
+    }
+
+    It 'S21.2: SiteAmbiguous fires when a site resolves to two headings' -Tag 'Fires', 'SiteAmbiguous' {
+        New-TreeFile -RelativePath 'TARGET2.md' -Content @'
+## Duplicate
+
+## Duplicate
+'@
+        $unit = New-Record -Id 'unit/document/target2' -Scalars @{ Kind = 'document'; Status = 'active'; Anchor = 'TARGET2.md' }
+        $decision = New-Record -Id 'decision/two-heading' -Kind 'Decision' -Scalars @{ Status = 'accepted' } -Lists @{ StatedIn = @('unit/document/target2 § Duplicate') }
+        $byId = @{ 'unit/document/target2' = $unit; 'decision/two-heading' = $decision }
+
+        $findings = Test-SiteAmbiguous -Records @($unit, $decision) -ById $byId -RepoPath $TestDrive
+        $findings.Count | Should -Be 1
+        $findings[0].Detail | Should -Match '2 heading'
+    }
+
+    It 'S21.2: a site resolving to exactly one heading is silent' -Tag 'NearMiss', 'SiteAmbiguous' {
+        New-TreeFile -RelativePath 'TARGET3.md' -Content @'
+## Exactly One
+'@
+        $unit = New-Record -Id 'unit/document/target3' -Scalars @{ Kind = 'document'; Status = 'active'; Anchor = 'TARGET3.md' }
+        $decision = New-Record -Id 'decision/one-heading' -Kind 'Decision' -Scalars @{ Status = 'accepted' } -Lists @{ StatedIn = @('unit/document/target3 § Exactly One') }
+        $byId = @{ 'unit/document/target3' = $unit; 'decision/one-heading' = $decision }
+
+        $findings = Test-SiteAmbiguous -Records @($unit, $decision) -ById $byId -RepoPath $TestDrive
+        $findings.Count | Should -Be 0
+    }
+
+    It 'S21.3: SiteOutOfReach fires when no unit''s own identity or one-hop closure names the site''s id' -Tag 'Fires', 'SiteOutOfReach' {
+        $unit = New-Record -Id 'unit/document/unrelated' -Scalars @{ Status = 'active' }
+        $decision = New-Record -Id 'decision/orphan-site' -Kind 'Decision' -Scalars @{ Status = 'accepted' } -Lists @{ StatedIn = @('unit/document/nowhere § Some Heading') }
+
+        $findings = Test-SiteOutOfReach -Records @($unit, $decision)
+        $findings.Count | Should -Be 1
+        $findings[0].Subject | Should -Be 'decision/orphan-site'
+    }
+
+    It 'S21.3: a site naming a contract at least one unit consumes or exposes is silent' -Tag 'NearMiss', 'SiteOutOfReach' {
+        $unit = New-Record -Id 'unit/script/holder' -Scalars @{ Status = 'active' } -Lists @{ Exposes = @('contract/held') }
+        $decision = New-Record -Id 'decision/reachable-site' -Kind 'Decision' -Scalars @{ Status = 'accepted' } -Lists @{ StatedIn = @('contract/held § Semantics') }
+
+        $findings = Test-SiteOutOfReach -Records @($unit, $decision)
+        $findings.Count | Should -Be 0
+    }
+
+    It 'S21.4: SiteContradictsLive fires when a decision is both named by a unit''s Live and stated in that same unit' -Tag 'Fires', 'SiteContradictsLive' {
+        $unit = New-Record -Id 'unit/document/both' -Scalars @{ Status = 'active' } -Lists @{ Live = @('decision/contradicts') }
+        $decision = New-Record -Id 'decision/contradicts' -Kind 'Decision' -Scalars @{ Status = 'accepted' } -Lists @{ StatedIn = @('unit/document/both § Some Heading') }
+
+        $findings = Test-SiteContradictsLive -Records @($unit, $decision)
+        $findings.Count | Should -Be 1
+        $findings[0].Subject | Should -Be 'unit/document/both'
+    }
+
+    It 'S21.4: a decision Live on one unit and stated in a different one is silent' -Tag 'NearMiss', 'SiteContradictsLive' {
+        $liveUnit = New-Record -Id 'unit/document/holds-live' -Scalars @{ Status = 'active' } -Lists @{ Live = @('decision/elsewhere') }
+        $siteUnit = New-Record -Id 'unit/document/holds-site' -Scalars @{ Status = 'active' }
+        $decision = New-Record -Id 'decision/elsewhere' -Kind 'Decision' -Scalars @{ Status = 'accepted' } -Lists @{ StatedIn = @('unit/document/holds-site § Some Heading') }
+
+        $findings = Test-SiteContradictsLive -Records @($liveUnit, $siteUnit, $decision)
+        $findings.Count | Should -Be 0
+    }
+}
+
+Describe 'Test-DesignState: DecisionUnplaced and SupersessionCycle (S22)' {
+
+    It 'S22.3: DecisionUnplaced fires for an accepted decision named by no unit''s Live and placing no site' -Tag 'Fires', 'DecisionUnplaced' {
+        $decision = New-Record -Id 'decision/orphan' -Kind 'Decision' -Scalars @{ Status = 'accepted' }
+        $findings = Test-DecisionUnplaced -Records @($decision)
+        $findings.Count | Should -Be 1
+        $findings[0].Subject | Should -Be 'decision/orphan'
+        $findings[0].Detail | Should -Match 'accepted'
+    }
+
+    It 'S22.3: DecisionUnplaced fires for a superseded decision named by no unit''s Archival' -Tag 'Fires', 'DecisionUnplaced' {
+        $decision = New-Record -Id 'decision/lost' -Kind 'Decision' -Scalars @{ Status = 'superseded'; SupersededBy = 'decision/somewhere' }
+        $findings = Test-DecisionUnplaced -Records @($decision)
+        $findings.Count | Should -Be 1
+        $findings[0].Detail | Should -Match 'superseded'
+    }
+
+    It 'S22.3: an accepted decision named by a unit''s Live is silent' -Tag 'NearMiss', 'DecisionUnplaced' {
+        $unit = New-Record -Id 'unit/document/holder' -Scalars @{ Status = 'active' } -Lists @{ Live = @('decision/held') }
+        $decision = New-Record -Id 'decision/held' -Kind 'Decision' -Scalars @{ Status = 'accepted' }
+        $findings = Test-DecisionUnplaced -Records @($unit, $decision)
+        $findings.Count | Should -Be 0
+    }
+
+    It 'S22.3: a decision placed by a site alone is silent - placement is presence, not resolution' -Tag 'NearMiss', 'DecisionUnplaced' {
+        $decision = New-Record -Id 'decision/site-placed' -Kind 'Decision' -Scalars @{ Status = 'accepted' } -Lists @{ StatedIn = @('unit/document/nowhere § Missing Heading') }
+        $findings = Test-DecisionUnplaced -Records @($decision)
+        $findings.Count | Should -Be 0
+    }
+
+    It 'S22.3: a superseded decision named by a unit''s Archival is silent' -Tag 'NearMiss', 'DecisionUnplaced' {
+        $unit = New-Record -Id 'unit/document/archiver' -Scalars @{ Status = 'active' } -Lists @{ Archival = @('decision/archived') }
+        $decision = New-Record -Id 'decision/archived' -Kind 'Decision' -Scalars @{ Status = 'superseded'; SupersededBy = 'decision/elsewhere' }
+        $findings = Test-DecisionUnplaced -Records @($unit, $decision)
+        $findings.Count | Should -Be 0
+    }
+
+    It 'S22.6: SupersessionCycle fires on a two-record cycle, reporting it once regardless of which member the walk starts from' -Tag 'Fires', 'SupersessionCycle' {
+        $a = New-Record -Id 'decision/cycle-a' -Kind 'Decision' -Scalars @{ Status = 'superseded'; SupersededBy = 'decision/cycle-b' }
+        $b = New-Record -Id 'decision/cycle-b' -Kind 'Decision' -Scalars @{ Status = 'superseded'; SupersededBy = 'decision/cycle-a' }
+        $byId = @{ 'decision/cycle-a' = $a; 'decision/cycle-b' = $b }
+        $findings = Test-SupersessionCycle -Records @($a, $b) -ById $byId
+        $findings.Count | Should -Be 1
+        $findings[0].Detail | Should -Match 'decision/cycle-a'
+        $findings[0].Detail | Should -Match 'decision/cycle-b'
+    }
+
+    It 'S22.6: SupersessionCycle fires when a decision names itself' -Tag 'Fires', 'SupersessionCycle' {
+        $self = New-Record -Id 'decision/self-loop' -Kind 'Decision' -Scalars @{ Status = 'superseded'; SupersededBy = 'decision/self-loop' }
+        $byId = @{ 'decision/self-loop' = $self }
+        $findings = Test-SupersessionCycle -Records @($self) -ById $byId
+        $findings.Count | Should -Be 1
+        $findings[0].Subject | Should -Be 'decision/self-loop'
+    }
+
+    It 'S22.6: a terminating chain of three or more, ending in an accepted decision, is silent' -Tag 'NearMiss', 'SupersessionCycle' {
+        $a = New-Record -Id 'decision/chain-a' -Kind 'Decision' -Scalars @{ Status = 'superseded'; SupersededBy = 'decision/chain-b' }
+        $b = New-Record -Id 'decision/chain-b' -Kind 'Decision' -Scalars @{ Status = 'superseded'; SupersededBy = 'decision/chain-c' }
+        $c = New-Record -Id 'decision/chain-c' -Kind 'Decision' -Scalars @{ Status = 'accepted' }
+        $byId = @{ 'decision/chain-a' = $a; 'decision/chain-b' = $b; 'decision/chain-c' = $c }
+        $findings = Test-SupersessionCycle -Records @($a, $b, $c) -ById $byId
+        $findings.Count | Should -Be 0
+    }
+}
+
+Describe 'Test-DesignState: LiveAlreadyStated (S30.1, S30.2)' {
+
+    BeforeEach {
+        Get-ChildItem $TestDrive -ErrorAction SilentlyContinue -Recurse -File |
+            Remove-Item -Force -ErrorAction SilentlyContinue
+        New-TreeFile -RelativePath 'design/20-contract.md' -Content $script:MinimalContract
+        New-TreeFile -RelativePath 'design/90-decisions.md' -Content "# Decisions`n"
+    }
+
+    It 'S30.1: the checker declares LiveAlreadyStated in its reported class list' {
+        $script:ReportedClasses | Should -Contain 'LiveAlreadyStated'
+    }
+
+    It 'S30.2: a run against a fixture unit whose Live decision''s Claim text stands verbatim under its own Anchor''s heading raises no LiveAlreadyStated finding - the checker never raises the id it declares' {
+        New-TreeFile -RelativePath '.claude/commands/fixture.md' -Content @'
+# Fixture
+
+## Already Stated
+The claim text stands here, verbatim.
+'@
+        New-StateFile -RelativePath 'units/command/fixture.md' -Content @'
+# unit/command/fixture
+Kind: command
+Status: active
+Anchor: .claude/commands/fixture.md
+Live: decision/fixture-claim
+'@
+        New-StateFile -RelativePath 'decisions/fixture-claim.md' -Content @'
+# decision/fixture-claim
+Status: accepted
+
+## Claim
+The claim text stands here, verbatim.
+'@
+        $result = Invoke-DesignStateCheck -RepoPath $TestDrive
+
+        (@($result.Findings | Where-Object { $_.Class -eq 'LiveAlreadyStated' })).Count | Should -Be 0
+        (@($result.Reported | Where-Object { $_.Class -eq 'LiveAlreadyStated' })).Count | Should -Be 0
+    }
+}
+
 Describe 'Test-DesignState: ClassListDisagreement (S5.1)' {
 
-    It 'raises nothing when the contract document declares exactly the same 23 ids' -Tag 'NearMiss','ClassListDisagreement' {
+    It 'raises nothing when the contract document declares exactly the same 32 ids' -Tag 'NearMiss','ClassListDisagreement' {
         New-TreeFile -RelativePath 'design/20-contract.md' -Content $script:MinimalContract
         $result = Test-ClassListAgreement -ContractPath (Join-Path $TestDrive 'design/20-contract.md')
         $result.Finding | Should -BeNullOrEmpty
@@ -959,6 +1507,21 @@ Describe 'Test-DesignState: the tracker classes (S5.11)' {
         $result.Reported.Count | Should -Be 0
         $result.CouldNotEvaluate.Count | Should -Be 0
     }
+
+    It '#162: the per-issue gh issue view call is scoped with -R when -Repository is given' {
+        Mock -CommandName Test-TrackerAvailable -MockWith { $true }
+        Mock -CommandName Invoke-GhRaw -MockWith {
+            param([string[]] $GhArgs)
+            $script:CapturedGhArgs = $GhArgs
+            [pscustomobject]@{ ExitCode = 0; Output = '{"title":"t","state":"open"}' }
+        }
+
+        $ref = New-Record -Id 'work/42' -Kind 'WorkRef' -Scalars @{ Issue = '42'; State = 'open'; Title = 't' }
+        Test-TrackerClasses -Records @($ref) -RepoPath $TestDrive -Repository 'x/y' | Out-Null
+
+        $script:CapturedGhArgs | Should -Contain '-R'
+        $script:CapturedGhArgs[$script:CapturedGhArgs.IndexOf('-R') + 1] | Should -Be 'x/y'
+    }
 }
 
 Describe 'Test-DesignState: end-to-end (S5.2, S5.3, S5.4, S5.9)' {
@@ -977,6 +1540,22 @@ Describe 'Test-DesignState: end-to-end (S5.2, S5.3, S5.4, S5.9)' {
         $result.Findings.Count | Should -Be 0
         $result.Reported.Count | Should -Be 0
         (@($result.CouldNotEvaluate | Where-Object { $_.Reason -eq 'StateSetAbsent' })).Count | Should -Be 1
+    }
+
+    It '#244: a ClassListDisagreement finding survives the StateSetAbsent short-circuit rather than being discarded' {
+        # A contract whose Blocking table omits the ClassListDisagreement row itself - it is a
+        # tree fact the script's own $script:BlockingClasses declares that the contract's copy
+        # then disagrees with, computed before the StateSetAbsent early return regardless of
+        # whether design/state/ holds any records.
+        $missingClassListId = $script:MinimalContract -replace '(?m)^\| `ClassListDisagreement` \| x \| x \|\r?\n', ''
+        New-TreeFile -RelativePath 'design/20-contract.md' -Content $missingClassListId
+
+        $result = Invoke-DesignStateCheck -RepoPath $TestDrive
+
+        $result.ExitCode | Should -Be 2
+        (@($result.CouldNotEvaluate | Where-Object { $_.Reason -eq 'StateSetAbsent' })).Count | Should -Be 1
+        $result.Findings.Count | Should -Be 1
+        $result.Findings[0].Class | Should -Be 'ClassListDisagreement'
     }
 
     It '#113: design/state/ holding only WorkRef records still yields StateSetAbsent, not UnrecordedArtifact' {
@@ -1113,23 +1692,217 @@ Describe 'Test-DesignState against this repository''s own tree' -Skip:$script:Sk
         $script:RealResult.LargestClosure.LargestContributor | Should -Not -BeNullOrEmpty
     }
 
-    It 'S5.12: neither S4.6 closure (unit/command/track, unit/document/agents-md) exceeds the 16,384-byte ceiling' {
+    It 'S23.2: the closure of unit/document/agents-md equals its own record and every id it names directly - never AGENTS.md itself - and AGENTS.md''s own length is reported separately as its artifact' {
         $graph = Read-DesignStateGraph -Path $script:RepoRoot
         $byId = @{}
         foreach ($r in $graph.Records) { $byId[$r.Id] = $r }
+        $root = $byId['unit/document/agents-md']
+
+        $members = Get-DesignClosure -Root $root -ById $byId
+        @($members | Where-Object { $_.Kind -eq 'Artifact' }).Count | Should -Be 0
+        $expected = 0
+        foreach ($m in $members) {
+            $expected += (Get-Item -LiteralPath (Join-Path $script:RepoRoot $m.Path)).Length
+        }
+
+        $agentsMdBytes = (Get-Item -LiteralPath (Join-Path $script:RepoRoot 'AGENTS.md')).Length
+        Get-UnitArtifactBytes -RepoPath $script:RepoRoot -Root $root | Should -Be $agentsMdBytes
+
         $result = Test-ClosureBudget -Records $graph.Records -ById $byId -RepoPath $script:RepoRoot
-        (@($result.Findings | Where-Object { $_.Subject -eq 'unit/command/track' })).Count | Should -Be 0
-        (@($result.Findings | Where-Object { $_.Subject -eq 'unit/document/agents-md' })).Count | Should -Be 0
+        # S24 absorbed enough of this unit's Live for its records to fit the ceiling, so the
+        # finding is present exactly when the measured closure exceeds it - and when it is, it
+        # carries the bounded figure and the artifact figure separately.
+        $finding = @($result.Findings | Where-Object { $_.Subject -eq 'unit/document/agents-md' })
+        $finding.Count | Should -Be ([int]($expected -gt 16384))
+        if ($finding.Count -eq 1) {
+            $finding[0].Detail | Should -Match "closure is $expected bytes"
+            $finding[0].Detail | Should -Match "unit's own artifact is $agentsMdBytes bytes"
+        }
     }
 
-    It 'S12.5: the check exits 0 against this repository, and names the largest closure and its size' {
+    It 'S20.7: every non-empty retired half sits in a companion file and not in an active record' {
+        (@($script:RealResult.Findings | Where-Object { $_.Class -eq 'RecordPairMalformed' })).Count | Should -Be 0
+        (@($script:RealResult.Findings | Where-Object { $_.Class -eq 'HalfStatusMismatch' })).Count | Should -Be 0
+        (@($script:RealResult.Findings | Where-Object { $_.Class -eq 'HalfOverlap' })).Count | Should -Be 0
+    }
+
+    It 'S20.9: I23 and I30 carry Enforcement: code with Evidence naming the tests that hold them' {
+        $graph = Read-DesignStateGraph -Path $script:RepoRoot
+        $byId = @{}
+        foreach ($r in $graph.Records) { $byId[$r.Id] = $r }
+        foreach ($id in 'I23', 'I30') {
+            $byId[$id].Scalars['Enforcement'] | Should -Be 'code'
+            $byId[$id].Lists['Evidence'] | Should -Not -BeNullOrEmpty
+        }
+    }
+
+    It 'S21.5: one real absorption lands - decision/2026-08-04-session-boundaries-are-policy-in-agents-md is stated in unit/document/agents-md and dropped from its Live, and the run reports no SiteAmbiguous, SiteOutOfReach or SiteContradictsLive for it' {
+        $graph = Read-DesignStateGraph -Path $script:RepoRoot
+        $byId = @{}
+        foreach ($r in $graph.Records) { $byId[$r.Id] = $r }
+
+        $decisionId = 'decision/2026-08-04-session-boundaries-are-policy-in-agents-md'
+        $byId[$decisionId].Lists['StatedIn'] | Should -Be @('unit/document/agents-md § Session boundaries')
+        $byId['unit/document/agents-md'].Lists['Live'] | Should -Not -Contain $decisionId
+
+        foreach ($class in 'SiteAmbiguous', 'SiteOutOfReach', 'SiteContradictsLive') {
+            @($script:RealResult.Findings | Where-Object { $_.Class -eq $class -and $_.Subject -match $decisionId -or ($_.Class -eq $class -and $_.Detail -match $decisionId) }).Count | Should -Be 0
+        }
+
+        $afterMembers = Get-DesignClosure -Root $byId['unit/document/agents-md'] -ById $byId
+        @($afterMembers | ForEach-Object { $_.Id }) | Should -Not -Contain $decisionId
+    }
+
+    It 'S21.5: absorbing the decision shrinks unit/document/agents-md''s closure by exactly that decision record''s length' {
+        # Isolates exactly what the criterion measures - the byte cost of one more Live member -
+        # by comparing against an in-memory root whose Live differs by only the absorbed decision
+        # id. Reverting the real files on disk would also shrink the unit's own record (the Live
+        # line itself gets shorter), which is a second, unrelated saving the criterion does not
+        # claim; this keeps every other byte fixed.
+        $decisionId = 'decision/2026-08-04-session-boundaries-are-policy-in-agents-md'
+        $graph = Read-DesignStateGraph -Path $script:RepoRoot
+        $byId = @{}
+        foreach ($r in $graph.Records) { $byId[$r.Id] = $r }
+
+        $afterRoot = $byId['unit/document/agents-md']
+        $afterMembers = Get-DesignClosure -Root $afterRoot -ById $byId
+        $afterBytes = ($afterMembers | ForEach-Object { Get-RecordFileBytes -RepoPath $script:RepoRoot -Record $_ } | Measure-Object -Sum).Sum
+
+        $clonedLists = $afterRoot.Lists.Clone()
+        $clonedLists['Live'] = @($afterRoot.Lists['Live']) + @($decisionId)
+        $beforeRoot = New-DesignRecord -Id $afterRoot.Id -Kind $afterRoot.Kind -Path $afterRoot.Path `
+            -Scalars $afterRoot.Scalars -Lists $clonedLists -Prose $afterRoot.Prose
+        $beforeMembers = Get-DesignClosure -Root $beforeRoot -ById $byId
+        $beforeBytes = ($beforeMembers | ForEach-Object { Get-RecordFileBytes -RepoPath $script:RepoRoot -Record $_ } | Measure-Object -Sum).Sum
+
+        ($beforeMembers | ForEach-Object { $_.Id }) | Should -Contain $decisionId
+        $decisionBytes = Get-RecordFileBytes -RepoPath $script:RepoRoot -Record $byId[$decisionId]
+        ($beforeBytes - $afterBytes) | Should -Be $decisionBytes
+    }
+
+    It 'S24.1/S24.4: every decision whose terms stand in AGENTS.md carries a StatedIn site naming that section and is absent from unit/document/agents-md''s Live' {
+        $graph = Read-DesignStateGraph -Path $script:RepoRoot
+        $byId = @{}
+        foreach ($r in $graph.Records) { $byId[$r.Id] = $r }
+        $absorbed = @{
+            'decision/2026-08-10-frozen-md-marker'                                   = 'The design freeze'
+            'decision/2026-08-02-house-convention-path-corrected'                    = 'House conventions'
+            'decision/2026-08-03-reconciliation-ends-in-decision-not-report'         = 'Working with me'
+            'decision/2026-08-03-issues-read-human-first-agent-detail-collapsed'     = 'Tracking work'
+            'decision/2026-08-03-work-defers-to-github-track-owns-github-writes'     = 'Tracking work'
+            'decision/2026-08-04-cost-measured-by-script-taxonomy-is-policy'         = 'What should stop being model work'
+            'decision/2026-08-12-codex-vendor-alias-list-for-sol-terra'              = 'Vendor model aliases'
+            'decision/2026-08-19-marked-region-marker-declares-its-own-kind'         = 'Marked regions'
+            'decision/2026-08-24-codex-tier-resolved-from-config'                    = 'Vendor model aliases'
+            'decision/2026-08-30-force-delete-delegated-on-tip-comparison'           = 'Git and delivery'
+            'decision/2026-08-30-tier-gate-reads-environment-stamp-first'            = 'Vendor model aliases'
+        }
+        $live = @($byId['unit/document/agents-md'].Lists['Live'])
+        foreach ($id in $absorbed.Keys) {
+            $byId[$id].Lists['StatedIn'] | Should -Contain "unit/document/agents-md § $($absorbed[$id])" -Because "$id must be stated in AGENTS.md"
+            $live | Should -Not -Contain $id -Because "$id must leave Live in the same commit"
+        }
+        @($script:RealResult.Findings | Where-Object { $_.Class -eq 'DecisionUnplaced' }).Count | Should -Be 0
+    }
+
+    It 'S24.3: SiteAmbiguous, SiteOutOfReach and SiteContradictsLive are all silent against this repository' {
+        foreach ($class in 'SiteAmbiguous', 'SiteOutOfReach', 'SiteContradictsLive') {
+            @($script:RealResult.Findings | Where-Object { $_.Class -eq $class }).Count | Should -Be 0 -Because "$class must be silent"
+        }
+    }
+
+    It 'S24.5: the checker reports no ClosureOverBudget finding for unit/document/agents-md' {
+        @($script:RealResult.Findings | Where-Object { $_.Class -eq 'ClosureOverBudget' -and $_.Subject -eq 'unit/document/agents-md' }).Count | Should -Be 0
+    }
+
+    It 'S30.1/S30.2: LiveAlreadyStated never fires against this repository, in either list' {
+        (@($script:RealResult.Findings | Where-Object { $_.Class -eq 'LiveAlreadyStated' })).Count | Should -Be 0
+        (@($script:RealResult.Reported | Where-Object { $_.Class -eq 'LiveAlreadyStated' })).Count | Should -Be 0
+    }
+
+    It 'S30.5: decision/2026-09-02-livealreadystated-is-the-reported-class carries all three StatedIn sites and has left unit/script/test-designstate''s Live' {
+        $graph = Read-DesignStateGraph -Path $script:RepoRoot
+        $byId = @{}
+        foreach ($r in $graph.Records) { $byId[$r.Id] = $r }
+
+        $decisionId = 'decision/2026-09-02-livealreadystated-is-the-reported-class'
+        $byId[$decisionId].Lists['StatedIn'] | Should -Be @(
+            'unit/document/design-20-contract § The divergence classes',
+            'contract/test-designstate § Semantics',
+            'unit/command/reconcile § LiveAlreadyStated'
+        )
+        $byId['unit/script/test-designstate'].Lists['Live'] | Should -Not -Contain $decisionId
+
+        foreach ($class in 'SiteAmbiguous', 'SiteOutOfReach', 'SiteContradictsLive') {
+            @($script:RealResult.Findings | Where-Object { $_.Class -eq $class -and ($_.Subject -match [regex]::Escape($decisionId) -or $_.Detail -match [regex]::Escape($decisionId)) }).Count | Should -Be 0
+        }
+    }
+
+    It 'S30.6: unit/script/test-designstate''s bounded closure is strictly lower after absorbing the decision than the 15,054 bytes it measured before' {
+        $graph = Read-DesignStateGraph -Path $script:RepoRoot
+        $byId = @{}
+        foreach ($r in $graph.Records) { $byId[$r.Id] = $r }
+
+        $root = $byId['unit/script/test-designstate']
+        $afterMembers = Get-DesignClosure -Root $root -ById $byId
+        $afterBytes = ($afterMembers | ForEach-Object { Get-RecordFileBytes -RepoPath $script:RepoRoot -Record $_ } | Measure-Object -Sum).Sum
+
+        $afterBytes | Should -BeLessThan 15054
+    }
+
+    It 'S22.7: ClassListDisagreement is silent - DecisionUnplaced and SupersessionCycle now land, closing the gap S21.6 left open' {
+        (@($script:RealResult.Findings | Where-Object { $_.Class -eq 'ClassListDisagreement' })).Count | Should -Be 0
+    }
+
+    It 'S22.4: the five records issue #151 names each carry the edge or the site they lack, and DecisionUnplaced reports none of them' {
+        $graph = Read-DesignStateGraph -Path $script:RepoRoot
+        $byId = @{}
+        foreach ($r in $graph.Records) { $byId[$r.Id] = $r }
+
+        $byId['unit/command/slice'].CompanionPath | Should -Not -BeNullOrEmpty
+        $slicedCompanionLists = @($byId['unit/command/slice'].Lists['Archival'])
+        $slicedCompanionLists | Should -Contain 'decision/2026-08-03-ticking-checkbox-is-the-users'
+
+        foreach ($id in 'decision/2026-08-21-install-delivers-on-a-feature-branch',
+            'decision/2026-08-25-branch-commit-push-pr-delegated-for-all-work',
+            'decision/2026-08-25-code-review-defaults-high-effort-fix-push',
+            'decision/2026-08-25-high-volume-tier-retired-haiku-luna-removed') {
+            $byId[$id].Lists['StatedIn'] | Should -Not -BeNullOrEmpty
+        }
+
+        (@($script:RealResult.Findings | Where-Object { $_.Class -eq 'DecisionUnplaced' })).Count | Should -Be 0
+    }
+
+    It 'S22.6: SupersessionCycle reports none against this repository''s own decisions' {
+        (@($script:RealResult.Findings | Where-Object { $_.Class -eq 'SupersessionCycle' })).Count | Should -Be 0
+    }
+
+    It 'S12.5/S25.4: the check reports zero findings against this repository and exits 0' {
         # Replaces S5's 'never clean against this repository', whose stated reason - that most
         # commands, scripts and documents had no unit record - stopped being true at S8 and S9.
         # It kept passing on a divergence it was never written to describe, which is the shape
         # AGENTS.md (Verification) calls a test that guards nothing.
+        #
+        # It then asserted exit 0, which stopped being true at S19: counting a unit's own
+        # artifact puts every document unit over the ceiling, and design/10-design.md
+        # ("Whether the ceiling can be met") says so outright - the brief's Abandonment line is
+        # live and the adjudication is the user's. A blanket exit-0 assertion turned that
+        # designed state into a permanently red build, which is the same defect one level up:
+        # a gate whose value is constant reports nothing.
+        #
+        # S23 re-scoped the adjudicated case again: the ceiling now excludes the unit's own
+        # artifact, so a breach could no longer be artifact-dominated - every remaining breach
+        # named a record, which is what made it absorption-remediable (S23.4, S23.6). S24 and
+        # S25 ran that absorption pass, one unit each - unit/document/agents-md and
+        # unit/document/design-20-contract - and this is the first run in which the whole kit
+        # reports itself inside the budget it set: zero findings, exit 0.
         $failing = @($script:RealResult.Findings | ForEach-Object { "[$($_.Class)] $($_.Subject): $($_.Detail)" })
         $unevaluated = @($script:RealResult.CouldNotEvaluate | ForEach-Object { "[$($_.Reason)] $($_.Detail)" })
-        $script:RealResult.ExitCode | Should -Be 0 -Because "findings: $($failing -join ' | '); could not evaluate: $($unevaluated -join ' | ')"
+
+        $script:RealResult.CouldNotEvaluate | Should -BeNullOrEmpty -Because "could not evaluate: $($unevaluated -join ' | ')"
+        $script:RealResult.Findings | Should -BeNullOrEmpty -Because "findings: $($failing -join ' | ')"
+        $script:RealResult.ExitCode | Should -Be 0 -Because "findings: $($failing -join ' | ')"
+
         $script:RealResult.LargestClosure.Unit | Should -Not -BeNullOrEmpty
         $script:RealResult.LargestClosure.Bytes | Should -BeGreaterThan 0
     }
@@ -1140,12 +1913,49 @@ Describe 'Test-DesignState against this repository''s own tree' -Skip:$script:Sk
     }
 
     It 'S16.1/S16.2: this repository has one Contract record per design/20-contract.md Public-surface entry, and OwnerMismatch reports none' {
-        # S14 wrote tools/Update-WorkMirror.ps1 and contract/update-workmirror with it, so the
-        # S16.6 exclusion (a Declaration pointing at an absent file) no longer applies - the
-        # count grew from 8 to 9 with it.
+        # This asserted a hardcoded count, which went stale three times as the section
+        # legitimately grew - 8 to 9 at S14, to 10 on 2026-08-31, to 14 on 2026-09-05 - and
+        # each staleness surfaced as a red gate on an unrelated pull request. The number was
+        # never the property worth defending; the correspondence is, and design/20-contract.md
+        # states it in both directions: "a record exists for every surface named below and for
+        # nothing else". A surface entry is a ### heading under ## Public surface whose text
+        # begins with a backticked path; the other headings there are prose about the section.
         $graph = Read-DesignStateGraph -Path $script:RepoRoot
-        $contracts = @($graph.Records | Where-Object { $_.Kind -eq 'Contract' })
-        $contracts.Count | Should -Be 9
+        $contractText = Get-Content -LiteralPath (Join-Path $script:RepoRoot 'design/20-contract.md')
+
+        $surfacePaths = [System.Collections.Generic.List[string]]::new()
+        $inSection = $false
+        foreach ($line in $contractText) {
+            if ($line -match '^## Public surface\s*$') { $inSection = $true; continue }
+            if ($inSection -and $line -match '^## ') { break }
+            if (-not $inSection) { continue }
+            if ($line -match '^### `([^`]+)`') { $surfacePaths.Add($Matches[1]) }
+        }
+        $surfacePaths.Count | Should -BeGreaterThan 0 -Because 'the Public-surface section must be readable at all'
+
+        $unitByAnchor = @{}
+        foreach ($unit in $graph.Records | Where-Object { $_.Kind -eq 'Unit' -and $_.Scalars['Status'] -eq 'active' }) {
+            $anchor = $unit.Scalars['Anchor']
+            if ($anchor) { $unitByAnchor[$anchor] = $unit.Id }
+        }
+
+        $contracts = @($graph.Records | Where-Object { $_.Kind -eq 'Contract' -and $_.Scalars['Status'] -eq 'active' })
+        $ownerIds = @($contracts | ForEach-Object { $_.Scalars['Owner'] })
+
+        # Every named surface has exactly one Contract record, owned by the unit anchored there.
+        foreach ($path in $surfacePaths) {
+            $unitId = $unitByAnchor[$path]
+            $unitId | Should -Not -BeNullOrEmpty -Because "design/20-contract.md names $path as public surface, so an active unit must be anchored there"
+            $owned = @($ownerIds | Where-Object { $_ -eq $unitId })
+            $owned.Count | Should -Be 1 -Because "$path has $($owned.Count) Contract records; the section claims exactly one"
+        }
+
+        # And nothing else does - no Contract record whose owner's artifact the section does not name.
+        foreach ($contract in $contracts) {
+            $ownerAnchor = ($graph.Records | Where-Object { $_.Id -eq $contract.Scalars['Owner'] }).Scalars['Anchor']
+            $surfacePaths | Should -Contain $ownerAnchor -Because "$($contract.Id) is owned by a unit anchored at $ownerAnchor, which design/20-contract.md's Public-surface section does not name"
+        }
+
         (@($script:RealResult.Findings | Where-Object { $_.Class -eq 'OwnerMismatch' })).Count | Should -Be 0
     }
 
@@ -1199,9 +2009,12 @@ Describe 'Test-DesignState against this repository''s own tree' -Skip:$script:Sk
             Set-Content -LiteralPath $supersededPath -Value $original -Encoding utf8NoBOM -NoNewline
         }
 
+        # Restoring clears EnforcementUnevidenced; it does not clear ClosureOverBudget, which is
+        # this repository's adjudicated state (S12.5, and design/10-design.md "Whether the
+        # ceiling can be met"). Asserting exit 0 here asserted the ceiling was met.
         $restoredResult = Invoke-DesignStateCheck -RepoPath $script:RepoRoot
         (@($restoredResult.Findings | Where-Object { $_.Class -eq 'EnforcementUnevidenced' })).Count | Should -Be 0
-        $restoredResult.ExitCode | Should -Be 0
+        (@($restoredResult.Findings | Where-Object { $_.Class -notin @('ClosureOverBudget') })).Count | Should -Be 0
         (& git -C $script:RepoRoot status --short) | Should -Be $script:StatusBefore
     }
 }

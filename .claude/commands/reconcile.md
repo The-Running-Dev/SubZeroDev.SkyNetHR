@@ -39,6 +39,11 @@ Places where the implemented structure differs from `10-design.md` — module bo
 ## Undocumented decisions
 Choices made during implementation that are not in `90-decisions.md`. These are the ones that silently become load-bearing.
 
+## LiveAlreadyStated
+For each active unit, compare every decision named in its `Live` against the artifact that unit is live on — its own `Anchor`, or a record one hop from it (`design/20-contract.md` § *The divergence classes*). Where a decision's terms already stand at a heading there with no site naming it, report the apparent match under the name `LiveAlreadyStated`. The payload is three parts: the unit id, the decision id, and the candidate site in `StatedIn`'s own `<id> § <heading>` form.
+
+This is a reading — `tools/Test-DesignState.ps1` declares the id and never raises it itself, for the same reason `SemanticDisagreement` cannot: judging whether a section states a decision's terms is a model reading prose, not a check a script can run. **This pass reports and never absorbs.** Acting on a match is the caller's own step 4 of `AGENTS.md` § *Writing a design-state record* — copying the payload into the record and dropping the id from `Live` — or stating in the pull request why the terms do not stand there. That sign-off happens below, at *Then ask*, the same as every other divergence this command finds; absorbing it here instead would be running that step unattended.
+
 ## Invalidated assumptions
 Anything the design assumed that implementation showed to be false.
 

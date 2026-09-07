@@ -95,6 +95,27 @@ Describe 'Measure-Session -TranscriptPath' {
         $text | Should -Match 'foo\s+1\s+1\s+0\s+0\s+0'
     }
 
+    It 'reports subagent usage as a separate figure, not folded into the session total' {
+        New-TranscriptFile -Name 'sess-d.jsonl' -Lines @(
+            '{"type":"assistant","timestamp":"2026-01-01T10:00:00Z","message":{"role":"assistant","model":"claude-sonnet-5","usage":{"input_tokens":10,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":5}}}'
+        )
+        $subagentDir = Join-Path $script:FixtureDir 'sess-d/subagents'
+        New-Item -ItemType Directory -Path $subagentDir -Force | Out-Null
+        Set-Content -LiteralPath (Join-Path $subagentDir 'agent-x.jsonl') -Encoding utf8NoBOM -Value @(
+            '{"parentUuid":null,"isSidechain":true,"agentId":"x","message":{"role":"assistant","model":"claude-sonnet-5","usage":{"input_tokens":100,"cache_creation_input_tokens":0,"cache_read_input_tokens":200,"output_tokens":50}}}'
+        )
+
+        $json = (& $script:ScriptPath -TranscriptPath $script:FixtureDir) -join "`n" | ConvertFrom-Json
+        $session = $json.sessions | Where-Object id -eq 'sess-d'
+
+        $session.total.input | Should -Be 10
+        $session.total.cacheRead | Should -Be 0
+        $session.subagents.calls | Should -Be 1
+        $session.subagents.input | Should -Be 100
+        $session.subagents.cacheRead | Should -Be 200
+        $session.subagents.output | Should -Be 50
+    }
+
     It 'throws when -SessionId matches no transcript' {
         New-TranscriptFile -Name 'sess-c.jsonl' -Lines @(
             '{"type":"assistant","timestamp":"2026-01-01T10:00:00Z","message":{"model":"claude-sonnet-5","usage":{"input_tokens":1}}}'
@@ -232,6 +253,40 @@ Describe 'Measure-Session -Hook' {
         $rows = Get-Content $script:Log
         $rows.Count | Should -Be 2
         $rows[1] | Should -Match 'hook-sess'
+    }
+
+    It 'writes a session run from a git worktree to the main checkout''s log, not the worktree''s own' {
+        # #182: the log path used to be derived from the running script's own
+        # location (Split-Path $PSScriptRoot -Parent), which differs per
+        # worktree even though every worktree shares one repository. A
+        # session run inside a worktree - this repository's own normal
+        # /slice workflow - silently logged to <worktree>/.claude/, invisible
+        # to anyone checking the main checkout, and lost once the worktree
+        # was deleted. Reproduced here with a real 'git worktree add' rather
+        # than a timing trick, since the bug is structural, not a race.
+        $mainDir = Join-Path $TestDrive ([guid]::NewGuid().ToString())
+        New-Item -ItemType Directory -Path (Join-Path $mainDir 'tools') -Force | Out-Null
+        Copy-Item -LiteralPath $script:ScriptPath -Destination (Join-Path $mainDir 'tools/Measure-Session.ps1')
+
+        git -C $mainDir init --quiet -b main 2>&1 | Out-Null
+        git -C $mainDir config user.email 'test@example.com' 2>&1 | Out-Null
+        git -C $mainDir config user.name 'Test' 2>&1 | Out-Null
+        git -C $mainDir add tools/Measure-Session.ps1 2>&1 | Out-Null
+        git -C $mainDir commit --quiet -m seed 2>&1 | Out-Null
+
+        $worktreeDir = Join-Path $TestDrive ([guid]::NewGuid().ToString())
+        git -C $mainDir worktree add --quiet $worktreeDir -b wt 2>&1 | Out-Null
+
+        $transcript = New-TranscriptFile -Name 'worktree-sess.jsonl' -Lines @(
+            '{"type":"assistant","timestamp":"2026-01-01T10:00:00Z","message":{"model":"claude-sonnet-5","usage":{"input_tokens":5,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":1}}}'
+        )
+        $payload = (@{ transcript_path = $transcript } | ConvertTo-Json -Compress)
+
+        $payload | pwsh -NoProfile -File (Join-Path $worktreeDir 'tools/Measure-Session.ps1') -Hook
+
+        Test-Path (Join-Path $mainDir '.claude/session-costs.tsv') | Should -BeTrue
+        (Get-Content (Join-Path $mainDir '.claude/session-costs.tsv') | Select-Object -Last 1) | Should -Match 'worktree-sess'
+        Test-Path (Join-Path $worktreeDir '.claude/session-costs.tsv') | Should -BeFalse
     }
 
     It 'replaces the existing row rather than duplicating it when the same session ends twice' {

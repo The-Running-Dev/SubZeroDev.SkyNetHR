@@ -69,7 +69,6 @@ Consumes:
 Exposes:
 Binds: I28
 Live: decision/2026-08-03-track-adds-to-existing-project
-Archival:
 Questions:
 Work:
 Evidence:
@@ -213,6 +212,92 @@ Affects: unit/command/track
             $record.Scalars.ContainsKey('Affects') | Should -BeFalse
             $record.Lists.ContainsKey('Affects') | Should -BeFalse
         }
+    }
+
+    It 'S21.1: Decision.StatedIn parses as a list field whose every entry is an id section-mark heading pair' {
+        New-StateFile -RelativePath 'decisions/2026-08-01-x.md' -Content @'
+# decision/2026-08-01-x
+Date: 2026-08-01
+Anchor: 2026-08-01 - x
+Status: accepted
+StatedIn: unit/document/agents-md § Session boundaries, contract/wait-pullrequestcheck § Semantics
+
+## Claim
+x
+'@
+
+        $graph = Read-DesignStateGraph -Path $TestDrive
+
+        $graph.Failures.Count | Should -Be 0
+        $graph.Records[0].Lists['StatedIn'] | Should -Be @(
+            'unit/document/agents-md § Session boundaries',
+            'contract/wait-pullrequestcheck § Semantics'
+        )
+    }
+
+    It 'S21.1: a StatedIn entry not of the id section-mark heading form is a parse failure naming the file, line, and verbatim text - and is dropped from the parsed list rather than kept' {
+        New-StateFile -RelativePath 'decisions/2026-08-01-y.md' -Content @'
+# decision/2026-08-01-y
+Date: 2026-08-01
+Anchor: 2026-08-01 - y
+Status: accepted
+StatedIn: this has no section mark at all
+
+## Claim
+y
+'@
+
+        $graph = Read-DesignStateGraph -Path $TestDrive
+
+        $graph.Failures.Count | Should -Be 1
+        $graph.Failures[0].Reason | Should -Be 'Unparseable'
+        $graph.Failures[0].Path | Should -Be 'design/state/decisions/2026-08-01-y.md'
+        $graph.Failures[0].Line | Should -Be 5
+        $graph.Failures[0].Text | Should -Be 'StatedIn: this has no section mark at all'
+        $graph.Records[0].Lists['StatedIn'] | Should -BeNullOrEmpty
+    }
+
+    It '#203: a StatedIn entry wrapped in double quotes may contain the list separator, and the quotes are stripped' {
+        New-StateFile -RelativePath 'decisions/2026-08-01-z.md' -Content @'
+# decision/2026-08-01-z
+Date: 2026-08-01
+Anchor: 2026-08-01 - z
+Status: accepted
+StatedIn: "unit/document/agents-md § Model, effort, and review budget", contract/wait-pullrequestcheck § Semantics
+
+## Claim
+z
+'@
+
+        $graph = Read-DesignStateGraph -Path $TestDrive
+
+        $graph.Failures.Count | Should -Be 0
+        $graph.Records[0].Lists['StatedIn'] | Should -Be @(
+            'unit/document/agents-md § Model, effort, and review budget',
+            'contract/wait-pullrequestcheck § Semantics'
+        )
+    }
+
+    It '#203: a quoted list entry containing its own double quote is unparseable, and the whole field line is reported and dropped' {
+        New-StateFile -RelativePath 'decisions/2026-08-01-w.md' -Content @'
+# decision/2026-08-01-w
+Date: 2026-08-01
+Anchor: 2026-08-01 - w
+Status: accepted
+StatedIn: "unit/document/agents-md § Model "quoted" here"
+
+## Claim
+w
+'@
+
+        $graph = Read-DesignStateGraph -Path $TestDrive
+
+        $graph.Failures.Count | Should -Be 1
+        $graph.Failures[0].Reason | Should -Be 'Unparseable'
+        $graph.Failures[0].Path | Should -Be 'design/state/decisions/2026-08-01-w.md'
+        $graph.Failures[0].Line | Should -Be 5
+        $graph.Failures[0].Text | Should -Be 'StatedIn: "unit/document/agents-md § Model "quoted" here"'
+        $graph.Records[0].Lists['StatedIn'] | Should -BeNullOrEmpty
     }
 
     It 'writes nothing (I18): git status is empty after a run against a state set, including an all-failed one' {

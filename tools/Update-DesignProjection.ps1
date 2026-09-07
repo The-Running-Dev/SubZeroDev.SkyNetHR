@@ -112,10 +112,51 @@ function Get-ConsumersProjectionContent {
     ,@($lines)
 }
 
+<#
+    A StatedIn entry is `<id> § <heading>`; the id half is what "the units its StatedIn sites
+    resolve to" (design/20-contract.md § tools/Update-DesignProjection.ps1) resolves against.
+    Read-DesignState.ps1 already drops a malformed entry as a parse failure, so every entry seen
+    here already has this shape - this only ever needs the id half.
+#>
+function ConvertFrom-StatedInSiteId {
+    param([Parameter(Mandatory)][string] $Site)
+    if ($Site -notmatch '^(?<id>\S+) § .+$') { return $null }
+    $Matches['id']
+}
+
+<#
+    The unit a StatedIn site's id stands for: itself when the id already is a unit, or that
+    contract's Owner when it names a contract - a script cannot be absorbed into directly, so its
+    decisions are stated in its contract's Semantics instead (design/10-design.md § Absorption).
+    Anything else - an id with no record, or a record of another kind - resolves to nothing; that
+    site is SiteAmbiguous's or SiteOutOfReach's to report, not a unit for this union to add.
+#>
+function Resolve-StatedInSiteUnitId {
+    param([Parameter(Mandatory)][string] $SiteId, [Parameter(Mandatory)][hashtable] $ById)
+    if (-not $ById.ContainsKey($SiteId)) { return $null }
+    $record = $ById[$SiteId]
+    if ($record.Kind -eq 'Unit') { return $SiteId }
+    if ($record.Kind -eq 'Contract') {
+        $owner = $record.Scalars['Owner']
+        if ([string]::IsNullOrWhiteSpace($owner)) { return $null }
+        return $owner
+    }
+    $null
+}
+
 function Get-DecisionAffectsProjectionContent {
+    <#
+        S22.1. Decision.Affects is the union of the units whose Live names the decision, the
+        units whose Archival does, and the units its own StatedIn sites resolve to - rendered as
+        one combined list, because design/10-design.md § Derived states Affects as a single
+        derived edge, not three. A decision reachable only through a site now renders with that
+        unit named, where before this slice - Live only - it rendered empty.
+    #>
     param([Parameter(Mandatory)][AllowEmptyCollection()][object[]] $Records)
     $decisions = @($Records | Where-Object { $_.Kind -eq 'Decision' } | Sort-Object Id)
     $units = @($Records | Where-Object { $_.Kind -eq 'Unit' })
+    $byId = @{}
+    foreach ($r in $Records) { if (-not $byId.ContainsKey($r.Id)) { $byId[$r.Id] = $r } }
     $lines = [System.Collections.Generic.List[string]]::new()
     $lines.Add('| Decision | In force for |')
     $lines.Add('|---|---|')
@@ -123,25 +164,46 @@ function Get-DecisionAffectsProjectionContent {
         $lines.Add('| _(no decision records yet)_ | |')
     }
     foreach ($d in $decisions) {
-        $affects = @($units | Where-Object { $_.Lists.ContainsKey('Live') -and $d.Id -in $_.Lists['Live'] } | ForEach-Object { $_.Id })
+        $affects = [System.Collections.Generic.List[string]]::new()
+        $affects.AddRange([string[]]@($units | Where-Object { $_.Lists.ContainsKey('Live') -and $d.Id -in $_.Lists['Live'] } | ForEach-Object { $_.Id }))
+        $affects.AddRange([string[]]@($units | Where-Object { $_.Lists.ContainsKey('Archival') -and $d.Id -in $_.Lists['Archival'] } | ForEach-Object { $_.Id }))
+        if ($d.Lists.ContainsKey('StatedIn')) {
+            foreach ($site in $d.Lists['StatedIn']) {
+                if ([string]::IsNullOrWhiteSpace($site)) { continue }
+                $siteId = ConvertFrom-StatedInSiteId -Site $site
+                if (-not $siteId) { continue }
+                $unitId = Resolve-StatedInSiteUnitId -SiteId $siteId -ById $byId
+                if ($unitId) { $affects.Add($unitId) }
+            }
+        }
         $lines.Add("| $($d.Id) | $(Format-IdList -Ids $affects) |")
     }
     ,@($lines)
 }
 
 function Get-QuestionAffectsProjectionContent {
+    <#
+        S22.2. Question.Affects derives from two fields Question.Affects is documented against
+        (design/10-design.md § Derived) - the units whose Questions names the question (still
+        open, still blocking) and the units whose Answered does (retired, no longer blocking) -
+        rendered as two distinguished columns rather than one combined list, because collapsing
+        them the way Decision.Affects does would render an answered question's units under
+        "Blocks" alongside a genuinely open one, which is exactly the state
+        design/20-contract.md § Unresolved's answered-question-unit-edge fix exists to end.
+    #>
     param([Parameter(Mandatory)][AllowEmptyCollection()][object[]] $Records)
     $questions = @($Records | Where-Object { $_.Kind -eq 'Question' } | Sort-Object Id)
     $units = @($Records | Where-Object { $_.Kind -eq 'Unit' })
     $lines = [System.Collections.Generic.List[string]]::new()
-    $lines.Add('| Question | Blocks |')
-    $lines.Add('|---|---|')
+    $lines.Add('| Question | Blocks | Answered |')
+    $lines.Add('|---|---|---|')
     if ($questions.Count -eq 0) {
-        $lines.Add('| _(no question records yet)_ | |')
+        $lines.Add('| _(no question records yet)_ | | |')
     }
     foreach ($q in $questions) {
-        $affects = @($units | Where-Object { $_.Lists.ContainsKey('Questions') -and $q.Id -in $_.Lists['Questions'] } | ForEach-Object { $_.Id })
-        $lines.Add("| $($q.Id) | $(Format-IdList -Ids $affects) |")
+        $blocks = @($units | Where-Object { $_.Lists.ContainsKey('Questions') -and $q.Id -in $_.Lists['Questions'] } | ForEach-Object { $_.Id })
+        $answered = @($units | Where-Object { $_.Lists.ContainsKey('Answered') -and $q.Id -in $_.Lists['Answered'] } | ForEach-Object { $_.Id })
+        $lines.Add("| $($q.Id) | $(Format-IdList -Ids $blocks) | $(Format-IdList -Ids $answered) |")
     }
     ,@($lines)
 }

@@ -19,6 +19,10 @@ Run this command's housekeeping as soon as a merge is on the table — either be
 
 The handoff at the end is part of the same automatic behaviour. `/next` follows every run — it is not asked for, and it is not conditional on how much this run cleaned up. It used to be `/track`, unconditionally, and that is what made the pair self-triggering: `/track` opened a pull request for its own mirror refresh, the merge put a merge back on the table, and this command fired again. `/next` breaks that by *checking what is owed* before running anything.
 
+## No model needed for the ordinary case
+
+Everything below through *Delete the confirmed candidates* is a fact-and-apply sequence a person can run from a terminal without opening a session at all: `tools/Invoke-Housekeeping.ps1` (or `Invoke-AgentKitClean` after dot-sourcing `tools/RepoAliases.ps1` into a PowerShell profile) discovers candidates and deletes every one this same run confirms, then reports `Escalate:true` and stops applying anything the moment `Invoke-DoneHousekeeping.ps1` itself surfaces a judgement case — `Stopped`, a `TipAheadOfMergedPr` entry, or a `Refused` deletion. It never opens a session on escalation; a person reads the report and decides whether to (`design/90-decisions.md`, 2026-09-06, issue #183). This section still describes the same mechanics for the session-driven path, which remains available and is what runs the judgement calls the script hands back.
+
 ## Run the mechanical half
 
 Everything through building the candidate list has no judgement call in it — dirty-tree check, default-branch resolution, the unmerged-current-branch check, the switch, the prune, `--merged`, and the `gh` cross-check for squash-merges are all facts, not decisions. `tools/Invoke-DoneHousekeeping.ps1 -RepoRoot <repo> -AutoStash` does all of it in one call and deletes nothing:
@@ -27,7 +31,9 @@ Everything through building the candidate list has no judgement call in it — d
 tools/Invoke-DoneHousekeeping.ps1 -RepoRoot <repo> -AutoStash
 ```
 
-- **`Stopped: true`** means it refused to switch at all — the only remaining `Reason` is `UnmergedCurrentBranch` (the current branch has commits not on the default branch and no merged PR accounts for them, checked via `gh pr list --state merged --head <branch>`). Report `Detail` and stop; this is real unaccounted-for work and stays a hard stop, not something to guess past.
+- **`Stopped: true`** means it refused to switch at all, on one of two `Reason`s:
+  - **`UnmergedCurrentBranch`** — the current branch has commits not on the default branch and no merged PR accounts for them, checked via `gh pr list --state merged --head <branch>`. Report `Detail` and stop; this is real unaccounted-for work and stays a hard stop, not something to guess past.
+  - **`CheckoutFailed`** — `git checkout <default>` itself failed, which is what happens when this session is running from a `.claude/worktrees/` checkout and the default branch is already checked out in the primary checkout (`git` refuses a second worktree on the same branch). Report `Detail` and stop; hand off to the primary checkout to run `/clean` there instead of trying to force the checkout from here.
 - **`-AutoStash`** means a dirty tree no longer stops the run: the script runs `git stash push -u` first (never a discard) and reports `Stashed: true` / `StashRef`. **Always report the stash** so it doesn't get silently lost on whatever branch is checked out next — tell the user a stash was made and how to get it back (`git stash pop`, or `git stash apply stash@{0}` if something else has since been stashed on top).
 - **Otherwise** it has already checked out `DefaultBranch`, pulled (unless it failed), pruned remote-tracking refs (`PrunedCount`), and built `Candidates` — every branch `--merged <default>` confirms, each with its `MergedPr` where `gh` found one. **`--merged` is a genuine merge check**, so a squash-merged branch (GitHub's squash produces a new commit `--merged` cannot see as "the same") never appears in `Candidates` even though `gh` shows it merged. The script cross-checks every branch `--merged` did *not* confirm against `gh` itself and reports the squash-merged ones separately in `SquashMergeCandidates` — you don't need to already know one exists.
 

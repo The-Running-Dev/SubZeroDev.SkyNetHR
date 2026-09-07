@@ -307,10 +307,69 @@ function Read-Session {
     }
 }
 
+function Get-SubagentUsage {
+    <#
+      Subagent transcripts live at <sessionId>/subagents/*.jsonl beside the
+      parent session's own <sessionId>.jsonl - a directory Get-ChildItem's
+      top-level *.jsonl listing never descends into. They are Claude-shaped
+      (same message.usage records, isSidechain:true) so Read-Session parses
+      them unchanged; only the discovery and the accounting are new.
+
+      Returned as its own total rather than merged into the parent's: a
+      subagent's tokens are a real cost, but not the parent session's
+      context, and the two are priced and read differently.
+    #>
+    param([string]$Directory, [string]$SessionId)
+
+    $sum = [pscustomobject]@{ Calls = 0; Input = 0L; CacheCreate = 0L; CacheRead = 0L; Output = 0L }
+    $subDirectory = Join-Path $Directory $SessionId 'subagents'
+    if (-not (Test-Path $subDirectory)) { return $sum }
+
+    foreach ($file in (Get-ChildItem $subDirectory -Filter *.jsonl -File -ErrorAction SilentlyContinue)) {
+        if ((Get-TranscriptVendor -File $file) -ne 'claude') { continue }
+        $session = Read-Session -File $file
+        foreach ($segment in $session.Segments) {
+            foreach ($field in 'Calls', 'Input', 'CacheCreate', 'CacheRead', 'Output') {
+                $sum.$field += $segment.$field
+            }
+        }
+    }
+    return $sum
+}
+
 function Format-Row {
     param([string]$Label, [object]$S)
     '{0,-28} {1,6} {2,10:N0} {3,12:N0} {4,13:N0} {5,10:N0}' -f
         $Label, $S.Calls, $S.Input, $S.CacheCreate, $S.CacheRead, $S.Output
+}
+
+function Get-CostLogPath {
+    <#
+      The log lives beside the repository, not beside whichever checkout
+      happened to run this hook. In a git worktree, Split-Path $ScriptRoot
+      -Parent resolves to the worktree's own directory rather than the main
+      checkout - so a session run there wrote its row to
+      <worktree>/.claude/session-costs.tsv, invisible to anyone looking at
+      the main checkout's log, and lost outright once the worktree is
+      deleted (this repository's own /clean does exactly that after a
+      merge). 'git rev-parse --git-common-dir' resolves to the same shared
+      .git directory regardless of which worktree asks, so its parent is
+      the one stable place every checkout of this repository agrees on.
+
+      Falls back to the pre-fix path (beside the running script) when git
+      is unavailable or the tree is not a git repository at all - the
+      common case in tests, and a graceful default rather than a hard
+      requirement on git being installed.
+    #>
+    param([string]$ScriptRoot)
+
+    $fallback = Join-Path (Split-Path $ScriptRoot -Parent) '.claude/session-costs.tsv'
+    try {
+        $commonDir = git -C $ScriptRoot rev-parse --path-format=absolute --git-common-dir 2>$null
+        if ($LASTEXITCODE -ne 0 -or -not $commonDir) { return $fallback }
+        return Join-Path (Split-Path $commonDir -Parent) '.claude/session-costs.tsv'
+    }
+    catch { return $fallback }
 }
 
 if ($Hook) {
@@ -338,7 +397,7 @@ if ($Hook) {
         }
         if (-not $sum.Calls) { exit 0 }
 
-        $log = Join-Path (Split-Path $PSScriptRoot -Parent) '.claude/session-costs.tsv'
+        $log = Get-CostLogPath -ScriptRoot $PSScriptRoot
         $columns = 'started', 'session', 'models', 'calls', 'span', 'active',
                    'input', 'cache_create', 'cache_read', 'output'
         $row = @(
@@ -439,6 +498,7 @@ if ($SessionId) { $files = @($files | Where-Object BaseName -like "$SessionId*")
 if (-not $files.Count) { throw "No transcripts matched in $directory." }
 
 $totals = [pscustomobject]@{ Calls = 0; Input = 0L; CacheCreate = 0L; CacheRead = 0L; Output = 0L }
+$subagentTotals = [pscustomobject]@{ Calls = 0; Input = 0L; CacheCreate = 0L; CacheRead = 0L; Output = 0L }
 $reportSessions = [System.Collections.Generic.List[object]]::new()
 
 foreach ($file in ($files | Sort-Object LastWriteTime)) {
@@ -470,6 +530,11 @@ foreach ($file in ($files | Sort-Object LastWriteTime)) {
         }
     }
 
+    $subagentSum = Get-SubagentUsage -Directory $directory -SessionId $session.Id
+    foreach ($field in 'Calls', 'Input', 'CacheCreate', 'CacheRead', 'Output') {
+        $subagentTotals.$field += $subagentSum.$field
+    }
+
     $shortId = if ($session.Id.Length -gt 8) { $session.Id.Substring(0, 8) } else { $session.Id }
     $reportSessions.Add([pscustomobject]@{
         Id      = $shortId
@@ -478,6 +543,7 @@ foreach ($file in ($files | Sort-Object LastWriteTime)) {
         Active  = $session.Active
         Models  = $session.Models
         Total   = $sum
+        Subagents = $subagentSum
         Segments = $session.Segments
     })
 }
@@ -504,12 +570,18 @@ if ($Human) {
             ('-' * $header.Length)
         }
         Format-Row -Label 'session total' -S $session.Total
+        if ($session.Subagents.Calls) {
+            Format-Row -Label 'subagents (separate cost)' -S $session.Subagents
+        }
     }
 
     if ($files.Count -gt 1) {
         ''
         ('=' * $header.Length)
         Format-Row -Label "all sessions ($($files.Count))" -S $totals
+        if ($subagentTotals.Calls) {
+            Format-Row -Label 'all subagents (separate cost)' -S $subagentTotals
+        }
     }
 
     ''
@@ -538,6 +610,7 @@ else {
                 activeSeconds = [math]::Round($_.Active.TotalSeconds)
                 models  = @($_.Models -split ',\s*' | Where-Object { $_ })
                 total   = ConvertTo-UsageObject $_.Total
+                subagents = ConvertTo-UsageObject $_.Subagents
             }
             if ($Detail) {
                 $entry.segments = @($_.Segments | ForEach-Object {
@@ -551,6 +624,7 @@ else {
     }
     if ($files.Count -gt 1) {
         $payload.allSessions = ConvertTo-UsageObject $totals
+        $payload.allSubagents = ConvertTo-UsageObject $subagentTotals
     }
 
     $payload | ConvertTo-Json -Depth 6
