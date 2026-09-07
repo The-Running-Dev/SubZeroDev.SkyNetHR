@@ -1299,25 +1299,44 @@ describe('S9.2/S9.3/S9.5 — GET .../tool-output/:turnId/:callId', () => {
     return frames.find((f) => f.includes(`event: ${kind}`) && f.includes(`"turnId":"${turnId}"`))!;
   }
 
-  /** Runs one turn whose tool.result is over the cap, and returns its (turnId, callId, bytes). */
+  /**
+   * Runs one turn whose tool.result is over the cap, and returns its (turnId, callId, bytes).
+   *
+   * Watches a single connection for both `permission.request` and `tool.result`, sending the
+   * permission decision as a side effect the first time the request frame appears, rather than
+   * closing the reader and reopening a second connection to wait for `tool.result` — a second
+   * connection replays the whole spill (D40), so on the test running two turns it retransmits
+   * the first turn's history before the second's own frames arrive, and under a loaded or
+   * slow-spawn runner (windows-latest under the full matrix) that extra round trip was wide
+   * enough to intermittently exceed even a widened deadline (#299). Reusing the one connection
+   * removes the redundant replay rather than just giving it more time to finish.
+   */
   async function runTruncatedTurn(h: Harness, id: string, bigBytes: number): Promise<{ turnId: string; callId: string; bytes: number }> {
     process.env['SKYNET_BIG_TOOL_RESULT_BYTES'] = String(bigBytes);
     const events = await get(h, `/api/sessions/${id}/events`);
     const sent = await post(h, `/api/sessions/${id}/message`, { text: 'go' });
     const { turnId } = (await sent.json()) as { turnId: string };
 
-    const { frames: reqFrames } = await readFrames(events, (f) => findOwnFrame(f, 'permission.request', turnId) !== undefined, 15000);
-    const reqFrame = findOwnFrame(reqFrames, 'permission.request', turnId);
-    const requestId = (JSON.parse(reqFrame.split('\n').find((l) => l.startsWith('data: '))!.slice(6)) as { data: { requestId: string } }).data.requestId;
-    await post(h, `/api/sessions/${id}/permission`, { requestId, decision: 'allow', scope: 'once', rule: null, reason: null });
+    let permissionSent = false;
+    let permissionPost: Promise<Response> | undefined;
+    const { frames } = await readFrames(
+      events,
+      (f) => {
+        if (!permissionSent) {
+          const reqFrame = findOwnFrame(f, 'permission.request', turnId);
+          if (reqFrame) {
+            permissionSent = true;
+            const requestId = (JSON.parse(reqFrame.split('\n').find((l) => l.startsWith('data: '))!.slice(6)) as { data: { requestId: string } })
+              .data.requestId;
+            permissionPost = post(h, `/api/sessions/${id}/permission`, { requestId, decision: 'allow', scope: 'once', rule: null, reason: null });
+          }
+        }
+        return findOwnFrame(f, 'tool.result', turnId) !== undefined;
+      },
+      15000,
+    );
+    await permissionPost;
 
-    // `readFrames` cancels the reader it hands back, so the same connection cannot be
-    // read twice — this is a fresh one, replaying history filtered by `turnId` again.
-    // Replays the whole spill (D40), so on the second call in a test running two turns
-    // this retransmits the first turn's history before the second's own frames arrive —
-    // widen the deadline past the 10s default so a slow runner has room for that (#299).
-    const events2 = await get(h, `/api/sessions/${id}/events`);
-    const { frames } = await readFrames(events2, (f) => findOwnFrame(f, 'tool.result', turnId) !== undefined, 15000);
     const frame = findOwnFrame(frames, 'tool.result', turnId);
     const dataLine = frame.split('\n').find((l) => l.startsWith('data: '))!;
     const envelope = JSON.parse(dataLine.slice('data: '.length)) as { data: { turnId: string; callId: string; truncated: boolean; bytes: number } };
