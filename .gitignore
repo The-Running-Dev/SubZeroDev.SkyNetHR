@@ -1,4 +1,7 @@
 node_modules/
 dist/
 .data/
-.claude/
+.claude/gates.json
+.claude/session-costs.tsv
+.claude/settings.local.json
+.claude/verify-report.json
