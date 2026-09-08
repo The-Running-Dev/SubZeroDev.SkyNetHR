@@ -500,7 +500,7 @@ test('S3.2 — a too-old Last-Event-ID is served from the spill for a live sessi
 });
 
 test('S3.3 — replay_gap is emitted exactly once when the spill genuinely cannot serve the range, and joins the live stream afterward', async () => {
-  const { manager, workspaceRoot, storageRoot } = await makeManager('error-result', { ringCapacity: 1 });
+  const { manager, workspaceRoot, storageRoot, store } = await makeManager('error-result', { ringCapacity: 1 });
   const owner = 'operator-1' as OperatorId;
   const projectDir = path.join(workspaceRoot, 'proj-s33');
   await mkdir(projectDir);
@@ -513,6 +513,20 @@ test('S3.3 — replay_gap is emitted exactly once when the spill genuinely canno
   await manager.subscribe(sessionId, owner, 0, { deliver: (e) => { if ('seq' in e) control.push(e); }, close: () => {} });
   await manager.message(sessionId, owner, 'go', []);
   await waitUntil(() => control.some((e) => e.kind === 'turn.ended'));
+
+  // Live delivery races the durable append (D18, I27), same as S3.4 below: `emit` delivers
+  // to `control` synchronously, before the spill write it triggers even starts. Deleting
+  // the file before that write lands risks colliding with a still-in-flight `open('a')` on
+  // the same path — the exact shape of this issue's flake. Wait for the spill to actually
+  // hold what `control` has, the same guard S3.4 already uses for this race.
+  const lastSeq = control[control.length - 1]!.seq;
+  const durableDeadline = Date.now() + 5000;
+  for (;;) {
+    const r = await store.readLastSeq(sessionId);
+    if (r.ok && r.value === lastSeq) break;
+    if (Date.now() > durableDeadline) throw new Error('timed out waiting for the spill to catch up');
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
 
   // The spill genuinely cannot serve: its file is gone. The ring (capacity 1) cannot
   // serve `after: 0` either, so this forces the spill path straight into the failure.
