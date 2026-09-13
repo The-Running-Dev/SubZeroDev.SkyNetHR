@@ -218,6 +218,58 @@ Describe 'Invoke-Nssm' {
     }
 }
 
+Describe 'Get-NssmVersion' {
+
+    It 'returns $null for a path with no embedded file-version resource' {
+        $path = Join-Path ([System.IO.Path]::GetTempPath()) "fake-noversion-$(New-Guid).cmd"
+        Set-Content -LiteralPath $path -Value '@echo off'
+        try {
+            Get-NssmVersion -Path $path | Should -BeNullOrEmpty
+        }
+        finally { Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue }
+    }
+
+    It 'returns $null for a path that does not exist' {
+        Get-NssmVersion -Path 'Z:\does\not\exist.exe' | Should -BeNullOrEmpty
+    }
+
+    It 'reads a real embedded FileVersion off an executable that has one' {
+        # Stand-in for nssm.exe: any signed Windows executable with a version resource proves
+        # Get-NssmVersion reads the actual resource rather than a stubbed value. pwsh.exe (or
+        # powershell.exe on a build without pwsh on PATH) always carries one.
+        $exe = Get-Command pwsh -ErrorAction SilentlyContinue
+        if (-not $exe) { $exe = Get-Command powershell -ErrorAction SilentlyContinue }
+        if (-not $exe) {
+            Set-ItResult -Skipped -Because 'no pwsh/powershell.exe on PATH to read version info from'
+            return
+        }
+        Get-NssmVersion -Path $exe.Source | Should -Not -BeNullOrEmpty
+    }
+}
+
+Describe 'Test-NssmVersionSufficient' {
+
+    It 'is $false when the version is $null - unknown fails closed' {
+        Test-NssmVersionSufficient -Version $null -Minimum ([version]'2.25.0.0') | Should -Be $false
+    }
+
+    It 'is $false when the version is below the minimum' {
+        Test-NssmVersionSufficient -Version '2.24.0.0' -Minimum ([version]'2.25.0.0') | Should -Be $false
+    }
+
+    It 'is $true when the version equals the minimum' {
+        Test-NssmVersionSufficient -Version '2.25.0.0' -Minimum ([version]'2.25.0.0') | Should -Be $true
+    }
+
+    It 'is $true when the version is above the minimum' {
+        Test-NssmVersionSufficient -Version '2.26.1.3' -Minimum ([version]'2.25.0.0') | Should -Be $true
+    }
+
+    It 'is $false for a string that does not parse as a version - unparseable fails closed' {
+        Test-NssmVersionSufficient -Version 'not-a-version' -Minimum ([version]'2.25.0.0') | Should -Be $false
+    }
+}
+
 Describe 'Test-NssmNoConsole' {
 
     BeforeEach {
@@ -263,6 +315,69 @@ Describe 'Invoke-Install' {
         finally { Remove-Item -LiteralPath $envPath -Force }
     }
 
+    It 'refuses when the resolved nssm build is below the required minimum version' {
+        # No nssm call should ever run for this - the version gate sits before Invoke-Nssm is
+        # reachable, so a fake nssm.cmd that would fail loudly if invoked proves it wasn't.
+        $envPath = [System.IO.Path]::GetTempFileName()
+        $repoRoot = Join-Path ([System.IO.Path]::GetTempPath()) "skynet-hr-test-$(New-Guid)"
+        $fakeNssm = Join-Path ([System.IO.Path]::GetTempPath()) "fake-nssm-$(New-Guid).cmd"
+        try {
+            New-Item -ItemType Directory -Force -Path (Join-Path $repoRoot 'dist') | Out-Null
+            Set-Content -LiteralPath (Join-Path $repoRoot 'dist/server.js') -Value '// unused'
+            Set-Content -LiteralPath $fakeNssm -Value @('@echo off', 'exit /b 1')
+
+            Set-Content -LiteralPath $envPath -Value @(
+                'AUTH_MODE=shared-secret'
+                'ALLOWED_ORIGINS=https://example.test'
+                'WORKSPACE_ROOTS=C:\work'
+                'STORAGE_ROOT=C:\data'
+                'AUTH_COOKIE_NAME=skynet_hr_session'
+                'AUTH_SECRET=dev-secret'
+            )
+            Mock Get-NssmVersion { '2.24.0.0' }
+
+            { Invoke-Install -EnvFile $envPath -ServiceName 'Test' -RepoRoot $repoRoot `
+                -NssmPath $fakeNssm -StopTimeoutMs 30000 } |
+                Should -Throw '*2.25*'
+        }
+        finally {
+            Remove-Item -LiteralPath $envPath -Force -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $repoRoot -Recurse -Force -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $fakeNssm -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    It 'refuses when the resolved nssm build has no readable version at all' {
+        $envPath = [System.IO.Path]::GetTempFileName()
+        $repoRoot = Join-Path ([System.IO.Path]::GetTempPath()) "skynet-hr-test-$(New-Guid)"
+        $fakeNssm = Join-Path ([System.IO.Path]::GetTempPath()) "fake-nssm-$(New-Guid).cmd"
+        try {
+            New-Item -ItemType Directory -Force -Path (Join-Path $repoRoot 'dist') | Out-Null
+            Set-Content -LiteralPath (Join-Path $repoRoot 'dist/server.js') -Value '// unused'
+            Set-Content -LiteralPath $fakeNssm -Value @('@echo off', 'exit /b 1')
+
+            Set-Content -LiteralPath $envPath -Value @(
+                'AUTH_MODE=shared-secret'
+                'ALLOWED_ORIGINS=https://example.test'
+                'WORKSPACE_ROOTS=C:\work'
+                'STORAGE_ROOT=C:\data'
+                'AUTH_COOKIE_NAME=skynet_hr_session'
+                'AUTH_SECRET=dev-secret'
+            )
+            # No mock: the fake nssm.cmd genuinely has no embedded file-version resource, so
+            # this exercises Get-NssmVersion's real $null path end-to-end through Invoke-Install.
+
+            { Invoke-Install -EnvFile $envPath -ServiceName 'Test' -RepoRoot $repoRoot `
+                -NssmPath $fakeNssm -StopTimeoutMs 30000 } |
+                Should -Throw '*unknown*'
+        }
+        finally {
+            Remove-Item -LiteralPath $envPath -Force -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $repoRoot -Recurse -Force -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $fakeNssm -Force -ErrorAction SilentlyContinue
+        }
+    }
+
     It 'refuses when nssm rejects a command, rather than reporting success' {
         # The missing-executable case above is Get-Command failing before nssm ever runs.
         # This is the other half (#233): nssm resolves and runs, but rejects one of the six
@@ -286,6 +401,9 @@ Describe 'Invoke-Install' {
                 'AUTH_SECRET=dev-secret'
             )
             Mock Get-ServiceParametersKey { "HKCU:\Software\SkyNetHRTests\$(New-Guid)" }
+            # The fake nssm.cmd has no embedded file-version resource; mock past the version
+            # gate so this test still reaches the exit-status check it exists to cover.
+            Mock Get-NssmVersion { '2.25.0.0' }
 
             { Invoke-Install -EnvFile $envPath -ServiceName 'Test' -RepoRoot $repoRoot `
                 -NssmPath $fakeNssm -StopTimeoutMs 30000 } |
@@ -324,6 +442,9 @@ Describe 'Invoke-Install' {
             New-Item -Path $fakeParamsKey -Force | Out-Null
             New-ItemProperty -LiteralPath $fakeParamsKey -Name 'AppNoConsole' -Value 1 -PropertyType DWord | Out-Null
             Mock Get-ServiceParametersKey { $fakeParamsKey }
+            # Same reason as the exit-status test above: the fake nssm.cmd carries no version
+            # resource, so the version gate is mocked past to reach the check under test.
+            Mock Get-NssmVersion { '2.25.0.0' }
 
             { Invoke-Install -EnvFile $envPath -ServiceName 'Test' -RepoRoot $repoRoot `
                 -NssmPath $fakeNssm -StopTimeoutMs 30000 } |

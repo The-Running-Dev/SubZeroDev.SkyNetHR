@@ -41,14 +41,14 @@
     in a way that fails silently. NSSM 2.24 is documented as unable to launch services on
     newer Windows without AppNoConsole=1, and that setting removes the console the Ctrl+C
     route needs - every stop then escalates to TerminateProcess, skipping `stop()`'s drain,
-    `manager.shutdown()` and the lock release, while the SCM still reports a clean stop. This
-    script does not attempt to detect that case by parsing the resolved nssm.exe's own
-    version: NSSM documents no command-line way to query it, and picking an admissibility
-    rule without one would be guessing at a policy this repository's own convention (AGENTS.md
-    "Stop if... bring it back rather than picking a floor unilaterally") says not to make
-    unilaterally. Tracked as issue #233's open item; every *other* nssm call's exit status is
-    now checked (Invoke-Nssm), so a rejected command fails the install instead of continuing
-    past it silently.
+    `manager.shutdown()` and the lock release, while the SCM still reports a clean stop. NSSM
+    documents no command-line way to query its own version, but every official build embeds
+    a Win32 file-version resource; Get-NssmVersion reads that directly (no process is
+    launched to do it) and Invoke-Install refuses to proceed when it reports less than
+    $script:MinimumNssmVersion (2.25.0.0, the floor named against issue #233 once the
+    version-detection mechanism itself stopped being the open question) or cannot be read at
+    all. Every *other* nssm call's exit status is also checked (Invoke-Nssm), so a rejected
+    command fails the install instead of continuing past it silently.
 
     The check: stop the service, then look for `<STORAGE_ROOT>\server.lock`. A shutdown that
     reached `stop()` removes it (D175, asserted by src/server.test.ts's S27.12); a hard kill
@@ -117,6 +117,11 @@ $script:AuthModeFields = @{
 }
 $script:AlwaysRequired = @('AUTH_MODE', 'ALLOWED_ORIGINS', 'WORKSPACE_ROOTS', 'STORAGE_ROOT')
 
+# The floor named against issue #233: NSSM builds below this are documented as unable to
+# launch services on newer Windows without AppNoConsole=1, which breaks the Ctrl+C graceful-
+# stop route this script depends on (see this script's own header comment).
+$script:MinimumNssmVersion = [version]'2.25.0.0'
+
 function Read-EnvFile {
     <# Hashtable of KEY=VALUE from a simple env file, or throws if the file is missing.
        No quoting/escaping support - deliberately as small as the deployment format needs. #>
@@ -184,6 +189,35 @@ function Invoke-Nssm {
     if ($LASTEXITCODE -ne 0) {
         throw "nssm $($Arguments -join ' ') failed (exit $LASTEXITCODE): $output"
     }
+}
+
+function Get-NssmVersion {
+    <# The resolved nssm.exe's embedded FileVersion, as a raw string, or $null when it has
+       none (or the path cannot be read). NSSM has no command-line version query - this reads
+       the Win32 file-version resource every official build embeds, directly off disk, so no
+       process is ever launched to answer the question. #>
+    param([Parameter(Mandatory)] [string] $Path)
+    try {
+        $raw = (Get-Item -LiteralPath $Path).VersionInfo.FileVersion
+        if ([string]::IsNullOrWhiteSpace($raw)) { return $null }
+        return $raw
+    }
+    catch {
+        return $null
+    }
+}
+
+function Test-NssmVersionSufficient {
+    <# $true when $Version parses to at least $Minimum. $null, empty, or an unparseable
+       string all fail closed to $false - an nssm build this cannot identify is exactly the
+       "unknown, so refuse" case, not "unknown, so assume it's fine". #>
+    param(
+        $Version,
+        [Parameter(Mandatory)] [version] $Minimum
+    )
+    if (-not $Version) { return $false }
+    try { return ([version]$Version) -ge $Minimum }
+    catch { return $false }
 }
 
 function Test-NssmNoConsole {
@@ -261,6 +295,12 @@ function Invoke-Install {
 
     $nssm = Get-Command $NssmPath -ErrorAction SilentlyContinue
     if (-not $nssm) { throw "nssm.exe not found ('$NssmPath'). Install it (https://nssm.cc) and retry, or pass -NssmPath." }
+
+    $nssmVersionRaw = Get-NssmVersion -Path $nssm.Source
+    if (-not (Test-NssmVersionSufficient -Version $nssmVersionRaw -Minimum $script:MinimumNssmVersion)) {
+        $found = if ($nssmVersionRaw) { $nssmVersionRaw } else { 'unknown (no embedded file-version resource)' }
+        throw "nssm.exe at '$($nssm.Source)' reports version $found; this script requires >= $($script:MinimumNssmVersion.ToString()). Builds below that are documented as unable to launch services on newer Windows without AppNoConsole=1, which would silently break the Ctrl+C graceful-stop route this script depends on (see this script's own header comment). Install a newer NSSM build (https://nssm.cc) and retry."
+    }
 
     $node = Get-Command node -ErrorAction SilentlyContinue
     if (-not $node) { throw 'node not found on PATH. Install Node >= 22.11.0 and retry.' }
