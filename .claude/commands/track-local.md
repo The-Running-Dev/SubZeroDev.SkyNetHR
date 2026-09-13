@@ -35,3 +35,14 @@ gap to fix. There is no projection here, so nothing can go `ProjectionStale`.
 step names `design/state-index.md` alongside it; that path does not exist here and `git add` fails
 on it. The mirror-refresh carve-out in `AGENTS.md`, *Git and delivery* is unaffected — it already
 scopes to paths the refresh scripts actually wrote.
+
+## tightened-authorization
+
+**The mirror-refresh carve-out's direct-to-`main` push does not work in this repository.**
+`AGENTS.md`, *Git and delivery* permits committing a mirror-only refresh straight to the default
+branch with no pull request. This repository's branch protection on `main` rejects every push
+that isn't through a pull request (GH013: "Changes must be made through a pull request"),
+regardless of what the diff contains — confirmed by a rejected push carrying only
+`design/state/work/*.md` (PR #327). Treat the carve-out as unavailable here: after running
+`Update-WorkMirror.ps1` and committing the mirror files, push the branch and open a pull request
+under the ordinary delegation instead of attempting the direct push.
