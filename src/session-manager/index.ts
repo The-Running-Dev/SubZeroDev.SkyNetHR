@@ -1731,8 +1731,7 @@ export function createSessionManager(deps: {
   ): Promise<void> {
     const appended = await store.appendAudit(record);
     if (!appended.ok) {
-      entry.adapter!.respond(requestId, 'deny');
-      await emit(entry, 'permission.resolved', {
+      await respondOrCancel(entry, turn, requestId, record, 'deny', {
         turnId: turn.turnId,
         requestId,
         decision: 'deny',
@@ -1749,8 +1748,7 @@ export function createSessionManager(deps: {
     }
 
     onDurable?.();
-    entry.adapter!.respond(requestId, success.decision);
-    await emit(entry, 'permission.resolved', {
+    await respondOrCancel(entry, turn, requestId, record, success.decision, {
       turnId: turn.turnId,
       requestId,
       decision: success.decision,
@@ -1758,6 +1756,59 @@ export function createSessionManager(deps: {
       operator: success.operator,
       reason: success.reason,
     });
+  }
+
+  // D213: `respond`'s `write_failed` means the child's stdin closed out from under this
+  // answer — the same race `send` hits right behind a spawn (D209/I59), but here the
+  // request was already removed from `turn.pending` (D33, before `finalizeResolution`
+  // runs), so the `exited` notification's own cancellation sweep can never reach it. This
+  // is the one place left to turn it into the `cancelled_process_exit` resolution
+  // `20-contract.md`'s `AdapterError.write_failed` row promises, instead of emitting the
+  // `intended` event/record as if the child had actually received it. `no_child` means the
+  // child was already gone before this call reached the adapter — the exited sweep already
+  // ran, or is racing to — so nothing new is owed here (the `AdapterError.no_child` row).
+  async function respondOrCancel(
+    entry: SessionEntry,
+    turn: Turn,
+    requestId: RequestId,
+    record: AuditRecord,
+    decision: PermissionDecision,
+    intended: EventPayloadMap['permission.resolved'],
+  ): Promise<void> {
+    const responded = entry.adapter!.respond(requestId, decision);
+    if (!responded.ok) {
+      if (responded.error.code === 'write_failed') {
+        const cancelled = await store.appendAudit({
+          ts: nowIso(),
+          operator: null,
+          sessionId: record.sessionId,
+          vendor: record.vendor,
+          sandbox: record.sandbox,
+          tool: record.tool,
+          input: record.input,
+          decision: 'deny',
+          scope: 'once',
+          reason: 'cancelled_process_exit',
+        });
+        await emit(entry, 'permission.resolved', {
+          turnId: turn.turnId,
+          requestId,
+          decision: 'deny',
+          scope: 'once',
+          operator: null,
+          reason: 'cancelled_process_exit',
+        });
+        if (!cancelled.ok) {
+          await emit(entry, 'session.notice', {
+            level: 'error',
+            code: 'audit_unavailable',
+            text: 'The audit record for a permission cancelled by process exit could not be written.',
+          });
+        }
+      }
+      return;
+    }
+    await emit(entry, 'permission.resolved', intended);
   }
 
   // S10.4: the server's own decision for a request matched against a standing rule.
