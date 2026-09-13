@@ -5308,18 +5308,4 @@ Reversibility: cheap — one constant and one guard.
 
 Staging only. Once an item becomes an issue it leaves this list.
 
-- **`session-manager` records a permission decision as delivered when `respond()` failed to write
-  it** (D213). Both `adapter.respond` calls on `answerPermission`'s resolution path
-  (`src/session-manager/index.ts`) ignore the `Result`. On `write_failed` the manager still emits
-  `permission.resolved` and an audit record carrying the operator's decision, though the child never
-  received it — and the request is no longer outstanding when the child's exit resolves the rest
-  `cancelled_process_exit`. `20-contract.md`'s error table is right: resolve `cancelled_process_exit`,
-  end the turn `process_exit`. Code-side; `/fix`.
-- **The SSE edge's backpressure `replay_gap` writes an `id:` line** (D209). The drop path for a
-  subscriber past `caps.subscriberQueueHighWater` in `src/edge/sse/index.ts` writes
-  `id: ${lastIdWritten}`, which D209 found `§ Streaming` and the file's own comment both forbid;
-  S3.3's no-`id:` test covers only the catch-up gap. Decided code-side in D209 and never tracked.
-  `/fix`.
-- **`edge/ws` repeats the frame discriminator inline rather than calling `isFrame`** (D209).
-  `deliver` in `src/edge/ws/index.ts` tests `'seq' in envelope`, which D209 found `§ contract`
-  forbids; `edge/sse` already imports `isFrame`. Decided code-side in D209 and never tracked. `/fix`.
+None at present.
