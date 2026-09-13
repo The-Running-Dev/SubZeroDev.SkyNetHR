@@ -1359,8 +1359,16 @@ What the declarations cannot say:
   **So an adapter surrenders the tree at `result` rather than at `close`, and any later adapter
   inherits that obligation** (D201). The turn's work is complete at the `result` and the child has
   nothing further to contribute, so the manager kills from there and the child's own exit arrives
-  as a *consequence* of the kill rather than as its trigger. `turn.ended` still follows that exit,
-  which is what keeps the guarantee below observable at the moment a caller can see it.
+  as a *consequence* of the kill rather than as its trigger.
+
+  **`turn.ended` follows the kill being *issued*, not the tree being confirmed gone** (D209).
+  `Adapter.kill()` dispatches and returns without awaiting the child — deliberately, so that an
+  operator's interrupt is not held open across an OS round trip — so what is established when
+  `turn.ended` is emitted is that the kill went out while the tree's root was still alive and
+  therefore still walkable. On POSIX the `SIGKILL` to the process group has been delivered by the
+  time the call returns; on Windows `taskkill /T /F` is itself a spawned process, so a
+  descendant's final teardown may briefly outlive the envelope. I59 states what a caller may rely
+  on, and it is that guarantee and not a stronger one.
 
   **A child's exit status is therefore not diagnostic on this path**: a non-zero code or a signal
   behind a `result` records the server's own act and must never turn a completed turn into a failed
@@ -1533,6 +1541,23 @@ reads it once at load and never probes.
 it is a process. Its surface is the process contract: what it accepts on the way in, what it
 does on the way out, and what it leaves on disk either way. That is stated here in full, on the
 same grounds a Markdown command file's is.
+
+**What it accepts on the way in includes two test seams, and naming them is what keeps "in
+full" true** (D206, D210). Each is read by shipped code, is set by nothing but the test suite,
+and is a no-op unless set:
+
+| Variable | Read by | What setting it does |
+|---|---|---|
+| `SKYNET_TEST_FORCE_STORE_CLOSE_ERROR` | `src/server.ts` | `'1'` makes `Store.close()` close and then reject, reaching shutdown step 5's catch |
+| `SKYNET_WS_FIRST_FRAME_DEADLINE_MS` | `src/edge/ws/index.ts` | a positive finite number replaces the bound on a WebSocket's first client frame; anything else leaves the default |
+
+**A seam may only make an already-best-effort step fail, or move a bound that is not a
+shutdown bound.** It may not change what shutdown writes, what it kills, the order it does either
+in, or its exit code — which is what keeps I52 and I54 true with either set as well as unset. A
+seam that could do any of those would be a second configuration surface arriving under a test's
+name. **Variables a fixture CLI reads are not on this list**: they configure a stand-in for the
+agent binary and never reach this process, and the adapters' `SKYNET_<VENDOR>_EXECUTABLE`, which
+does reach it, is governed separately by D91 (*`adapters/*`* above).
 
 It loads config, builds `store`, `records`, `checkpoints` and `session-manager`, runs boot in
 the order *`session-manager`* fixes above, wires exactly one edge (D10, D117) — plus
@@ -2295,9 +2320,9 @@ highest-value section in this document.
 | **I54** | A shutdown's completion never depends on a client disconnecting. Every step past the guard is bounded, so the exit is reached whether or not a subscriber is still attached — the clean path is reachable in the configuration that ships, not only when nobody was watching (D176) | `server` |
 | **I55** | From the moment `SessionManager`'s shutdown method is entered, no `AdapterNotification` of any kind reaches a handler below the sink. The mute sits on the manager's own `notify` sink, which every notification already passes through, and **not** on the `exited` handler: `turn.ended` arrives as a second, separate notification after `exited` inside the same synchronous callback, so a mute on the handler would silence the cancellations and let the turn's closure through. **One kind is not simply dropped**: a `spawned` reaching the sink is answered there — `killProcessTree(n.pid, n.pgid)` on the pid the notification itself carries, D23's own reap-kill — because that pid is the only handle a child spawned behind the mute leaves, and nothing else in this module ever holds it. The kill writes nothing, resolves nothing, emits nothing and appends nothing, so no code below the sink runs either way and I52 still holds by construction (D198). The mute is one-way — nothing clears it, and shutdown is its only caller (D178) | `session-manager` |
 | **I56** | `<storage>/server.lock` is written or removed only by the instance that holds it. `releaseLock` and every renewal read the file first and act only while it still carries this process's `instanceId`; an absent file or a foreign one means this server has been displaced — it removes nothing, and stops by running shutdown's ordinary steps, whose release then reads a foreign id and deletes nothing of its own accord (D180, D195). **Renewal continues through shutdown's steps 1 to 3 and is cancelled as step 4's first act**: this server holds the root while it drains, kills and tombstones, so a timer stopped any earlier lets a successor reclaim a root still being written to | `store`, `server` |
-| **I57** | `pid`, `hostname`, `startedAt` and `image` on a `ServerLock` are informational. No decision reads them: not the reclaim decision, not the release check, not the renewal check. Their only consumer is the text of a `StartupError.storage_locked` (D180) | `store`, `session-manager` |
+| **I57** | `pid`, `hostname`, `startedAt` and `image` on a `ServerLock` are informational. No decision reads them: not the reclaim decision, not the release check, not the renewal check. Their only consumers are the text of a `StartupError.storage_locked` and the log line a reclaim writes naming the holder it displaced — both reports to an operator, neither a decision (D180) | `store`, `session-manager` |
 
-| **I59** | A turn ends by ending the process tree its child rooted, on **every** path a turn can end by — normal exit, interrupt, adapter failure, shutdown — using D38's one mechanism and no other. When `turn.ended` is observable for a turn, no process that turn started is still running, so a released workspace claim and a subsequent restore are never conditional on an untracked descendant (D184). **Every one of those paths kills a tree whose root is still alive**: on normal exit the kill is issued at the `result` and not behind the child's own exit, because `taskkill /PID <pid> /T /F` against an exited root fails at target resolution and never walks the tree, so a kill placed after `close` would hold this invariant on POSIX alone — and a half-platform invariant is not I59 (D201, `design/findings/S28-tree-reachability.md`). The child's exit is then a consequence of the kill and its code or signal is not diagnostic | `session-manager`, `adapters/*` |
+| **I59** | A turn ends by ending the process tree its child rooted, on **every** path a turn can end by — normal exit, interrupt, adapter failure, shutdown — using D38's one mechanism and no other. When `turn.ended` is observable for a turn, the tree kill for every process that turn started has already been **issued** against a live root, so a released workspace claim and a subsequent restore are never conditional on an *untracked* descendant (D184). The kill is issued and not awaited, so on Windows a descendant's final teardown may briefly outlive the envelope (D209). **Every one of those paths kills a tree whose root is still alive**: on normal exit the kill is issued at the `result` and not behind the child's own exit, because `taskkill /PID <pid> /T /F` against an exited root fails at target resolution and never walks the tree, so a kill placed after `close` would hold this invariant on POSIX alone — and a half-platform invariant is not I59 (D201, `design/findings/S28-tree-reachability.md`). The child's exit is then a consequence of the kill and its code or signal is not diagnostic | `session-manager`, `adapters/*` |
 | **I60** | `Config.storageRoot` is jail-normalised, and `pathsOverlap` is false between it and every entry of `Config.workspaceRoots`. A configuration failing this is refused at startup and the server does not listen; no session is ever served from it (D185) | `config` |
 | **I58** | An `IgnoredManifest` records path, kind, size and mtime and **never content**. `RestoreResult.unreached === null` means the comparison could not be made and never that nothing differs; an empty array is the positive answer. No gate, control, or refusal anywhere in this contract reads a manifest — it is a report to an operator and its collapsed-directory blindness makes it unusable as evidence (D182, D187) | `checkpoints`, `client` |
 | **I61** | Every write of `<storage>/server.lock` publishes the file whole, so a sample observes complete contents or none and never a partial file: a reclaim and every renewal by temp-file-then-atomic-rename, and a claim on an absent lock by an exclusive create, which must fail rather than overwrite when a second booting server wrote first. A lock that will not **parse** is therefore corruption, and `claimLock` refuses on it rather than reclaiming (D196). A lock that parses and merely lacks `renewals` is not corruption: it predates the lease, and it reclaims by the ordinary rule (I50) | `store` |
@@ -2352,8 +2377,9 @@ the whole turn**.
 (D92). The live stream carries records that are ordinary, harmless, and no part of this
 vocabulary; raising `error / adapter_unknown_record` for each would put a diagnostic line in
 front of the operator on every routine turn. The adapter therefore holds a named ignore list —
-top-level `rate_limit_event` and `control_response`, and the `system` subtypes `hook_started`,
-`hook_response`, `thinking_tokens` and `post_turn_summary` — and returns silently for those.
+top-level `rate_limit_event` and `control_response`; the `system` subtypes `hook_started`,
+`hook_response`, `thinking_tokens` and `post_turn_summary`; and the `content_block_delta`
+delta types `thinking_delta` and `input_json_delta` (D172) — and returns silently for those.
 Anything outside both the thirteen rows and that list still raises `adapter_unknown_record`,
 non-fatally, with the record preserved in `raw`. **The list is a vendor fact and lives with the
 vendor's adapter; adding to it is an adapter change, never a change to `ErrorEventKind`.**
@@ -2767,10 +2793,9 @@ belong to the `exec --json` fallback alone; neither affects a session on `app-se
     correct value depends on how an operator mounted anything. It is therefore a **module
     constant** — `LOCK_OBSERVATION_WINDOW_MS`, 10 000 ms — and this document's standing ruling on
     sibling bounds stands unreversed. The partition residual is not closed but put out of reach, and
-    is now the reason the scope is drawn where it is. **This leaves `10-design.md` overstating the
-    scope in three places** — *Platform divergence*'s network-share row and the paragraph above it,
-    the partition row in *Failure modes*, and open question 16 itself. That edit is `/design`'s, and
-    this pass deliberately did not make it. (#206)
+    is now the reason the scope is drawn where it is. `10-design.md` has since been brought into
+    line in all three places this item once named — *Platform divergence*, the partition row in
+    *Failure modes*, and open question 16. (#206)
 17. **Resolved by D196, and only because 16 went the way it did.** Every write of the lock
     publishes it whole — a reclaim and every renewal by the temp-file-then-atomic-rename helper the
     same module already uses for `meta.json` under I16, a claim on an absent lock by an exclusive

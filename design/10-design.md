@@ -2417,20 +2417,17 @@ the release: if it is lost, `pids.ndjson` records a dead pid as live, and D23's 
 tombstones it at the next boot rather than killing whatever now holds that pid — which is the
 case that guard was built for.
 
-What is left behind, by the way the server was stopped:
+**What is left behind, by the way the server was stopped, is `20-contract.md § server`'s
+table and is not restated here** — for the same reason the step list above is not (D205). What
+that table cannot carry is why it is shaped as it is, and that is this section's:
 
-| Ended by | `server.lock` | Spill of a turn in flight | Child | What boot does |
-|---|---|---|---|---|
-| One signal, drain completes | Removed | Ends on an unpaired `turn.started` | Killed and tombstoned | Reclaim not invoked, reap finds nothing. D39 still closes the turn, D130 still marks the outage |
-| One signal, drain times out | Removed | As above | As above | As above |
-| A second signal | **Left** | As above | **Still running** — the guard exits before step 3 | Reclaimed after one observation window and logged (D180); D23 reaps the tree; the rest as above |
-| `SIGKILL`, OOM, power cut | **Left** | As above | Still running, or gone with the container | As above — except after a host crash, where the `startedAt` limb tombstones the entry rather than killing anything |
-
-**Two of the four rows still leave a tree for boot to reap**, and both are ways of stopping
-that shutdown does not get to control — which is why D177 adds a step without taking anything
-away from D23. The spill column does not vary at all, and that is the measure of how little
-shutdown is load-bearing: every one of these ends a turn in flight the same way on disk, and
-boot repairs all four identically.
+**Some ways of stopping still leave a tree for boot to reap**, and every one of them is a way
+of stopping that shutdown does not get to control — a second signal, which exits before step 3
+can run, and the kills and power cuts that produce no shutdown at all. That is why D177 adds a
+step without taking anything away from D23: the new step covers the paths shutdown reaches, and
+the reaper still covers the paths it does not. **The spill column does not vary across any of
+them**, and that is the measure of how little shutdown is load-bearing: every way of stopping
+ends a turn in flight the same way on disk, and boot repairs them all identically.
 
 **A shutdown can leave `ckpt.git/index.lock`** behind, where the process dies with a
 `git commit` in flight, and that is an already-designed state rather than a new one:

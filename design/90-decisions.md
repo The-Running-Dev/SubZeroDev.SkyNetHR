@@ -5182,6 +5182,69 @@ altering the kit for every consuming repo.
 Reversibility: cheap — reversible by later building `design/state-index.md` and deleting the
 `document-map` override, should this repo adopt the fuller apparatus.
 
+### 2026-09-13 — D209 `turn.ended` follows the tree kill being issued, not the tree being gone
+Context: a reconciliation against `957bf09` found `20-contract.md § session-manager` stating that
+`turn.ended` "still follows that exit", and I59 that no process a turn started "is still running"
+once `turn.ended` is observable. Neither is what the tree establishes. `Adapter.kill()` dispatches
+and returns without awaiting the child (`src/adapters/claude/index.ts`, commented "Not awaited"),
+and the manager awaits that call and then emits. On POSIX the `SIGKILL` to the group is delivered
+before the call returns; on Windows `taskkill /T /F` is a spawned process, so a descendant's
+teardown can briefly outlive the envelope.
+Chosen: **the contract states what is established — the kill issued against a live, walkable root
+before `turn.ended` — and I59 is narrowed to that.** The property D201 fought for is untouched:
+the kill still goes out while the root is alive, which is the half of the Windows finding that
+mattered, since `taskkill` against an exited root never walks the tree at all.
+Rejected: **making `kill()` await the tree's death**, so the old wording became literally true. It
+holds an operator's interrupt response open across an OS round trip, which is the exact reason the
+adapter declines to await, and it needs a bound whose expiry reintroduces the same gap.
+Rejected: **leaving both sides and recording the gap as known.** It keeps an invariant whose
+wording a reader would reasonably build a restore guarantee on and which the code does not hold.
+Rejected: **measuring first on Windows.** Whether the window is ever observable does not change
+which statement is true of the code.
+Also decided in the same pass, code-side, and routed to `/fix` rather than made here: a `send`
+that fails *after* the child spawned (`write_failed` from inside the spawn handler) ends the turn
+with no tree kill at all — a live I59 breach, where the contract was right; `edge/ws` repeats the
+frame discriminator inline rather than calling `isFrame`, which `§ contract` forbids; and the SSE
+edge's backpressure `replay_gap` writes an `id:` line, which `§ Streaming` and the file's own
+comment both forbid. None of the three needed a contract change.
+Reversibility: cheap — prose in two places.
+
+### 2026-09-13 — D210 `§ server` names the two test seams shipped code reads, and says what a seam may do
+Context: D206 ruled that `20-contract.md § server`, which states the process input surface "in
+full", must name `SKYNET_TEST_FORCE_STORE_CLOSE_ERROR`, and left the amendment owed to `/contract`.
+It never landed. The reconciliation that found that also found a second seam read by shipped code,
+`SKYNET_WS_FIRST_FRAME_DEADLINE_MS`. It first reported four; two of those four,
+`SKYNET_TEST_SCENARIO` and `SKYNET_CODEX_NO_APP_SERVER`, turned out on reading to appear in shipped
+files only inside comments and to be read by fixture CLIs, and the sign-off to "name all four" was
+given on that miscount. The intent signed off — make "in full" true by naming every seam this
+process reads — is what is applied.
+Chosen: **both real seams are named, with D206's constraint widened to cover the second**: a seam
+may only make a best-effort step fail or move a bound that is not a shutdown bound, and never
+change what shutdown writes, kills, orders, or exits with. Variables read only by a fixture CLI are
+stated to be off the list, because they never reach this process.
+Rejected: **naming all four as signed off.** It would write two inputs this process does not read
+into the one section that claims completeness — the false-statement class a reconciliation exists
+to remove.
+Rejected: **dropping the "in full" claim.** It gives up the property that makes the section
+checkable, which D206 already declined.
+Reversibility: cheap.
+
+### 2026-09-13 — D211 `10-design.md § Shutdown ordering` stops restating the contract's outcome table
+Context: D205 deleted the shutdown step list and the restore operation list from `10-design.md`
+because a second copy of a sequence the contract carries rots. The same section kept a second
+copy of the contract's "what is left behind" table beside them, and it rotted by the identical
+mechanism: four rows against the contract's five, missing D195's displacement row, with prose
+reading "two of the four rows". D205's pass swept the fenced blocks and not the table.
+Chosen: **D205's ruling, applied to the copy it missed.** The table is deleted and replaced by a
+pointer to `20-contract.md § server`; the argument around it — why some ways of stopping still
+leave a tree for boot, why D177 adds a step without removing D23's, why the spill column does not
+vary — stays, rewritten to carry no count, because none of it is recoverable from the tree.
+Rejected: **adding the fifth row.** Re-accepts the keep-both-copies discipline that has now failed
+twice in one section over four slices, which D205 already rejected.
+Rejected: **moving the argument into the contract.** Rejected by D205 as larger than the drift
+warrants, and nothing here changes that.
+Reversibility: cheap — the table pastes back from the contract.
+
 ## Open
 
 Staging only. Once an item becomes an issue it leaves this list.
