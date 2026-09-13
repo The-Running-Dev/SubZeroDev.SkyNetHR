@@ -36,8 +36,10 @@ An operator can, from a browser:
 
 Item 4 names Claude by decision, not by omission. A Codex session satisfies items 3 and 5
 to 7, and in place of per-call approval runs under a launch-time policy with a persistent
-banner naming its sandbox — see D5 and D27. Whether Codex's runtime approval is reachable
-over a programmatic transport is unverified, and tier one does not wait on that answer.
+banner naming its sandbox — see D5 and D27. Codex's runtime approval **is** reachable over a
+programmatic transport — S8.1 observed it on `codex app-server` and established that
+`codex exec --json` structurally cannot carry it — and tier one does not wait on that answer
+either way: the shipped policy stays `preauthorised`, and acting on the prompt is D5's to revise.
 
 Item 6 excludes what the workspace's own `.gitignore` excludes, and that is a decision
 rather than a shortfall. A rollback that reinstated `node_modules` and build output would
@@ -93,8 +95,11 @@ Binding. Out of scope even where a change looks trivial.
   authenticates, or a LAN boundary.
 - Must run on Windows and Linux servers. The primary host is Windows. Both are supported
   targets held to the same definition of done, and both are gated by an automated run — path
-  handling, process termination and workspace rollback all differ between them. No such gate
-  exists yet; building it is tier-one work.
+  handling, process termination and workspace rollback all differ between them. That gate
+  exists: `.github/workflows/verify.yml` runs the suite on `ubuntu-latest` and
+  `windows-latest` from one matrix, `fail-fast: false` (S19). What it proves, and which
+  surfaces still have a code path on both platforms and no criterion naming them, are in
+  `10-design.md § Platform divergence`.
 
 ## What we are copying, and from where
 
