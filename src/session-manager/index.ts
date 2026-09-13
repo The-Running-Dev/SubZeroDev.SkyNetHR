@@ -1262,6 +1262,14 @@ export function createSessionManager(deps: {
         if (sendResult.error.code === 'agent_unavailable') {
           await emit(entry, 'error', { kind: 'agent_unavailable', message: sendResult.error.detail, fatal: true });
         }
+        // D209/I59: `write_failed` is the one `send()` failure that can follow a real
+        // spawn — the write racing right behind it, on a child already live and tracked
+        // (`spawned` already notified). This Result never reaches the `turn.ended`
+        // notification handler that carries every other path's kill (S28.3/S28.9), so
+        // it owes the same `Adapter.kill()` here or the tree it just spawned outlives
+        // the turn. A `send` that never spawned (e.g. `agent_unavailable`) still has no
+        // live child, so this stays the no-op S28.6 already covers.
+        await entry.adapter!.kill();
         // The `turn.started` above is already durable; pair it (I14, D39) before
         // freeing the slot, or the log carries an open turn no restart ever repairs.
         await emit(entry, 'turn.ended', { turnId, stopReason: 'error', usage: null });

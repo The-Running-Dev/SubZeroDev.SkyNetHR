@@ -4797,6 +4797,59 @@ test('S28.5 — the same Adapter.kill() interrupt and shutdown already call is e
   }
 });
 
+test('D209 — a send() that fails after the child spawned (write_failed) still ends the tracked tree, not just the turn', async () => {
+  const { config, store, checkpoints, workspaceRoot } = await makeManager('full');
+  const owner = 'operator-1' as OperatorId;
+  const projectDir = path.join(workspaceRoot, 'proj-d209-write-failed');
+  await mkdir(projectDir);
+
+  let killed = false;
+  let treePid: number | null = null;
+  let treeGrandchildPid: number | null = null;
+  const factory: (vendor: Vendor, adapterOpts: AdapterOptions) => Result<Adapter, AdapterError> = (vendor, adapterOpts) => {
+    let tree: { pid: number; pgid: number | null } | null = null;
+    const adapter: Adapter = {
+      vendor,
+      policy: { mode: 'interactive', sandbox: null, banner: null },
+      acceptsAttachments: false,
+      async send() {
+        // D209: a `send` that fails after the child spawned — a write racing the write
+        // that immediately follows `spawn` in the real adapter — is `write_failed`, not
+        // `agent_unavailable`; the child is already live and tracked when it happens.
+        const spawned = await spawnTrackedTree();
+        strayPids.push(spawned.pid, spawned.grandchildPid);
+        treePid = spawned.pid;
+        treeGrandchildPid = spawned.grandchildPid;
+        tree = { pid: spawned.pid, pgid: spawned.pgid };
+        adapterOpts.notify({ kind: 'spawned', pid: spawned.pid, pgid: spawned.pgid, image: 'node' });
+        return { ok: false, error: { code: 'write_failed', detail: 'stdin not writable' } };
+      },
+      respond() {
+        return { ok: true, value: undefined };
+      },
+      async kill() {
+        killed = true;
+        if (!tree) return;
+        const { pid, pgid } = tree;
+        tree = null;
+        await fixtureKillTree(pid, pgid);
+      },
+    };
+    return { ok: true, value: adapter };
+  };
+
+  const manager = createSessionManager({ config, store, checkpoints, records: notImplementedProxy<Records>('records'), createAdapter: factory });
+  const created = await manager.create(owner, { vendor: 'claude', cwd: projectDir, model: null, sandbox: null, requisitionId: null });
+  assert.equal(created.ok, true);
+  if (!created.ok) return;
+
+  const messaged = await manager.message(created.value.sessionId, owner, 'go', []);
+  assert.equal(messaged.ok, false, "send()'s write_failed surfaces as the message() error");
+
+  assert.equal(killed, true, "I59: a live-rooted tree this turn spawned must not survive send()'s failure Result");
+  await waitUntil(() => !isAlive(treePid!) && !isAlive(treeGrandchildPid!), 5000);
+});
+
 test('S28.6 — a turn that spawned nothing, and a turn whose child is already gone, both end normally with a no-op kill and no extra envelope or notice', async () => {
   const { config, store, checkpoints, workspaceRoot } = await makeManager('full');
   const owner = 'operator-1' as OperatorId;
