@@ -1004,6 +1004,73 @@ test('S4.7 — an audit append failure denies the permission, and the turn conti
   assert.equal(toolResult.ok, false, 'the tool never ran — the child was told deny');
 });
 
+test('D213/#322 — a write_failed from respond() resolves the pending permission cancelled_process_exit, not the operator\'s decision', async () => {
+  const { config, store, checkpoints, workspaceRoot, storageRoot } = await makeManager('full');
+  const owner = 'operator-1' as OperatorId;
+  const projectDir = path.join(workspaceRoot, 'proj-d213');
+  await mkdir(projectDir);
+
+  // A fixture adapter that reports one outstanding permission request as soon as `send`
+  // is called, then always fails `respond` with `write_failed` — standing in for the
+  // race where the child's stdin has already closed by the time the operator answers.
+  const factory = (vendor: Vendor, adapterOpts: AdapterOptions): Result<Adapter, AdapterError> => {
+    const adapter: Adapter = {
+      vendor,
+      policy: { mode: 'interactive', sandbox: null, banner: null },
+      acceptsAttachments: false,
+      async send(_text, _attachments, _resume, turnId) {
+        adapterOpts.notify({
+          kind: 'event',
+          event: {
+            kind: 'permission.request',
+            data: { turnId, requestId: 'req-1', callId: 'call-1', tool: 'Bash', input: { cmd: 'ls' }, matchTarget: null, suggestions: [] },
+          },
+        } as never);
+        return { ok: true, value: undefined };
+      },
+      respond(_requestId, _decision) {
+        return { ok: false, error: { code: 'write_failed', detail: 'stdin not writable' } };
+      },
+      async kill() {},
+    };
+    return { ok: true, value: adapter };
+  };
+
+  const manager = createSessionManager({ config, store, checkpoints, records: notImplementedProxy<Records>('records'), createAdapter: factory });
+
+  const created = await manager.create(owner, { vendor: 'claude', cwd: projectDir, model: null, sandbox: null, requisitionId: null });
+  assert.equal(created.ok, true);
+  if (!created.ok) return;
+  const { sessionId } = created.value;
+
+  const received: Envelope[] = [];
+  await manager.subscribe(sessionId, owner, 0, { deliver: (e) => { if ('seq' in e) received.push(e); }, close: () => {} });
+  await manager.message(sessionId, owner, 'go', []);
+
+  await waitUntil(() => received.some((e) => e.kind === 'permission.request'));
+  const requestId = (received.find((e) => e.kind === 'permission.request')!.data as { requestId: string }).requestId;
+
+  const answered = await manager.answerPermission(sessionId, owner, { requestId: requestId as never, decision: 'allow', scope: 'once', rule: null, reason: null });
+  assert.equal(answered.ok, true);
+  if (answered.ok) assert.equal(answered.value.accepted, true);
+
+  await waitUntil(() => received.some((e) => e.kind === 'permission.resolved'));
+  const resolutions = received.filter((e) => e.kind === 'permission.resolved');
+  assert.equal(resolutions.length, 1, 'exactly one permission.resolved for this request — the allow the operator sent, never delivered, is not also reported');
+  const resolved = resolutions[0]!.data as { decision: string; scope: string; operator: string | null; reason: string };
+  assert.equal(resolved.decision, 'deny');
+  assert.equal(resolved.scope, 'once');
+  assert.equal(resolved.operator, null);
+  assert.equal(resolved.reason, 'cancelled_process_exit', 'a write_failed on respond() must not be reported as though the operator\'s decision reached the child');
+
+  await new Promise((r) => setTimeout(r, 100));
+  const audit = await readAudit(storageRoot);
+  assert.equal(audit.length, 2, 'the operator\'s durable decision, then the correction — never just the decision as though it were delivered');
+  assert.equal(audit[0]!.decision, 'allow');
+  assert.equal(audit[1]!.decision, 'deny');
+  assert.equal(audit[1]!.reason, 'cancelled_process_exit');
+});
+
 test('S4.9 — a child that dies with requests outstanding resolves each one cancelled_process_exit, each with an audit record, before turn.ended', async () => {
   const { manager, workspaceRoot, storageRoot } = await makeManager('die-with-pending');
   const owner = 'operator-1' as OperatorId;
