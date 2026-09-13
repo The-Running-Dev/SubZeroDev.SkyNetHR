@@ -112,10 +112,11 @@ key rather than passing it as an `nssm set` argument.
 **Verify the stop path once, before trusting the deployment.** `nssm stop` attaches to the
 child's console and raises a Ctrl+C event, which Node delivers as `SIGINT` — the same
 handler `src/server.ts` installs for a local Ctrl+C, on the same path as the container's
-`SIGTERM`. That route works, but it depends on the child having a console, and NSSM 2.24 is
+`SIGTERM`. That route works, but it depends on the child having a console. NSSM 2.24 is
 documented as unable to launch services on newer Windows without `AppNoConsole=1` — a
 setting that removes exactly that console and turns every stop into a hard kill which still
-reports success. So confirm it once, on your build:
+reports success — so the installer refuses any NSSM build below 2.25, or one whose version it
+cannot read. `AppNoConsole` set by hand breaks the same route on any build, so confirm it once:
 
 ```powershell
 nssm stop SkyNetHR
