@@ -5245,6 +5245,81 @@ Rejected: **moving the argument into the contract.** Rejected by D205 as larger 
 warrants, and nothing here changes that.
 Reversibility: cheap — the table pastes back from the contract.
 
+### 2026-09-13 — D212 `§ The divergence classes` follows the kit-synced checker, and the comparison reaches here
+Context: kit-sync #303 (`3992b26`) replaced `tools/Test-DesignState.ps1` with one that declares and
+raises a record-pair and site-placement round — `RecordPairMalformed`, `HalfStatusMismatch`,
+`HalfOverlap`, `SiteAmbiguous`, `SiteOutOfReach`, `SiteContradictsLive`, `DecisionUnplaced`,
+`SupersessionCycle`, and the reported `LiveAlreadyStated` — bounds `ClosureOverBudget` with the
+unit's own artifact excluded, and stopped discarding the class-list result on the `StateSetAbsent`
+return (#259's first criterion). The section's rows did not travel with it, although the section
+itself says a kit-sync brings them in the same commit, and the checker has reported a blocking
+`ClassListDisagreement` since — unnoticed, because nothing in CI runs it. The section also still
+said, per D197, that the comparison is discarded here and that the list is shorter than the kit's
+because this script does not implement that round. Both are now false.
+Chosen: **the document follows the script.** The nine rows are transcribed from
+`SubZeroDev.AgentKit`'s contract at `ac828a3`, with `LiveAlreadyStated`'s reason carrying no kit
+invariant number; `ClosureOverBudget`'s row takes the bounded definition the script now computes,
+a change `ClassListDisagreement` cannot see by the section's own account; the reach paragraph says
+the comparison survives `StateSetAbsent`; and the `*-local.md` example is corrected, since
+`.claude/commands/track-local.md` now ships (D207). This completes #303 rather than setting policy:
+the section had already assigned these rows to the kit-sync that brought the script.
+Rejected: **routing the rows to `/contract` as an amendment.** Same tier, another session, and the
+blocking finding stands meanwhile, for a change the section had already assigned.
+Rejected: **narrowing this repository's copy of the script back to the old list.** It forks a
+kit-owned file that the next `/kit-sync` overwrites.
+Reversibility: cheap.
+
+### 2026-09-13 — D213 A `write_failed` from `send` ends the turn `error`, not `process_exit`
+Context: `20-contract.md`'s error table gave `AdapterError.write_failed` one story — resolve pending
+permissions `cancelled_process_exit`, end the turn `process_exit`. From `send`, `session-manager`'s
+`message()` ends the turn `stopReason: 'error'` and returns the adapter error, which the edge maps to
+`503 agent_unavailable`; #317 added the tree kill that path owed under I59 (D209). No permission can
+be pending there — the turn has only just started — so the row's first half was vacuous on that path
+and its second half was false.
+Chosen: **the contract follows the code on the `send` path**, and the row is split by origin. `error`
+is the accurate reason: the child did not exit on its own; the server gave up on a live one and
+killed it.
+Rejected: **changing the code to end the turn `process_exit`.** It attributes a server-side kill to
+the child, and changes a `stopReason` a client already sees.
+Also found in the same pass, and kept on the contract's side: from `respond`, the manager ignores the
+`Result` entirely (§ Open).
+Reversibility: cheap — prose.
+
+### 2026-09-13 — D214 The Windows installer refuses an NSSM build below 2.25.0.0
+Context: D191 made the post-stop `server.lock` check the guard against NSSM 2.24's documented need
+for `AppNoConsole=1` on newer Windows — a setting that removes the console the Ctrl+C graceful-stop
+route needs, turning every stop into a hard kill that still reports success. #233 asked the
+installer to refuse such a build outright, and stopped at the floor as a policy call. The user set
+it; #319 implemented it.
+Chosen: **`tools/Install-WindowsService.ps1` refuses any NSSM whose embedded Win32 file-version is
+below 2.25.0.0, unconditionally, and refuses when that version cannot be read.** The version is read
+off the executable's resource on disk; no process is launched. The post-stop check stays (D191),
+because `AppNoConsole` set by hand breaks the same route on any build.
+Rejected: **a floor conditional on Windows version.** The documented failure is stated against
+"newer Windows" with no build boundary, so a condition would need a boundary nothing documents.
+Rejected: **launching `nssm` to ask its version.** NSSM documents no command-line version query.
+Rejected: **admitting a build whose version cannot be read.** An unidentified build is the case the
+floor exists to refuse; failing open passes exactly the build nobody can vouch for.
+Rejected: **leaving detection to the post-stop check alone**, as D191 did. It catches the failure
+only after a deployment is already trusted, and only if the operator runs it.
+Reversibility: cheap — one constant and one guard.
+
 ## Open
 
 Staging only. Once an item becomes an issue it leaves this list.
+
+- **`session-manager` records a permission decision as delivered when `respond()` failed to write
+  it** (D213). Both `adapter.respond` calls on `answerPermission`'s resolution path
+  (`src/session-manager/index.ts`) ignore the `Result`. On `write_failed` the manager still emits
+  `permission.resolved` and an audit record carrying the operator's decision, though the child never
+  received it — and the request is no longer outstanding when the child's exit resolves the rest
+  `cancelled_process_exit`. `20-contract.md`'s error table is right: resolve `cancelled_process_exit`,
+  end the turn `process_exit`. Code-side; `/fix`.
+- **The SSE edge's backpressure `replay_gap` writes an `id:` line** (D209). The drop path for a
+  subscriber past `caps.subscriberQueueHighWater` in `src/edge/sse/index.ts` writes
+  `id: ${lastIdWritten}`, which D209 found `§ Streaming` and the file's own comment both forbid;
+  S3.3's no-`id:` test covers only the catch-up gap. Decided code-side in D209 and never tracked.
+  `/fix`.
+- **`edge/ws` repeats the frame discriminator inline rather than calling `isFrame`** (D209).
+  `deliver` in `src/edge/ws/index.ts` tests `'seq' in envelope`, which D209 found `§ contract`
+  forbids; `edge/sse` already imports `isFrame`. Decided code-side in D209 and never tracked. `/fix`.
