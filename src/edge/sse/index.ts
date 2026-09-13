@@ -151,7 +151,7 @@ export function createSseEdge(deps: EdgeDeps): RequestListener {
         kind: 'error',
         data: { kind: 'replay_gap', message: 'the subscriber fell too far behind to keep delivering live', fatal: false },
       } as Envelope;
-      res.write(`id: ${lastIdWritten}\nevent: error\ndata: ${JSON.stringify(gap)}\n\n`);
+      res.write(`event: error\ndata: ${JSON.stringify(gap)}\n\n`);
       teardown();
       if (!res.writableEnded) res.end();
     });

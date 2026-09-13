@@ -1046,6 +1046,12 @@ describe('#133 — a slow live subscriber is dropped past caps.subscriberQueueHi
     const text = Buffer.concat(raw).toString('utf8');
     assert.match(text, /"kind":"replay_gap"/, 'a replay_gap envelope was delivered before the drop');
     assert.match(text, /"fatal":false/, 'the gap is reported non-fatal, same shape session-manager.subscribe mints');
+
+    // #323 — the backpressure gap frame restates a watermark and must carry no id:, the same
+    // rule S3.3 already asserts for the catch-up gap (§ Streaming, D209).
+    const frames = text.split('\n\n').filter((f) => f.trim().length > 0);
+    const gapFrame = frames.find((f) => f.includes('replay_gap'))!;
+    assert.doesNotMatch(gapFrame, /^id:/m, 'and carries no id: — an id here would resume past history never received');
   });
 });
 
