@@ -45,7 +45,7 @@ Cost: Cheap now. The contradiction is between two paragraphs of the same documen
 
 ## F4
 Severity: LOCAL
-Status: unadjudicated
+Status: defect (adjudicated 2026-09-14). Added evidence: the target intends restore to hold a reservation. L609 says "workspace creation/restore additionally uses A11 reservations", and L870 says restore "must participate in A11/A22 concurrency". A11 L368, the actual specification, describes only a start-of-restore check. SkyNetHR's `maxLiveSessionsPerWorkspace: 1` is not exposed, because S1 being live already refuses the create.
 Claim: A11's restore exclusivity is checked once at the start of a restore and is not held as a reservation. The create admission formula ("live sessions + pending reservations") does not see a restore in progress.
 Where: §5 A11 bullets 3–4, 6
 Breaks when: An embedder sets `maxLiveSessionsPerWorkspace: 2`. A11 makes this configurable, and only SkyNetHR sets it to `1`. Session S1 on `repo` starts `checkpoints.restore`, which passes its exclusivity check because no other overlapping session is live. While the checkout runs, `sessions.create` on `repo/web` counts one live session and zero reservations, which is below 2, so it is admitted. The new session's first turn writes into the tree mid-checkout.
