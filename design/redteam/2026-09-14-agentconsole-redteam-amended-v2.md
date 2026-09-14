@@ -54,7 +54,7 @@ Cost: Cheap now.
 
 ## F5
 Severity: LOCAL
-Status: unadjudicated
+Status: defect (adjudicated 2026-09-14). Evidence correction: L548 is the direct contradiction, because the meta package references every `Runtime.<rid>` package, which L647/L654/L859 forbid. L535's "one package per RID" is not forbidden, since §10 L654 allows per-RID packages if a single package does not fit. It is only a premature freeze of the graph against L640/L663/L859.
 Claim: §8 still states the NuGet package graph that §10 and §15 forbid.
 Where: §8 L535 ("one package per RID"), L548 ("`SubZeroDev.AgentConsole` references all `Runtime.<rid>` packages"); §10 L647; §15 L859
 Breaks when: An implementer follows §8's package tree. §10 says the meta package "must **not** depend on every `Runtime.<rid>` package", and §15 says not to freeze the RID graph before the packaging spike.
