@@ -20,7 +20,7 @@ Cost: Expensive later. The hook set, and where each hook sits relative to rollba
 
 ## F2
 Severity: STRUCTURAL
-Status: unadjudicated
+Status: defect (adjudicated 2026-09-14). Evidence corrections: (1) "§3 L79" is §2 K2's recommended resolution. The rule that binds the amended text is A4 L318–319, where the bridge "injects it into the runtime call" and a non-owner gets `not_found`. L849 backs up A12's ban on owner filtering in bridges. (2) The document writes `principal` on `sessions.list`, `attachments.begin`, `events.append` and `turns.interrupt`, so its absence elsewhere is not shorthand. (3) The handle-keyed operations (`attachments.write/commit/abort`, `events.credit`, `events.unsubscribe`) are the weaker half, since nothing says the handle is bound to the opening principal. The strong half is `events.subscribe`, `events.read`, `toolOutput.read` and `attachments.read`, which are opened with no principal at all.
 Claim: A2's read, subscribe and upload-continuation operations carry no `principal`. This contradicts A4's rule of "a principal on every session-scoped operation" (§3 L79), and A12 forbids the bridges from filtering by owner instead.
 Where: §5 A2 (`events.subscribe`, `events.read`, `toolOutput.read`, `attachments.write/commit/abort/read`); A4 bullets 2–3; A12 bullet 3; A21 bullet 1
 Breaks when: Operator B's browser asks the bridge for operator A's session: `events.subscribe {sessionId: A1}`, or `toolOutput.read {sessionId: A1, turnId, callId}`.
