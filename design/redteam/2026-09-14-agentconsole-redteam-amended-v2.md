@@ -8,7 +8,7 @@ Note: This session wrote the base review. Another vendor made the amendments. Th
 
 ## F1
 Severity: BLOCKING
-Status: unadjudicated
+Status: defect (adjudicated 2026-09-14). Evidence correction: the S13.9 bullet is wrong that the Phase 3b gate "cannot pass". `src/session-manager/index.test.ts` L3364 asserts only `state === 'approved'` (L3385) and never retries, and `claim` never changes `state`. The only other `release` test (`src/records/index.test.ts` L212) calls `release` directly. The gate would therefore pass silently with the defect present. Added evidence: the target's own L97 says the claim "must be released if a later step fails", and A5 provides no hook to do it.
 Claim: A5 gives the host no signal that a create it has already approved was rolled back. The host's `records.claim` and `attachSession` side effects therefore outlive the session they were made for.
 Where: §5 A5 (bullets 3–4, 6), A11 bullet 3; §6 row `records.claim/attachSession`; §9 Cancellation; §13 Phase 3b gate ("existing session-manager and edge suites pass unchanged")
 Breaks when: The failure can happen in three places.
