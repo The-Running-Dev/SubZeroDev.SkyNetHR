@@ -33,7 +33,7 @@ Cost: Expensive later. Operation parameter shapes are frozen into PROTOCOL.md an
 
 ## F3
 Severity: STRUCTURAL
-Status: unadjudicated
+Status: defect (adjudicated 2026-09-14). Location correction: the document supports two readings. (A) L797's "lane (A22)" includes the end semantics, so the Phase 3b gate contradicts itself as stated. (B) Phase 3b introduces only the lane (L805), and L808 defers "A22 semantics" to Phase 4. The break then lands at the Phase 5+7 cutover (L814), where SkyNetHR's `POST /end` mid-turn stops returning 409, contrary to the Phase 7 "behave the same from an operator perspective" criterion (L28, L47). Under either reading the document never says whether SkyNetHR keeps `409 turn_in_flight` on end. Added evidence: this is contracted behaviour, not only a test (SkyNetHR `design/20-contract.md` L1777, `design/10-design.md` L1747, S5.10).
 Claim: A22's `sessions.end` closing barrier contradicts the document's own Phase 3b gate.
 Where: §5 A22 bullet 5; §13 Phase 3b gate bullet 1
 Breaks when: Phase 3b introduces the A22 lane while a turn is running, and `sessions.end` is called.
