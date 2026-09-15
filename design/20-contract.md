@@ -450,11 +450,14 @@ are not.
 - **`message.delta` frames for one `turnId` concatenate, in arrival order, to the `message` that
   follows** (D168). Not in `seq` order: a delta is a frame and carries no `seq` (I51). A client
   may render either and must not render both, and picks by `turnId`.
-- **A delta never survives a reconnect, and that is what makes the rule above decidable.** Deltas
-  are live-only: they are never replayed, so a client that reconnects mid-message receives no
-  deltas for that message and renders the `message` when it lands. The "must not render both"
-  choice therefore only ever arises on an uninterrupted connection; across a reconnect the
-  question does not arise at all.
+- **A delta never survives a reconnect, and the renderer discarding what it streamed is what makes
+  the rule above decidable** (D224). Deltas are live-only: they are never replayed, so a client
+  that reconnects mid-message receives no further deltas for that message and receives the
+  `message` when it lands. A partial bubble already drawn from deltas before the connection
+  dropped can therefore never be finished, and **on every reconnect — not only on selecting a
+  session — the renderer removes each partial bubble it is tracking before forgetting it**, so
+  the replayed `message` renders once, in full. Without that discard a reconnect is exactly where
+  "both" happens.
 - `tool.result` always follows its `tool.call`. A `tool.call` with no result by `turn.ended`
   was abandoned.
 - `permission.request` is always answered by exactly one `permission.resolved`, including
@@ -1005,8 +1008,20 @@ step is enough.
 |---|---|
 | absent | Write `self`. Claimed, **with no wait** — the ordinary restart, and keeping it out of the window is the whole return on releasing cleanly (D175) |
 | present, `(instanceId, renewals)` changed across the window | Refuse. `StartupError.storage_locked` naming the holder's `pid`, `hostname` and `startedAt` — informational fields, printed because a refusal that cannot say *who* is most of the way to useless |
-| present, `(instanceId, renewals)` unchanged across the window | Reclaim: log the holder, overwrite with `self`. Claimed. **Whichever host wrote it** — there is one rule here, and the absence of a second is the correction (I50) |
+| present, `(instanceId, renewals)` unchanged across the window | Reclaim: log the holder, overwrite with `self`, then **confirm before any boot work** (below). Claimed only once confirmed. **Whichever host wrote it** — there is one rule here, and the absence of a second is the correction (I50) |
 | present but unparseable | Refuse. `StartupError.storage_lock_corrupt`, naming the path (D196). **This is corruption, not a race**: every write publishes the file whole (I61), so a sample sees the previous contents or the next and never a partial file. It is also not a legacy lock — one written before the lease parses cleanly and simply carries no `renewals`, which takes the row above (I61) |
+
+**A reclaim is not a claim until the reclaimer has seen its own lock survive one renewal interval**
+(D216). Two boots can both observe the same stale pair unchanged and both overwrite it; the rename
+that publishes a reclaim overwrites unconditionally, so neither write tells its author it lost.
+After the overwrite the reclaimer therefore waits `LOCK_RENEWAL_INTERVAL_MS` on its own monotonic
+clock and samples again, **before reaping, rehydrating, or anything else server-wide**. Its own
+`instanceId` proceeds. A foreign one refuses exactly as a live holder does —
+`StartupError.storage_locked`, having reaped and rehydrated nothing. This is
+still observation and never comparison, so it stays inside D180's rule. What it leaves is a
+reclaimer stalled for longer than one interval between its last sample and its overwrite, which is
+the stalled-holder bound D194 already draws; a winner that proceeds past such a late overwrite
+finds it at its first renewal and stops (I56).
 
 **The holding host has left this table, and the deletion is the point.** D161's rule — a lock
 naming another `hostname` is never reclaimed — made a recreated container's refusal permanent,
@@ -1058,7 +1073,8 @@ is a `Config` field: D194 fixes the supported storage classes to a local filesys
 mount, so no correct value here depends on how an operator mounted anything, and this document's
 standing ruling stands — promoting either to a deployment flag is a contract amendment.
 
-**The cost is one window, and only where a lock is found.** An absent lock claims immediately, so
+**The cost is one window, and only where a lock is found** — plus one renewal interval where that
+lock is reclaimed (D216). An absent lock claims immediately, so
 the wait falls on an unclean restart and never on the ordinary one, which is the whole return on
 releasing cleanly (D175) and the reason `30-slices.md § S22.5` instruments the reclaim and expects
 it uncalled.
@@ -1070,7 +1086,8 @@ the rename stays on one volume — they must overwrite what is there. A **claim 
 not**, and must not: `rename` overwrites unconditionally and so cannot detect that a second booting
 server made the same "absent" observation and wrote first, which is why the claim is an exclusive
 create instead — atomic, and failing rather than clobbering. Both publish a complete file or none,
-which is all I61 asks; only the claim additionally needs to lose a race it did not win. That is what
+which is all I61 asks; only the claim additionally needs to lose a race it did not win — a reclaim
+loses its race by the confirming sample above, not by its write. That is what
 makes the unparseable row above a refusal rather than a guess: a reader observes the previous contents or the next, never a
 partial file, so a lock that will not parse is corruption and not a renewal caught in flight. **It
 is deliberately not fsync'd.** This is the one file here whose durability buys nothing — a lock lost
@@ -1531,6 +1548,28 @@ the SSE edge: omitted or `0` replays from the start, otherwise from `after + 1`,
 spill-served case and the gap case, where `error / replay_gap` is sent as a frame carrying no
 resumable position exactly as SSE's gap frame carries no `id:`.
 
+**A refusal before subscribing is a frame and a close code, and both are contract** (D230). A client
+cannot read an HTTP status off an upgraded socket, so where the edge refuses after the handshake it
+writes one text frame `{ type: 'error', error: { code: ApiErrorCode, message } }` — distinguishable
+from an `Envelope` by carrying `type` and no `kind` — and then closes. **The close code is the part a
+client acts on**, because it alone says whether reconnecting can help:
+
+| Close | Frame first | Cause | Class |
+|---|---|---|---|
+| `4401` | `unauthenticated` | The first message resolved no usable identity | **Permanent** |
+| `4404` | the mapped code, e.g. `no_such_session`; the close reason repeats it | The session is unknown or not the caller's | **Permanent** |
+| `4408` | none | No first frame arrived within the authentication deadline | Transient |
+| `1002` | `bad_request`, when the first message is not JSON; none, when the socket's framing will not parse | A bad first message, or a protocol error | Transient |
+| `1003` / `1009` | none | A fragmented message, or a buffered message over the edge's frame bound | Transient |
+| `1011` | none | The subscribe failed after authentication (the session was removed), or the first-message handler failed | Transient |
+| `1000` | an `error / replay_gap` envelope, when dropped for backpressure | Dropped for falling too far behind; or the session's stream ended; or the reply to a client's own close | Transient |
+
+**A client must stop reconnecting on a permanent code** and show the refusal the frame carried: no
+identity and not-yours do not resolve on retry, and a client that reconnects on them repeats the same
+refusal indefinitely with nothing telling the operator why. On a transient code it reconnects,
+resuming from the last `seq` it holds. The two permanent codes are private-range rather than RFC 6455's
+`1008`, which is one code for both and cannot tell no identity from not yours.
+
 **How the client learns which edge is live.** `index.html` carries
 `<meta name="skynet-edge" content="sse">` or `content="ws"`, set by whichever edge serves the
 document — a `<meta>` tag and not a `<script>`, so it costs the strict CSP nothing. The client
@@ -1964,8 +2003,10 @@ governs what `emit` assigns and `emit` produces none of these, and the ring is d
 first of them is delivered, so it never holds an envelope the spill will not.
 
 A comment line (`: keepalive`) every `Caps.keepaliveMs` keeps intermediaries from closing an idle
-stream, and **is what lets a client tell a silent agent from a dead connection** — which is what
-makes D21's no-server-side-timer rule cost nothing on the wire.
+stream — which is what makes D21's no-server-side-timer rule cost nothing on the wire. **It is not
+a liveness signal to the client** (D233): `EventSource` never surfaces a comment
+line to script, and no client timer watches for one. A dead connection shows as a transport error
+or a close, which the browser's own reconnect already handles.
 
 ## Error semantics
 
@@ -2033,6 +2074,10 @@ prefix.** This union carries no route-level not-found, so:
 - A path **under `/api/`** that this build does not serve — including an unrecognised sub-route
   under an existing session id — answers `422 bad_request`, naming the offending path or
   sub-route in `detail.field`.
+- One of the five static client assets **that cannot be read** answers `404 no_such_output`
+  (D231). That is a broken install, not a request for the wrong thing, which is why it does not
+  take `no_such_session`; the code is borrowed because this union has no install-fault member, and
+  a client must not read it as a missing tool-output blob.
 
 The consequence of the first is stated so a client does not read more into it than it holds: **a
 `404 no_such_session` distinguishes "no such session", "not your session" and "no such route" in
@@ -2064,7 +2109,7 @@ control rather than concealment (D50, D70).
 | `ConfigError.missing_field` / `invalid_field` | Validation of the environment. `invalid_field` additionally covers **`STORAGE_ROOT` overlapping any `WORKSPACE_ROOTS` entry** under `pathsOverlap`, once both are jail-normalised (D185, I60) — `detail` names the root it collides with. No variant is added for it: the field is genuinely invalid relative to another field | No | Refuse to start. On the overlap, naming both paths and which to move; nothing is written and the storage tree is untouched |
 | `StartupError.storage_unwritable` | The storage root cannot be written at boot | No | Refuse to start |
 | `StartupError.storage_lock_corrupt` | `<storage>/server.lock` is present and will not parse (D196). **Not a renewal caught in flight** — every write publishes the file whole (I61), so a reader sees complete contents or none — and **not a lock predating the lease**, which parses and reaches the reclaim path on its absent counter (I61) | No | Refuse to start with a non-zero exit, naming the path. Nothing server-wide has been written. The operator's action is to remove the file, having satisfied themselves no server is running |
-| `StartupError.storage_locked` | Another server process holds this storage root: the lock's `renewals` moved across one observation window measured on this process's own monotonic clock (D180). **Never raised on a host comparison**, which no longer happens | No | Refuse to start with a non-zero exit, naming the holding `pid`, `hostname` and `startedAt`. **Nothing server-wide has been written**, because the claim precedes the reap step |
+| `StartupError.storage_locked` | Another server process holds this storage root: the lock's `renewals` moved across one observation window measured on this process's own monotonic clock (D180), **or a reclaim's confirming sample, one renewal interval after its overwrite, found another `instanceId`** (D216). **Never raised on a host comparison**, which no longer happens | No | Refuse to start with a non-zero exit, naming the holding `pid`, `hostname` and `startedAt`. **Nothing server-wide has been written**, because the claim precedes the reap step |
 | `IdentityError.no_identity` | No header, no cookie, or an empty one | No | `401 unauthenticated` |
 | `IdentityError.untrusted_proxy` | The identity header arrived from an address not in `trustProxy` | No | `401 unauthenticated`; log the address |
 | `IdentityError.bad_secret` | The shared-secret cookie does not match | No | `401 unauthenticated` |
@@ -2072,9 +2117,9 @@ control rather than concealment (D50, D70).
 | `JailError.unresolvable` | The candidate cannot be resolved to a real path | No | `409 outside_workspace_root`. The jail admits only paths *proven* inside a root |
 | `StoreError.io` | Any write or read failure | Sometimes | On a spill append: end the session (`storage_failure`). On an audit append: deny the permission. On a blob read: `404`. On a record-log append: `500 record_write_failed`, registry unchanged |
 | `StoreError.not_found` | A blob or session directory is absent | No | `404 no_such_output` / `404 no_such_attachment` |
-| `StoreError.corrupt` | `meta.json` fails to parse, or a trailing line does | No | Skip that session at boot, or drop that line and serve the rest. **Never abort boot** |
+| `StoreError.corrupt` | `meta.json` fails to parse, or a trailing line does. **Also returned by `readAuditPage` for a `before` cursor that fails authentication** — a reuse, recorded rather than given its own variant (D227) | No | Skip that session at boot, or drop that line and serve the rest. **Never abort boot**. From `readAuditPage`: `422 bad_request` naming `before` |
 | `StoreError.unsupported_schema_version` | `meta.json` carries an unknown `schemaVersion` | No | Skip that session at boot; leave its files untouched. Never a migration attempt, never a partial read |
-| `CheckpointError.git_unavailable` / `init_failed` | `ckpt.git` cannot be created | No | `session.notice / warn` (`checkpoints_unavailable`); the session proceeds without checkpoints |
+| `CheckpointError.git_unavailable` / `init_failed` | `ckpt.git` cannot be created. **Also returned, as reuses recorded rather than given variants of their own (D227), when `destroy` cannot remove `ckpt.git` or `ignored/`, and when `list`'s `git log` fails for any reason other than an unborn `HEAD`** — which is an empty list, not an error | No | On creation: `session.notice / warn` (`checkpoints_unavailable`); the session proceeds without checkpoints. From `destroy`: its detail joins the live-only `error / session_delete_incomplete`, and the session is still removed. From `list`: `500 checkpoint_failed` |
 | `CheckpointError.locked` | `ckpt.git/index.lock` exists | Yes, after the lock clears | Pre-turn: `session.notice / warn` (`checkpoint_skipped`); the turn proceeds with no restore point |
 | `CheckpointError.commit_failed` | A commit fails for any other reason | Sometimes | As above |
 | *(no variant)* | **The ignored-path manifest could not be captured at commit, written, read, or parsed at restore** (D182) | — | **Not an error at all, at either end.** The commit succeeds with no manifest; the restore succeeds with `unreached: null`. A manifest is a report and never a gate, so no path may fail on its absence — and `null` is the one thing that must never be rendered as "nothing differs" (I58) |
@@ -2283,7 +2328,7 @@ highest-value section in this document.
 | **I8** | `state === 'ended'` implies `LiveSession.turn === null` and `endedAt !== null`; `state === 'live'` implies `endedAt === null` | `session-manager` |
 | **I9** | Every `permission.request` is followed by exactly one `permission.resolved` with the same `requestId`, in the same session, before or at `turn.ended` | `session-manager` |
 | **I10** | An `AuditRecord` is fsync'd before the corresponding `control_response` is written to the child's stdin | `session-manager`, `store` |
-| **I11** | Every `permission.resolved` has exactly one `AuditRecord`, including auto-answers with `scope: 'standing'` | `session-manager` |
+| **I11** | Every `permission.resolved` has exactly one decision `AuditRecord`, including auto-answers with `scope: 'standing'`, **followed by at most one `cancelled_process_exit` correction record when that decision never reached the child** — `respond` failing `write_failed` after the decision record was durable (D26), or the `exited` sweep cancelling an answer still in flight (D218). `audit.ndjson` is append-only (I13), so the decision record cannot be retracted, and without the correction it would claim for good that an answer was delivered (D219) | `session-manager` |
 | **I12** | `AuditRecord.input` is never truncated, summarised, or derived; it is the bytes shown to the operator | `session-manager` |
 | **I13** | `audit.ndjson` is never deleted, rewritten, or shortened, including when the session it names is deleted | `store` |
 | **I14** | `turn.started` for a turn precedes every other event of that turn, and `turn.ended` follows all of them, including across a server restart | `session-manager` |
@@ -2319,7 +2364,7 @@ highest-value section in this document.
 | **I47** | `updatedPermissions` is never written to a child's stdin, under any decision or scope | `adapters/*`, `session-manager` |
 | **I48** | `ToolCall.summary` is display-only: above `adapters/*` it is rendered as a text node and nothing else. No module parses it, matches against it, or derives anything persisted or security-relevant from it; its shape is not contractual. Testing it for empty, to decide whether to show the line at all, is display and is permitted | `adapters/*`, `session-manager`, `client` |
 | **I49** | An attachment's bytes never enter `events.ndjson`, and an operator's `filename` never reaches a filesystem path — the server-minted `AttachmentId` is the only path segment. The blob is written and fsync'd before the `message` envelope naming it is constructed | `store`, `session-manager` |
-| **I50** | A storage root is held by at most one server process. `<storage>/server.lock` is claimed **before boot's reap step**, not merely before `listen`, and is reclaimed only where its `(instanceId, renewals)` pair is observed unchanged across one full observation window measured on the claiming process's own monotonic clock — **whichever host wrote it**, and with no wall clock compared anywhere in the decision (D180). A boot that refuses on a held lock has written nothing server-wide. **A storage root is supported on a local filesystem or a bind mount only** (D194): the one hole — a live holder whose renewals are invisible for a full window — needs a cache or a partition between writer and reader, which two processes on one host do not have, so it is out of reach rather than tolerated. It is what a network-share root would reintroduce, and closing it there would need a fencing service outside the storage root (D7) | `store`, `session-manager` |
+| **I50** | A storage root is held by at most one server process. `<storage>/server.lock` is claimed **before boot's reap step**, not merely before `listen`, and is reclaimed only where its `(instanceId, renewals)` pair is observed unchanged across one full observation window measured on the claiming process's own monotonic clock — **whichever host wrote it**, and with no wall clock compared anywhere in the decision (D180). **A reclaim is confirmed before boot work**: the reclaimer re-samples one renewal interval after its overwrite and proceeds only on its own `instanceId` (D216). A boot that refuses on a held lock has written nothing server-wide. **A storage root is supported on a local filesystem or a bind mount only** (D194): the one hole — a live holder whose renewals are invisible for a full window — needs a cache or a partition between writer and reader, which two processes on one host do not have, so it is out of reach rather than tolerated. It is what a network-share root would reintroduce, and closing it there would need a fencing service outside the storage root (D7) | `store`, `session-manager` |
 | **I51** | A `message.delta` is a live-only frame, for **both** vendors: it is assigned no `seq`, no `Envelope` is ever constructed for it, it never enters the ring buffer, it is never appended to `events.ndjson`, and it is never replayed. It is delivered to the subscribers attached when it is produced and to no others. Deltas for one `turnId` concatenate in arrival order to the `message` that follows (D168) | `session-manager`, `adapters/*` |
 | **I52** | A shutdown establishes no durable state and holds no session invariant. It marks no session ended, closes no turn on disk, appends to no spill, writes no `session.notice`, and emits no envelope. Its only durable write is one `ProcessTombstone` per child it killed, which records what shutdown *did* rather than repairing what it found. Every repair stays boot's, so the crash path and the orderly path converge on one implementation of each (D174). **It is held by construction rather than by inspection**: I55 stops every notification at the sink, so no code below it is in a position to emit, resolve or append during teardown (D178) | `server`, `session-manager` |
 | **I53** | `<storage>/server.lock` is removed only as the last act **a successor can observe** — after the listener has closed and after the kill step has run, with nothing behind it but `store.close()`, which releases this process's own file handles, writes nothing, and is invisible to any other process (D202) — **except on `server.on('error')`, the failed-bind path**, where neither precondition can be met: `listen` never succeeded, so there is no listener to close, and no turn has been started, so there is no child to kill. There, release is the whole of shutdown: it runs at once, still ownership-checked like every other release, and exits non-zero. A shutdown that cannot get that far — on either path — leaves the lock rather than releasing it early, and the next boot reclaims it one observation window after the holder's last renewal (D175, D180, D199) | `server` |
@@ -2528,6 +2573,13 @@ The ordering guarantee holds by construction: `completed` for an item cannot pre
 Policy for every Codex session:
 `{ mode: 'preauthorised', sandbox: <the mode chosen at launch>, banner: <naming that mode> }`,
 and I25 holds — a Codex session emits **zero** `permission.request` events.
+
+**An `item/commandExecution/requestApproval` that arrives anyway is declined, and the turn
+continues** (D228). The adapter answers `{ decision: 'decline' }` and surfaces it as a non-fatal
+`error / adapter_unknown_record`; it constructs no `permission.request` (I25), so there is no
+`permission.resolved` to audit (I11), and nothing executed. Decline is the only answer safe with no
+operator to ask. It is deliberately not `schema_mismatch`, which would cost a turn every time a
+future CLI shifts what `approvalPolicy: 'never'` means.
 
 **What changed is that the fallback's premise no longer holds, and this says so rather than
 quietly keeping the conclusion.** Under `app-server` with `approvalPolicy: 'on-request'`, the
