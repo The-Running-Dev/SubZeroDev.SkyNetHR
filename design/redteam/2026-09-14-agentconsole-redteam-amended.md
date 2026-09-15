@@ -100,7 +100,7 @@ Cost: Expensive later. Flow control on the link is protocol semantics shared by 
 
 ## F8
 Severity: STRUCTURAL
-Status: unadjudicated
+Status: defect (adjudicated 2026-09-15). Added evidence: `audit.ndjson` also sits at `storageRoot` (`src/store/index.ts` L577), and §6 L407 routes `readAudit` to the runtime, so audit is in the same unassigned move as `reviews.ndjson`/`requisitions.ndjson` (L579–580). The target cites both the current blob layout (L52, L235) and the shared lease (L100), yet has no match for migration, compatibility or relocation. The `schemaVersion` bullet is conditional: the target never mentions a bump, and `readAllMeta` accepts only `1` (L648). Context: v2 addresses this, forbidding Phase 3b relocation and adding a compatibility layout adapter for historical sessions (v2 A13 L378–379).
 Claim: A21 (opaque storage ids) and A13 (separate runtime and HR storage roots) change the on-disk layout of existing SkyNetHR data, and no phase migrates that data or reads the old layout.
 Where: §5 A13, A21; §6 `src/store` rows; §13 Phase 3b ("Give HR files their own lease root"), step 6 ("Cutover is per process")
 Breaks when: A SkyNetHR instance upgrades through Phase 3b and step 6 while holding existing data:
