@@ -5304,6 +5304,31 @@ Rejected: **leaving detection to the post-stop check alone**, as D191 did. It ca
 only after a deployment is already trusted, and only if the operator runs it.
 Reversibility: cheap — one constant and one guard.
 
+### 2026-09-15 — D215 Envelopes follow the order the adapter reported them in, and a notification handler assigns `seq` before it yields
+Context: #329. S3.3's spill-catch-up test timed out in 6 of 15 isolated runs. Adapter notifications
+are handed to their handlers without waiting for the previous one to finish, and `cli-session`'s
+handler awaited the `meta.json` write before emitting `session.started` — so the first turn's
+`turn.started` through `turn.ended` took `seq` 1–6 and `session.started` landed at 7, after the turn
+it opens. Nothing in the contract forbade that: I1 states contiguity, I14 binds the events *of* a
+turn and `session.started` carries no `turnId`, and the renderer rules place it on "the first turn"
+without a position. The rule the code already followed — `src/session-manager/index.ts` leaves the
+tool-output blob write unawaited so a later `turn.ended` cannot claim a lower `seq`, citing I1 and
+I27 — was stated by neither.
+Chosen: **I64** — the envelopes a notification directly produces take `seq` in notification order,
+held by each handler reaching every such `emit` before its first `await`, the way I5 holds a guard.
+Two handlers fall short and are `/fix`'s under #329: `cli-session` writes `meta.json` before
+emitting, and `turn.ended` awaits `Adapter.kill()` before emitting where I59 asks only that the kill
+be issued.
+Rejected: **chaining a session's notification handlers one after another**, as D89 chains its
+appends. It would hold the order by code rather than by review, but it makes a session's live
+delivery — a permission prompt included — wait on whichever handler's I/O is slowest, the coupling
+`emit`'s synchronous prefix exists to avoid; and a handler that ever awaited something needing a
+later notification would stall the session for good.
+Rejected: **declaring `session.started`'s position non-contractual and fixing only the test.**
+Cheapest, but it leaves the rule the code already depends on unwritten, so an `await` added ahead of
+any handler's `emit` could reorder one turn's events with no invariant naming the defect.
+Reversibility: cheap — one invariant row; the two handler corrections are local.
+
 ## Open
 
 Staging only. Once an item becomes an issue it leaves this list.
