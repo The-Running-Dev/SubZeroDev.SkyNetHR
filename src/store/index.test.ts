@@ -996,6 +996,46 @@ test('S30.1d — a lock whose (instanceId, renewals) is unchanged across the win
   assert.equal(JSON.parse(raw).pid, process.pid, 'self now holds the lock');
 });
 
+// D216: the rename that publishes a reclaim overwrites unconditionally, so two boots
+// observing the same stale pair unchanged both overwrite it. Only the one whose write
+// survives the confirmation window — the last to land on disk — proceeds; the other refuses
+// storage_locked instead of silently believing it holds the root (I50).
+test('D216 — two boots reclaiming the same stale lock: only the survivor of confirmation proceeds', async () => {
+  const storageRoot = await mkdtemp(path.join(tmpdir(), 'skynet-store-'));
+  const filePath = path.join(storageRoot, 'server.lock');
+  const stale = lock({ pid: 555, hostname: 'holder-host' });
+  await writeFile(filePath, JSON.stringify(stale));
+
+  const [aResult, bResult] = await Promise.all([createStore(baseConfig(storageRoot)), createStore(baseConfig(storageRoot))]);
+  assert.equal(aResult.ok, true);
+  assert.equal(bResult.ok, true);
+  if (!aResult.ok || !bResult.ok) throw new Error('store failed to init');
+
+  const selfA = lock({ pid: 1, hostname: 'a-host' });
+  const selfB = lock({ pid: 2, hostname: 'b-host' });
+  const [a, b] = await Promise.all([aResult.value.claimLock(selfA), bResult.value.claimLock(selfB)]);
+  const attempts = [
+    { self: selfA, r: a },
+    { self: selfB, r: b },
+  ];
+  const winners = attempts.filter((x) => x.r.ok);
+  const losers = attempts.filter((x) => !x.r.ok);
+  assert.equal(winners.length, 1, 'exactly one reclaimer survives its own confirmation');
+  assert.equal(losers.length, 1, 'the other observes a foreign instanceId at confirmation and refuses rather than proceeding');
+
+  const loser = losers[0]!.r;
+  assert.equal(loser.ok, false);
+  if (!loser.ok) {
+    assert.equal(loser.error.code, 'storage_locked', 'the loser refuses storage_locked, not silence');
+    if (loser.error.code === 'storage_locked') {
+      assert.equal(loser.error.holder.instanceId, winners[0]!.self.instanceId, 'the refusal names the surviving winner');
+    }
+  }
+
+  const raw = await readFile(filePath, 'utf8');
+  assert.equal(JSON.parse(raw).instanceId, winners[0]!.self.instanceId, 'the lock file names the confirmed winner, not the loser');
+});
+
 // S30.2: the criterion the slice exists for (#206) — a lock naming a different hostname,
 // with an unmoving counter, is reclaimed and boot proceeds. The holding host is deleted from
 // the decision entirely (D180); a hostname mismatch is an ordinary, expected observation.
