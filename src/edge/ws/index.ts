@@ -2,6 +2,7 @@ import type { IncomingMessage, RequestListener, ServerResponse } from 'node:http
 import type { Socket } from 'node:net';
 import { createHash } from 'node:crypto';
 import type { AttachmentId, CallId, ChecklistItemId, Envelope, Frame, RequisitionId, ReviewId, SessionId, Seq, Subscription, TurnId } from '../../contract/index.js';
+import { isFrame } from '../../contract/index.js';
 import { sendError } from '../error-envelope/index.js';
 import {
   type EdgeDeps,
@@ -312,7 +313,7 @@ export function createWsEdge(deps: EdgeDeps): WsRequestListener {
       // as any envelope.
       deliver(envelope: Envelope | Frame): void {
         if (!open) return;
-        if ('seq' in envelope) lastSeqWritten = envelope.seq;
+        if (!isFrame(envelope)) lastSeqWritten = envelope.seq;
         guardedWrite(encodeFrame(OPCODE_TEXT, Buffer.from(JSON.stringify(envelope), 'utf8')));
       },
       close(): void {
