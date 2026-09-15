@@ -1184,7 +1184,8 @@ decides it for an interrupt and for a turn boot closes.
 
 **`send` spawns the turn's child, writes the message to stdin, and holds stdin open for the
 life of the turn.** Closing it after the prompt forecloses the permission feature entirely and
-is the obvious first implementation. `kill` is terminate-then-force **on the process tree**, not
+is the obvious first implementation. The `codex exec --json` fallback is the one exception: it has
+no permission path, and ends stdin behind the prompt (`src/adapters/codex/index.ts`). `kill` is terminate-then-force **on the process tree**, not
 on the pid: the recorded process is the agent CLI, and what holds the workspace open is whatever
 it spawned. Terminate-then-force is the POSIX half only — Windows has no signal to be graceful
 with, so `taskkill /T /F` is one step and the grace period has nothing to elapse over (D148).
@@ -2480,16 +2481,16 @@ schema-generated (`codex app-server generate-json-schema`, `v2/`), not hand-tran
 |---|---|
 | `thread/started` | `AdapterNotification` `cli-session`, carrying `threadId`; the manager emits `session.started` on the first turn only |
 | `turn/started` | *nothing* — the manager emitted `turn.started` when it claimed the slot |
-| `item/started`, type `reasoning` | *nothing*; text accumulates in the adapter |
-| `item/reasoning/summaryTextDelta` | *nothing*; accumulated |
-| `item/completed`, type `reasoning` | `thinking`, with the accumulated text |
+| `item/started`, type `reasoning` | *nothing* |
+| `item/reasoning/summaryTextDelta` | *nothing*; not accumulated |
+| `item/completed`, type `reasoning` | `thinking`, its text read off the completed item — `summary`, else `content`; nothing when both are empty |
 | `item/agentMessage/delta` | `message.delta`, role assistant — a **frame**, not an envelope (D168, I51) |
 | `item/completed`, type `agentMessage` | `message`, role assistant |
 | `item/started`, type `commandExecution` | `tool.call`; `callId` is the item's `id` |
 | `item/commandExecution/outputDelta` | *nothing*; accumulated |
 | `item/completed`, type `commandExecution` | `tool.result`, same `callId`; `ok` from `status`, `output` from `aggregatedOutput` |
 | `thread/tokenUsage/updated` → `last` | `usage` |
-| `turn/completed` | `turn.ended`; `stopReason` from `turn.status` — `completed`, `interrupted`, `error`, and anything else is `schema_mismatch`. Its `last` is **not** mapped: see *Usage* |
+| `turn/completed` | `turn.ended`; `stopReason` from `turn.status` — `completed`, `interrupted`, `failed` (as `error`), and anything else is `schema_mismatch`. Its `last` is **not** mapped: see *Usage* |
 | `item/commandExecution/requestApproval` | **unreachable under the shipped policy** — see below |
 | `close` with no `turn/completed` seen | `turn.ended`, `stopReason: 'process_exit'` |
 
