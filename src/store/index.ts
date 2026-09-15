@@ -996,6 +996,30 @@ export async function createStore(config: Config): Promise<Result<Store, StoreEr
         } catch (err) {
           return startupIoError(filePath, (err as Error).message);
         }
+
+        // D216: a reclaim is not a claim until the reclaimer has seen its own lock survive
+        // one renewal interval — the rename above overwrites unconditionally, so it never
+        // tells its author whether a second racing reclaimer won instead. This re-sample is
+        // what confirms it, on this process's own monotonic clock, still never comparing a
+        // wall clock (D180). No boot work happens before it returns.
+        await delay(LOCK_RENEWAL_INTERVAL_MS);
+
+        let confirm: LockSample;
+        try {
+          confirm = await sampleLock(filePath);
+        } catch (err) {
+          return startupIoError(filePath, (err as Error).message);
+        }
+        if (confirm.kind === 'corrupt') {
+          return { ok: false, error: { code: 'storage_lock_corrupt', path: filePath, detail: confirm.detail } };
+        }
+        if (confirm.kind === 'absent') {
+          return startupIoError(filePath, 'server.lock vanished after a reclaim overwrite it, before confirmation');
+        }
+        if (confirm.holder.instanceId !== self.instanceId) {
+          return { ok: false, error: { code: 'storage_locked', path: filePath, holder: confirm.holder } };
+        }
+
         heldLock = self;
         return { ok: true, value: undefined };
         // Loop back only on the "absent" rows above; a reclaim never retries.
