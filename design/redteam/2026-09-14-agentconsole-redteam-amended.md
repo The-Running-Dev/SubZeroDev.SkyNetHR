@@ -26,7 +26,7 @@ Cost: Expensive later. Callback-issued requests would need a correlation field d
 
 ## F3
 Severity: BLOCKING
-Status: unadjudicated
+Status: defect (adjudicated 2026-09-15). Evidence nuances: (1) the git-checkout-over-B bullet is partly answered by A11 L345, which lets an extension declare stricter workspace concurrency with the runtime enforcing the effective minimum. The document never says checkpoints does so. The ended-session guard at L1458–1461 is about a rehydrated session's reclaimed cwd, not a live overlapping session. (2) The disappearing-rows bullet is conditional. A8 L325 says only "extension event", while the L780 snapshot test and L826 keep the unprefixed `checkpoint.created`. The core holds: no checkpoint operations in A2, no operation registration anywhere in the document, and restore is absent from the A22 L384 mutator list. §4 item 12 (L270) makes the extension "definitive", so this is an internal contradiction, not a deferral. Context: v2 addresses this with extension-registered `checkpoints.list`/`checkpoints.restore` as A11/A22 mutators (v2 L304, L421, L870), and keeps `checkpoint.created` (v2 L343). v2's restore-reservation gap is v2 F4.
 Claim: Checkpoint listing and restore have no protocol operation, and no extension mechanism exists that could add one. Restore is also not among A22's named lane mutators.
 Where: §5 A2, A5, A6, A8, A11, A22; §4 item 12 ("made definitive"); §6 row `src/checkpoints`
 Breaks when: SkyNetHR migrates (step 6). Today:
