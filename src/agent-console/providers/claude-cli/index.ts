@@ -12,7 +12,7 @@ import type {
   RequestId,
   Result,
   TurnId,
-} from '../../contract/index.js';
+} from '../types.js';
 import { NdjsonSplitter } from '../ndjson.js';
 import { BASH_COMMAND_FIELD, summariseToolCall } from './summarise.js';
 
@@ -98,6 +98,7 @@ export function createClaudeAdapter(opts: AdapterOptions & { readonly executable
   // without adding a field to `AdapterOptions`, which the contract fixes.
   const executable = opts.executable ?? process.env['SKYNET_CLAUDE_EXECUTABLE'] ?? 'claude';
   let child: ChildProcess | null = null;
+  let currentModel = opts.model;
   let cliSessionId: CliSessionId | null = null;
   let currentTurnId: TurnId | null = null;
   let resultSeen = false;
@@ -413,7 +414,7 @@ export function createClaudeAdapter(opts: AdapterOptions & { readonly executable
       '--permission-prompt-tool',
       'stdio',
     ];
-    if (opts.model) args.push('--model', opts.model);
+    if (currentModel) args.push('--model', currentModel);
     if (resume) args.push('--resume', resume);
     // (S25.6) Off by default; off reproduces today's envelope sequence element for
     // element, since no `stream_event` record is ever sent without this flag.
@@ -429,9 +430,10 @@ export function createClaudeAdapter(opts: AdapterOptions & { readonly executable
     // attachment-probe.md`).
     acceptsAttachments: true,
 
-    send(text: string, attachments: readonly AttachmentPayload[], resume: CliSessionId | null, turnId: TurnId): Promise<Result<void, AdapterError>> {
+    send(text: string, attachments: readonly AttachmentPayload[], resume: CliSessionId | null, turnId: TurnId, model?: string): Promise<Result<void, AdapterError>> {
       return new Promise((resolve) => {
         currentTurnId = turnId;
+        currentModel = model ?? opts.model;
         resultSeen = false;
         // Cleared per turn, not per adapter. One adapter serves every turn of a session,
         // so a flag left set by an earlier interrupt would make the *next* turn's genuine

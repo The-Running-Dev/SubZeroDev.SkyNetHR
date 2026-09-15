@@ -7,6 +7,8 @@ import path from 'node:path';
 import { after, test } from 'node:test';
 import { promisify } from 'node:util';
 import { createSessionManager, match, parseStandingRule } from './index.js';
+import { createRegisteredAdapter } from '../agent-console/providers/legacy.js';
+import { createProviderRegistry } from '../agent-console/providers/registry.js';
 import { stripExtendedPrefix } from '../jail/index.js';
 import { createStore as createStoreRaw } from '../store/index.js';
 import { createCheckpoints } from '../checkpoints/index.js';
@@ -55,11 +57,81 @@ after(async () => {
 
 const execFileAsync = promisify(execFile);
 
-const FIXTURE = path.join(process.cwd(), 'src', 'adapters', 'claude', 'fixtures', 'fake-claude-cli.mjs');
+test('Phase 2 — pending provider creation reserves nested workspaces and releases claims after failure', async () => {
+  const { config, store, checkpoints, records, workspaceRoot } = await makeManager('full');
+  const parent = path.join(workspaceRoot, 'pending');
+  const nested = path.join(parent, 'nested');
+  await mkdir(nested, { recursive: true });
+  let release!: (result: Result<Adapter, AdapterError>) => void;
+  let calls = 0;
+  let entered!: () => void;
+  const probing = new Promise<void>(resolve => { entered = resolve; });
+  const manager = createSessionManager({ config, store, checkpoints, records,
+    createAdapter: () => { calls++; entered(); return new Promise(resolve => { release = resolve; }); },
+  });
+  const owner = 'phase2-owner' as OperatorId;
+  const input = { vendor: 'claude' as const, cwd: parent, model: null, sandbox: null, requisitionId: null };
+  const creating = manager.create(owner, input);
+  await probing;
+  const conflict = await manager.create(owner, { ...input, cwd: nested });
+  assert.ok(!conflict.ok && conflict.error.code === 'workspace_busy');
+  release({ ok: false, error: { code: 'agent_unavailable', image: 'fixture', detail: 'probe failed' } });
+  assert.equal((await creating).ok, false);
+  const retry = manager.create(owner, input);
+  await waitUntil(() => calls === 2);
+  release({ ok: false, error: { code: 'agent_unavailable', image: 'fixture', detail: 'retry reached the provider' } });
+  const retried = await retry;
+  assert.ok(!retried.ok && retried.error.code === 'adapter');
+});
+
+test('Phase 2 — a third registered provider drives the unchanged manager and startup notices survive async creation', async () => {
+  const { config, store, checkpoints, records, workspaceRoot } = await makeManager('full');
+  const registry = createProviderRegistry();
+  registry.register({
+    id: 'third-fixture', label: 'Third fixture',
+    async probe() { return { available: true, capabilities: {
+      workspace: 'required', permissions: 'interactive', attachments: { supported: false }, usage: false,
+      resume: false, streamingDeltas: false, needsProcess: false, conversationState: 'provider',
+    } }; },
+    async create(context) {
+      context.emit('session.notice', { level: 'warn', code: 'usage_unavailable', text: 'fixture usage unavailable' });
+      const { capabilities } = await this.probe(context);
+      return { ok: true, value: {
+        policy: { mode: 'interactive', sandbox: null, banner: null }, capabilities,
+        startTurn(input, turn) {
+          const started = Promise.resolve({ ok: true as const, value: undefined });
+          const done = started.then(() => {
+            turn.emit('message', { role: 'assistant', text: input.text, attachments: [] });
+            turn.emit('turn.ended', { stopReason: 'completed', usage: null });
+            return { stopReason: 'completed' as const, usage: null };
+          });
+          return { started, done, async interrupt() {}, respondToPermission: () => ({ ok: false, error: { code: 'no_child' } }) };
+        },
+        async close() {},
+      } };
+    },
+  });
+  const manager = createSessionManager({ config, store, checkpoints, records,
+    createAdapter: (id, options) => createRegisteredAdapter(registry, id, options),
+  });
+  const owner = 'phase2-owner' as OperatorId;
+  const created = await manager.create(owner, { vendor: 'third-fixture' as Vendor, cwd: workspaceRoot, model: null, sandbox: null, requisitionId: null });
+  assert.ok(created.ok);
+  const events: Envelope[] = [];
+  await manager.subscribe(created.value.sessionId, owner, 0, { deliver: e => { if ('seq' in e) events.push(e); }, close() {} });
+  assert.ok((await manager.message(created.value.sessionId, owner, 'third provider works', [])).ok);
+  await waitUntil(() => events.some(e => e.kind === 'turn.ended'));
+  const notice = events.findIndex(e => e.kind === 'session.notice' && e.data.code === 'usage_unavailable');
+  assert.ok(notice >= 0 && notice < events.findIndex(e => e.kind === 'turn.started'));
+  assert.equal(events.filter(e => e.kind === 'session.notice' && e.data.code === 'usage_unavailable').length, 1);
+  assert.ok(events.some(e => e.kind === 'message' && e.data.role === 'assistant' && e.data.text === 'third provider works'));
+});
+
+const FIXTURE = path.join(process.cwd(), 'src', 'agent-console', 'providers', 'claude-cli', 'fixtures', 'fake-claude-cli.mjs');
 // (S21.8) The Codex fixture is the sanctioned stand-in for a vendor whose adapter declares
 // `acceptsAttachments: false` (D91) — Codex's own is hardcoded false (S21.8's finding names
 // no Codex transport as probed for non-text content).
-const CODEX_FIXTURE = path.join(process.cwd(), 'src', 'adapters', 'codex', 'fixtures', 'fake-codex-cli.mjs');
+const CODEX_FIXTURE = path.join(process.cwd(), 'src', 'agent-console', 'providers', 'codex-cli', 'fixtures', 'fake-codex-cli.mjs');
 
 // A turn deliberately left stalled on an unanswered permission (S4.12, S5.10) leaves its
 // child alive with nothing in this file to end it. `edge/sse/index.test.ts` carries the

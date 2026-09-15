@@ -5,10 +5,13 @@ import os from 'node:os';
 import path from 'node:path';
 import { platform } from 'node:process';
 import { promisify } from 'node:util';
-import { createAdapter as createRealAdapter } from '../adapters/index.js';
+import { createConfiguredAdapter as createRealAdapter } from '../config/providers.js';
 import { pathsOverlap, resolveInsideRoot } from '../jail/index.js';
 import type {
   Adapter,
+  AdapterOptions,
+  Vendor,
+  AdapterError,
   AdapterNotification,
   AttachmentId,
   AttachmentPayload,
@@ -233,7 +236,7 @@ export function createSessionManager(deps: {
   // its turn ended and deliberately does not kill its own child — to show that the
   // tree-kill obligation is this manager's to enforce and not an accident of one
   // vendor's own close handler.
-  readonly createAdapter?: typeof createRealAdapter;
+  readonly createAdapter?: (id: Vendor, options: AdapterOptions) => Result<Adapter, AdapterError> | Promise<Result<Adapter, AdapterError>>;
   // Test seam only, for the same reason as `createAdapter` above: S29.5's second
   // fail-closed case (the live counterpart's own creation time cannot be read) has no
   // other way to force deterministically — a real live process's own read practically
@@ -248,9 +251,11 @@ export function createSessionManager(deps: {
   // `cli-session`, `spawned`, `exited` — with one conditional rather than one per kind.
   let notifyMuted = false;
 
-  function findLiveOverlap(candidate: ResolvedPath): SessionEntry | null {
-    for (const entry of sessions.values()) {
-      if (entry.record.state === 'live' && pathsOverlap(candidate, entry.record.cwd)) return entry;
+  const pendingCreates = new Map<SessionId, { record: { cwd: ResolvedPath; owner: OperatorId } }>();
+  function findLiveOverlap(candidate: ResolvedPath): { record: { cwd: ResolvedPath; owner: OperatorId } } | null {
+    const holders = [...pendingCreates.values(), ...[...sessions.values()].filter(entry => entry.record.state === 'live')];
+    for (const holder of holders) {
+      if (pathsOverlap(candidate, holder.record.cwd)) return holder;
     }
     return null;
   }
@@ -1003,7 +1008,7 @@ export function createSessionManager(deps: {
       const cwd = jailed.value;
 
       // I5: the workspace test and the claim happen in one synchronous block — no
-      // `await` between `findLiveOverlap` and `sessions.set` — so two concurrent
+      // `await` between `findLiveOverlap` and reserving the pending workspace — so two concurrent
       // creates for overlapping cwds cannot both pass the test.
       const overlap = findLiveOverlap(cwd);
       if (overlap) {
@@ -1020,13 +1025,32 @@ export function createSessionManager(deps: {
       }
 
       const sessionId = randomUUID() as SessionId;
-      const adapterResult = adapterFactory(input.vendor, {
-        cwd,
-        model: input.model,
-        sandbox: input.sandbox,
-        notify: (n) => handleNotification(sessionId, n),
-        streamDeltas: config.streamDeltas,
-      });
+      pendingCreates.set(sessionId, { record: { cwd, owner } });
+      const pendingNotifications: AdapterNotification[] = [];
+      let registered = false;
+      let adapterResult: Result<Adapter, AdapterError>;
+      try {
+        adapterResult = await adapterFactory(input.vendor, {
+          cwd,
+          model: input.model,
+          sandbox: input.sandbox,
+          notify: (n) => {
+            if (registered) handleNotification(sessionId, n);
+            else pendingNotifications.push(n);
+          },
+          streamDeltas: config.streamDeltas,
+        });
+      } catch (error) {
+        adapterResult = { ok: false, error: { code: 'agent_unavailable', image: input.vendor, detail: String(error) } };
+      } finally {
+        // No await between releasing this reservation and installing the live entry.
+        pendingCreates.delete(sessionId);
+      }
+      if (notifyMuted && adapterResult.ok) {
+        await adapterResult.value.kill();
+        if (input.requisitionId !== null) records.release(input.requisitionId);
+        return { ok: false, error: { code: 'adapter', cause: { code: 'agent_unavailable', image: input.vendor, detail: 'server is shutting down' } } };
+      }
       if (!adapterResult.ok) {
         // S13.9: any failure after the claim releases it — the requisition reads
         // `approved` again and a retry can spend it.
@@ -1067,13 +1091,15 @@ export function createSessionManager(deps: {
         pendingToolOutputWrites: new Set(),
       };
       sessions.set(sessionId, entry);
-
       const created = await store.createSession(record);
       if (!created.ok) {
         sessions.delete(sessionId);
         if (input.requisitionId !== null) records.release(input.requisitionId);
         return { ok: false, error: { code: 'storage', cause: created.error } };
       }
+
+      registered = true;
+      for (const notification of pendingNotifications) handleNotification(sessionId, notification);
 
       // S6.8: a ckpt.git that cannot be initialised is a warning, not a session-creation
       // failure — the session is created and usable without checkpoints.

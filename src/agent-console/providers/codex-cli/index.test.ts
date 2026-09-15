@@ -6,14 +6,14 @@ import path from 'node:path';
 import { test } from 'node:test';
 import { promisify } from 'node:util';
 import { createCodexAdapter, resetCodexTransportCacheForTests } from './index.js';
-import { createAdapter } from '../index.js';
-import type { AdapterNotification } from '../../contract/index.js';
+import { createConfiguredAdapter as createAdapter } from '../../../config/providers.js';
+import type { AdapterNotification } from '../types.js';
 
 const execFileAsync = promisify(execFile);
 
-const FIXTURE = path.join(process.cwd(), 'src', 'adapters', 'codex', 'fixtures', 'fake-codex-cli.mjs');
+const FIXTURE = path.join(process.cwd(), 'src', 'agent-console', 'providers', 'codex-cli', 'fixtures', 'fake-codex-cli.mjs');
 
-function makeAdapter(sandbox: 'read-only' | 'workspace-write' | 'unrestricted' = 'workspace-write') {
+async function makeAdapter(sandbox: 'read-only' | 'workspace-write' | 'unrestricted' = 'workspace-write') {
   // (#134) Transport detection is now cached per (executable, cwd) for the life of the
   // process — every test here reuses the same FIXTURE path, and several toggle
   // SKYNET_CODEX_NO_APP_SERVER between cases to force a different transport out of that
@@ -21,7 +21,7 @@ function makeAdapter(sandbox: 'read-only' | 'workspace-write' | 'unrestricted' =
   // silently answer every test after it.
   resetCodexTransportCacheForTests();
   const notifications: AdapterNotification[] = [];
-  const result = createCodexAdapter({
+  const result = await createCodexAdapter({
     executable: FIXTURE,
     cwd: process.cwd() as never,
     model: null,
@@ -55,9 +55,9 @@ function eventsOf(notifications: readonly AdapterNotification[], kind: string) {
 }
 
 // S8.3 — policy is reported at create, before any turn runs, and names the sandbox.
-test('S8.3 — a Codex session reports a preauthorised policy naming its sandbox', () => {
+test('S8.3 — a Codex session reports a preauthorised policy naming its sandbox', async () => {
   delete process.env['SKYNET_CODEX_NO_APP_SERVER'];
-  const { result } = makeAdapter('read-only');
+  const { result } = await makeAdapter('read-only');
   assert.equal(result.ok, true);
   if (!result.ok) return;
   assert.equal(result.value.vendor, 'codex');
@@ -68,9 +68,9 @@ test('S8.3 — a Codex session reports a preauthorised policy naming its sandbox
 
 // S21.8/D160 — undeclared, not merely unprobed: no finding has verified either Codex
 // transport carries a non-text content block.
-test('S21.8/D160 — a Codex session declares acceptsAttachments: false', () => {
+test('S21.8/D160 — a Codex session declares acceptsAttachments: false', async () => {
   delete process.env['SKYNET_CODEX_NO_APP_SERVER'];
-  const { result } = makeAdapter('read-only');
+  const { result } = await makeAdapter('read-only');
   assert.equal(result.ok, true);
   if (!result.ok) return;
   assert.equal(result.value.acceptsAttachments, false);
@@ -80,7 +80,7 @@ test('S21.8/D160 — a Codex session declares acceptsAttachments: false', () => 
 // app-server can report usage and emits no such notice.
 test('D146/D149 — usage_unavailable is emitted once for exec, never for app-server', async () => {
   process.env['SKYNET_CODEX_NO_APP_SERVER'] = '1';
-  const exec = makeAdapter();
+  const exec = await makeAdapter();
   assert.equal(exec.result.ok, true);
   await waitUntil(() => eventsOf(exec.notifications, 'session.notice').length > 0);
   const execNotices = eventsOf(exec.notifications, 'session.notice');
@@ -92,7 +92,7 @@ test('D146/D149 — usage_unavailable is emitted once for exec, never for app-se
   });
   delete process.env['SKYNET_CODEX_NO_APP_SERVER'];
 
-  const appServer = makeAdapter();
+  const appServer = await makeAdapter();
   assert.equal(appServer.result.ok, true);
   // No turn is run on this adapter, so nothing else will ever arrive on `notifications` —
   // a fixed wait is what distinguishes "never emitted" from "not emitted yet".
@@ -105,7 +105,7 @@ test('D146/D149 — usage_unavailable is emitted once for exec, never for app-se
 test('S8.3, S8.4 — app-server: the mapped table, and zero permission.request events', async () => {
   delete process.env['SKYNET_CODEX_NO_APP_SERVER'];
   process.env['SKYNET_CODEX_SCENARIO'] = 'full';
-  const { result, notifications } = makeAdapter();
+  const { result, notifications } = await makeAdapter();
   assert.equal(result.ok, true);
   if (!result.ok) return;
   const adapter = result.value;
@@ -150,7 +150,7 @@ test('S8.3, S8.4 — app-server: the mapped table, and zero permission.request e
 // ignore list) is a schema mismatch: fatal, and the session refuses to start.
 test('S8.5 — app-server: an unrecognised notification method is a fatal schema mismatch', async () => {
   process.env['SKYNET_CODEX_SCENARIO'] = 'unknown-method';
-  const { result, notifications } = makeAdapter();
+  const { result, notifications } = await makeAdapter();
   assert.equal(result.ok, true);
   if (!result.ok) return;
 
@@ -168,7 +168,7 @@ test('S8.5 — app-server: an unrecognised notification method is a fatal schema
 // a web search — this contract does not map, not harmless metadata).
 test('S8.5 — app-server: an unrecognised item type is a fatal schema mismatch', async () => {
   process.env['SKYNET_CODEX_SCENARIO'] = 'unknown-item-type';
-  const { result } = makeAdapter();
+  const { result } = await makeAdapter();
   assert.equal(result.ok, true);
   if (!result.ok) return;
   const sendResult = await result.value.send('hello', [], null, 'turn-3' as never);
@@ -183,7 +183,7 @@ test('S8.5 — app-server: an unrecognised item type is a fatal schema mismatch'
 // directly and the turn still completes with zero permission.request events.
 test('S8.4 — an approval request under the shipped policy is declined without a permission.request event', async () => {
   process.env['SKYNET_CODEX_SCENARIO'] = 'approval-request';
-  const { result, notifications } = makeAdapter();
+  const { result, notifications } = await makeAdapter();
   assert.equal(result.ok, true);
   if (!result.ok) return;
   const sendResult = await result.value.send('hello', [], null, 'turn-4' as never);
@@ -199,7 +199,7 @@ test('S8.4 — an approval request under the shipped policy is declined without 
 // mirrors the Claude adapter's equivalent row, not a schema-mismatch case.
 test('app-server: the child closing with no turn/completed seen maps to turn.ended/process_exit', async () => {
   process.env['SKYNET_CODEX_SCENARIO'] = 'crash';
-  const { result, notifications } = makeAdapter();
+  const { result, notifications } = await makeAdapter();
   assert.equal(result.ok, true);
   if (!result.ok) return;
   await result.value.send('hello', [], null, 'turn-5' as never);
@@ -209,7 +209,7 @@ test('app-server: the child closing with no turn/completed seen maps to turn.end
 
 test('app-server: a malformed JSON line is non-fatal and the stream continues', async () => {
   process.env['SKYNET_CODEX_SCENARIO'] = 'bad-line';
-  const { result, notifications } = makeAdapter();
+  const { result, notifications } = await makeAdapter();
   assert.equal(result.ok, true);
   if (!result.ok) return;
   await result.value.send('hello', [], null, 'turn-6' as never);
@@ -226,7 +226,7 @@ test('app-server: a malformed JSON line is non-fatal and the stream continues', 
 test('S8.3, S8.7 — exec fallback: lifecycle and messages map, tool events and usage do not', async () => {
   process.env['SKYNET_CODEX_NO_APP_SERVER'] = '1';
   process.env['SKYNET_CODEX_SCENARIO'] = 'full';
-  const { result, notifications } = makeAdapter();
+  const { result, notifications } = await makeAdapter();
   assert.equal(result.ok, true);
   if (!result.ok) return;
 
@@ -255,7 +255,7 @@ test('S8.3, S8.7 — exec fallback: lifecycle and messages map, tool events and 
 test('S8.5 — exec fallback: an unrecognised record type is a fatal schema mismatch', async () => {
   process.env['SKYNET_CODEX_NO_APP_SERVER'] = '1';
   process.env['SKYNET_CODEX_SCENARIO'] = 'unknown-type';
-  const { result } = makeAdapter();
+  const { result } = await makeAdapter();
   assert.equal(result.ok, true);
   if (!result.ok) return;
   const sendResult = await result.value.send('hello', [], null, 'turn-8' as never);
@@ -276,7 +276,7 @@ test('#134 — detectTransport is probed once for a given (executable, cwd), not
   process.env['SKYNET_CODEX_PROBE_LOG'] = probeLog;
   resetCodexTransportCacheForTests();
 
-  const first = createCodexAdapter({
+  const first = await createCodexAdapter({
     executable: FIXTURE,
     cwd: process.cwd() as never,
     model: null,
@@ -288,7 +288,7 @@ test('#134 — detectTransport is probed once for a given (executable, cwd), not
   const afterFirst = (await readFileOrEmpty(probeLog)).split('\n').filter((l) => l.length > 0);
   assert.ok(afterFirst.length >= 1, 'the first call actually probed');
 
-  const second = createCodexAdapter({
+  const second = await createCodexAdapter({
     executable: FIXTURE,
     cwd: process.cwd() as never,
     model: null,
@@ -303,7 +303,7 @@ test('#134 — detectTransport is probed once for a given (executable, cwd), not
   // A different cwd is a different cache key — detection runs again, proving this is a
   // real cache keyed on the inputs, not a probe that has simply stopped running at all.
   const otherDir = await mkdtemp(path.join(tmpdir(), 'skynet-codex-probe-other-'));
-  const third = createCodexAdapter({
+  const third = await createCodexAdapter({
     executable: FIXTURE,
     cwd: otherDir as never,
     model: null,
@@ -318,10 +318,10 @@ test('#134 — detectTransport is probed once for a given (executable, cwd), not
   delete process.env['SKYNET_CODEX_PROBE_LOG'];
 });
 
-test('createCodexAdapter refuses when neither transport responds', () => {
+test('createCodexAdapter refuses when neither transport responds', async () => {
   const notifications: AdapterNotification[] = [];
-  const result = createCodexAdapter({
-    executable: path.join(process.cwd(), 'src', 'adapters', 'codex', 'fixtures', 'does-not-exist.mjs'),
+  const result = await createCodexAdapter({
+    executable: path.join(process.cwd(), 'src', 'agent-console', 'providers', 'codex-cli', 'fixtures', 'does-not-exist.mjs'),
     cwd: process.cwd() as never,
     model: null,
     sandbox: 'workspace-write',
@@ -335,8 +335,8 @@ test('createCodexAdapter refuses when neither transport responds', () => {
 
 // The dispatcher's own guard (`../index.ts`): Codex has no "no sandbox" option, unlike
 // Claude which has no sandbox mechanism at all.
-test('createAdapter refuses a Codex session with sandbox: null', () => {
-  const result = createAdapter('codex', {
+test('createAdapter refuses a Codex session with sandbox: null', async () => {
+  const result = await createAdapter('codex', {
     cwd: process.cwd() as never,
     model: null,
     sandbox: null,
@@ -363,7 +363,7 @@ test('#201 — Windows: a .cmd executable is spawned via a shell, and `spawned` 
   await writeFile(cmdPath, `@echo off\r\n"${process.execPath}" "${FIXTURE}" %*\r\n`);
 
   const notifications: AdapterNotification[] = [];
-  const result = createCodexAdapter({
+  const result = await createCodexAdapter({
     executable: cmdPath,
     cwd: process.cwd() as never,
     model: null,

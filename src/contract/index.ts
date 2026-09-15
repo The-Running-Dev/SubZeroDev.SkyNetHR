@@ -1,5 +1,7 @@
 // SkyNetHR's contract facade. Generic declarations are owned by AgentConsole;
 // design/20-contract.md remains authoritative for their meaning.
+import type { Adapter, AdapterError, AdapterOptions, AdapterNotification, AdapterEmitted, AdapterEvent, AttachmentPayload, SandboxMode, PermissionDecision, PermissionPolicy } from '../agent-console/providers/types.js';
+export type { Adapter, AdapterError, AdapterOptions, AdapterNotification, AdapterEmitted, AdapterEvent, AttachmentPayload, SandboxMode, PermissionDecision, PermissionPolicy } from '../agent-console/providers/types.js';
 import type {
   Brand,
   SessionId,
@@ -102,19 +104,12 @@ export type ChecklistItemId = Brand<string, 'ChecklistItemId'>;
 // next page continues. Equality and round-tripping only; no caller may parse one.
 export type AuditCursor = Brand<string, 'AuditCursor'>;
 
-export type Vendor = 'claude' | 'codex';
-export type SandboxMode = 'read-only' | 'workspace-write' | 'unrestricted';
+export type Vendor = typeof import('../config/providers.js').providerDefinitions[number]['id'];
 export type SessionState = 'live' | 'ended';
 
 // ---------------------------------------------------------------------------
 // Session
 // ---------------------------------------------------------------------------
-
-export interface PermissionPolicy {
-  readonly mode: 'interactive' | 'preauthorised';
-  readonly sandbox: SandboxMode | null;
-  readonly banner: string | null; // non-null exactly when mode === 'preauthorised'
-}
 
 // The persisted session record: exactly what `meta.json` carries, and nothing more. The
 // live turn is deliberately absent — `meta.json` is the session minus turn, buffer and
@@ -287,7 +282,6 @@ export interface AttachmentUpload {
 // Minted only by `parseStandingRule`.
 export type StandingRuleExpression = Brand<string, 'StandingRuleExpression'>;
 
-export type PermissionDecision = 'allow' | 'deny';
 export type AnswerScope = 'once' | 'always'; // what a client may send
 export type ResolvedScope = 'once' | 'always' | 'standing'; // 'standing' = matched a stored rule
 
@@ -574,77 +568,6 @@ export interface ReviewPatch {
   readonly rating?: Rating | null;
   readonly pip?: boolean;
   readonly body?: string;
-}
-
-// ---------------------------------------------------------------------------
-// adapters/*
-// ---------------------------------------------------------------------------
-
-// Everything an adapter tells the manager. Event payloads carry no `seq`, no `sessionId`
-// and no `ts` — the manager assigns those.
-export type AdapterNotification =
-  | { readonly kind: 'event'; readonly event: AdapterEvent }
-  | { readonly kind: 'cli-session'; readonly cliSessionId: CliSessionId } // every system/init
-  | { readonly kind: 'spawned'; readonly pid: number; readonly pgid: number | null; readonly image: string }
-  | { readonly kind: 'exited'; readonly code: number | null; readonly signal: string | null };
-
-export type AdapterEmitted = Exclude<
-  EventKind,
-  | 'session.started'
-  | 'session.ended'
-  | 'checkpoint.created'
-  | 'checklist.item.completed'
-  // D97: the manager is the sole emitter. It holds the `pending` map, deletes from it
-  // synchronously (D33) and appends the `AuditRecord` every resolution owes (I11), so an
-  // adapter resolving a request of its own would produce a resolution with no audit record
-  // and leave the map holding an entry nothing clears.
-  | 'permission.resolved'
->;
-
-export type AdapterEvent = {
-  [K in AdapterEmitted]: {
-    readonly kind: K;
-    readonly data: Omit<EventPayloadMap[K], 'turnId'>;
-    readonly raw?: unknown;
-  };
-}[AdapterEmitted];
-
-export interface AdapterOptions {
-  readonly cwd: ResolvedPath;
-  readonly model: string | null;
-  readonly sandbox: SandboxMode | null;
-  readonly notify: (n: AdapterNotification) => void;
-  // (S25.6) Whether to request token-level `message.delta` frames from a transport that
-  // gates them behind a flag. An adapter whose transport streams deltas unconditionally
-  // ignores it. Defaults off (`Config.streamDeltas`); off reproduces today's envelope
-  // sequence element for element. Which adapters read it, and how, is `adapters/*`'s own
-  // vendor knowledge (I20) and is not stated here.
-  readonly streamDeltas: boolean;
-}
-
-// (D160) An attachment as the adapter receives it: the ref the envelope carries, plus the bytes.
-// The manager reads them from `store` and hands them down, because an adapter depends on
-// `contract` and nothing else and may not be given a store handle.
-export interface AttachmentPayload {
-  readonly ref: AttachmentRef;
-  readonly data: Uint8Array;
-}
-
-export interface Adapter {
-  readonly vendor: Vendor;
-  readonly policy: PermissionPolicy; // the vendor's capability, fixed at create
-  // (D160) Whether this vendor's transport carries non-text content at all. Read by the edge
-  // to refuse `attachments` with `422 bad_request`; a capability, not a vendor test (I20).
-  readonly acceptsAttachments: boolean;
-  // Spawns the turn's child, writes the message to stdin, and holds stdin open.
-  send(
-    text: string,
-    attachments: readonly AttachmentPayload[],
-    resume: CliSessionId | null,
-    turnId: TurnId,
-  ): Promise<Result<void, AdapterError>>;
-  respond(requestId: RequestId, decision: PermissionDecision): Result<void, AdapterError>;
-  kill(): Promise<void>; // terminate-then-force, on the process tree
 }
 
 // ---------------------------------------------------------------------------
@@ -995,14 +918,6 @@ export type CheckpointError =
   | { readonly code: 'no_such_checkpoint'; readonly sha: GitSha }
   | { readonly code: 'commit_failed'; readonly detail: string }
   | { readonly code: 'restore_incomplete'; readonly detail: string };
-
-export type AdapterError =
-  | { readonly code: 'agent_unavailable'; readonly image: string; readonly detail: string }
-  | { readonly code: 'unsupported_vendor'; readonly vendor: string }
-  | { readonly code: 'unsupported_sandbox'; readonly sandbox: string }
-  | { readonly code: 'no_child' }
-  | { readonly code: 'schema_mismatch'; readonly detail: string }
-  | { readonly code: 'write_failed'; readonly detail: string };
 
 // tier two
 export type RecordsError =
