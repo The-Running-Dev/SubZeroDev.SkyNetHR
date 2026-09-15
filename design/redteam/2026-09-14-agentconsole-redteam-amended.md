@@ -168,7 +168,7 @@ Cost: Cheap now, since it is only the package graph. Expensive once consumers de
 
 ## F14
 Severity: LOCAL
-Status: unadjudicated
+Status: defect (adjudicated 2026-09-15). Added evidence: the check sits one line below the lines L2 cites (`path.join` L774, check L775; open L799), and also guards `attachmentId` (L823, L849) and `turnId` in `removeAttachments` (L877). Attachment ids are minted by `randomUUID()` (`src/session-manager/index.ts` L1166) and filenames never reach a path, so A21's attachment half has no current risk either. L2's [I] residual concern (custom and API providers widen who controls `callId`) remains valid. The untested gaps were probed with a Node replica of the check's logic on Windows: `CON`, `NUL`, `COM1`, `con.txt`, `ab:cd`, `foo.` and `foo ` are accepted; `a:b` and `C:foo` are rejected only because `win32` basename treats a letter-colon prefix as a drive. v2 rewrites L2 (L234–236), A21 (L407–411) and the §15 warning (L868) to preserve the layout and harden the validator.
 Claim: L2's evidence is false: `callId` and `turnId` are already validated before becoming path segments. A21's opaque-id storage change is justified by that false finding.
 Where: §3 L2; §5 A21; §15 "external identifier as a filesystem path segment" warning
 Breaks when: Read against the tree. `isSafePathSegment` (`src/store/index.ts` L70-80) rejects empty names, `.` and `..`, `/`, `\`, NUL, and anything that is not its own basename. It is applied in `writeToolOutput` (L775) and `openToolOutput` (L799). L2 says "A grep of `src/` found no `callId` pattern check." What the check does not cover, not tested in this pass [I]: Windows device names (`CON`, `NUL`) and `name:stream` alternate data stream syntax.
