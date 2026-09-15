@@ -679,3 +679,10 @@ describe('#133 — a slow live subscriber is dropped past caps.subscriberQueueHi
     assert.match(gapFrame!, /"fatal":false/, 'the gap is reported non-fatal, same shape session-manager.subscribe mints');
   });
 });
+
+describe('D209 — the frame discriminator is `isFrame`, not an inline `seq` test', () => {
+  it('deliver does not test `\'seq\' in envelope` inline', async () => {
+    const source = await readFile(path.join(process.cwd(), 'src', 'edge', 'ws', 'index.ts'), 'utf8');
+    assert.doesNotMatch(source, /'seq' in envelope/);
+  });
+});
