@@ -86,7 +86,7 @@ Cost: Expensive later. Lane granularity is the core concurrency contract.
 
 ## F7
 Severity: STRUCTURAL
-Status: unadjudicated
+Status: defect (adjudicated 2026-09-15). Evidence corrections: (1) queue depth is still measurable per subscription. What the shared pipe removes is attributing the pressure to one subscription; SkyNetHR today guards each subscriber's own socket (`src/edge/sse/index.ts` L145). (2) Only subscriptions actually streaming during the stall cross high-water, so 100 gaps needs 100 busy sessions. (3) Step 5 is inference: the target never says the writer shares an execution path with lane processing or CLI stdout reads. Confirmed: §9 L566–567 and L569 specify per-subscription queues, never-dropped responses and resubscribe-from-last-seq with no link-level flow control and no overflow rule for the control lane. Context: v2 addresses this with `events.credit` (v2 L291, L309, L598–600), declares pipe backpressure global (v2 L311, L869), and adds a priority control queue with fair scheduling (v2 L601).
 Claim: Per-subscription backpressure (A3, §9) cannot be measured on one shared stdout pipe. One slow SDK reader therefore gaps every session at once, and resubscribe-with-replay amplifies the load that caused it. The "bounded control lane", whose responses "are never dropped", has no overflow behaviour.
 Where: §5 A3; §9 stdio "Backpressure"
 Breaks when: One ASP.NET host runs 100 live sessions across 30 principals, and a GC pause or thread-pool starvation stalls the SDK read loop for 2 s. The chain:
