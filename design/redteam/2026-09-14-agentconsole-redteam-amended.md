@@ -127,7 +127,7 @@ Cost: Expensive later for pagination and admin removal, which are protocol surfa
 
 ## F10
 Severity: LOCAL
-Status: unadjudicated
+Status: defect (adjudicated 2026-09-15). Confirmed: the only fault path is stdout EOF (L572), which a stalled event loop never produces, and this revision has no per-request timeout (the only other timeout is host shutdown, L634). Cost correction: `runtime.ping` is named only in §10 L630 and is absent from A2's operation list, so the fix adds one operation as well as SDK launch code; still cheap now. The failure is new with the extraction, since SkyNetHR runs in-process today. v2 applies the heartbeat on all platforms (L657–658) and warns against treating the Job Object as hang detection (L873).
 Claim: A hung runtime on Windows is never detected. The heartbeat exists only on Linux and macOS, and the Job Object acts only when the host dies.
 Where: §10 Launch
 Breaks when: The runtime's event loop stalls (an adapter parse loop, a synchronous fs call on a network share, a provider bug) while the ASP.NET host stays up. Windows sends no `runtime.ping`, and stdin EOF never happens because the host is alive.
