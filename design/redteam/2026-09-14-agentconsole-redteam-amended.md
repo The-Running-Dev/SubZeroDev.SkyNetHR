@@ -45,7 +45,7 @@ Cost: Expensive later. It needs an extension-operation namespace and a lane-muta
 
 ## F4
 Severity: BLOCKING
-Status: unadjudicated
+Status: defect (adjudicated 2026-09-15). Severity kept at BLOCKING over a recommended STRUCTURAL: K2 (L68, L79) presents A4 as the answer to cross-user access, so as shipped it reads as a tenant boundary, and the worst outcome is cross-tenant exposure attributed to the reader's own tool call. Evidence: no statement anywhere in this revision that `principal` is not an OS or filesystem boundary. Q1 (L810) covers only shared CLI login and billing, Q6 (L815) only session sharing, and L165's "another tenant's checkout" reinforces the tenant reading. Unverified: the Absence line's claim about the proposal, which is not available; the review half holds. Context: v2 addresses this with a threat-model boundary in A4 that puts mutually untrusted tenants out of scope (v2 L321–322).
 Claim: Principal isolation (A4) is enforced only at the protocol surface. Every principal's agent runs as the same OS user, with read and write reach over every other principal's workspaces, the runtime store and the audit log. Nothing in the document says so.
 Where: §2 K2; §5 A4, A9, A11; §14 Q1, Q6. Absence: neither the review nor the proposal has a threat model (the proposal has no match for "threat", "isolation" or "trusted").
 Breaks when: A multi-user ASP.NET host (K2's own scenario) has principals alice and bob and `workspaceRoots: ['D:/work']`. Alice's session in `D:/work/alice` asks the agent to read `D:/work/bob/.env`, or `<runtimeRoot>/sessions/*/events.ndjson`. Nothing stops it:
