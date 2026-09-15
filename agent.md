@@ -62,6 +62,12 @@ and preferences belong in `AGENTS.md`.
   behaviour both documents promise and nothing delivers. **Cost: a reconciliation pass spent
   establishing, value by value, which silences were meant.** A union member with no producer says
   so in its own comment, or the member goes (D139).
+- **A comment promising a step is read as the step.** `edge/ws` said its gap floor would be "set
+  from `after` once `onFirstMessage` knows it", and the Codex adapter said `thread/start` set the
+  sandbox a resume would keep; neither assignment existed. **Cost: an early `replay_gap` that
+  restated seq 0, and resumed Codex threads running outside the launch policy, both past code
+  review and a reconcile, because each reader took the comment for the code.** Where a comment
+  says a later line does something, find the line. *(Earned here, not inherited.)*
 
 ## Sequences and arguments
 
@@ -105,6 +111,12 @@ and preferences belong in `AGENTS.md`.
   phase.** The same root left the launch-flag list missing `-p`, without which the transport
   does not start, and made a twelve-row mapping table read as the CLI's whole vocabulary.
   Probe the protocol at `/design`, not at the slice. *(Earned here, not inherited.)*
+- **A regression test that reaches the bug through a different entry point guards nothing.**
+  S25.5's "reconnect mid-message renders once" reconnects by re-selecting the session, which
+  clears the transcript; the path a real reconnect takes, `onopen` with no re-select, still
+  rendered the reply twice. **Cost: the criterion was ticked on a path users never take, and the
+  double render shipped.** Drive the test through the entry point the failure is reported on.
+  *(Earned here, not inherited.)*
 
 ## Token economy
 

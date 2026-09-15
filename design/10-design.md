@@ -2396,7 +2396,7 @@ is what an adapter is handed at create — so muting there covers all four of `e
 `cli-session`, `spawned` and `exited` together, and leaves no second path for a later change
 to forget. **That the choke point rather than the handler is the right place is measurable,
 not stylistic**: the adapter sends `turn.ended` as a second, separate notification immediately
-after `exited` and inside the same synchronous callback (`src/session-manager/index.ts`), so a
+after `exited` and inside the same synchronous callback (`src/adapters/claude/index.ts`), so a
 mute written into the `exited` handler would let the turn's closure through and only a mute at
 the sink catches both. `SessionManager`
 gains one method for `server.ts` to call and `Adapter` gains nothing, which keeps server

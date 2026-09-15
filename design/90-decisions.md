@@ -5329,8 +5329,306 @@ Cheapest, but it leaves the rule the code already depends on unwritten, so an `a
 any handler's `emit` could reorder one turn's events with no invariant naming the defect.
 Reversibility: cheap — one invariant row; the two handler corrections are local.
 
+### 2026-09-15 — D216 A reclaimer confirms its own lock before boot work
+Context: `/reconcile`. `store.claimLock` reclaims a stale `server.lock` by rename (D196) and proceeds
+without confirming the rename was its own. Two boots reclaiming the same stale lock both proceed, and
+the loser runs reap → rehydrate over the root until its first renewal detects displacement (D195) —
+I50 breached for up to one renewal interval. § Server lock says only the claim needs to lose a race.
+Chosen: **after the rename, the reclaimer waits one renewal interval and re-samples before any boot
+work; its own `instanceId` proceeds, a foreign one refuses as for a live holder.** It stays inside
+D180's observe-don't-compare rule, and the residual collapses into D180's named visibility limit.
+Costs one renewal interval on reclaim boots only; a clean restart releases and never reclaims
+(D175). Lands through § Open.
+Rejected: **an exclusively-created reclaim marker.** True mutual exclusion on a local filesystem,
+but the marker's own crash-staleness needs its own rule — the same problem one level down — and it
+adds a persisted file.
+Rejected: **naming concurrent reclaim as an accepted residual.** No code, but a loser's reap and
+rehydrate over a live root stays possible.
+Reversibility: cheap — one paragraph and one function.
+
+### 2026-09-15 — D217 A Codex thread is started and resumed under the session's policy and model
+Context: `/reconcile`. `thread/resume` sends only `threadId`, so a resumed thread runs under the
+CLI's defaults rather than the launch sandbox and `approvalPolicy: 'never'`; a comment claims
+`thread/start` already covers it. Separately, the adapter never reads `CreateSessionInput.model`, so
+every Codex session runs the CLI's configured model whatever the session records. The installed
+schema accepts both on start and resume.
+Chosen: **the tree follows the contract.** Start and resume both carry `cwd`, `sandbox`,
+`approvalPolicy: 'never'` and `model`, and the false comment goes. No contract change: the per-session
+policy and model are already the contract (I25). Lands through § Open.
+Rejected: **probing whether resume inherits the original sandbox first.** It costs a probe session,
+and the explicit pass is right whichever way it comes out.
+Rejected: **recording resume-inherits-defaults, and Codex-ignores-model, as accepted.** Each keeps a
+banner or a field telling the operator something false — for the policy, on every resume.
+Rejected: **refusing `model` for vendor `codex`.** It removes a capability the CLI has and changes a
+public validation rule.
+Reversibility: cheap.
+
+### 2026-09-15 — D218 The `exited` sweep reaches answers still in flight, and a cancellation is emitted before it is appended
+Context: `/reconcile`. An answer awaiting its audit append has already left `turn.pending` (D33), so
+the `exited` sweep misses it: `turn.ended` goes out, `respond` returns `no_child`, and the request is
+never resolved (I9). And on `respond` → `write_failed`, `respondOrCancel` awaits the cancellation's
+append before emitting `permission.resolved`, so the child's close can take the lower `seq` —
+the same clause of I9, from the other side.
+Chosen: **the manager keeps a per-turn set of answers in flight; the `exited` sweep cancels those
+too, before `turn.ended`, and `finalizeResolution` stands down for a swept answer.
+`respondOrCancel` emits `permission.resolved` and clears its in-flight entry in one synchronous tick,
+then awaits the append** — as the `exited` handler already does. D26's durable-first rule governs the
+`control_response`, and none reached the child. The one tick is also what stops the sweep resolving
+the same request twice. The `no_child` row then holds as written; no contract change. Lands through
+§ Open.
+Rejected: **resolving on `no_child`.** The resolution lands after `turn.ended`, which still breaks
+I9, and it needs the row amended.
+Rejected: **naming the exit-during-audit race as an I9 exception.** A client can be left showing a
+prompt that never resolves.
+Rejected: **keeping audit-before-emit and holding the adapter's `turn.ended` until cancellations
+settle.** A buffering path in the handler adds ordering surface in the territory I64 just closed.
+Reversibility: cheap.
+
+### 2026-09-15 — D219 I11 allows one correction record after a decision that never reached the child
+Context: `/reconcile`. When `respond` fails `write_failed` after the decision record is durable
+(D26), the manager appends a `cancelled_process_exit` record too — two `AuditRecord`s for one
+`permission.resolved`, pinned by a test. After D218 the sweep produces the same pair for an answer in
+flight. I11 says exactly one.
+Chosen: **the contract follows the code: one decision record per `permission.resolved`, followed by
+at most one `cancelled_process_exit` correction when that decision never reached the child.** The
+log is append-only, so the first record cannot be retracted, and without the correction it would
+claim forever that an allow was delivered. Lands through § Open, at `/contract`.
+Rejected: **a `supersedes` reference on the correction.** Machine-checkable pairing, but it changes
+the persisted `AuditRecord` shape and needs an I61 additive-rule review.
+Rejected: **dropping the correction to hold I11 as written.** `audit.ndjson`, the evidence the brief
+promises, would then say an allow was delivered when it was not.
+Reversibility: cheap — one invariant row.
+
+### 2026-09-15 — D220 A Codex schema mismatch after `send` ends the turn `error`
+Context: `/reconcile`. The Codex adapter's failure path sets `resultSeen` and terminates the child;
+the close handler emits `turn.ended` only when `!resultSeen`, so the turn never ends and the session
+stays busy (I14). The Claude adapter ends the turn `error` for the same cause.
+Chosen: **the failure path issues the tree kill, then emits `turn.ended {stopReason: 'error'}` if the
+turn is open** — kill before envelope per I59, as Claude does. No contract change. Lands through
+§ Open.
+Rejected: **a separate failure flag, so the close handler ends the turn.** It ends `process_exit`,
+misreporting a vendor-protocol failure as a crash, and splits the two adapters' `stopReason` for one
+cause.
+Reversibility: cheap.
+
+### 2026-09-15 — D221 A storage-failure turn issues its kill before `turn.ended` is delivered
+Context: `/reconcile`. When a spill append fails, the manager delivers `turn.ended/storage_failure`
+before calling `adapter.kill()`. I59 says the tree kill is already issued once `turn.ended` is
+observable, and S28 has landed, so this is not D199's deferred debt.
+Chosen: **start the kill, deliver the envelope, then await the kill** — issued, not awaited, which is
+I59 and D209's own wording and matches the interrupt and `send`-failure paths. No contract change.
+Lands through § Open.
+Rejected: **awaiting the kill before delivering.** Stricter than I59, holds `turn.ended` behind a
+Windows `taskkill /T`, and differs from every other I59 path.
+Reversibility: cheap.
+
+### 2026-09-15 — D222 Shutdown bounds step 3 at 2 s
+Context: `/reconcile`. `server.ts` awaits `manager.shutdown()` with no bound, where § Shutdown says
+the caller bounds it and I54 bounds every step past the guard. A stalled `taskkill /T` or tombstone
+append holds release and exit until the supervisor kills the process — D176's rejected failure.
+Docker's default grace is 10 s; the drain (5 s) and the release (2 s) already take 7.
+Chosen: **a `KILL_TIMEOUT_MS = 2000` constant beside its two siblings, raced against step 3 as step 4
+already is, logging when it fires, then continuing to release** — 9 s worst case, inside Docker's
+default. No contract change. Lands through § Open.
+Rejected: **3 s with `stop_grace_period: 15s` in compose.** It couples to the open
+deployment-artifact work, and non-Docker supervisors do not read compose.
+Rejected: **bounding inside `manager.shutdown`.** It contradicts the contract's "this caller bounds
+it", needs an amendment, and moves a timing constant away from its siblings.
+Reversibility: cheap — one constant.
+
+### 2026-09-15 — D223 A Claude deny should let the turn continue, pending a probe of `interrupt: false`
+Context: `/reconcile`. Every Claude deny sends `interrupt: true` with "Denied by operator", and in S26
+run 5 a real deny ended the turn `error` (`design/findings/S26-real-permission-round-trip.md`). The
+contract's audit-failure row and `10-design.md` both say the turn continues and the agent can respond
+to the denial, with the storage failure as the deny's reason. Neither half holds, and no decision
+records `interrupt: true`.
+Chosen: **the code follows the documents, gated on evidence.** `/fix` first runs one real deny with
+`interrupt: false` against the installed CLI (`agent.md`: a vendor flag is not verified until it has
+run). If the turn continues, the adapter sends `interrupt: false`, with a test and a finding note. If
+it does not, the fix stops and this returns for a decision — "the documents follow the code" being
+the standing alternative. Carrying the storage-failure text needs a reason on `Adapter.respond`, a
+public signature, so that half is `/contract`'s. Lands through § Open.
+Rejected: **documents follow the code, deny ends the turn.** No code, but every operator deny, not
+only an audit failure, throws away the rest of the turn.
+Rejected: **operator deny interrupts, audit-failure deny does not.** Needs the probe and the
+signature change too, and gives two deny behaviours for a distinction the operator cannot see.
+Reversibility: cheap.
+
+### 2026-09-15 — D224 A reconnect discards the partial message bubbles it cannot finish
+Context: `/reconcile`. On a real reconnect — SSE auto-reconnect, or ws `onclose` → reopen — `onopen`
+clears `streamedMessages` but leaves the partial delta bubble in the transcript, and the replayed
+`message` renders a second one. S25.5's test reconnects by re-selecting, which clears the transcript,
+so it passes. The contract's delta/message bullet says across a reconnect the question does not
+arise.
+Chosen: **`onopen` removes every tracked partial bubble before clearing the map, so the replayed
+`message` renders once, in full.** The test fires `onopen` without a re-select. `/contract` rewords
+the bullet to say the renderer discards partial bubbles on reconnect, which is what makes "never
+both" decidable. Lands through § Open.
+Rejected: **keeping the bubble and suppressing the replay.** Deltas are never replayed (I51), so the
+bubble stays truncated for good.
+Rejected: **routing every reconnect through a full reload.** Correct, but every network blip repaints
+the transcript and re-reads the spill.
+Reversibility: cheap.
+
+### 2026-09-15 — D225 A `replay_gap` restates at least the client's resume point, and the refetch-once rule is per refetch
+Context: `/reconcile`. `edge/ws` starts its gap floor at 0 and never raises it to `after`, though its
+comment says it will, so a backpressure drop before the first write on a resumed stream restates seq
+0 — not a held seq (D156). And the client's refetch-once flag clears only on selecting a session, so
+after one refetch any later, unrelated gap in the same selection skips straight to "history
+unavailable"; D155 gives up only when the refetch stream itself gaps.
+Chosen: **both in the tree.** `edge/ws` floors at `after` once the first message computes it, with a
+regression test verified by reverting the fix. The client clears the flag when the refetch stream
+delivers its first envelope with a `seq`, so a gap on the refetch stream still stops. No contract
+change. Lands through § Open.
+Rejected: **reading seq 0 as "restart from the beginning".** It contradicts D156's wording and costs
+a whole-transcript refetch.
+Rejected: **attaching the flag to the refetch stream object.** Same behaviour, and it also covers a
+refetch stream that gaps before delivering anything, but it is a larger change to how the stream is
+held; recorded as the upgrade if that case is ever seen.
+Rejected: **one refetch per selection, in D155 and the contract.** The operator sees silent holes
+after a second gap until re-selecting.
+Reversibility: cheap.
+
+### 2026-09-15 — D226 The Codex transport probe does not cache "not installed" (refines D141)
+Context: `/reconcile`. D141 probes once and caches, so a hung binary stalls the server for up to 4 s
+once rather than per create. The cache also holds a not-found result for the process lifetime, so a
+Codex installed after start stays `agent_unavailable` until a restart, where the error row says
+retryable once installed.
+Chosen: **cache a detected transport and a timed-out probe; do not cache not-found.** Re-probing a
+missing binary costs milliseconds, and the hung-binary stall D141 recorded is still paid once. No
+contract change. Lands through § Open.
+Rejected: **amending the row to say a restart is needed.** Nothing tells the operator so.
+Rejected: **caching no negative result.** A hung binary brings back the 4 s stall on every Codex
+create, the cost D141 exists to avoid.
+Reversibility: cheap.
+
+### 2026-09-15 — D227 Two error variants keep their reuse, and their rows say so
+Context: `/reconcile`. `StoreError.corrupt` is also returned for an audit cursor that fails
+authentication, mapped to `422 bad_request` naming `before` (D141's answer); its row names only
+unparseable `meta.json` or a torn trailing line. `CheckpointError.init_failed` / `git_unavailable` is
+also returned when `destroy` cannot remove `ckpt.git` or `ignored/` (a removal notice; the session
+is still removed) and when `list`'s `git log` fails other than on an unborn HEAD
+(`500 checkpoint_failed`); its row names only creation. Every outcome is sensible; the stated
+meanings are not complete.
+Chosen: **widen both rows with the further conditions and their real outcomes, at `/contract`; no
+union change.** The code comment in `src/checkpoints/index.ts` apologising for the reuse goes. Lands
+through § Open.
+Rejected: **new variants — `StoreError.bad_cursor`, `CheckpointError.teardown_failed` and
+`read_failed`.** Each would mean one thing, and `bad_cursor` would guard against a future real
+corruption in the audit read being reported as a bad cursor. But each changes a public union and
+every exhaustive switch over it, for no change an operator sees.
+Reversibility: cheap — two table rows.
+
+### 2026-09-15 — D228 A Codex approval request arriving despite `approvalPolicy: 'never'` is declined, and the turn continues
+Context: `/reconcile`. The contract calls `item/commandExecution/requestApproval` unreachable under
+the shipped policy and says nothing of what happens if one arrives. The adapter answers
+`{decision: 'decline'}` and emits a non-fatal `adapter_unknown_record`, with no `permission.request`
+(I25) and no audit record. No decision recorded that. After D217 the policy is sent on resume too.
+Chosen: **the contract follows the code.** A sentence under § Policy: such a request is declined,
+the turn continues, and it surfaces as `adapter_unknown_record`. No audit is owed — there is no
+`permission.resolved` (I11) and nothing executed. Decline is the only answer safe with no operator,
+the same argument as the audit-failure deny. Lands through § Open, at `/contract`.
+Rejected: **treating it as `schema_mismatch`, ending the turn.** Louder, but it costs a turn every
+time a future CLI shifts policy semantics.
+Rejected: **declining and auditing.** The adapter cannot write audit across the module boundary, so
+it needs a new notification kind — a public-interface change — for a path believed unreachable.
+Reversibility: cheap — one sentence.
+
+### 2026-09-15 — D229 An ended session is deletable from the console
+Context: `/reconcile`. The Terminate screen hides its confirm button for an ended session, and it is
+the client's only `DELETE` caller, so every restart-ended (D20) or storage-failure-ended (D41)
+session is undeletable from the console, its spill and `ckpt.git` left on disk. `10-design.md` and
+the `DELETE` route both allow it, and S18.9 makes the screen presentation over `DELETE`.
+Chosen: **the confirm button shows for an ended session too, with the ended notice kept as
+context.** No contract change. Lands through § Open.
+Rejected: **recording console non-deletion as deliberate.** Ended sessions' storage grows without
+bound unless an operator calls the API by hand.
+Reversibility: cheap.
+
+### 2026-09-15 — D230 The ws edge's refusal frame and close codes are contract
+Context: `/reconcile`. Before subscribing, `edge/ws` refuses with an `{type: 'error'}` frame and closes
+4408 (no first frame by the deadline), 1002 (bad first message), 4401 (unauthenticated), 4404 (not
+the owner) or 1011 (server error), and closes 1000 after a backpressure `replay_gap`. None of it is in
+`design/`, and the client depends on it: 4401 and 4404 stop its reconnect loop.
+Chosen: **§ Streaming (ws) states the refusal frame, each code with its cause, and which are
+permanent versus transient, at `/contract`.** No code; the edge and client already agree. A second
+client would face the same question, which is what puts it in the contract. Lands through § Open.
+Rejected: **RFC 6455 codes instead (1008 for both 4401 and 4404).** 1008 cannot tell no identity from
+not yours, and it changes working behaviour for no operator gain.
+Reversibility: cheap in text; expensive once a third-party client relies on the codes.
+
+### 2026-09-15 — D231 An unreadable shipped asset answers `404 no_such_output`
+Context: `/reconcile`. When a known static asset cannot be read, `serveStatic` answers
+`404 no_such_output`. The contract defines that code as a missing tool-output blob, and covers only
+unknown paths outside `/api/` (`404 no_such_session`). An unreadable asset is a broken install.
+Chosen: **the contract follows the code: one bullet beside the unknown-route rule, at `/contract`**,
+recording the reuse because the union has no install-fault member. No code. Lands through § Open.
+Rejected: **a 500.** No `code` fits, so it borrows an unrelated one or adds a member to a public
+union.
+Rejected: **`404 no_such_session`, as for an unknown path.** It hides a broken install behind a
+message suggesting the operator asked for the wrong thing.
+Reversibility: cheap — one bullet.
+
+### 2026-09-15 — D232 Two small corrections follow the contract: I38's log line, and the cookie max-age read
+Context: `/reconcile`. `foldLatestById` logs only when a record log cannot be read at all; a line
+that fails to parse or has no `id` is dropped silently, where I38 promises "a shortened registry and
+a log line". And `src/config/index.ts` parses `SESSION_COOKIE_MAX_AGE_SECONDS` under every auth
+mode, where the contract reads it only under shared-secret, so a malformed value refuses boot under
+a header mode that never uses it.
+Chosen: **both in the tree.** One warning per fold that dropped lines, naming the file, the count and
+the first line number — not one per line, on a badly torn file. The max-age parse is gated on the
+shared-secret mode. No contract change. Lands through § Open.
+Rejected: **narrowing I38 to an unreadable file.** A torn requisition or review line then vanishes
+from the registry with nothing telling an operator why.
+Rejected: **the contract saying max-age is always validated.** A boot refusal over a setting the
+mode never reads.
+Reversibility: cheap.
+
+### 2026-09-15 — D233 SSE keepalive keeps an idle stream open; it does not detect a dead one
+Context: `/reconcile`. § Streaming says the `: keepalive` comment is what lets a client tell a silent
+agent from a dead connection. No client can: `EventSource` never surfaces comment lines to script,
+and the client has no liveness timer. A dead connection shows as a transport error or close. The
+sentence is D21's rationale, so the rule stands and only its justification is overstated.
+Chosen: **reword at `/contract`: keepalive keeps intermediaries from closing an idle stream; a dead
+connection is detected by transport error or close, which the browser's reconnect already handles.**
+D21 unchanged. No code. Lands through § Open.
+Rejected: **building client liveness** — keepalive as an observable data frame and a client timer
+reconnecting after missed ones. It detects half-open connections the browser misses, but changes the
+SSE wire and the client for a failure not observed.
+Reversibility: cheap — one sentence.
+
 ## Open
 
 Staging only. Once an item becomes an issue it leaves this list.
 
-None at present.
+- **Stale-lock reclaim confirms before boot work (D216).** `/contract` (opus/high) amends § Server
+  lock; then `/fix` (sonnet/medium) in `store.claimLock`, with a two-reclaimer test.
+- **Codex start and resume carry policy and model (D217).** `/fix`: `thread/start` and
+  `thread/resume` send `cwd`, `sandbox`, `approvalPolicy: 'never'` and `model`; the false comment in
+  the resume path goes; a fake-CLI test asserts the params on both.
+- **Permission resolution on child exit (D218).** `/fix` in `session-manager`: a per-turn in-flight
+  answer set swept on `exited`, `finalizeResolution` standing down for a swept answer, and
+  `respondOrCancel` emitting before appending; tests for exit during an audit append and close during
+  a cancellation append.
+- **Codex failure path ends the turn (D220).** `/fix`: kill, then `turn.ended error`; a fake-CLI test
+  sends a malformed notification after send-ok and asserts exactly one `turn.ended`.
+- **Storage-failure kill order (D221).** `/fix` in `session-manager`; a test asserts kill was called
+  before `turn.ended`.
+- **Shutdown step 3 bound (D222).** `/fix` in `server.ts`: `KILL_TIMEOUT_MS = 2000`, logged when it
+  fires; a test with a never-settling `manager.shutdown` still reaches release and exit 0.
+- **Claude deny `interrupt: false` (D223).** `/fix` probes a real deny first and stops if the turn does
+  not continue; on success, switch, test and finding note, then `/contract` for a reason on
+  `Adapter.respond`.
+- **Reconnect discards partial bubbles (D224).** `/fix` in `client/app.js`, tested by firing `onopen`
+  without a re-select; `/contract` rewords the delta/message bullet.
+- **Gap floor and refetch scope (D225).** `/fix`: `edge/ws` floors at `after` (regression test verified
+  by revert); the client clears its refetch flag on the refetch stream's first `seq`.
+- **Codex probe cache (D226).** `/fix`: not-found is not cached; test not-found → install → create
+  succeeds.
+- **Ended sessions deletable (D229).** `/fix` in `client/app.js`, and its Terminate-screen test.
+- **I38 log line and cookie max-age read (D232).** `/fix` in `store` and `config`, a test each; the
+  same pass removes the apology comment in `src/checkpoints/index.ts` (D227).
+- **Contract amendments with no code (D219, D227, D228, D230, D231, D233).** One `/contract`
+  (opus/high) pass: I11's correction record; the `StoreError.corrupt` and `CheckpointError` rows; the
+  Codex § Policy decline sentence; ws refusal frame and close codes; the unreadable-asset bullet; the
+  keepalive rationale.
