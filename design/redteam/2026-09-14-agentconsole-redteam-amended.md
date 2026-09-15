@@ -136,7 +136,7 @@ Cost: Cheap now. The fix is contained in SDK launch code; the heartbeat method a
 
 ## F11
 Severity: LOCAL
-Status: unadjudicated
+Status: defect (adjudicated 2026-09-15). Nuances: A9's third part, explicit host-supplied provider `env` (L331), lets a site pass proxy and CA variables through config, so the defect is an ungated default flip (L335) with a failure that does not name environment filtering, not an unfixable configuration. The relocated-login bullet is the weakest, since the provider-declared allowlist (L330) could carry `CLAUDE_CONFIG_DIR`/`CODEX_HOME`; A9 just does not require it. Local support for the Windows bullet: both adapters read `ComSpec` for `shell: true` spawns (`src/adapters/claude/index.ts` L29, `src/adapters/codex/index.ts` L76) and inherit the full env today (claude L475, codex L511, L704). The downstream-tool [X] claims are unverified here. v2 adds the Windows and network/TLS variables (L349–350), provider CLI-home declarations (L351), probe-gated default (L354), and diagnosing conformance tests (L355).
 Claim: A9's base allowlist omits variables that vendor CLIs need to reach their APIs and find their logins, and that allowlist becomes the default in AgentConsole's first release.
 Where: §5 A9; §10 Launch
 Breaks when: The CLI needs any of these, none of which is in the base list:
