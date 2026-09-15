@@ -73,7 +73,7 @@ Cost: Expensive later. The v1 vocabulary is frozen into the schemas and both SDK
 
 ## F6
 Severity: STRUCTURAL
-Status: unadjudicated
+Status: defect (adjudicated 2026-09-15). Reach corrections: (a) holds, and the runtime heartbeat (L630) cannot detect it because the receive loop stays live (L578). In v1, only create callbacks hold a lane (see F2), so a hung `beforeCreate` leaves `sessions.create` unanswered, and a hung `afterCreate` blocks `sessions.end`/`events.append` on S. Blocked `turns.interrupt`/`permissions.respond` requires a callback during a turn. (b) The deadlock branch is not the document's reading, because A22 L384 lists "turn start/end" as separate mutators. The other branch stands as written: L384 makes `turn.ended` a lane mutator, L388's barrier fails "later queued mutators" with no exception for the active turn's terminal event, and L389 requires the end-vs-in-flight scenario without defining its outcome. SkyNetHR today refuses end with `turn_in_flight` (`src/session-manager/index.ts` L1376), so the orphan appears only once A22 replaces that (compare v2 F3). Context: v2 addresses both, with a 30 s callback timeout that never wedges the lane (v2 A5 L328, L851) and a barrier that still permits the active turn's terminal events (v2 A22 L418).
 Claim: A22's lane has no liveness rule. Runtime→host callbacks have no timeout, and nothing defines what holds the lane across a multi-minute turn. The behaviour of `sessions.end` and `turns.interrupt` against a held lane is therefore undefined.
 Where: §5 A5, A17, A22; §9 stdio "Process death" and "Concurrent session operations"
 Breaks when:
