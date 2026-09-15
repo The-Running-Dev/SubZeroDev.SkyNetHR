@@ -150,7 +150,7 @@ Cost: Cheap now. Contained in ProcessSupervisor.
 
 ## F12
 Severity: LOCAL
-Status: unadjudicated
+Status: defect (adjudicated 2026-09-15). Context: the failure is new with the extraction. SkyNetHR sends attachments base64-inline in the `/message` body (`src/edge/http-common/index.ts` L219–226, L402–417), capped by `CAPS_ATTACHMENT_BYTES` and `CAPS_ATTACHMENT_COUNT` (`src/config/index.ts` L242–245) and rolled back per turn (`removeAttachments`, `src/store/index.ts` L875), so no partial-upload state exists today. Nuances: the 20 MiB figure exceeds SkyNetHR's 10 MiB default cap but is immaterial, since any file over 256 KiB is multi-chunk; A2 does not say whether `turns.send` takes attachment ids, which is part of the defect; §12 does not say whether the bridge buffers before chunking, so an SDK or host dying mid-sequence is an equivalent path. v2 adds begin/write/commit/abort with declared size (L297–302), partial caps, expiry and committed-ids-only `turns.send` (L303, L758–759), and a §15 warning (L871).
 Claim: Chunked `attachments.add` (A2) has no upload lifecycle: no upload identity, commit step, declared size or expiry. Abandoned uploads leave partial attachments that no operator action can find or remove.
 Where: §5 A2; §9 NDJSON "Binary data"; §12 Attachments
 Breaks when: A phone browser uploads a 20 MiB file as 80 chunks of 256 KiB, and the tab is backgrounded at chunk 37 (§12 notes that background tabs drop connections). No operation defines resume, abort or completeness, and `turns.send` referencing an attachment whose last chunk never arrived has no defined error. Tool output has a per-session byte cap (D162, `src/store/index.ts` L778-785), but no cap is stated for partial attachments.
