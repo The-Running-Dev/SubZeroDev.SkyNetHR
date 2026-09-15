@@ -59,7 +59,7 @@ Cost: Expensive later. A real boundary means a per-principal OS identity or cont
 
 ## F5
 Severity: STRUCTURAL
-Status: unadjudicated
+Status: defect (adjudicated 2026-09-15). Evidence nuance: elsewhere the review uses "§17" for the proposal's ASP.NET section (L45, L63, L132), and L690 also cites a "§17 table". So "the §17 error table below" may point at a proposal section rather than a missing section of this document. It dangles either way: the ASP.NET section is not an error table, and L486 lists the error table only as future `PROTOCOL.md` content. Added evidence: H3 L126 cites `EventPayloadMap` "L208-223" as lacking `error`, but `error` is at L222, inside that range. The L1477 emission carries `fatal: false`. Context: v2 addresses this, keeping `error` as a v1 kind (v2 H3 L125–127, A8 L342) and flipping the warning (v2 L852).
 Claim: H3, A8 and a §15 warning rest on a false fact. `error` is already an event kind, so "no `error` event kind" removes a kind that exists, is emitted and is rendered.
 Where: §3 H3; §5 A8; §15 "DO NOT LET ASTRA add an `error` event kind"
 Breaks when: An implementer follows A8 or the §15 warning. The kind is live today:
