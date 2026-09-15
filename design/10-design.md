@@ -199,7 +199,7 @@ fire for a read-only one, under the default mode this server spawns with** (S26.
 non-redirecting `Bash echo`) were both the safe case, so "no prompt" was correct for those
 specific commands; the mistake was generalising that to "the channel never fires," which a
 third, contradicting probe (S25's run 4, a `Write`) had already put in question. Driven
-correctly — the child's stdin held open, which is what `src/adapters/claude/index.ts`'s
+correctly — the child's stdin held open, which is what `src/agent-console/providers/claude-cli/index.ts`'s
 production `send()` already does — the round trip works for both `allow` and `deny`, against
 the real installed CLI, with the same exactly-one-resolution guarantees the fixture suite
 already asserts. **Codex's runtime approval is also observed**, unchanged from S8.1. The
@@ -1107,13 +1107,13 @@ edges → config**, for the origin allow-list (D29), which each edge applies bef
 identity — it is a property of the request rather than of the operator, so it does not belong
 behind `identity`.
 
-**`edge/http-common → adapters` is drawn, and it is not an I20 violation.** The edge validates
-the `vendor` field on `POST /api/sessions` and `POST /api/requisitions` against `VENDORS`, the
-single enumeration of that union's members, which lives beside the `createAdapter` switch that
-makes each member runnable so a second independently-typed copy cannot drift. Testing
-membership is not branching on a vendor: no code above `adapters/*` asks *which* vendor this
-is, and I20 remains what it says. The alternative — a second enumeration in `contract` or at
-the edge — buys the missing arrow at the cost of the drift `VENDORS` exists to prevent.
+**`edge/http-common → config/providers` validates membership without vendor branching.**
+The host composition registers its concrete provider definitions. Both the `Vendor` type
+and `VENDORS` derive from that registration; creation looks up a definition in the registry.
+There is no dispatch switch or second enumeration. Generic registry and turn-handle code
+lives under `src/agent-console/providers`; concrete leaves own transport selection and
+vendor mappings. The detailed migration semantics are in `20-contract.md § AgentConsole
+provider boundary — Phase 2` (D235).
 
 **One edge was drawn backwards, and S1 found it: `config` depends on `jail`, not the reverse**
 (D94). `jail` was given a `config` dependency here for the workspace roots, and it does not
@@ -2157,7 +2157,7 @@ Not guaranteed, and the client must not assume it:
 | A slow subscriber | Per-subscriber queue; drop that one, gap it, keep the rest | Fan-out; logged as D18 |
 | Interrupt arrives as the turn ends on its own | Whichever clears `turn` first wins; the loser is a no-op returning `{ok:true}` | Manager turn state (D24) |
 | Delete arrives during a turn | Refused `409` | Manager turn state (D25) |
-| Two sessions on overlapping workspaces | The second is refused at create | Manager, on **overlap** of the resolved paths of **live** sessions (D19 + D20 + D30), claimed synchronously |
+| Two sessions on overlapping workspaces | The second is refused at create | Manager, on **overlap** of the resolved paths of **live sessions and pending creates** (D19 + D20 + D30 + D235), claimed synchronously |
 | A client arrives during boot rehydration | Cannot — listening starts after rehydration | Boot ordering |
 | Two operators decide one requisition *(tier two)* | First wins; second gets `409 already_decided` | `records` registry, claimed synchronously with the check |
 | Two sessions created against one approved requisition *(tier two)* | First wins; second gets `409 requisition_consumed` | `records` registry, claimed synchronously with the workspace claim |
@@ -2400,7 +2400,7 @@ is what an adapter is handed at create — so muting there covers all four of `e
 `cli-session`, `spawned` and `exited` together, and leaves no second path for a later change
 to forget. **That the choke point rather than the handler is the right place is measurable,
 not stylistic**: the adapter sends `turn.ended` as a second, separate notification immediately
-after `exited` and inside the same synchronous callback (`src/adapters/claude/index.ts`), so a
+after `exited` and inside the same synchronous callback (`src/agent-console/providers/claude-cli/index.ts`), so a
 mute written into the `exited` handler would let the turn's closure through and only a mute at
 the sink catches both. `SessionManager`
 gains one method for `server.ts` to call and `Adapter` gains nothing, which keeps server
@@ -2940,7 +2940,7 @@ these are cited by number elsewhere in this document and in the slices.
    `token_count` — that schema describes `~/.codex/sessions/**/rollout-*.jsonl` on disk, which
    S8's *Out of scope* forbids scraping. Both are mapped in
    `20-contract.md § Vendor mapping — Codex`, `app-server` primary (D107). Transport selection
-   is the adapter's alone; `createAdapter` takes no transport parameter, because a transport
+   is the adapter's alone; `createConfiguredAdapter` takes no transport parameter, because a transport
    is a vendor fact and I20 forbids one above `adapters/*`.
 7. **Measured by S8.1, and the answer differs by transport.** On `app-server` the ids are
    UUID-based and distinct across turns — assumed session-unique, exactly as Claude's are. On
@@ -3027,7 +3027,7 @@ these are cited by number elsewhere in this document and in the slices.
     reports per-context cumulative figures, in which case summing raw values would double-count
     across a turn and again across a compaction. **It does not.** Two probes against the real
     CLI (`design/findings/S1-claude-adapter.md`, fixtures at
-    `src/adapters/claude/fixtures/usage-probe-*.ndjson`) show each `assistant` record carrying
+    `src/agent-console/providers/claude-cli/fixtures/usage-probe-*.ndjson`) show each `assistant` record carrying
     that API call's own marginal usage — no subtraction needed. The real hazard was a different
     one: **one logical message is streamed as several `assistant` records sharing a `message.id`
     and repeating byte-identical usage**, so a naive sum double-counts by duplication rather

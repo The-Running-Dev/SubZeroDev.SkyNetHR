@@ -14,7 +14,7 @@ import { createRecords } from '../../records/index.js';
 import { stripExtendedPrefix } from '../../jail/index.js';
 import type { AuthConfig, Config, Records, Store } from '../../contract/index.js';
 
-const FIXTURE = path.join(process.cwd(), 'src', 'adapters', 'claude', 'fixtures', 'fake-claude-cli.mjs');
+const FIXTURE = path.join(process.cwd(), 'src', 'agent-console', 'providers', 'claude-cli', 'fixtures', 'fake-claude-cli.mjs');
 
 function notImplementedProxy<T extends object>(name: string): T {
   return new Proxy({}, { get: () => () => { throw new Error(`${name} must not be called in S2`); } }) as T;

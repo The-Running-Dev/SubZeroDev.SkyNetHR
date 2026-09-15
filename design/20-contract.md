@@ -47,7 +47,7 @@ Every type below is exposed by **`src/contract/index.ts`**, the host `contract` 
 declarations remain in the facade. The generic module depends on nothing. The runtime
 exports are `RATINGS` (D150), declared in the host, and `isFrame` (D171), declared alongside
 the generic envelope and re-exported by the host. `VENDORS` is
-the other runtime enumeration in this contract and it is **not** here — it lives in `adapters`,
+the other runtime enumeration in this contract and it is **not** here — it lives in the host composition `src/config/providers.ts`,
 for the reason given under *Public surface*.
 
 ### Identifiers and scalars
@@ -98,8 +98,8 @@ specification (D108):
   **except** `;` `&` `|` `<` `>` `` ` `` `$` CR LF. There is no escape, so no rule matches a
   literal `*`. Nothing else in the pattern is special.
 
-`Vendor`, `SandboxMode` and `SessionState` are closed unions. `Vendor`'s runtime enumeration
-lives in `adapters` and `Rating`'s in `contract`; the reasons differ and are given under
+`SandboxMode` and `SessionState` are closed unions. `Vendor` is derived from the host's registered
+provider definitions; its runtime enumeration lives in `src/config/providers.ts` and `Rating`'s in `contract`; the reasons differ and are given under
 *Public surface*.
 
 **`Result<T, E>` is how failure crosses a module boundary.** Every fallible operation that
@@ -109,8 +109,9 @@ handling what the signature does not name.
 
 ### Session
 
-Declared in `src/contract/index.ts`: `PermissionPolicy`, `SessionRecord`, `SessionSummary`,
-`LiveSession`, `SessionSnapshot`.
+Declared in `src/contract/index.ts`: `SessionRecord`, `SessionSummary`, `LiveSession`,
+`SessionSnapshot`. `PermissionPolicy` lives in `src/agent-console/providers/types.ts` and is
+re-exported by the host contract.
 
 **`SessionRecord` is exactly what `meta.json` carries and nothing more** — the session minus
 turn, buffer and subscribers (D49). What the declaration cannot say:
@@ -835,7 +836,7 @@ against a named export and never speculatively.
 beside its consumer because the edge validator that tests membership before accepting a
 `Rating` on a review route would otherwise hand-copy the union — a second, independently typed
 list free to drift from the one it validates. It is deliberately **not** the `VENDORS`
-arrangement (D126): `Vendor`'s list sits in `adapters` beside the `createAdapter` switch that
+arrangement (D126): `Vendor`'s list derives from the host's provider registry, which
 makes each member runnable, and `Rating` has no such switch, its members being validated and
 stored rather than dispatched on. Nor may it move to `records`, which is tier two, while the
 tier-one edge needs this vocabulary to parse a body.
@@ -1176,10 +1177,12 @@ touched.
 ### `adapters/*`
 
 `AdapterNotification`, `AdapterEmitted`, `AdapterEvent`, `AdapterOptions`, `AttachmentPayload`
-and `Adapter` are declared in `src/contract/index.ts`; `VENDORS` and `createAdapter` in
-`src/adapters/index.ts`; the two adapters in `src/adapters/claude/` and `src/adapters/codex/`.
+and `Adapter` are declared in `src/agent-console/providers/types.ts` and re-exported by
+`src/contract/index.ts`. `VENDORS` and `createConfiguredAdapter` live in `src/config/providers.ts`;
+the concrete adapters live under `src/agent-console/providers/claude-cli/` and
+`src/agent-console/providers/codex-cli/`. The provider boundary below owns their composition.
 
-**Adapters are leaves.** They depend on `contract` and nothing else: they do not read config,
+**Adapters are leaves.** They depend only on AgentConsole provider types and local helpers: they do not read config,
 do not touch the store, do not write audit records, and do not know whether a turn is in
 flight. They are handed a resolved `cwd` and one outbound channel and that is their entire
 world. This is what keeps a second vendor from becoming a second architecture, and two edges
@@ -1207,7 +1210,7 @@ decides it for an interrupt and for a turn boot closes.
 **`send` spawns the turn's child, writes the message to stdin, and holds stdin open for the
 life of the turn.** Closing it after the prompt forecloses the permission feature entirely and
 is the obvious first implementation. The `codex exec --json` fallback is the one exception: it has
-no permission path, and ends stdin behind the prompt (`src/adapters/codex/index.ts`). `kill` is terminate-then-force **on the process tree**, not
+no permission path, and ends stdin behind the prompt (`src/agent-console/providers/codex-cli/index.ts`). `kill` is terminate-then-force **on the process tree**, not
 on the pid: the recorded process is the agent CLI, and what holds the workspace open is whatever
 it spawned. Terminate-then-force is the POSIX half only — Windows has no signal to be graceful
 with, so `taskkill /T /F` is one step and the grace period has nothing to elapse over (D148).
@@ -1229,16 +1232,14 @@ reader is `session-manager`, not an edge**, along with the two attachment caps b
 holds no reference to a live session's adapter, and giving it one would put an adapter capability
 on `SessionManager`'s interface to relocate a check whose refusal is identical either way.
 
-**`VENDORS` is the one enumeration of `Vendor`'s members and it is declared beside
-`createAdapter`'s switch, not in `contract`** (D126), because a list that is not beside the
-dispatch it authorises is a list free to gain a member nothing can create.
-`edge/http-common` imports it to validate a `vendor` on a request body, which is the one read
-D10 permits an edge to make of this module: **testing membership of a closed union is not asking
-which vendor this is.** A caller may rely on the array holding every member of `Vendor` and no
-other value, and on no member of it reaching `createAdapter`'s `unsupported_vendor` — that
-second property is what keeping the list and the switch in one file buys, and it is not the same
-as the call succeeding, which `unsupported_sandbox` may still refuse. Nothing may rely on the
-order.
+**`VENDORS` and the host `Vendor` type derive from the registered provider definitions**
+(D235). There is no dispatch switch or independently maintained enumeration. The generic
+registry accepts string ids; the host configuration selects which definitions it exposes.
+The edge checks membership in that configured list. It never selects behavior by identity.
+Existing persisted vendor values and the host event schemas are unchanged for this build.
+Adding a provider changes its module and host registration, not core, renderer or generic
+vocabulary. A duplicate registration returns `duplicate_provider` without replacing the
+existing definition; unknown creation returns `unsupported_vendor`.
 
 **A vendor adapter may accept one thing beyond `AdapterOptions`, and it is a test seam rather
 than a deployment knob** (D91). `createClaudeAdapter` and `createCodexAdapter` each take an
@@ -1246,12 +1247,66 @@ optional `executable`, defaulting to `SKYNET_<VENDOR>_EXECUTABLE` and then to th
 name, so a fixture CLI speaking the documented wire shape can stand in for the real binary over
 a real child process — which is what verifying the permission round trip rests on. It is
 deliberately **not** a `Config` field: a deployment that can repoint the agent binary from the
-environment is a deployment where the audit log names a program nobody chose. `createAdapter`
+environment is a deployment where the audit log names a program nobody chose. `createConfiguredAdapter`
 does not expose it, so nothing above `adapters/*` can reach it.
 
-**Transport selection is the adapter's alone and it ends there.** `createAdapter` takes no
+**Transport selection is the adapter's alone and it ends there.** `createConfiguredAdapter` takes no
 transport parameter and none is added: a transport is a vendor fact and I20 forbids one above
 `adapters/*`.
+
+### AgentConsole provider boundary — Phase 2
+
+The public declarations live in `src/agent-console/providers/types.ts`; registry operations
+in `src/agent-console/providers/registry.ts`. The migration adapters are composed by
+`adapter-session.ts` and `legacy.ts` in that same directory. This is the in-process provider
+boundary from the approved extraction handoff §11/A7/A10/A20, not an RPC or SDK surface.
+
+The concrete provider modules are leaves of AgentConsole: no imports of SkyNetHR identity,
+configuration, records, storage or manager. Host registration belongs in `src/config/providers.ts`.
+This registration file and the concrete leaf providers may name vendors; generic provider
+code and all modules above the provider boundary may not branch on vendor identity (I20).
+
+**Capabilities describe the selected implementation.** `probe` is asynchronous, with bounded
+help/version subprocesses and drained pipes. A failed probe reports unavailable, not a
+rejected promise. The transport cache includes in-flight and negative results, keyed by
+executable and canonical cwd; refresh replaces that cache entry for future creation, never
+changes an existing session. Codex tries app-server before exec; usage and streaming deltas
+are available only with app-server, attachments remain unsupported, and permissions remain
+preauthorised. A help probe establishes transport availability, not authentication. Version
+is omitted when not observed. Claude retains its documented attachment capability and
+reports executable availability separately; a missing executable still fails its first send
+after `turn.started`, preserving the existing paired failure sequence.
+
+**Creation reserves before awaiting.** The manager counts pending creates alongside live
+sessions under the same `pathsOverlap` predicate, and takes the workspace and requisition
+claims without yielding. Provider failure releases both; installing the live entry replaces
+the pending reservation without yielding. Startup notifications are held until the entry
+and its storage exist, then forwarded once in arrival order before a turn can start.
+An in-flight create that resumes behind the shutdown mute is refused and releases its claims.
+
+**A turn handle preserves both acknowledgement and completion.** `started` carries the
+existing send Result, including spawn/handshake failure; `done` carries the terminal outcome.
+The synchronous outbound callback runs before completion resolves, preserving the manager's
+sequence assignment and process-tree-kill timing. Events carry no envelope metadata; frames
+use the separate callback and never acquire seq. Process and CLI-session facts use the
+context's notification channel, retaining D46 until ProcessSupervisor is extracted.
+
+**Permission responses are synchronous delivery outcomes.** A successful write reports the
+requested decision. A lost child or failed write reports `cancelled_process_exit` with its
+original cause. This does not write audit or emit `permission.resolved`: SkyNetHR's shim
+restores the original error Result so D213's distinct no-child and write-failure behavior,
+including fsync-before-answer, remains manager-owned. A stale handle cannot answer or kill
+a subsequent turn. Closing a provider session prevents new turns and issues its child-tree
+kill; it does not signal server shutdown or replace the manager's notification mute.
+
+**Models are optional provider options and turn overrides.** Absence preserves the session
+choice and then the CLI default. The same shell-safe model character set enforced by the
+host is enforced at the new provider boundary; unsafe values never reach a turn spawn.
+The CLI providers advertise free-form model selection, not a fabricated installed-model list.
+Policy and attachment support are exposed from the created provider session so the migration
+shim preserves the existing banner and message refusal without vendor-specific core logic.
+No runtime-held conversation history, new process supervisor, public protocol operation,
+SDK, bridge or renderer is introduced in this phase.
 
 ### `records` *(tier two)*
 
@@ -2130,6 +2185,9 @@ control rather than concealment (D50, D70).
 | *(no variant)* | **The ignored-path manifest could not be captured at commit, written, read, or parsed at restore** (D182) | — | **Not an error at all, at either end.** The commit succeeds with no manifest; the restore succeeds with `unreached: null`. A manifest is a report and never a gate, so no path may fail on its absence — and `null` is the one thing that must never be rendered as "nothing differs" (I58) |
 | `CheckpointError.no_such_checkpoint` | Restore names an unknown `sha` | No | `404 no_such_checkpoint`; the workspace is untouched |
 | `CheckpointError.restore_incomplete` | `read-tree` or `clean` fails, **or the verification pass comes back dirty** — `diff --quiet <sha>` for tracked content, `ls-files --others --exclude-standard` for what was left behind. Never an exit code alone: `read-tree` exits 0 with a warning on the embedded-repository case (D112) | No | `error / checkpoint_restore_failed`, non-fatal, plus `500 checkpoint_failed`. **The workspace is partially restored**; the safety checkpoint is the way back |
+| `AdapterError.invalid_model` | A provider option or turn override fails the existing shell-safe model grammar | No, correct the value | Refuse before sending; the host maps to `422 bad_request` for model |
+| `AdapterError.turn_in_flight` | A provider session already holds an unfinished turn | After that turn completes | Refuse without disturbing the live handle |
+| `AdapterError.session_closed` | A turn is requested after provider-session close | No | Create a new provider session |
 | `AdapterError.agent_unavailable` | `spawn` returns `ENOENT`, or no supported transport is available | Yes, once installed | `503 agent_unavailable`; `error / agent_unavailable`, fatal to the turn; clear the turn. The session stays live |
 | `AdapterError.unsupported_vendor` | An unknown vendor string | No | `422 bad_request` |
 | `AdapterError.unsupported_sandbox` | A sandbox the vendor does not offer | No | `422 bad_request` |
@@ -2516,7 +2574,7 @@ The CLI exposes **two** live interfaces, not one, and their guarantees differ in
 contract cannot average away — item-id uniqueness and the usage basis both change between them.
 Both are mapped. **`app-server` is primary; `exec --json` is the fallback** (D107).
 
-**Transport selection is the adapter's and it ends there.** `createAdapter` takes no transport
+**Transport selection is the adapter's and it ends there.** `createConfiguredAdapter` takes no transport
 parameter and none is added: a transport is a vendor fact, and I20 forbids one above
 `adapters/*`. The adapter selects `app-server` where the installed CLI offers it and
 `exec --json` otherwise, once, at `create`. Where neither is available the result is

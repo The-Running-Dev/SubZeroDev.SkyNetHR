@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+if (process.argv.includes('--version')) { process.stdout.write('fake-cli 1.0.0\n'); process.exit(0); }
 import { appendFileSync, readFileSync, writeFileSync, writeSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 // A deterministic stand-in for the real `claude` binary, used because

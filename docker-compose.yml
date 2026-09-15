@@ -37,7 +37,7 @@
 #     authenticated `claude`/`codex` CLI state (design/00-brief.md's "Hosting the model"
 #     non-goal: no vendor credential lives in the image itself). Both vendor credential
 #     mounts are required, symmetric with each other, even for an operator who only ever
-#     opens one vendor's sessions — `src/adapters/index.ts`'s `VENDORS` advertises both from
+#     opens one vendor's sessions — `src/config/providers.ts`'s `VENDORS` advertises both from
 #     this one image, and an empty bind mount is a clean, documented way to leave a vendor
 #     unauthenticated (its sessions then fail per-turn auth, not container startup).
 #   - Pick an `AUTH_MODE` (design/90-decisions.md D3) and set the variables it needs.

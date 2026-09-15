@@ -1,7 +1,7 @@
 # The deployment artifact (design/90-decisions.md, 2026-08-19 — "The deployment artifact
 # borrows the host's authenticated Claude CLI"; corrected 2026-08-25, D179, to cover both
 # vendors). Ships this server plus the `claude` and `codex` CLIs it spawns per turn
-# (src/adapters/claude/index.ts, src/adapters/codex/index.ts) — no model credential is
+# (src/agent-console/providers/claude-cli/index.ts, src/agent-console/providers/codex-cli/index.ts) — no model credential is
 # baked in here (design/00-brief.md's "Hosting the model" non-goal): the container expects
 # each operator's own already-authenticated CLI state bind-mounted in at run time.
 #
@@ -12,7 +12,7 @@
 
 ARG NODE_IMAGE=node:22-bookworm-slim
 
-# Pinned, and bumped deliberately. src/adapters/claude/index.ts drives this CLI over its
+# Pinned, and bumped deliberately. src/agent-console/providers/claude-cli/index.ts drives this CLI over its
 # `stream-json` wire schema and reports anything it does not recognise as
 # `adapter_unknown_record`, so a floating version would let two builds of the same commit
 # behave differently — and the image gate never drives a real turn, so nothing would catch
@@ -45,14 +45,14 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends git tini \
  && rm -rf /var/lib/apt/lists/*
 
-# The CLI this server drives (src/adapters/claude/index.ts spawns `claude` on PATH by
+# The CLI this server drives (src/agent-console/providers/claude-cli/index.ts spawns `claude` on PATH by
 # default). Installed globally so it resolves the same way for every operator regardless
 # of $HOME, which is left free for the credential bind mount below.
 RUN npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" && npm cache clean --force
 
-# The other half of the two-vendor contract (src/adapters/index.ts's `VENDORS`). Pinned to
+# The other half of the two-vendor contract (src/config/providers.ts's `VENDORS`). Pinned to
 # the exact build `design/findings/S8-codex-adapter.md` probed and the Codex adapter's own
-# tests were written against ("installed `codex-cli 0.146.0`", src/adapters/codex/index.ts) —
+# tests were written against ("installed `codex-cli 0.146.0`", src/agent-console/providers/codex-cli/index.ts) —
 # a floating version could change `codex exec --json`/`codex app-server`'s record shapes out
 # from under the adapter with nothing to catch it, the same reasoning as the pin above.
 # `codex --version` after install turns a broken/renamed package into a build failure instead
@@ -89,7 +89,7 @@ EXPOSE 3000
 # for, so `docker stop` — and every `docker compose up -d` on a new `:latest`, which is the
 # documented redeploy path — would discard SIGTERM and escalate to SIGKILL after the grace
 # period, killing a turn mid-write. Pid 1 is also the reaper of last resort: the adapter
-# spawns `claude` `detached` into its own process group (src/adapters/claude/index.ts), and
+# spawns `claude` `detached` into its own process group (src/agent-console/providers/claude-cli/index.ts), and
 # anything that outlives it reparents here. `tini` forwards the signal and reaps; the
 # handler in src/server.ts is what turns the forwarded SIGTERM into a clean close.
 ENTRYPOINT ["/usr/bin/tini", "--"]

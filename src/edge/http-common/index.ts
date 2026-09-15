@@ -27,7 +27,7 @@ import type {
 } from '../../contract/index.js';
 import { RATINGS } from '../../contract/index.js';
 import { sendError } from '../error-envelope/index.js';
-import { VENDORS } from '../../adapters/index.js';
+import { VENDORS } from '../../config/providers.js';
 
 // D10 (`10-design.md § Module boundaries`) decided the two transport edges stay separate
 // modules and neither imports the other — it did not forbid a third module both compose
@@ -133,6 +133,8 @@ export function apiErrorFor(error: SessionError): { code: ApiErrorCode; message:
         : { code: 'outside_workspace_root', message: 'cwd is outside every configured workspace root' };
     case 'adapter':
       switch (error.cause.code) {
+        case 'invalid_model':
+          return { code: 'bad_request', message: 'invalid model', detail: { field: 'model' } };
         case 'unsupported_vendor':
           return { code: 'bad_request', message: 'unsupported vendor', detail: { field: 'vendor' } };
         case 'unsupported_sandbox':
