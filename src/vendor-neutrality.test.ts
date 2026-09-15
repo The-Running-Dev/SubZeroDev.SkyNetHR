@@ -20,6 +20,7 @@ const RESTRICTED_DIRS: ReadonlyArray<{ dir: string; extension: string }> = [
   { dir: path.join(SRC_ROOT, 'store'), extension: '.ts' },
   { dir: path.join(SRC_ROOT, 'session-manager'), extension: '.ts' },
   { dir: path.join(SRC_ROOT, 'contract'), extension: '.ts' },
+  { dir: path.join(SRC_ROOT, 'agent-console'), extension: '.ts' },
   { dir: path.join(SRC_ROOT, 'edge'), extension: '.ts' },
   { dir: path.join(process.cwd(), 'client'), extension: '.js' },
 ];

@@ -982,10 +982,11 @@ the append-only-file property that makes it evidence — or stays out, leaving t
 
 ## Module boundaries
 
-Fourteen modules — the two transport edges are two modules, not one with a slash in its name,
+Fifteen modules — the two transport edges are two modules, not one with a slash in its name,
 which is the whole point of D10; `records` is the twelfth, added by tier two (D77); and
 `edge/http-common` and `edge/error-envelope` are the thirteenth and fourteenth, which the two
-edges compose through. The dependency graph is acyclic, and the edges most likely to be drawn
+edges compose through. `agent-console/contract` holds the generic vocabulary re-exported by
+the host `contract` facade. The dependency graph is acyclic, and the edges most likely to be drawn
 backwards are called out below the diagram.
 
 **D10 forbids the two edges importing each other; it does not forbid a third module both
@@ -999,7 +1000,8 @@ and first-message auth, and each one's routing table.
 
 ```mermaid
 flowchart TD
-    CT["contract<br/>types only"]
+    CT["contract<br/>host facade"]
+    AC["agent-console/contract<br/>generic vocabulary"]
     CF["config"]
     ID["identity"]
     JL["jail"]
@@ -1014,6 +1016,7 @@ flowchart TD
     EW["edge/ws"]
     CL["client"]
 
+    CT --> AC
     SM --> JL
     SM --> ST
     SM --> CK
@@ -1054,7 +1057,8 @@ flowchart TD
 
 | Module | Owns | Depends on | Exposes |
 |---|---|---|---|
-| `contract` | The normalised vocabulary | *nothing* | Types, plus the enumeration of a closed union a validator must test membership of — `RATINGS` (D150) |
+| `agent-console/contract` | The self-contained generic vocabulary | *nothing* | Generic types and `isFrame` (D171) |
+| `contract` | The host vocabulary and generic re-exports | `agent-console/contract` | Types, `RATINGS` (D150), and the re-exported `isFrame` (D171) |
 | `config` | Roots, auth mode, bind address, origin allow-list, caps | `contract`, `jail` | A validated config object |
 | `identity` | Request → `OperatorId`, or rejection | `config` | One function per deployment mode |
 | `jail` | Path resolution, normalisation and containment | `contract` | `resolveInsideRoot`, `pathsOverlap`, `stripExtendedPrefix` |

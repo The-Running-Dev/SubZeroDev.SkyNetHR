@@ -29,20 +29,24 @@ a pointer in the same commit**. That replacement is descriptive drift corrected 
 found (`AGENTS.md` *Hard rules*), not a contract amendment, and it needs no approval. It is
 one-way: a later pass never turns a pointer back into a scaffold.
 
-`FrameKind` and `Frame` are declared in `src/contract/index.ts`, next to `Envelope` (S25).
+`FrameKind` and `Frame` are declared in `src/agent-console/contract/index.ts`, next to
+`Envelope`, and re-exported by `src/contract/index.ts` (S25).
 
 **A comment in the tree is not the canonical statement of a rule.** The declarations in
-`src/contract/index.ts` carry explanatory comments, many of them copied from earlier
-revisions of this document. They are a convenience for a reader already in the file; the
+`src/contract/index.ts` and `src/agent-console/contract/index.ts` carry explanatory comments,
+many of them copied from earlier revisions of this document. They are a convenience for a reader already in the file; the
 binding statement is here, and a comment that disagrees with this document is the defect.
 
 Language is TypeScript, per `00-brief.md § Constraints`.
 
 ## Types
 
-Every type below is declared in **`src/contract/index.ts`**, which is the `contract` module
-of `10-design.md § Module boundaries`: the normalised vocabulary, depending on nothing, and
-leaving nothing behind at runtime except the single enumeration `RATINGS` (D150). `VENDORS` is
+Every type below is exposed by **`src/contract/index.ts`**, the host `contract` facade in
+`10-design.md § Module boundaries`. The self-contained generic declarations live in
+**`src/agent-console/contract/index.ts`** and are re-exported by that facade; host-dependent
+declarations remain in the facade. The generic module depends on nothing. The runtime
+exports are `RATINGS` (D150), declared in the host, and `isFrame` (D171), declared alongside
+the generic envelope and re-exported by the host. `VENDORS` is
 the other runtime enumeration in this contract and it is **not** here — it lives in `adapters`,
 for the reason given under *Public surface*.
 
@@ -271,7 +275,9 @@ one (D193).
 
 ### Event envelope
 
-Declared in `src/contract/index.ts`: `EventPayloadMap`, `EventKind`, `Envelope`.
+Declared in `src/agent-console/contract/index.ts` and re-exported by `src/contract/index.ts`:
+`EventPayloadMap`, `EventKind`, `Envelope`. The host augments the map with the payloads whose
+declarations remain there; its complete vocabulary is unchanged.
 
 **`(sessionId, seq)` is the primary key of the entire system.** Everything replayable is keyed
 on it, which is why `seq` assignment sits in the session manager (D2) and why it is expensive
@@ -306,7 +312,7 @@ which *Rules the renderer may rely on* already permits.
 
 A frame is an envelope minus `seq` — the manager assigns `sessionId`, `ts` and the payload's
 `turnId` as it always has, and assigns no `seq`, because a frame has no position in the
-replayable stream. `raw` (`src/contract/index.ts`) exists for debugging and **must never be
+replayable stream. `raw` (`src/agent-console/contract/index.ts`) exists for debugging and **must never be
 rendered**.
 
 `Config.streamDeltas` (`src/config/index.ts`) is what makes the Claude CLI emit them at all —
@@ -316,14 +322,12 @@ unconditionally and simply ignores it.
 
 ### Event payloads
 
-Declared in `src/contract/index.ts`, one per member of `EventPayloadMap`: `SessionStarted`,
-`SessionEnded`, `SessionNotice`, `TurnStarted`, `TurnEnded`, `MessageEvent`, `MessageDelta`,
-`Thinking`, `ToolCall`, `ToolResult`, `PermissionRequest`, `PermissionResolved`,
-`CheckpointCreated`, `UsageEvent`, `ErrorEvent`, and tier two's `ChecklistItemCompleted`. The
-supporting unions and value types are declared beside them: `SessionEndReason`,
-`SessionNoticeCode`, `TurnStopReason`, `AttachmentUpload`, `AttachmentRef`,
-`StandingRuleExpression`, `PermissionDecision`, `AnswerScope`, `ResolvedScope`,
-`PermissionResolvedReason`, `Usage` and `ErrorEventKind`.
+The self-contained payloads and their supporting declarations live in
+`src/agent-console/contract/index.ts`, re-exported by `src/contract/index.ts`.
+`SessionStarted`, `PermissionResolved`, and tier two's `ChecklistItemCompleted` remain in
+`src/contract/index.ts`: they depend on host-owned vendor or operator identity. The host
+also retains `AttachmentUpload`, `StandingRuleExpression`, `PermissionDecision`,
+`AnswerScope`, `ResolvedScope`, and `PermissionResolvedReason`.
 
 **`AnswerScope` and `ResolvedScope` are two types rather than one, and the asymmetry is the
 point.** `AnswerScope` is what a *client may send* — `'once' | 'always'`. `ResolvedScope` is
@@ -812,7 +816,8 @@ this project has none, so every entry here is code.
 
 ### `contract`
 
-Declared in `src/contract/index.ts`. Types, plus **two runtime exports**, each of a kind this
+Exposed by `src/contract/index.ts`, with generic declarations re-exported from
+`src/agent-console/contract/index.ts`. Types, plus **two runtime exports**, each of a kind this
 section admits and each named here: the enumeration of a closed union a validator must test
 membership of — `RATINGS` (D150) — and the discriminator for a union the type system cannot
 separate structurally — `isFrame` (D171). Everything else this module exports is a type and
