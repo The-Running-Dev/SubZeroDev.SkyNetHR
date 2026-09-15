@@ -136,6 +136,42 @@ test('Phase 2 — concurrent Codex probes share one async result; refresh change
   assert.equal(await readFile(log, 'utf8'), before, 'negative results are cached too');
 });
 
+test('Phase 2 — a concurrent refresh cannot change the transport behind a created capability snapshot', async (t) => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'provider-refresh-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const log = path.join(dir, 'started');
+  const mode = path.join(dir, 'mode');
+  const release = path.join(dir, 'release');
+  const cli = path.join(dir, 'cli.mjs');
+  await writeFile(mode, 'app-server');
+  await writeFile(cli, `import {existsSync,writeFileSync,readFileSync} from 'node:fs';
+const target=readFileSync(${JSON.stringify(mode)},'utf8');
+if(target==='app-server') {
+  writeFileSync(${JSON.stringify(log)},'started');
+  const timer=setInterval(()=>{if(existsSync(${JSON.stringify(release)})){clearInterval(timer);process.exit(0);}},10);
+} else process.exit(target===process.argv[2]?0:1);
+`);
+  const notices: unknown[] = [];
+  const provider = defineCodexProvider(cli);
+  const creating = provider.create({ cwd, notify() {}, emit: (_kind, data) => notices.push(data) }, { sandbox: 'workspace-write', streamDeltas: false });
+  let started = false;
+  for (let attempt = 0; attempt < 100; attempt++) {
+    if (await readFile(log, 'utf8').catch(() => '') === 'started') { started = true; break; }
+    await new Promise(resolve => setTimeout(resolve, 10));
+  }
+  assert.ok(started, 'the original help probe must start before refresh');
+  await writeFile(mode, 'exec');
+  const refreshed = await provider.probe({ cwd, refresh: true });
+  await writeFile(release, 'release');
+  const created = await creating;
+  assert.ok(refreshed.available);
+  assert.equal(refreshed.capabilities.usage, false);
+  assert.ok(created.ok);
+  assert.equal(created.value.capabilities.usage, true);
+  assert.deepEqual(notices, [], 'the original app-server session must not use the refreshed exec transport');
+  await created.value.close();
+});
+
 test('Phase 2 — a timed-out probe returns unavailable and leaves the event loop responsive', async () => {
   const result = await probeCommand(process.execPath, ['-e', 'setInterval(()=>{},1000)'], process.cwd(), false, 60);
   assert.equal(result.ok, false);

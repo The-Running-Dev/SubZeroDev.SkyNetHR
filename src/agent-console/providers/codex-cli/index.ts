@@ -95,8 +95,7 @@ function detectTransport(executable: string, cwd: string, refresh = false): Prom
   return result;
 }
 
-export async function probeCodex(executable: string, context: ProbeContext): Promise<ProviderStatus> {
-  const transport = await detectTransport(executable, context.cwd, context.refresh);
+function statusForTransport(transport: Transport | null): ProviderStatus {
   return {
     available: transport !== null,
     ...(transport === null ? { unavailableReason: 'agent_unavailable' } : {}),
@@ -108,6 +107,20 @@ export async function probeCodex(executable: string, context: ProbeContext): Pro
       needsProcess: true, conversationState: 'provider',
     },
   };
+}
+
+// A create and its capability snapshot share this exact resolution, even if a
+// concurrent refresh replaces the cache while the original probe is still running.
+export async function prepareCodex(executable: string, context: ProbeContext) {
+  const transport = await detectTransport(executable, context.cwd, context.refresh);
+  return {
+    status: statusForTransport(transport),
+    create: (options: AdapterOptions) => buildCodexAdapter(options, executable, transport),
+  };
+}
+
+export async function probeCodex(executable: string, context: ProbeContext): Promise<ProviderStatus> {
+  return (await prepareCodex(executable, context)).status;
 }
 
 export function resetCodexTransportCacheForTests(): void { transportCache.clear(); }
@@ -207,16 +220,18 @@ function makeFailSchemaMismatch(
 export async function createCodexAdapter(
   opts: AdapterOptions & { readonly executable?: string },
 ): Promise<Result<Adapter, AdapterError>> {
+  if (opts.sandbox === null || !SANDBOX_MODES.has(opts.sandbox)) {
+    return { ok: false, error: { code: 'unsupported_sandbox', sandbox: String(opts.sandbox) } };
+  }
   const executable = opts.executable ?? process.env['SKYNET_CODEX_EXECUTABLE'] ?? 'codex';
-  // The dispatcher (../index.ts) refuses `sandbox: null`, but does not validate a non-null
-  // value against the enum — a caller that reaches this function directly (a test, or a
-  // future caller) must still fail closed on a malformed value rather than let it fall
-  // through `cliSandboxValue`'s switch as `undefined`.
+  return (await prepareCodex(executable, { cwd: opts.cwd })).create(opts);
+}
+
+function buildCodexAdapter(opts: AdapterOptions, executable: string, transport: Transport | null): Result<Adapter, AdapterError> {
   if (opts.sandbox === null || !SANDBOX_MODES.has(opts.sandbox)) {
     return { ok: false, error: { code: 'unsupported_sandbox', sandbox: String(opts.sandbox) } };
   }
   const sandbox = opts.sandbox;
-  const transport = await detectTransport(executable, opts.cwd);
   if (transport === null) {
     return { ok: false, error: { code: 'agent_unavailable', image: executable, detail: 'neither `codex app-server` nor `codex exec` responded to --help' } };
   }
