@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.agent-console.invalid/events/message.schema.json",
+  "type": "object",
+  "properties": {
+    "kind": {
+      "const": "message"
+    },
+    "data": {
+      "type": "object",
+      "properties": {
+        "turnId": {
+          "type": "string"
+        },
+        "role": {
+          "enum": [
+            "user",
+            "assistant"
+          ]
+        },
+        "text": {
+          "type": "string"
+        },
+        "attachments": {
+          "type": "array",
+          "items": {
+            "$ref": "https://schemas.agent-console.invalid/common.schema.json#/$defs/attachment"
+          }
+        }
+      },
+      "required": [
+        "turnId",
+        "role",
+        "text",
+        "attachments"
+      ]
+    }
+  },
+  "required": [
+    "kind",
+    "data"
+  ]
+}

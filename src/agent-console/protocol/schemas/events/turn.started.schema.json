@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.agent-console.invalid/events/turn.started.schema.json",
+  "type": "object",
+  "properties": {
+    "kind": {
+      "const": "turn.started"
+    },
+    "data": {
+      "type": "object",
+      "properties": {
+        "turnId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "turnId"
+      ]
+    }
+  },
+  "required": [
+    "kind",
+    "data"
+  ]
+}

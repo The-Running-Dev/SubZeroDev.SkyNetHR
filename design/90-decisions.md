@@ -5597,6 +5597,23 @@ reconnecting after missed ones. It detects half-open connections the browser mis
 SSE wire and the client for a failure not observed.
 Reversibility: cheap — one sentence.
 
+### 2026-09-15 — D234 Phase 1b validates the shared event fixtures with Ajv at test time
+Context: AgentConsole Phase 1b needs JSON Schema 2020-12 conformance evidence. The existing
+dependency tree contains TypeScript, Node declarations and their declaration dependency only;
+there is no JSON Schema validator to reuse.
+Chosen: **Ajv's 2020-12 entry point and ajv-formats, as development dependencies only**, used
+by the fixture tests with strict schema checking and date-time format assertions enabled.
+No runtime imports, coercion, defaults, property removal or protocol parsing are introduced.
+The schemas and JSON fixtures stay independent of the validator so later C# conformance can
+use the same files. See [Ajv's draft support](https://ajv.js.org/json-schema.html#draft-2020-12-breaking)
+and [format validation](https://ajv.js.org/guide/formats.html).
+Rejected: **Ajv's default draft-07 entry point** — not the required dialect;
+**a handwritten validator** — duplicates a standard and cannot establish 2020-12 conformance;
+**a separate Python or .NET validation process** — adds a second toolchain to the existing
+Node test gate before either language has a consumer in this slice;
+**runtime validation** — changes behavior and belongs outside Phase 1b.
+Reversibility: cheap — test tooling only; the schemas and fixture files are portable JSON.
+
 ## Open
 
 Staging only. Once an item becomes an issue it leaves this list.

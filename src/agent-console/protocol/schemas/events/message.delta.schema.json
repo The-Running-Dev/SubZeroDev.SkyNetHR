@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.agent-console.invalid/events/message.delta.schema.json",
+  "type": "object",
+  "properties": {
+    "kind": {
+      "const": "message.delta"
+    },
+    "data": {
+      "type": "object",
+      "properties": {
+        "turnId": {
+          "type": "string"
+        },
+        "role": {
+          "const": "assistant"
+        },
+        "text": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "turnId",
+        "role",
+        "text"
+      ]
+    }
+  },
+  "required": [
+    "kind",
+    "data"
+  ]
+}

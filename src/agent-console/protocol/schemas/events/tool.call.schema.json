@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.agent-console.invalid/events/tool.call.schema.json",
+  "type": "object",
+  "properties": {
+    "kind": {
+      "const": "tool.call"
+    },
+    "data": {
+      "type": "object",
+      "properties": {
+        "turnId": {
+          "type": "string"
+        },
+        "callId": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "input": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "summary": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "turnId",
+        "callId",
+        "name",
+        "input",
+        "summary"
+      ]
+    }
+  },
+  "required": [
+    "kind",
+    "data"
+  ]
+}

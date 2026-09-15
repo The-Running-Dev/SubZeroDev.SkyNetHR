@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.agent-console.invalid/events/session.notice.schema.json",
+  "type": "object",
+  "properties": {
+    "kind": {
+      "const": "session.notice"
+    },
+    "data": {
+      "type": "object",
+      "properties": {
+        "level": {
+          "enum": [
+            "info",
+            "warn",
+            "error"
+          ]
+        },
+        "code": {
+          "enum": [
+            "compaction",
+            "resume_unavailable",
+            "checkpoints_unavailable",
+            "checkpoint_skipped",
+            "sandbox",
+            "audit_unavailable",
+            "storage_failure",
+            "server_restart",
+            "usage_unavailable"
+          ]
+        },
+        "text": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "level",
+        "code",
+        "text"
+      ]
+    }
+  },
+  "required": [
+    "kind",
+    "data"
+  ]
+}

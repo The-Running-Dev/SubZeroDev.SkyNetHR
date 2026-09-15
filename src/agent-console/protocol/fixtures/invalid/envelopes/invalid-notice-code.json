@@ -1,0 +1,11 @@
+{
+  "seq": 1,
+  "sessionId": "session-1",
+  "ts": "2026-09-15T12:34:56.789Z",
+  "kind": "session.notice",
+  "data": {
+    "level": "info",
+    "code": "unknown",
+    "text": "Compacting context."
+  }
+}

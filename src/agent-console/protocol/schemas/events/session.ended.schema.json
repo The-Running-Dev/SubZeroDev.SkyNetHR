@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.agent-console.invalid/events/session.ended.schema.json",
+  "type": "object",
+  "properties": {
+    "kind": {
+      "const": "session.ended"
+    },
+    "data": {
+      "type": "object",
+      "properties": {
+        "reason": {
+          "enum": [
+            "operator",
+            "server_restart",
+            "storage_failure"
+          ]
+        },
+        "endedAt": {
+          "$ref": "https://schemas.agent-console.invalid/common.schema.json#/$defs/timestamp"
+        }
+      },
+      "required": [
+        "reason",
+        "endedAt"
+      ]
+    }
+  },
+  "required": [
+    "kind",
+    "data"
+  ]
+}

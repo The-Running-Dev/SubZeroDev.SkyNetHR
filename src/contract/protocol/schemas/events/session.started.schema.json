@@ -1,0 +1,81 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.skynet-hr.invalid/events/session.started.schema.json",
+  "type": "object",
+  "properties": {
+    "kind": {
+      "const": "session.started"
+    },
+    "data": {
+      "type": "object",
+      "properties": {
+        "vendor": {
+          "enum": [
+            "claude",
+            "codex"
+          ]
+        },
+        "cwd": {
+          "type": "string"
+        },
+        "model": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "policy": {
+          "type": "object",
+          "properties": {
+            "mode": {
+              "enum": [
+                "interactive",
+                "preauthorised"
+              ]
+            },
+            "sandbox": {
+              "enum": [
+                "read-only",
+                "workspace-write",
+                "unrestricted",
+                null
+              ]
+            },
+            "banner": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "mode",
+            "sandbox",
+            "banner"
+          ]
+        },
+        "state": {
+          "enum": [
+            "live",
+            "ended"
+          ]
+        },
+        "createdAt": {
+          "$ref": "https://schemas.agent-console.invalid/common.schema.json#/$defs/timestamp"
+        }
+      },
+      "required": [
+        "vendor",
+        "cwd",
+        "model",
+        "policy",
+        "state",
+        "createdAt"
+      ]
+    }
+  },
+  "required": [
+    "kind",
+    "data"
+  ]
+}

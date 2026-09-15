@@ -1,0 +1,11 @@
+{
+  "sessionId": "session-1",
+  "ts": "2026-09-15T12:34:56.789Z",
+  "kind": "message.delta",
+  "data": {
+    "turnId": "turn-1",
+    "role": "assistant",
+    "text": "Ready."
+  },
+  "seq": null
+}

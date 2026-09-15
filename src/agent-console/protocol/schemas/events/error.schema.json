@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.agent-console.invalid/events/error.schema.json",
+  "type": "object",
+  "properties": {
+    "kind": {
+      "const": "error"
+    },
+    "data": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "enum": [
+            "replay_gap",
+            "agent_unavailable",
+            "adapter_unknown_record",
+            "adapter_bad_line",
+            "adapter_schema_mismatch",
+            "checkpoint_restore_failed",
+            "session_delete_incomplete"
+          ]
+        },
+        "message": {
+          "type": "string"
+        },
+        "fatal": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "kind",
+        "message",
+        "fatal"
+      ]
+    }
+  },
+  "required": [
+    "kind",
+    "data"
+  ]
+}

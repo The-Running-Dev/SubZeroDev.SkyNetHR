@@ -1,0 +1,13 @@
+{
+  "seq": 1,
+  "sessionId": "session-1",
+  "ts": "2026-09-15T12:34:56.789Z",
+  "kind": "tool.call",
+  "data": {
+    "turnId": "turn-1",
+    "callId": "call-1",
+    "name": "read_file",
+    "input": [],
+    "summary": "Read README.md"
+  }
+}

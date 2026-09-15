@@ -1,0 +1,124 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.agent-console.invalid/common.schema.json",
+  "$defs": {
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+    },
+    "number": {
+      "type": "number",
+      "minimum": -9007199254740991,
+      "maximum": 9007199254740991,
+      "$comment": "Preserves the declared number type; integer values are bounded to JavaScript-safe integers."
+    },
+    "seq": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991,
+      "$comment": "Zero is a replay_gap watermark; ordinary emitted envelopes start at one (I1)."
+    },
+    "usage": {
+      "type": "object",
+      "properties": {
+        "inputTokens": {
+          "$ref": "https://schemas.agent-console.invalid/common.schema.json#/$defs/number"
+        },
+        "outputTokens": {
+          "$ref": "https://schemas.agent-console.invalid/common.schema.json#/$defs/number"
+        },
+        "cacheRead": {
+          "$ref": "https://schemas.agent-console.invalid/common.schema.json#/$defs/number"
+        },
+        "cacheCreate": {
+          "$ref": "https://schemas.agent-console.invalid/common.schema.json#/$defs/number"
+        }
+      },
+      "required": [
+        "inputTokens",
+        "outputTokens",
+        "cacheRead",
+        "cacheCreate"
+      ]
+    },
+    "attachment": {
+      "type": "object",
+      "properties": {
+        "attachmentId": {
+          "type": "string"
+        },
+        "filename": {
+          "type": "string"
+        },
+        "mediaType": {
+          "type": "string"
+        },
+        "bytes": {
+          "$ref": "https://schemas.agent-console.invalid/common.schema.json#/$defs/number"
+        }
+      },
+      "required": [
+        "attachmentId",
+        "filename",
+        "mediaType",
+        "bytes"
+      ]
+    },
+    "frame": {
+      "type": "object",
+      "properties": {
+        "sessionId": {
+          "type": "string"
+        },
+        "ts": {
+          "$ref": "https://schemas.agent-console.invalid/common.schema.json#/$defs/timestamp"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "data": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "raw": {},
+        "seq": false
+      },
+      "required": [
+        "sessionId",
+        "ts",
+        "kind",
+        "data"
+      ]
+    },
+    "envelope": {
+      "type": "object",
+      "properties": {
+        "seq": {
+          "$ref": "https://schemas.agent-console.invalid/common.schema.json#/$defs/seq"
+        },
+        "sessionId": {
+          "type": "string"
+        },
+        "ts": {
+          "$ref": "https://schemas.agent-console.invalid/common.schema.json#/$defs/timestamp"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "data": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "raw": {}
+      },
+      "required": [
+        "seq",
+        "sessionId",
+        "ts",
+        "kind",
+        "data"
+      ]
+    }
+  }
+}

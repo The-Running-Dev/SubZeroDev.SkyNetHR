@@ -1,0 +1,11 @@
+{
+  "seq": 1,
+  "sessionId": "session-1",
+  "ts": "2026-09-15T12:34:56.789Z",
+  "kind": "checkpoint.created",
+  "data": {
+    "turnId": null,
+    "sha": "1234567890abcdef1234567890abcdef12345678",
+    "label": "Before turn"
+  }
+}
