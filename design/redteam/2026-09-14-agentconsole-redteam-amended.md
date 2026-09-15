@@ -159,7 +159,7 @@ Cost: Cheap now. Expensive once both SDKs implement a chunk protocol without the
 
 ## F13
 Severity: LOCAL
-Status: unadjudicated
+Status: defect (adjudicated 2026-09-15). Location: §8 L516, §10 L612–614 and L619. Nuances: "pulls all of them in anyway" overstates the contradiction, since nuget.org's 250 MB limit is per package and the split still meets L615's stated purpose; "six executables on every Windows build" holds only for RID-less builds (L619), because a RID-specific build copies one folder and restore unpacks into the global cache once. That restore downloads every referenced RID package is [X], unverified here, and accepted by the amending vendor in v2 L647. v2 corrects §10 (L647, L654, L663, L859) but leaves §8 L548 unchanged, which is v2 F5.
 Claim: The meta package references every `Runtime.<rid>` package. Every consumer therefore restores all six Node binaries whatever their target, and RID-less builds copy all six into `bin/`.
 Where: §8 "Versioning rule"; §10 Packages and Resolution
 Breaks when: Any `dotnet restore` of `SubZeroDev.AgentConsole`. Six official Node binaries at roughly 80–120 MB each [X] come to about 0.5–0.7 GB per restore and per RID-less publish. §10 splits the packages to stay under nuget.org's 250 MB limit, then pulls all of them in anyway.
