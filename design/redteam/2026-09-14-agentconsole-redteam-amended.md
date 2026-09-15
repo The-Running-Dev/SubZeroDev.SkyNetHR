@@ -186,7 +186,7 @@ Cost: Cheap now. It is host integration policy.
 
 ## F16
 Severity: LOCAL
-Status: unadjudicated
+Status: defect (adjudicated 2026-09-15). Location: step 6 is §13 L786–788; Phase 3b is L776; A13 L351–352; §15 L838. Nuances: "same lease" is set against the later `transport: 'child'` flip (L789) and can be read as "the Phase 3b lease arrangement, unchanged", so this is an ambiguity beside §15's prohibition rather than a forced contradiction. The first consequence branch is weaker than stated: SkyNetHR claims its lease before boot touches anything (`src/store/index.ts` L935–937), so a second instance fails at the HR-lease claim unless a runtime root is opened without that claim first, which the finding does not show. v2 L814 rewords step 6 to name the already-split lease domains, and L864 keeps the prohibition.
 Claim: Step 6 says the in-process cutover keeps the "same lease", which contradicts A13, Phase 3b and §15, all of which require separate runtime and HR leases.
 Where: §13 step 6 vs §13 Phase 3b, §5 A13, §15 lease warning
 Breaks when: An implementer carries out step 6 as written after Phase 3b has split the storage roots.
