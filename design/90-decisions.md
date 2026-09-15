@@ -5600,35 +5600,3 @@ Reversibility: cheap — one sentence.
 ## Open
 
 Staging only. Once an item becomes an issue it leaves this list.
-
-- **Stale-lock reclaim confirms before boot work (D216).** `/contract` (opus/high) amends § Server
-  lock; then `/fix` (sonnet/medium) in `store.claimLock`, with a two-reclaimer test.
-- **Codex start and resume carry policy and model (D217).** `/fix`: `thread/start` and
-  `thread/resume` send `cwd`, `sandbox`, `approvalPolicy: 'never'` and `model`; the false comment in
-  the resume path goes; a fake-CLI test asserts the params on both.
-- **Permission resolution on child exit (D218).** `/fix` in `session-manager`: a per-turn in-flight
-  answer set swept on `exited`, `finalizeResolution` standing down for a swept answer, and
-  `respondOrCancel` emitting before appending; tests for exit during an audit append and close during
-  a cancellation append.
-- **Codex failure path ends the turn (D220).** `/fix`: kill, then `turn.ended error`; a fake-CLI test
-  sends a malformed notification after send-ok and asserts exactly one `turn.ended`.
-- **Storage-failure kill order (D221).** `/fix` in `session-manager`; a test asserts kill was called
-  before `turn.ended`.
-- **Shutdown step 3 bound (D222).** `/fix` in `server.ts`: `KILL_TIMEOUT_MS = 2000`, logged when it
-  fires; a test with a never-settling `manager.shutdown` still reaches release and exit 0.
-- **Claude deny `interrupt: false` (D223).** `/fix` probes a real deny first and stops if the turn does
-  not continue; on success, switch, test and finding note, then `/contract` for a reason on
-  `Adapter.respond`.
-- **Reconnect discards partial bubbles (D224).** `/fix` in `client/app.js`, tested by firing `onopen`
-  without a re-select; `/contract` rewords the delta/message bullet.
-- **Gap floor and refetch scope (D225).** `/fix`: `edge/ws` floors at `after` (regression test verified
-  by revert); the client clears its refetch flag on the refetch stream's first `seq`.
-- **Codex probe cache (D226).** `/fix`: not-found is not cached; test not-found → install → create
-  succeeds.
-- **Ended sessions deletable (D229).** `/fix` in `client/app.js`, and its Terminate-screen test.
-- **I38 log line and cookie max-age read (D232).** `/fix` in `store` and `config`, a test each; the
-  same pass removes the apology comment in `src/checkpoints/index.ts` (D227).
-- **Contract amendments with no code (D219, D227, D228, D230, D231, D233).** One `/contract`
-  (opus/high) pass: I11's correction record; the `StoreError.corrupt` and `CheckpointError` rows; the
-  Codex § Policy decline sentence; ws refusal frame and close codes; the unreadable-asset bullet; the
-  keepalive rationale.
