@@ -116,7 +116,7 @@ Cost: Expensive later. Once both layouts exist in the field, readers must carry 
 
 ## F9
 Severity: STRUCTURAL
-Status: unadjudicated
+Status: defect (adjudicated 2026-09-15). Context: the shape is inherited, not introduced. SkyNetHR today has only an owner-scoped hard delete (D25), no automatic retention, and no paging, which suits its small trusted operator group but not a reusable multi-user protocol. Not a brief conflict, since SkyNetHR's brief does not require retention. Q6 (L815) covers cross-principal sharing, not identity migration or cleanup. The only paging in this revision is `events.read {…limit}` (L287). v2 adds a paged `sessions.list` (L284, L293), an explicit retention default (L285), and `admin.sessions.list/remove/reassignPrincipal` (L286, L295).
 Claim: Session data has no retention policy, no removal path that works without the owning principal, and no pagination. Storage and boot cost grow with every principal's entire history, and sessions become unreachable when a principal mapping changes.
 Where: §5 A1, A2 (`sessions.remove` is principal-scoped), A4 (`admin.*` is read-only: audit query and snapshot); §14 Q6
 Breaks when:
