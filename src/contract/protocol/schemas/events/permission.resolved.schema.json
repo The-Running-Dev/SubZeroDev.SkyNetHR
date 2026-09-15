@@ -1,0 +1,61 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.skynet-hr.invalid/events/permission.resolved.schema.json",
+  "type": "object",
+  "properties": {
+    "kind": {
+      "const": "permission.resolved"
+    },
+    "data": {
+      "type": "object",
+      "properties": {
+        "turnId": {
+          "type": "string"
+        },
+        "requestId": {
+          "type": "string"
+        },
+        "decision": {
+          "enum": [
+            "allow",
+            "deny"
+          ]
+        },
+        "scope": {
+          "enum": [
+            "once",
+            "always",
+            "standing"
+          ]
+        },
+        "operator": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reason": {
+          "enum": [
+            "answered",
+            "preapproved",
+            "cancelled_process_exit",
+            "superseded",
+            "audit_unavailable"
+          ]
+        }
+      },
+      "required": [
+        "turnId",
+        "requestId",
+        "decision",
+        "scope",
+        "operator",
+        "reason"
+      ]
+    }
+  },
+  "required": [
+    "kind",
+    "data"
+  ]
+}

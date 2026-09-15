@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.agent-console.invalid/events/usage.schema.json",
+  "type": "object",
+  "properties": {
+    "kind": {
+      "const": "usage"
+    },
+    "data": {
+      "type": "object",
+      "properties": {
+        "turnId": {
+          "type": "string"
+        },
+        "usage": {
+          "$ref": "https://schemas.agent-console.invalid/common.schema.json#/$defs/usage"
+        }
+      },
+      "required": [
+        "turnId",
+        "usage"
+      ]
+    }
+  },
+  "required": [
+    "kind",
+    "data"
+  ]
+}

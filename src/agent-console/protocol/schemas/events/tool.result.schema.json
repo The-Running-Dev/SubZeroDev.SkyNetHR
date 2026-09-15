@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.agent-console.invalid/events/tool.result.schema.json",
+  "type": "object",
+  "properties": {
+    "kind": {
+      "const": "tool.result"
+    },
+    "data": {
+      "type": "object",
+      "properties": {
+        "turnId": {
+          "type": "string"
+        },
+        "callId": {
+          "type": "string"
+        },
+        "ok": {
+          "type": "boolean"
+        },
+        "output": {
+          "type": "string"
+        },
+        "truncated": {
+          "type": "boolean"
+        },
+        "bytes": {
+          "$ref": "https://schemas.agent-console.invalid/common.schema.json#/$defs/number"
+        }
+      },
+      "required": [
+        "turnId",
+        "callId",
+        "ok",
+        "output",
+        "truncated",
+        "bytes"
+      ]
+    }
+  },
+  "required": [
+    "kind",
+    "data"
+  ]
+}

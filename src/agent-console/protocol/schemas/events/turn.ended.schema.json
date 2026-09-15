@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.agent-console.invalid/events/turn.ended.schema.json",
+  "type": "object",
+  "properties": {
+    "kind": {
+      "const": "turn.ended"
+    },
+    "data": {
+      "type": "object",
+      "properties": {
+        "turnId": {
+          "type": "string"
+        },
+        "stopReason": {
+          "enum": [
+            "completed",
+            "error",
+            "process_exit",
+            "interrupted",
+            "server_restart",
+            "storage_failure"
+          ]
+        },
+        "usage": {
+          "anyOf": [
+            {
+              "$ref": "https://schemas.agent-console.invalid/common.schema.json#/$defs/usage"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "turnId",
+        "stopReason",
+        "usage"
+      ]
+    }
+  },
+  "required": [
+    "kind",
+    "data"
+  ]
+}

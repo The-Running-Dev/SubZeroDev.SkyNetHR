@@ -1,0 +1,11 @@
+{
+  "seq": 0,
+  "sessionId": "session-1",
+  "ts": "2026-09-15T12:34:56.789Z",
+  "kind": "error",
+  "data": {
+    "kind": "replay_gap",
+    "message": "Unrecognised input.",
+    "fatal": false
+  }
+}

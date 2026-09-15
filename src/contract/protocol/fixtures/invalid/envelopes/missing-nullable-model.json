@@ -1,0 +1,17 @@
+{
+  "seq": 1,
+  "sessionId": "session-1",
+  "ts": "2026-09-15T12:34:56.789Z",
+  "kind": "session.started",
+  "data": {
+    "vendor": "claude",
+    "cwd": "/work/project",
+    "policy": {
+      "mode": "interactive",
+      "sandbox": null,
+      "banner": null
+    },
+    "state": "live",
+    "createdAt": "2026-09-15T12:34:56.789Z"
+  }
+}

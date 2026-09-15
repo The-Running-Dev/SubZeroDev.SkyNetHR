@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.agent-console.invalid/events/permission.request.schema.json",
+  "type": "object",
+  "properties": {
+    "kind": {
+      "const": "permission.request"
+    },
+    "data": {
+      "type": "object",
+      "properties": {
+        "turnId": {
+          "type": "string"
+        },
+        "requestId": {
+          "type": "string"
+        },
+        "callId": {
+          "type": "string"
+        },
+        "tool": {
+          "type": "string"
+        },
+        "input": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "matchTarget": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "suggestions": {
+          "type": "array",
+          "items": {}
+        }
+      },
+      "required": [
+        "turnId",
+        "requestId",
+        "callId",
+        "tool",
+        "input",
+        "matchTarget",
+        "suggestions"
+      ]
+    }
+  },
+  "required": [
+    "kind",
+    "data"
+  ]
+}

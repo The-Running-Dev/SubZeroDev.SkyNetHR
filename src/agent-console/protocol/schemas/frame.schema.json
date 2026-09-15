@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.agent-console.invalid/frame.schema.json",
+  "title": "AgentConsole live-only frame",
+  "allOf": [
+    {
+      "$ref": "https://schemas.agent-console.invalid/common.schema.json#/$defs/frame"
+    },
+    {
+      "$ref": "events/message.delta.schema.json"
+    }
+  ]
+}

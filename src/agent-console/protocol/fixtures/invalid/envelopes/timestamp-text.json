@@ -1,0 +1,12 @@
+{
+  "seq": 1,
+  "sessionId": "session-1",
+  "ts": "yesterday",
+  "kind": "message",
+  "data": {
+    "turnId": "turn-1",
+    "role": "assistant",
+    "text": "Ready.",
+    "attachments": []
+  }
+}

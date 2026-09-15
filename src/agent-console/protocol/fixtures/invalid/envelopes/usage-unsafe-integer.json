@@ -1,0 +1,15 @@
+{
+  "seq": 1,
+  "sessionId": "session-1",
+  "ts": "2026-09-15T12:34:56.789Z",
+  "kind": "usage",
+  "data": {
+    "turnId": "turn-1",
+    "usage": {
+      "inputTokens": 9007199254740992,
+      "outputTokens": 10,
+      "cacheRead": 0,
+      "cacheCreate": 0
+    }
+  }
+}

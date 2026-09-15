@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.skynet-hr.invalid/envelope.schema.json",
+  "title": "SkyNetHR envelope, including host augmentation",
+  "oneOf": [
+    {
+      "$ref": "https://schemas.agent-console.invalid/envelope.schema.json"
+    },
+    {
+      "allOf": [
+        {
+          "$ref": "https://schemas.agent-console.invalid/common.schema.json#/$defs/envelope"
+        },
+        {
+          "oneOf": [
+            {
+              "$ref": "events/session.started.schema.json"
+            },
+            {
+              "$ref": "events/permission.resolved.schema.json"
+            },
+            {
+              "$ref": "events/checklist.item.completed.schema.json"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

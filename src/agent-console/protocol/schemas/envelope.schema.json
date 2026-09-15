@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.agent-console.invalid/envelope.schema.json",
+  "title": "Generic AgentConsole envelope",
+  "allOf": [
+    {
+      "$ref": "https://schemas.agent-console.invalid/common.schema.json#/$defs/envelope"
+    },
+    {
+      "oneOf": [
+        {
+          "$ref": "events/session.ended.schema.json"
+        },
+        {
+          "$ref": "events/session.notice.schema.json"
+        },
+        {
+          "$ref": "events/turn.started.schema.json"
+        },
+        {
+          "$ref": "events/turn.ended.schema.json"
+        },
+        {
+          "$ref": "events/message.schema.json"
+        },
+        {
+          "$ref": "events/thinking.schema.json"
+        },
+        {
+          "$ref": "events/tool.call.schema.json"
+        },
+        {
+          "$ref": "events/tool.result.schema.json"
+        },
+        {
+          "$ref": "events/permission.request.schema.json"
+        },
+        {
+          "$ref": "events/checkpoint.created.schema.json"
+        },
+        {
+          "$ref": "events/usage.schema.json"
+        },
+        {
+          "$ref": "events/error.schema.json"
+        }
+      ]
+    }
+  ],
+  "$comment": "I51: message.delta is vocabulary but is transported only by frame.schema.json. Host augmentation is composed by the host, never referenced here."
+}

@@ -1,0 +1,31 @@
+{
+  "seq": 1,
+  "sessionId": "session-1",
+  "ts": "2026-09-15T12:34:56.789Z",
+  "kind": "tool.call",
+  "data": {
+    "turnId": "turn-1",
+    "callId": "call-1",
+    "name": "read_file",
+    "input": {
+      "null": null,
+      "nested": {
+        "enabled": true,
+        "list": [
+          1,
+          "two"
+        ]
+      }
+    },
+    "summary": "Read README.md"
+  },
+  "raw": {
+    "record": [
+      null,
+      true,
+      {
+        "anything": "retained"
+      }
+    ]
+  }
+}
