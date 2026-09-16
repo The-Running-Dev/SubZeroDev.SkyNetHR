@@ -1884,7 +1884,8 @@ export function createSessionManager(deps: {
     switch (n.kind) {
       case 'cli-session': {
         entry.record.cliSessionId = n.cliSessionId;
-        await store.writeMeta(entry.record); // one of the three occasions store's table names
+        // I64: `emit` must be reached before this handler's first `await` — the
+        // `meta.json` write comes after `session.started` is emitted, not before.
         if (!entry.firstTurnAnnounced) {
           entry.firstTurnAnnounced = true;
           await emit(entry, 'session.started', {
@@ -1896,6 +1897,7 @@ export function createSessionManager(deps: {
             createdAt: entry.record.createdAt,
           });
         }
+        await store.writeMeta(entry.record); // one of the three occasions store's table names
         return;
       }
       case 'spawned': {
