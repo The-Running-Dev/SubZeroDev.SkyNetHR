@@ -565,9 +565,9 @@ export function createCodexAdapter(
           let threadId: string;
           if (resume !== null) {
             threadId = resume;
-            await rpcCall('thread/resume', { threadId: resume });
+            await rpcCall('thread/resume', { threadId: resume, cwd: opts.cwd, sandbox: cliSandboxValue(sandbox), approvalPolicy: 'never', model: opts.model });
           } else {
-            const started = (await rpcCall('thread/start', { cwd: opts.cwd, sandbox: cliSandboxValue(sandbox), approvalPolicy: 'never' })) as
+            const started = (await rpcCall('thread/start', { cwd: opts.cwd, sandbox: cliSandboxValue(sandbox), approvalPolicy: 'never', model: opts.model })) as
               | { thread?: { id?: string } }
               | undefined;
             const startedId = started?.thread?.id;

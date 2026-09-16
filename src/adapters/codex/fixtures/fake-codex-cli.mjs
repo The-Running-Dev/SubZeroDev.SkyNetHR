@@ -110,11 +110,13 @@ if (subcommand === 'app-server') {
       return;
     }
     if (msg.method === 'thread/start') {
+      if (process.env.SKYNET_CODEX_PARAMS_LOG) appendFileSync(process.env.SKYNET_CODEX_PARAMS_LOG, JSON.stringify({ method: msg.method, params: msg.params }) + '\n');
       respond(msg.id, { thread: { id: threadId } });
       notify('thread/started', { thread: { id: threadId } });
       return;
     }
     if (msg.method === 'thread/resume') {
+      if (process.env.SKYNET_CODEX_PARAMS_LOG) appendFileSync(process.env.SKYNET_CODEX_PARAMS_LOG, JSON.stringify({ method: msg.method, params: msg.params }) + '\n');
       respond(msg.id, { thread: { id: threadId } });
       return;
     }
