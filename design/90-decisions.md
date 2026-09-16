@@ -5614,6 +5614,24 @@ Node test gate before either language has a consumer in this slice;
 **runtime validation** — changes behavior and belongs outside Phase 1b.
 Reversibility: cheap — test tooling only; the schemas and fixture files are portable JSON.
 
+### 2026-09-16 — D235 S28.4 follows I59 and I64: the `turn.ended` kill is issued, not awaited, before the slot clears
+Context: #358 landed I64's `cli-session` half of #329 and stopped at the `turn.ended` half. Moving
+that handler's `emit` ahead of its first `await` breaks S28.4, which requires the kill to **complete**
+before the turn slot is cleared and before `turn.ended` is emitted, and whose test checks for
+`turn_in_flight` while the kill is still running. D209 had already narrowed I59 to the kill being
+issued, D215 names this kill as started and not awaited, and D221 rejected awaiting it before
+delivery. None of them updated S28.4.
+Chosen: **S28.4 is the stale side.** It now requires the kill issued, the slot cleared, then the
+envelope, all before the handler yields, with the kill's completion free to follow. The handler does
+exactly that. The old guarantee was only ever true of the test fixture: Claude's and Codex's `kill()`
+contain no `await`, so the awaited kill never held the slot past dispatch in production.
+Rejected: **amending I64 to exempt `turn.ended` and keeping the awaited kill.** It reopens D209's
+and D221's rejected alternative. It also keeps a guarantee the shipped adapters never gave.
+Rejected: **holding the slot until the child's `close`.** It is a stronger property than either
+document states and it changes S5.1's clearing rule. That is `/design`'s call, not a reconciliation
+edit.
+Reversibility: cheap — one criterion, one test, one handler block.
+
 ## Open
 
 Staging only. Once an item becomes an issue it leaves this list.

@@ -1697,9 +1697,11 @@ Acceptance:
     (D201) — which is the path that does not kill today. **Do not wait for the child to exit on its
     own before asserting**: that sequence is what S28.1 measured as unreachable on Windows, and
     S28.9 is where the ordering itself is checked.
-  - S28.4 The kill completes before `turn.ended` is emitted and before the turn slot is cleared,
-    asserted by instrumenting all three in order, so a caller that reacts to `turn.ended` by
-    requesting a restore cannot race a surviving descendant.
+  - S28.4 The kill is **issued** before the turn slot is cleared and before `turn.ended` is
+    emitted, and all three happen before the handler first yields, asserted by instrumenting them
+    in order: the kill entered, the slot free, then the envelope, with the kill's own completion
+    free to fall after the envelope. A caller reacting to `turn.ended` therefore finds a kill
+    already sent to a live root. Completion is not awaited first (D209, I64, D235).
   - S28.5 One mechanism, not two: the same helper boot's reap and `interrupt` already call is
     entered on each of the four paths a turn can end by — normal exit, interrupt, adapter failure
     and shutdown — asserted by a call count per path rather than by reading the code.

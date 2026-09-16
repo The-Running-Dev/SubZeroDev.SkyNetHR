@@ -4622,7 +4622,7 @@ interface FixtureAdapterOptions {
   // own `kill()` ever runs, simulating "a turn whose child is already gone".
   readonly preKilled?: boolean;
   // S28.4: gates this fixture's own `kill()` from returning until released, so a test
-  // can observe what the manager does (or refuses to do) while a kill is in flight.
+  // can observe what the manager does while a kill is issued but not yet complete.
   readonly killGate?: () => Promise<void>;
   readonly onKill?: () => void;
   // Whether `send` emits the `turn.ended` event notification at all — `false` leaves
@@ -4662,11 +4662,13 @@ function makeFixtureAdapterFactory(
       },
       async kill() {
         opts.onKill?.();
-        if (opts.killGate) await opts.killGate();
-        if (!tree) return;
-        const { pid, pgid } = tree;
+        // Captured before the first `await`, as Claude's and Codex's own `kill()` capture
+        // their child: a later turn's `send` may replace `tree` while this kill is gated.
+        const target = tree;
         tree = null;
-        await fixtureKillTree(pid, pgid);
+        if (opts.killGate) await opts.killGate();
+        if (!target) return;
+        await fixtureKillTree(target.pid, target.pgid);
       },
     };
     return { ok: true, value: adapter };
@@ -4724,7 +4726,7 @@ test('S28.3/S28.9/S28.10 — a normal turn completion ends the tree, not just th
   assert.equal((endedEnvelopes[0]!.data as { stopReason: string }).stopReason, 'completed', 'the result already established completion; the kill signal that ended the child does not revise it');
 });
 
-test('S28.4 — the kill completes before turn.ended is emitted and before the turn slot is cleared', async () => {
+test('S28.4 — the kill is issued before the turn slot is cleared and before turn.ended is emitted, and is not awaited first', async () => {
   const { config, store, checkpoints, workspaceRoot } = await makeManager('full');
   const owner = 'operator-1' as OperatorId;
   const projectDir = path.join(workspaceRoot, 'proj-s284');
@@ -4753,11 +4755,15 @@ test('S28.4 — the kill completes before turn.ended is emitted and before the t
   const { sessionId } = created.value;
 
   const received: Envelope[] = [];
+  // `message()` tests the slot synchronously on entry (I5), so a call made inside the
+  // delivery of `turn.ended` reads the slot exactly as the envelope's observer finds it.
+  const atDelivery: { next: ReturnType<typeof manager.message> | null } = { next: null };
   await manager.subscribe(sessionId, owner, 0, {
     deliver: (e) => {
       if ('seq' in e) {
         order.push(`envelope:${e.kind}`);
         received.push(e);
+        if (e.kind === 'turn.ended' && atDelivery.next === null) atDelivery.next = manager.message(sessionId, owner, 'again', []);
       }
     },
     close: () => {},
@@ -4765,26 +4771,21 @@ test('S28.4 — the kill completes before turn.ended is emitted and before the t
 
   const messaged = await manager.message(sessionId, owner, 'go', []);
   assert.equal(messaged.ok, true);
-  assert.ok(order.includes('kill:start'), 'the kill was already entered by the time send() resolved');
-
-  // While the kill is still in flight: the slot is still held, and turn.ended has not
-  // been observed — "before" made checkable rather than assumed.
-  const concurrent = await manager.message(sessionId, owner, 'again', []);
-  assert.equal(concurrent.ok, false);
-  if (!concurrent.ok) assert.equal(concurrent.error.code, 'turn_in_flight', 'the slot is still held while the kill is in flight');
-  assert.equal(received.some((e) => e.kind === 'turn.ended'), false, 'turn.ended has not been delivered while the kill is in flight');
-
-  releaseKill();
   await waitUntil(() => received.some((e) => e.kind === 'turn.ended'));
 
+  // The kill is still gated here: turn.ended did not wait for it (I64, D209).
+  assert.equal(order.includes('kill:done'), false, 'turn.ended was delivered while the kill was issued but not complete');
   assert.deepEqual(
-    order.filter((o) => o === 'kill:start' || o === 'kill:done' || o === 'envelope:turn.ended'),
-    ['kill:start', 'kill:done', 'envelope:turn.ended'],
-    'the kill starts and completes before turn.ended is observable',
+    order.filter((o) => o === 'kill:start' || o === 'envelope:turn.ended').slice(0, 2),
+    ['kill:start', 'envelope:turn.ended'],
+    'the kill is issued before turn.ended is observable',
   );
+  assert.ok(atDelivery.next !== null);
+  const next = await atDelivery.next;
+  assert.equal(next.ok, true, 'the slot was already free when turn.ended was delivered');
 
-  const after = await manager.message(sessionId, owner, 'once more', []);
-  assert.equal(after.ok, true, 'the slot is free again once the kill has completed and turn.ended has been observed');
+  releaseKill();
+  await waitUntil(() => order.includes('kill:done') && received.filter((e) => e.kind === 'turn.ended').length === 2);
 });
 
 test('S28.5 — the same Adapter.kill() interrupt and shutdown already call is entered on normal completion and adapter failure too', async () => {
