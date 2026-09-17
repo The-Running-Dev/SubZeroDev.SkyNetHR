@@ -174,6 +174,59 @@ test('Phase 4 credits — one exhausted subscriber gaps once while a credited pe
   assert.equal(forId(resumed)[0].seq, 13);
 });
 
+for (const fs of [false, true]) test(`Phase 4 replay credits — ${fs ? 'filesystem' : 'memory'} backlog exceeds the default budget and resumes after a gap`, async t => {
+  const f = await fixture(t, { fs }), owner = { sessionId: (await f.create()).result.sessionId, principal: 'alice' };
+  const append = async (n: number) => assert.ok((await f.request('events.append', { ...owner, kind: 'x-fixture.tick', data: { n } })).result);
+  const events = (id: string) => f.messages.filter(m => m.method === 'events.event' && m.params?.subscriptionId === id).map(m => m.params!.event as any);
+  const waitFor = async (id: string, count: number) => {
+    const deadline = Date.now() + 5000;
+    while (events(id).length < count) { assert.ok(Date.now() < deadline, `expected ${count} events, got ${events(id).length}`); await delay(5); }
+  };
+  const credit = async (id: string, count: number) => {
+    const result = await f.request('events.credit', { subscriptionId: id, principal: 'alice', count });
+    assert.equal(result.error, undefined, JSON.stringify(result));
+  };
+  for (let n = 1; n <= 257; n++) await append(n);
+  const first = (await f.request('events.subscribe', owner)).result.subscriptionId;
+  assert.deepEqual(events(first), []);
+  await credit(first, 64); await waitFor(first, 64);
+  await delay(10); assert.equal(events(first).length, 64, 'replay cannot spend ungranted credit');
+  await credit(first, 193); await waitFor(first, 257);
+  assert.deepEqual(events(first).map(e => e.seq), Array.from({ length: 257 }, (_, n) => n + 1));
+
+  // Exhaust live delivery, then actually resume from the last accepted watermark.
+  for (let n = 258; n <= 514; n++) await append(n);
+  await waitFor(first, 258);
+  assert.equal(events(first).at(-1).data.kind, 'replay_gap');
+  assert.equal(events(first).at(-1).seq, 257);
+  const resumed = (await f.request('events.subscribe', { ...owner, fromSeq: 257 })).result.subscriptionId;
+  await credit(resumed, 64); await waitFor(resumed, 64);
+  await append(515); // Live traffic during paused replay must follow all history.
+  await credit(resumed, 194); await waitFor(resumed, 258);
+  assert.deepEqual(events(resumed).map(e => e.seq), Array.from({ length: 258 }, (_, n) => n + 258));
+  assert.ok(events(resumed).every(e => e.kind === 'x-fixture.tick'));
+});
+
+for (const action of ['unsubscribe', 'reassign', 'shutdown'] as const) test(`Phase 4 replay credits — ${action} closes a paused filesystem replay`, async t => {
+  const f = await fixture(t, { fs: true, budget: 2 }), owner = { sessionId: (await f.create()).result.sessionId, principal: 'alice' };
+  for (let n = 0; n < 3; n++) await f.request('events.append', { ...owner, kind: 'x-fixture.tick', data: { n } });
+  const subscriptionId = (await f.request('events.subscribe', owner)).result.subscriptionId;
+  const events = () => f.messages.filter(m => m.method === 'events.event' && m.params?.subscriptionId === subscriptionId);
+  assert.equal((await f.request('events.credit', { subscriptionId, principal: 'alice', count: 1 })).error, undefined);
+  const deadline = Date.now() + 5000;
+  while (!events().length) { assert.ok(Date.now() < deadline); await delay(5); }
+  assert.equal((events()[0]!.params!.event as any).seq, 1);
+  if (action === 'shutdown') await f.close();
+  else {
+    const result = action === 'unsubscribe'
+      ? await f.request('events.unsubscribe', { subscriptionId, principal: 'alice' })
+      : await f.request('admin.sessions.reassignPrincipal', { sessionId: owner.sessionId, principal: 'bob' });
+    assert.equal(result.error, undefined);
+    assert.equal((await f.request('events.credit', { subscriptionId, principal: 'alice', count: 10 })).error?.data?.code, 'not_found');
+  }
+  await delay(10); assert.equal(events().length, 1);
+});
+
 test('Phase 4 A19 — turn events may precede send response; cancellation never interrupts the turn', async t => {
   const started = gate<void>(), entered = gate<void>();
   const f = await fixture(t, { start: async (_input, turn) => { turn.emit('message', { role: 'assistant', text: 'early', attachments: [] }); entered.resolve(); await started.promise; } });

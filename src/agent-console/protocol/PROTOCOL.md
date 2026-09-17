@@ -101,8 +101,12 @@ The stdio parent is privileged. Browser integrations must use the explicit
 ## Delivery, errors and concurrency
 
 Notifications use `events.event {subscriptionId, event}`. Subscriptions start at
-zero credit. Grant credit after a bounded consumer channel accepts notifications;
-do not grant it merely because the pipe was read. Responses and control messages
+zero credit and return their handle before reading historical replay. Once a
+bounded consumer channel is ready, grant its initial capacity; replenish credit
+after it accepts notifications. Historical replay is pulled one record at a time as credit
+permits, followed by live events buffered since the subscription snapshot. Replay
+and buffered live events share the event/byte budget. Do not replenish credit
+merely because the pipe was read. Responses and control messages
 have priority over round-robin subscription delivery. Each subscription has a
 bounded event/byte budget. Exhaustion closes that subscription and sends exactly
 one control-delivered `error/replay_gap`, restating the last delivered watermark.
