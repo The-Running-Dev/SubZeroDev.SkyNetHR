@@ -5652,6 +5652,34 @@ document states and it changes S5.1's clearing rule. That is `/design`'s call, n
 edit.
 Reversibility: cheap — one criterion, one test, one handler block.
 
+### 2026-09-17 — D237 Phase 3 extracts ProcessSupervisor as mechanism only; the ledger is injected, not owned
+Context: the Phase 3 handoff extracts the existing process mechanism (spawn, environment,
+stdin, termination, OS identity, the PID ledger) out of providers and the manager into
+`src/agent-console/process`, mirroring Phase 1a/1b/2's extraction pattern. Neither the
+mechanism/lifecycle boundary nor how the filesystem-backed ledger reaches the new module is
+fixed by the existing contract.
+Chosen: **mechanism only, ledger injected.** `src/agent-console/process` owns
+spawn/environment/stdin/termination/OS-identity primitives and a `ProcessLedger` interface;
+the filesystem implementation still writes `pids.ndjson` in its existing two line shapes,
+through the shared append/fold helpers (`append-log.ts`). The manager keeps every lifecycle
+decision — kill/slot-clear/emit ordering, muted-spawn handling, the orphan-reap guard,
+process facts — and the host store composes and closes the ledger alongside its other
+append handles. Environment construction defaults to full host inheritance plus existing
+overrides; the explicit `constructed` mode (OS essentials, proxy/TLS, provider-declared
+names, host entries) is opt-in in this phase.
+Rejected: **moving lifecycle decisions (kill/slot-clear/emit ordering, muted-spawn handling,
+the reap guard) into the new module** — crosses the seam Phase 2 already drew between
+providers and the manager, and duplicates state the manager still needs. **Hardcoding the
+filesystem ledger inside `process/` instead of an injected interface** — would stop the
+store from composing and closing it alongside its other handles, and would either duplicate
+`append-log.ts`'s existing append/tombstone/fold logic or force the store to reach into the
+new module's internals. **Defaulting environment construction to `constructed`** — would
+silently change every existing provider's environment with no consumer requesting it this
+phase; kept `inherit` as the default and left `constructed` opt-in instead.
+Reversibility: cheap — mechanism only; no HTTP, event, provider or persistence schema
+changes, and `pids.ndjson`'s on-disk shape is unchanged. Landing point: AgentConsole
+Phase 3, PR #366.
+
 ### 2026-09-17 — D238 I27 permits only Phase 3b's bounded session and workspace guards
 Context: the AgentConsole implementation handoff requires A11 workspace allocation and A22
 per-session lanes, while I27 prohibited caller locks outright. The owner authorized a narrow
