@@ -121,6 +121,30 @@ test('S1.3 — row 12: the child closing with no result seen maps to turn.ended/
   assert.equal((eventsOf(notifications, 'turn.ended')[0]!.event.data as { stopReason: string }).stopReason, 'process_exit');
 });
 
+// #360 — a close event from a child already superseded by the next turn's own spawn must
+// not clear that new child's reference, report a spurious 'exited', or emit a duplicate
+// turn.ended for the new turn.
+test('#360 — a late close from a replaced child is ignored rather than misattributed to the new turn', async () => {
+  process.env['SKYNET_TEST_SCENARIO'] = 'slow-close';
+  process.env['SKYNET_SLOW_CLOSE_MS'] = '300';
+  const { adapter, notifications } = makeAdapter('slow-close');
+
+  const first = await adapter.send('hello', [], null, 'turn-1' as never);
+  assert.equal(first.ok, true);
+  await waitUntil(() => eventsOf(notifications, 'turn.ended').length > 0);
+
+  process.env['SKYNET_TEST_SCENARIO'] = 'error-result';
+  const second = await adapter.send('hi again', [], null, 'turn-2' as never);
+  assert.equal(second.ok, true);
+  await waitUntil(() => eventsOf(notifications, 'turn.ended').length >= 2);
+
+  // Give turn-1's delayed close (SKYNET_SLOW_CLOSE_MS after its stdin closed) time to land.
+  await new Promise((r) => setTimeout(r, 500));
+
+  assert.equal(eventsOf(notifications, 'turn.ended').length, 2);
+  assert.equal(notifications.filter((n) => n.kind === 'exited').length, 1);
+});
+
 // S21.1/D160 — `AttachmentPayload` maps to one `image` content block per attachment, ahead
 // of the text block, in the same `content` array the finding
 // (design/findings/S21-attachment-probe.md) verified the CLI accepts.

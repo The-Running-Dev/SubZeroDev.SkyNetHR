@@ -543,6 +543,10 @@ function buildCodexAdapter(opts: AdapterOptions, executable: string, transport: 
       });
 
       proc.on('close', (code, signal) => {
+        // #360: mirrors ../claude/index.ts's identical guard — a close arriving after
+        // this child has already been replaced by the next turn's own spawn must not
+        // clear that turn's child reference or report an exit that is not its own.
+        if (proc !== child) return;
         child = null;
         notify({ kind: 'exited', code, signal });
         if (!resultSeen) {
@@ -566,9 +570,9 @@ function buildCodexAdapter(opts: AdapterOptions, executable: string, transport: 
           let threadId: string;
           if (resume !== null) {
             threadId = resume;
-            await rpcCall('thread/resume', { threadId: resume });
+            await rpcCall('thread/resume', { threadId: resume, cwd: opts.cwd, sandbox: cliSandboxValue(sandbox), approvalPolicy: 'never', model: opts.model });
           } else {
-            const started = (await rpcCall('thread/start', { cwd: opts.cwd, sandbox: cliSandboxValue(sandbox), approvalPolicy: 'never' })) as
+            const started = (await rpcCall('thread/start', { cwd: opts.cwd, sandbox: cliSandboxValue(sandbox), approvalPolicy: 'never', model: opts.model })) as
               | { thread?: { id?: string } }
               | undefined;
             const startedId = started?.thread?.id;
@@ -741,6 +745,8 @@ function buildCodexAdapter(opts: AdapterOptions, executable: string, transport: 
       });
 
       proc.on('close', (code, signal) => {
+        // #360: mirrors ../claude/index.ts's identical guard.
+        if (proc !== child) return;
         child = null;
         notify({ kind: 'exited', code, signal });
         if (!resultSeen) {

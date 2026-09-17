@@ -1910,7 +1910,8 @@ export function createSessionManager(deps: {
     switch (n.kind) {
       case 'cli-session': {
         entry.record.cliSessionId = n.cliSessionId;
-        await store.writeMeta(entry.record); // one of the three occasions store's table names
+        // I64: `emit` must be reached before this handler's first `await` — the
+        // `meta.json` write comes after `session.started` is emitted, not before.
         if (!entry.firstTurnAnnounced) {
           entry.firstTurnAnnounced = true;
           await emit(entry, 'session.started', {
@@ -1922,6 +1923,7 @@ export function createSessionManager(deps: {
             createdAt: entry.record.createdAt,
           });
         }
+        await store.writeMeta(entry.record); // one of the three occasions store's table names
         return;
       }
       case 'spawned': {
@@ -2129,17 +2131,19 @@ export function createSessionManager(deps: {
         // same `Adapter.kill()` `interrupt()` and `shutdown()` already call. This is the
         // manager's own obligation and not one vendor's close handler: it runs
         // regardless of what the adapter that reported this `turn.ended` did on its own.
-        // It happens before the slot is cleared and before this envelope is emitted, so
-        // a caller reacting to `turn.ended` by requesting a restore cannot race a
-        // surviving descendant, and it happens synchronously in the same call stack as
-        // the notification that carried it — before the child's own `close`, which
-        // needs a real OS round trip to fire at all (S28.9).
-        if (kind === 'turn.ended') {
-          await entry.adapter!.kill();
+        // The kill is issued before the slot is cleared and before this envelope is
+        // emitted, synchronously in the same call stack as the notification that carried
+        // it — before the child's own `close`, which needs a real OS round trip to fire at
+        // all (S28.9). It is issued and not awaited ahead of `emit` (I59, D209): I64 needs
+        // this handler to reach `emit` before its first `await`, so the kill's completion
+        // is awaited only after the envelope has its `seq` (S28.4, D235).
+        const killing = kind === 'turn.ended' ? entry.adapter!.kill() : null;
+        if (killing) {
           entry.turn = null;
           entry.livePid = null;
         }
         await emit(entry, kind, payload as never, raw);
+        if (killing) await killing;
         if (autoApprove && autoApproveRule && turn) await resolvePreapproved(entry, turn, autoApprove, autoApproveRule);
         return;
       }

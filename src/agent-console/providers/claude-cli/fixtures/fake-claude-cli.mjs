@@ -69,6 +69,9 @@ import { spawn } from 'node:child_process';
 //                   a string (#202).
 //   malformed-usage — an assistant record whose usage.input_tokens is a string instead of
 //                   a number (#202).
+//   slow-close    — a normal `result`, but the process does not actually exit until
+//                   SKYNET_SLOW_CLOSE_MS (default 300) after its stdin is closed — long
+//                   enough for the caller to start its next turn's own child first (#360).
 
 const scenario = process.env.SKYNET_TEST_SCENARIO ?? 'full';
 // (S25.6) The real CLI only emits stream_event records when this flag is present
@@ -315,6 +318,10 @@ function runScenario() {
         },
       });
       return;
+    case 'slow-close':
+      assistantText('finishing up', 'msg-slow-1');
+      line({ type: 'result', subtype: 'success' });
+      return;
     case 'many': {
       for (let i = 0; i < 200; i++) assistantText('message ' + i, 'msg-many-' + i);
       line({ type: 'result', subtype: 'success' });
@@ -431,5 +438,10 @@ function runScenario() {
 }
 
 process.stdin.on('end', () => {
-  if (!awaitingControlResponse) process.exit(0);
+  if (awaitingControlResponse) return;
+  if (scenario === 'slow-close') {
+    setTimeout(() => process.exit(0), Number(process.env.SKYNET_SLOW_CLOSE_MS || 300));
+    return;
+  }
+  process.exit(0);
 });

@@ -13,7 +13,7 @@ const execFileAsync = promisify(execFile);
 
 const FIXTURE = path.join(process.cwd(), 'src', 'agent-console', 'providers', 'codex-cli', 'fixtures', 'fake-codex-cli.mjs');
 
-async function makeAdapter(sandbox: 'read-only' | 'workspace-write' | 'unrestricted' = 'workspace-write') {
+async function makeAdapter(sandbox: 'read-only' | 'workspace-write' | 'unrestricted' = 'workspace-write', model: string | null = null) {
   // (#134) Transport detection is now cached per (executable, cwd) for the life of the
   // process — every test here reuses the same FIXTURE path, and several toggle
   // SKYNET_CODEX_NO_APP_SERVER between cases to force a different transport out of that
@@ -24,7 +24,7 @@ async function makeAdapter(sandbox: 'read-only' | 'workspace-write' | 'unrestric
   const result = await createCodexAdapter({
     executable: FIXTURE,
     cwd: process.cwd() as never,
-    model: null,
+    model,
     sandbox,
     notify: (n) => notifications.push(n),
     streamDeltas: false,
@@ -146,6 +146,45 @@ test('S8.3, S8.4 — app-server: the mapped table, and zero permission.request e
   assert.equal((turnEnded.event.data as { stopReason: string }).stopReason, 'completed');
 });
 
+// D217 — both a fresh thread/start and a resumed thread/resume carry the session's
+// sandbox and policy, not just the fresh path; the resumed thread must not silently run
+// under the CLI's own defaults. Same for model (never read before D217).
+test('D217 — thread/start and thread/resume both carry cwd, sandbox, approvalPolicy: never, and model', async () => {
+  delete process.env['SKYNET_CODEX_NO_APP_SERVER'];
+  process.env['SKYNET_CODEX_SCENARIO'] = 'full';
+  const dir = await mkdtemp(path.join(tmpdir(), 'skynet-codex-params-'));
+  const paramsLog = path.join(dir, 'params.log');
+  process.env['SKYNET_CODEX_PARAMS_LOG'] = paramsLog;
+
+  const fresh = await makeAdapter('read-only', 'gpt-5-codex');
+  assert.equal(fresh.result.ok, true);
+  if (!fresh.result.ok) return;
+  await fresh.result.value.send('hello', [], null, 'turn-d217-1' as never);
+  await waitUntil(() => eventsOf(fresh.notifications, 'turn.ended').length > 0);
+
+  const resumed = await makeAdapter('read-only', 'gpt-5-codex');
+  assert.equal(resumed.result.ok, true);
+  if (!resumed.result.ok) return;
+  await resumed.result.value.send('hello again', [], 'fake-thread-resumed' as never, 'turn-d217-2' as never);
+  await waitUntil(() => eventsOf(resumed.notifications, 'turn.ended').length > 0);
+
+  const lines = (await readFileOrEmpty(paramsLog)).split('\n').filter((l) => l.length > 0).map((l) => JSON.parse(l));
+  const startCall = lines.find((l) => l.method === 'thread/start');
+  const resumeCall = lines.find((l) => l.method === 'thread/resume');
+  assert.ok(startCall, 'thread/start was called');
+  assert.ok(resumeCall, 'thread/resume was called');
+  assert.equal(startCall.params.sandbox, 'read-only');
+  assert.equal(startCall.params.approvalPolicy, 'never');
+  assert.equal(startCall.params.model, 'gpt-5-codex');
+  assert.equal(resumeCall.params.threadId, 'fake-thread-resumed');
+  assert.equal(resumeCall.params.sandbox, 'read-only');
+  assert.equal(resumeCall.params.approvalPolicy, 'never');
+  assert.equal(resumeCall.params.model, 'gpt-5-codex');
+  assert.equal(typeof resumeCall.params.cwd, 'string');
+
+  delete process.env['SKYNET_CODEX_PARAMS_LOG'];
+});
+
 // S8.5 — an app-server notification outside the mapped table (and outside the harmless
 // ignore list) is a schema mismatch: fatal, and the session refuses to start.
 test('S8.5 — app-server: an unrecognised notification method is a fatal schema mismatch', async () => {
@@ -205,6 +244,92 @@ test('app-server: the child closing with no turn/completed seen maps to turn.end
   await result.value.send('hello', [], null, 'turn-5' as never);
   await waitUntil(() => eventsOf(notifications, 'turn.ended').length > 0);
   assert.equal((eventsOf(notifications, 'turn.ended')[0]!.event.data as { stopReason: string }).stopReason, 'process_exit');
+});
+
+// #360 — mirrors ../claude/index.test.ts's identical case. The second turn is started
+// from a microtask scheduled inside the first turn's own turn.ended notification — after
+// `terminate()` has read the correct (still-current) child, but strictly before that
+// killed child's OS 'close' event can fire (always a later macrotask) — making the race
+// deterministic rather than dependent on real kill timing, which differs by platform.
+test('#360 — app-server: a late close from a replaced child is ignored rather than misattributed to the new turn', async () => {
+  delete process.env['SKYNET_CODEX_NO_APP_SERVER'];
+  process.env['SKYNET_CODEX_SCENARIO'] = 'full';
+  resetCodexTransportCacheForTests();
+  const notifications: AdapterNotification[] = [];
+  let triggerSecondSend: (() => void) | null = null;
+  let secondSendStarted = false;
+  const notify = (n: AdapterNotification) => {
+    notifications.push(n);
+    if (!secondSendStarted && n.kind === 'event' && n.event.kind === 'turn.ended') {
+      secondSendStarted = true;
+      queueMicrotask(() => triggerSecondSend?.());
+    }
+  };
+  const result = createCodexAdapter({
+    executable: FIXTURE,
+    cwd: process.cwd() as never,
+    model: null,
+    sandbox: 'workspace-write',
+    notify,
+    streamDeltas: false,
+  });
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  triggerSecondSend = () => {
+    void result.value.send('hi again', [], null, 'turn-2' as never);
+  };
+
+  await result.value.send('hello', [], null, 'turn-1' as never);
+  await waitUntil(() => eventsOf(notifications, 'turn.ended').length >= 2);
+  await waitUntil(() => notifications.some((n) => n.kind === 'exited'));
+  // Give any second (misattributed) close a further beat to land before asserting it didn't.
+  await new Promise((r) => setTimeout(r, 300));
+
+  assert.equal(eventsOf(notifications, 'turn.ended').length, 2);
+  assert.equal(notifications.filter((n) => n.kind === 'exited').length, 1);
+});
+
+// #360 — the exec fallback's identical close handler, same technique as above.
+test('#360 — exec fallback: a late close from a replaced child is ignored rather than misattributed to the new turn', async () => {
+  process.env['SKYNET_CODEX_NO_APP_SERVER'] = '1';
+  process.env['SKYNET_CODEX_SCENARIO'] = 'full';
+  resetCodexTransportCacheForTests();
+  try {
+    const notifications: AdapterNotification[] = [];
+    let triggerSecondSend: (() => void) | null = null;
+    let secondSendStarted = false;
+    const notify = (n: AdapterNotification) => {
+      notifications.push(n);
+      if (!secondSendStarted && n.kind === 'event' && n.event.kind === 'turn.ended') {
+        secondSendStarted = true;
+        queueMicrotask(() => triggerSecondSend?.());
+      }
+    };
+    const result = createCodexAdapter({
+      executable: FIXTURE,
+      cwd: process.cwd() as never,
+      model: null,
+      sandbox: 'workspace-write',
+      notify,
+      streamDeltas: false,
+    });
+    assert.equal(result.ok, true);
+    if (!result.ok) return;
+    triggerSecondSend = () => {
+      void result.value.send('hi again', [], null, 'turn-2' as never);
+    };
+
+    await result.value.send('hello', [], null, 'turn-1' as never);
+    await waitUntil(() => eventsOf(notifications, 'turn.ended').length >= 2);
+    await waitUntil(() => notifications.some((n) => n.kind === 'exited'));
+    // Give any second (misattributed) close a further beat to land before asserting it didn't.
+    await new Promise((r) => setTimeout(r, 300));
+
+    assert.equal(eventsOf(notifications, 'turn.ended').length, 2);
+    assert.equal(notifications.filter((n) => n.kind === 'exited').length, 1);
+  } finally {
+    delete process.env['SKYNET_CODEX_NO_APP_SERVER'];
+  }
 });
 
 test('app-server: a malformed JSON line is non-fatal and the stream continues', async () => {

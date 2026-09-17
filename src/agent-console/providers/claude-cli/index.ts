@@ -561,6 +561,13 @@ export function createClaudeAdapter(opts: AdapterOptions & { readonly executable
         });
 
         proc.on('close', (code, signal) => {
+          // #360: this child's own kill was already issued at `result` (or an earlier
+          // interrupt); a `send()` for the next turn does not wait for that exit to
+          // land before spawning its own child and reassigning `child`. A `close` that
+          // arrives after that reassignment names a process nothing here still owns —
+          // acting on it would wipe the new turn's child reference and misattribute
+          // this exit as its own.
+          if (proc !== child) return;
           child = null;
           // D97: the adapter never resolves a permission of its own — resolving every
           // outstanding request as `cancelled_process_exit`, and owing each one an
