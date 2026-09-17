@@ -1,4 +1,4 @@
-import { spawn } from 'node:child_process';
+import { spawnProcess, killProbe } from '../process/index.js';
 
 export interface ProbeResult { readonly ok: boolean; readonly output: string }
 
@@ -15,16 +15,13 @@ export function probeCommand(command: string, args: readonly string[], cwd: stri
       resolve({ ok, output: output.trim() });
     };
     try {
-      const child = spawn(command, [...args], { cwd, shell, detached: process.platform !== 'win32', stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, FORCE_COLOR: '0', NO_COLOR: '1' } });
-      child.stdout.on('data', (chunk: Buffer) => { if (output.length < 4096) output += chunk.toString('utf8').slice(0, 4096 - output.length); });
-      child.stderr.resume();
+      const child = spawnProcess({ command, args: [...args], shell }, { cwd, stdin: 'ignore', overrides: { FORCE_COLOR: '0', NO_COLOR: '1' } });
+      child.stdout!.on('data', (chunk: Buffer) => { if (output.length < 4096) output += chunk.toString('utf8').slice(0, 4096 - output.length); });
+      child.stderr!.resume();
       child.once('error', () => finish(false));
       child.once('close', (code) => finish(code === 0));
       timer = setTimeout(() => {
-        if (child.pid !== undefined) {
-          if (process.platform === 'win32') spawn('taskkill', ['/PID', String(child.pid), '/T', '/F'], { stdio: 'ignore' }).once('error', () => {});
-          else { try { process.kill(-child.pid, 'SIGKILL'); } catch { child.kill('SIGKILL'); } }
-        }
+        killProbe(child);
         finish(false);
       }, timeoutMs);
     } catch { finish(false); }

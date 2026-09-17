@@ -1008,6 +1008,7 @@ flowchart TD
     ST["store"]
     CK["checkpoints"]
     AD["adapters/*"]
+    PS["agent-console/process<br/>ProcessSupervisor"]
     RC["records<br/>tier two"]
     SM["session-manager"]
     HC["edge/http-common"]
@@ -1050,6 +1051,11 @@ flowchart TD
     RC --> CF
     RC --> CT
     AD --> CT
+    AD --> PS
+    SM --> PS
+    ST --> PS
+    CT --> PS
+    PS --> AC
     JL --> CT
     ST --> CT
     CL --> CT
@@ -1058,22 +1064,24 @@ flowchart TD
 | Module | Owns | Depends on | Exposes |
 |---|---|---|---|
 | `agent-console/contract` | The self-contained generic vocabulary | *nothing* | Generic types and `isFrame` (D171) |
-| `contract` | The host vocabulary and generic re-exports | `agent-console/contract` | Types, `RATINGS` (D150), and the re-exported `isFrame` (D171) |
+| `contract` | The host vocabulary and generic re-exports | `agent-console/contract`, `agent-console/process` | Types, `RATINGS` (D150), and the re-exported `isFrame` (D171) |
 | `config` | Roots, auth mode, bind address, origin allow-list, caps | `contract`, `jail` | A validated config object |
 | `identity` | Request → `OperatorId`, or rejection | `config` | One function per deployment mode |
 | `jail` | Path resolution, normalisation and containment | `contract` | `resolveInsideRoot`, `pathsOverlap`, `stripExtendedPrefix` |
-| `store` | meta, spill, tool-output blobs, audit, process records, **the two record logs**, ring buffer | `config`, `contract` | Read/append primitives |
+| `store` | meta, spill, tool-output blobs, audit, process-ledger composition, **the two record logs**, ring buffer | `config`, `contract`, `agent-console/process` | Read/append primitives |
 | `checkpoints` | Shadow git lifecycle | `config`, `contract` | create / list / restore |
-| `adapters/*` | **The only vendor knowledge** | `contract` | `send`, `respond`, `kill`, and one inbound `notify` (D46) |
+| `agent-console/providers/*-cli` | **The only vendor knowledge**, behind the provider compatibility adapters | `agent-console/contract`, `agent-console/process`, provider types/helpers | `send`, `respond`, `kill`, and one inbound `notify` (D46) |
+| `agent-console/process` | Spawn, environment, stdin, child/stream handles, termination, OS identity, injected PID ledger | `agent-console/contract`, Node built-ins | Internal ProcessSupervisor mechanism and filesystem ledger |
 | `records` *(tier two)* | Review and requisition lifecycle, and their registries | `config`, `store`, `contract` | Raise / decide / claim, author / finalise, read |
-| `session-manager` | Ownership, turn state, `seq`, fan-out, reaping, the payroll fold, **the audit read and the incident view over it** | `config`, `jail`, `store`, `checkpoints`, `adapters`, `records`, `contract` | Session CRUD, subscribe, `readAudit` |
+| `session-manager` | Ownership, turn state, `seq`, fan-out, reaping, the payroll fold, **the audit read and the incident view over it** | `config`, `jail`, `store`, `checkpoints`, `adapters`, `agent-console/process`, `records`, `contract` | Session CRUD, subscribe, `readAudit` |
 | `edge/error-envelope` | The one `ApiErrorCode` → HTTP status mapping | `contract` | `statusForCode`, `sendError` |
 | `edge/http-common` | Everything about a request that is not framing: **the origin check**, identity resolution, login, body reading, the `AuditQuery` parse, and the handlers both edges share | `config`, `session-manager`, `records`, `identity`, `adapters`, `contract`, `edge/error-envelope` | Handlers and helpers, to the two edges only |
 | `edge/sse` | SSE framing and `Last-Event-ID` reconnect; its own routing table | `config`, `session-manager`, `records`, `contract`, `edge/http-common`, `edge/error-envelope` | HTTP routes |
 | `edge/ws` | WebSocket framing and first-message auth; its own routing table | `config`, `session-manager`, `records`, `contract`, `edge/http-common`, `edge/error-envelope` | HTTP routes, plus `.handleUpgrade` (D117) |
 | `client` | Rendering, **under the CSP and no-`innerHTML` rules** (D43, D74); the four themes (D58, D78) | `contract` | — |
 
-**Adapters are leaves.** They depend on `contract` and nothing else. They do not read
+**Provider adapters are leaves.** They use the generic contract, provider helpers and
+the shared process mechanism under `src/agent-console/process`. They do not read
 config, do not touch the store, do not write audit records, and do not know whether a turn
 is in flight. They are handed a resolved `cwd` and one outbound channel and that is their
 entire world. This is what keeps a second vendor from becoming a second architecture.
@@ -1113,7 +1121,18 @@ and `VENDORS` derive from that registration; creation looks up a definition in t
 There is no dispatch switch or second enumeration. Generic registry and turn-handle code
 lives under `src/agent-console/providers`; concrete leaves own transport selection and
 vendor mappings. The detailed migration semantics are in `20-contract.md § AgentConsole
-provider boundary — Phase 2` (D235).
+provider boundary — Phase 2` (D236).
+
+**ProcessSupervisor is mechanism only (AgentConsole Phase 3).** Providers share executable
+resolution, spawn, environment and termination primitives; Node child/stream callbacks keep
+their existing registration order and the providers retain child-identity guards. The manager
+uses OS identity helpers and an injected `ProcessLedger`, while retaining the reap guard,
+process facts, kill requests and event ordering. The filesystem ledger still writes
+`pids.ndjson`; `store` composes and closes it alongside its other append handles. Low-level
+append/fold helpers are shared, without moving session persistence, audit, workspace or lock
+ownership. The three termination entry points preserve live-child staged termination,
+orphan/muted-spawn force-kill and probe-timeout force-kill separately. Environment construction
+defaults to full inheritance plus existing overrides; constructed mode is opt-in in this phase.
 
 **One edge was drawn backwards, and S1 found it: `config` depends on `jail`, not the reverse**
 (D94). `jail` was given a `config` dependency here for the workspace roots, and it does not
@@ -2157,7 +2176,7 @@ Not guaranteed, and the client must not assume it:
 | A slow subscriber | Per-subscriber queue; drop that one, gap it, keep the rest | Fan-out; logged as D18 |
 | Interrupt arrives as the turn ends on its own | Whichever clears `turn` first wins; the loser is a no-op returning `{ok:true}` | Manager turn state (D24) |
 | Delete arrives during a turn | Refused `409` | Manager turn state (D25) |
-| Two sessions on overlapping workspaces | The second is refused at create | Manager, on **overlap** of the resolved paths of **live sessions and pending creates** (D19 + D20 + D30 + D235), claimed synchronously |
+| Two sessions on overlapping workspaces | The second is refused at create | Manager, on **overlap** of the resolved paths of **live sessions and pending creates** (D19 + D20 + D30 + D236), claimed synchronously |
 | A client arrives during boot rehydration | Cannot — listening starts after rehydration | Boot ordering |
 | Two operators decide one requisition *(tier two)* | First wins; second gets `409 already_decided` | `records` registry, claimed synchronously with the check |
 | Two sessions created against one approved requisition *(tier two)* | First wins; second gets `409 requisition_consumed` | `records` registry, claimed synchronously with the workspace claim |

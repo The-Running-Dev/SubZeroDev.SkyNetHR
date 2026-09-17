@@ -1,4 +1,5 @@
-import { spawn, type ChildProcess } from 'node:child_process';
+import type { ChildProcess } from 'node:child_process';
+import { spawnProcess, resolveSpawn, reportableImage, terminateProcess, closeStdin, protectStdin } from '../../process/index.js';
 import { platform } from 'node:process';
 import { probeCommand } from '../probe.js';
 import type { ProbeContext, ProviderStatus } from '../types.js';
@@ -20,7 +21,6 @@ import { NdjsonSplitter } from '../ndjson.js';
 import { summariseCommand } from './summarise.js';
 
 const isWindows = platform === 'win32';
-const KILL_GRACE_MS = 2000; // mirrors the Claude adapter's SIGTERM-then-SIGKILL grace (D38)
 type Transport = 'app-server' | 'exec';
 
 // `SandboxMode` is this contract's vendor-neutral vocabulary; the CLI's own flag values
@@ -43,38 +43,8 @@ function sandboxBanner(mode: SandboxMode): string {
 
 const SANDBOX_MODES = new Set<SandboxMode>(['read-only', 'workspace-write', 'unrestricted']);
 
-interface ResolvedSpawn {
-  readonly command: string;
-  readonly args: string[];
-  readonly shell: boolean;
-}
-
-// Shared by the asynchronous transport probe and the real per-turn spawn: a
-// `.mjs`/`.js` executable is a test fixture, run under this same Node; the bare `codex`
-// name or an explicit `.cmd`/`.bat` needs a shell on Windows for PATH/PATHEXT resolution
-// (Node refuses to spawn those directly). Mirrors `../claude/index.ts`'s identical need.
-function resolveSpawn(executable: string, extraArgs: string[]): ResolvedSpawn {
-  const isScriptFixture = executable.endsWith('.mjs') || executable.endsWith('.js');
-  const needsShell = isWindows && !isScriptFixture && (executable === 'codex' || /\.(cmd|bat)$/i.test(executable));
-  const command = isScriptFixture ? process.execPath : needsShell && /\s/.test(executable) ? `"${executable}"` : executable;
-  const args = isScriptFixture ? [executable, ...extraArgs] : extraArgs;
-  return { command, args, shell: needsShell };
-}
-
-// (#201) With `shell: true` on Windows, Node launches `%ComSpec%` and the reported
-// `proc.pid` names *that* shell process, not the resolved executable — `tasklist` for
-// that pid reports the shell's own image (`cmd.exe` by default), never `executable`.
-// Recording anything else here is what makes the boot reaper's exact-image comparison
-// (`session-manager/index.ts`'s `imagesMatch`) reject the real process tree as a
-// mismatch after a crash. Mirrors `../claude/index.ts`'s identical need.
-function reportableImage(executable: string, usedShell: boolean): string {
-  if (!usedShell) return executable;
-  const comspec = process.env['ComSpec'] ?? process.env['COMSPEC'] ?? 'cmd.exe';
-  return comspec.replace(/^.*[\\/]/, '').replace(/\.exe$/i, '');
-}
-
 async function probeOk(executable: string, cwd: string, subcommand: string): Promise<boolean> {
-  const resolved = resolveSpawn(executable, [subcommand, '--help']);
+  const resolved = resolveSpawn(executable, [subcommand, '--help'], executable === 'codex');
   return (await probeCommand(resolved.command, resolved.args, cwd, resolved.shell)).ok;
 }
 
@@ -256,33 +226,7 @@ function buildCodexAdapter(opts: AdapterOptions, executable: string, transport: 
   }
 
   function terminate(proc: ChildProcess): void {
-    if (proc.pid === undefined) return;
-    if (isWindows) {
-      spawn('taskkill', ['/PID', String(proc.pid), '/T', '/F']).once('error', () => {});
-      return;
-    }
-    const pid = proc.pid;
-    try {
-      process.kill(-pid, 'SIGTERM');
-    } catch {
-      try {
-        proc.kill('SIGTERM');
-      } catch {
-        // Already gone.
-      }
-    }
-    setTimeout(() => {
-      if (child !== proc) return; // already exited; 'close' cleared it
-      try {
-        process.kill(-pid, 'SIGKILL');
-      } catch {
-        try {
-          proc.kill('SIGKILL');
-        } catch {
-          // Already gone.
-        }
-      }
-    }, KILL_GRACE_MS).unref();
+    terminateProcess(proc, (candidate) => child === candidate);
   }
 
   // -------------------------------------------------------------------------
@@ -502,25 +446,19 @@ function buildCodexAdapter(opts: AdapterOptions, executable: string, transport: 
       }
 
       let proc: ChildProcess;
-      const resolved = resolveSpawn(executable, ['app-server']);
+      const resolved = resolveSpawn(executable, ['app-server'], executable === 'codex');
       try {
-        proc = spawn(resolved.command, resolved.args, {
-          cwd: opts.cwd,
-          stdio: ['pipe', 'pipe', 'pipe'],
-          shell: resolved.shell,
-          detached: !isWindows,
-          env: { ...process.env, FORCE_COLOR: '0', NO_COLOR: '1' },
-        });
+        proc = spawnProcess(resolved, { cwd: opts.cwd, overrides: { FORCE_COLOR: '0', NO_COLOR: '1' } });
       } catch (err) {
         resolve({ ok: false, error: { code: 'agent_unavailable', image: executable, detail: (err as Error).message } });
         return;
       }
       child = proc;
       killRequested = false;
-      // Mirrors `../claude/index.ts`'s identical handler, for the identical reason: a write
+      // Mirrors `../claude-cli/index.ts`'s identical handler, for the identical reason: a write
       // racing this child's death lands on a pipe whose reader is gone, and an unhandled
       // stream `error` is an uncaught exception that takes the whole server down.
-      proc.stdin?.on('error', () => {});
+      protectStdin(proc);
 
       proc.once('spawn', () => {
         notify({
@@ -543,7 +481,7 @@ function buildCodexAdapter(opts: AdapterOptions, executable: string, transport: 
       });
 
       proc.on('close', (code, signal) => {
-        // #360: mirrors ../claude/index.ts's identical guard — a close arriving after
+        // #360: mirrors ../claude-cli/index.ts's identical guard — a close arriving after
         // this child has already been replaced by the next turn's own spawn must not
         // clear that turn's child reference or report an exit that is not its own.
         if (proc !== child) return;
@@ -558,7 +496,7 @@ function buildCodexAdapter(opts: AdapterOptions, executable: string, transport: 
 
       // The handshake. `initialize` then `thread/start` (fresh) or `thread/resume`
       // (continuing) then `turn/start` — mirrors the per-turn spawn-and-resume shape
-      // `../claude/index.ts` uses, adapted to a request/response protocol instead of one
+      // `../claude-cli/index.ts` uses, adapted to a request/response protocol instead of one
       // stdin line. Not itself part of the contract's mapping table (that only pins the
       // *incoming* notification shapes S8.1 observed); the outgoing request shapes here
       // are this adapter's own, verified against the installed `codex-cli 0.146.0`'s
@@ -700,15 +638,9 @@ function buildCodexAdapter(opts: AdapterOptions, executable: string, transport: 
       if (resume !== null) args.push('resume', resume);
 
       let proc: ChildProcess;
-      const resolved = resolveSpawn(executable, args);
+      const resolved = resolveSpawn(executable, args, executable === 'codex');
       try {
-        proc = spawn(resolved.command, resolved.args, {
-          cwd: opts.cwd,
-          stdio: ['pipe', 'pipe', 'pipe'],
-          shell: resolved.shell,
-          detached: !isWindows,
-          env: { ...process.env, FORCE_COLOR: '0', NO_COLOR: '1' },
-        });
+        proc = spawnProcess(resolved, { cwd: opts.cwd, overrides: { FORCE_COLOR: '0', NO_COLOR: '1' } });
       } catch (err) {
         resolve({ ok: false, error: { code: 'agent_unavailable', image: executable, detail: (err as Error).message } });
         return;
@@ -716,13 +648,13 @@ function buildCodexAdapter(opts: AdapterOptions, executable: string, transport: 
       child = proc;
       // As above: an unhandled stream `error` on a pipe whose reader has died is an
       // uncaught exception, and this write is the one most likely to race a kill.
-      proc.stdin?.on('error', () => {});
+      protectStdin(proc);
       // The prompt goes over stdin (as the real CLI was probed: `echo <prompt> | codex exec
       // --json ...`, `design/findings/S8-codex-adapter.md` §2), never argv — the resolved
       // spawn command runs through a Windows shell for a bare `codex`/`.cmd` executable
-      // (`resolveSpawn`, above), and shell:true joins argv into one unescaped command line,
+      // (`resolveSpawn`), and shell:true joins argv into one unescaped command line,
       // so operator-authored chat text must never be an argument.
-      proc.stdin?.end(text);
+      closeStdin(proc, text);
 
       proc.once('spawn', () => {
         notify({
@@ -745,7 +677,7 @@ function buildCodexAdapter(opts: AdapterOptions, executable: string, transport: 
       });
 
       proc.on('close', (code, signal) => {
-        // #360: mirrors ../claude/index.ts's identical guard.
+        // #360: mirrors ../claude-cli/index.ts's identical guard.
         if (proc !== child) return;
         child = null;
         notify({ kind: 'exited', code, signal });

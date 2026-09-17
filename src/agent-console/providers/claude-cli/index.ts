@@ -1,4 +1,5 @@
-import { spawn, type ChildProcess } from 'node:child_process';
+import type { ChildProcess } from 'node:child_process';
+import { spawnProcess, resolveSpawn, reportableImage, terminateProcess, closeStdin, protectStdin } from '../../process/index.js';
 import { platform } from 'node:process';
 import type {
   Adapter,
@@ -17,23 +18,6 @@ import { NdjsonSplitter } from '../ndjson.js';
 import { BASH_COMMAND_FIELD, summariseToolCall } from './summarise.js';
 
 const isWindows = platform === 'win32';
-
-// (#201) With `shell: true` on Windows, Node launches `%ComSpec%` and the reported
-// `proc.pid` names *that* shell process, not the resolved executable — `tasklist` for
-// that pid reports the shell's own image (`cmd.exe` by default), never `executable`.
-// Recording anything else here is what makes the boot reaper's exact-image comparison
-// (`session-manager/index.ts`'s `imagesMatch`) reject the real process tree as a
-// mismatch after a crash. Mirrors `../codex/index.ts`'s identical need.
-function reportableImage(executable: string, usedShell: boolean): string {
-  if (!usedShell) return executable;
-  const comspec = process.env['ComSpec'] ?? process.env['COMSPEC'] ?? 'cmd.exe';
-  return comspec.replace(/^.*[\\/]/, '').replace(/\.exe$/i, '');
-}
-
-// SIGTERM-then-SIGKILL grace period for a POSIX process group (D38, `10-design.md §
-// Interrupt`). Windows has no equivalent staged termination — `taskkill /T /F` is
-// already forceful — so this applies to the POSIX branch of `kill` only.
-const KILL_GRACE_MS = 2000;
 
 // Top-level record `type`s the wire protocol may legitimately send that this vocabulary
 // does not render. Verified against a real CLI run (`design/findings/S1-claude-adapter.md`):
@@ -126,37 +110,10 @@ export function createClaudeAdapter(opts: AdapterOptions & { readonly executable
     return true;
   }
 
-  // Mirrors `../codex/index.ts`'s identical helper: SIGTERM-then-SIGKILL on POSIX,
-  // `taskkill /T /F` on Windows. Extracted so both `kill()` (an operator interrupt) and
-  // `failSchemaMismatch` (a malformed known record, below) can end the child the same way.
+  // Both operator interrupt and schema failure use the shared mechanism. Ownership
+  // remains here so the POSIX grace timer cannot act on a superseded child.
   function terminate(proc: ChildProcess): void {
-    if (proc.pid === undefined) return;
-    if (isWindows) {
-      spawn('taskkill', ['/PID', String(proc.pid), '/T', '/F']).once('error', () => {});
-      return;
-    }
-    const pid = proc.pid;
-    try {
-      process.kill(-pid, 'SIGTERM');
-    } catch {
-      try {
-        proc.kill('SIGTERM');
-      } catch {
-        // Already gone.
-      }
-    }
-    setTimeout(() => {
-      if (child !== proc) return; // already exited; 'close' cleared it
-      try {
-        process.kill(-pid, 'SIGKILL');
-      } catch {
-        try {
-          proc.kill('SIGKILL');
-        } catch {
-          // Already gone.
-        }
-      }
-    }, KILL_GRACE_MS).unref();
+    terminateProcess(proc, (candidate) => child === candidate);
   }
 
   // A known record variant whose required nested shape does not hold (#202): fatal, not a
@@ -394,7 +351,7 @@ export function createClaudeAdapter(opts: AdapterOptions & { readonly executable
           { stopReason: subtype === 'success' ? 'completed' : 'error', usage: null },
           rec,
         );
-        if (child?.stdin && !child.stdin.destroyed) child.stdin.end();
+        if (child?.stdin && !child.stdin.destroyed) closeStdin(child);
         return;
       }
 
@@ -449,33 +406,11 @@ export function createClaudeAdapter(opts: AdapterOptions & { readonly executable
           return;
         }
 
-        // A `.mjs`/`.js` executable is a test fixture script, not a real vendor binary:
-        // Windows cannot exec it directly, so run it under this same Node.
-        const isScriptFixture = executable.endsWith('.mjs') || executable.endsWith('.js');
-        // A shell is needed on Windows for anything that is not a real executable image:
-        // the bare `claude` name (PATH + PATHEXT resolution finds a `.cmd` shim) and any
-        // explicit `.cmd`/`.bat` path — modern Node refuses to spawn those without one
-        // (EINVAL, thrown synchronously). Quoting guards a shim path with spaces, since
-        // a shell spawn concatenates rather than escapes.
-        const needsShell = isWindows && !isScriptFixture && (executable === 'claude' || /\.(cmd|bat)$/i.test(executable));
-        const spawnCommand = isScriptFixture ? process.execPath : needsShell && /\s/.test(executable) ? `"${executable}"` : executable;
-        const spawnArgs = isScriptFixture ? [executable, ...buildArgs(resume)] : buildArgs(resume);
+        const resolved = resolveSpawn(executable, buildArgs(resume), executable === 'claude');
 
         let proc: ChildProcess;
         try {
-          proc = spawn(spawnCommand, spawnArgs, {
-            cwd: opts.cwd,
-            stdio: ['pipe', 'pipe', 'pipe'],
-            shell: needsShell,
-            // POSIX only (D38, `10-design.md § Platform divergence`): makes this child
-            // the leader of a new process group, so its own pid is a real group id and
-            // `process.kill(-pid)` in `kill` below reaches everything it later spawns —
-            // a compiler, a test runner — not just this one process. Windows has no
-            // process-group concept here; `taskkill /T` walks the live process table
-            // instead, so `detached` would only detach the console for no benefit.
-            detached: !isWindows,
-            env: { ...process.env, FORCE_COLOR: '0', NO_COLOR: '1' },
-          });
+          proc = spawnProcess(resolved, { cwd: opts.cwd, overrides: { FORCE_COLOR: '0', NO_COLOR: '1' } });
         } catch (err) {
           // spawn can throw synchronously (EINVAL and friends); a throw here would
           // otherwise reject this promise and bypass the Result contract entirely.
@@ -490,7 +425,7 @@ export function createClaudeAdapter(opts: AdapterOptions & { readonly executable
         // failure itself is already `writeLine`'s to report through its own Result; this
         // only stops the stream from escalating it into a crash. Nothing about the server
         // stopping is known here — this is stream hygiene on this adapter's own child.
-        proc.stdin?.on('error', () => {});
+        protectStdin(proc);
 
         let settled = false;
         proc.once('spawn', () => {
@@ -500,7 +435,7 @@ export function createClaudeAdapter(opts: AdapterOptions & { readonly executable
             kind: 'spawned',
             pid: proc.pid ?? -1,
             pgid: isWindows ? null : (proc.pid ?? null),
-            image: reportableImage(executable, needsShell),
+            image: reportableImage(executable, resolved.shell),
           });
           // (D160/S21.1) One `image` content block per attachment, ahead of the text —
           // the same `content` array shape the finding verified against a real CLI run.

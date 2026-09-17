@@ -1,10 +1,9 @@
+import { createProcessSupervisor } from '../agent-console/process/index.js';
+import type { ProcessLedger } from '../agent-console/process/ledger.js';
 import { randomUUID } from 'node:crypto';
-import { spawn, execFile } from 'node:child_process';
-import { readFile, rm, writeFile } from 'node:fs/promises';
+import { rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { platform } from 'node:process';
-import { promisify } from 'node:util';
 import { createConfiguredAdapter as createRealAdapter } from '../config/providers.js';
 import { pathsOverlap, resolveInsideRoot } from '../jail/index.js';
 import type {
@@ -64,9 +63,6 @@ import type {
 } from '../contract/index.js';
 import { isFrame } from '../contract/index.js';
 
-const isWindows = platform === 'win32';
-const isDarwin = platform === 'darwin';
-const execFileAsync = promisify(execFile);
 import type { Checkpoints } from '../contract/index.js';
 import type { Records } from '../contract/index.js';
 
@@ -228,6 +224,7 @@ function truncateUtf8(buf: Buffer, maxBytes: number): string {
 export function createSessionManager(deps: {
   readonly config: Config;
   readonly store: Store;
+  readonly processLedger?: ProcessLedger<StoreError>;
   readonly checkpoints: Checkpoints;
   readonly records: Records;
   // Test seam only, the same reason `adapters/*`'s own executable-override options
@@ -244,6 +241,9 @@ export function createSessionManager(deps: {
   readonly getOsCreatedAt?: (pid: number) => Promise<IsoTimestamp | null>;
 }): SessionManager {
   const { config, store, checkpoints, records, createAdapter: adapterFactory = createRealAdapter, getOsCreatedAt: getOsCreatedAtOverride } = deps;
+  const supervisor = createProcessSupervisor(deps.processLedger ?? store);
+  const { getProcessImage, imagesMatch, killProcessTree } = supervisor;
+  const getOsCreatedAt = getOsCreatedAtOverride ?? supervisor.getOsCreatedAt;
   const sessions = new Map<SessionId, SessionEntry>();
   // D178, I55: one-way, and `shutdown` is its only setter. Checked at `handleNotification`,
   // the one function every `AdapterNotification` already passes through (it is what an
@@ -458,119 +458,6 @@ export function createSessionManager(deps: {
     }
   }
 
-  // The OS-reported image name for a live pid, or `null` when nothing is running there
-  // (already exited, or never existed). Windows has no `/proc`; neither does macOS —
-  // both read the live process table instead, each with the tool the platform gives.
-  async function getProcessImage(pid: number): Promise<string | null> {
-    if (isWindows) {
-      try {
-        const { stdout } = await execFileAsync('tasklist', ['/FI', `PID eq ${pid}`, '/FO', 'CSV', '/NH']);
-        const firstLine = stdout.split(/\r?\n/).find((l) => l.trim().length > 0);
-        if (!firstLine) return null;
-        const match = /^"([^"]*)"/.exec(firstLine);
-        return match ? match[1]! : null;
-      } catch {
-        return null;
-      }
-    }
-    if (isDarwin) {
-      try {
-        // `comm=` reports the full invoked path on macOS (unlike Linux's `/proc/pid/comm`,
-        // which is always the bare name); `ucomm=` is the field that stays a bare name here.
-        const { stdout } = await execFileAsync('ps', ['-p', String(pid), '-o', 'ucomm=']);
-        const line = stdout.trim();
-        return line.length > 0 ? line : null;
-      } catch {
-        return null;
-      }
-    }
-    try {
-      const comm = await readFile(`/proc/${pid}/comm`, 'utf8');
-      return comm.trim();
-    } catch {
-      return null;
-    }
-  }
-
-  function imagesMatch(recorded: string, actual: string): boolean {
-    const strip = (s: string) => s.replace(/\.exe$/i, '');
-    return isWindows ? strip(recorded).toLowerCase() === strip(actual).toLowerCase() : strip(recorded) === strip(actual);
-  }
-
-  // S29.1 (`design/findings/S29-created-at-stability.md`): both supported platforms give
-  // a reading that is byte-identical across two reads of the same live process, so exact
-  // equality (I19's fourth limb) is safe. Linux computes wall-clock creation time from
-  // `/proc/[pid]/stat`'s `starttime` (ticks since boot) plus `/proc/stat`'s `btime`
-  // (seconds since the epoch) — both read fresh, never cached, so a reading taken now and
-  // one taken at reap time are the same computation over the same immutable inputs.
-  // Windows reads `Get-Process`'s own `StartTime`. Neither macOS nor any other platform is
-  // measured; `getOsCreatedAt` returns `null` there; S29.7 makes that indistinguishable
-  // from any other capture failure.
-  let linuxClkTck: number | null = null;
-  async function realGetOsCreatedAt(pid: number): Promise<IsoTimestamp | null> {
-    if (isWindows) {
-      try {
-        const { stdout } = await execFileAsync('powershell', [
-          '-NoProfile',
-          '-Command',
-          `(Get-Process -Id ${pid}).StartTime.ToUniversalTime().ToString('o')`,
-        ]);
-        const line = stdout.trim();
-        return line.length > 0 ? (line as IsoTimestamp) : null;
-      } catch {
-        return null;
-      }
-    }
-    if (isDarwin) return null;
-    try {
-      if (linuxClkTck === null) {
-        const { stdout } = await execFileAsync('getconf', ['CLK_TCK']);
-        linuxClkTck = Number(stdout.trim());
-      }
-      const stat = await readFile('/proc/stat', 'utf8');
-      const btimeLine = stat.split('\n').find((l) => l.startsWith('btime '));
-      if (!btimeLine) return null;
-      const btime = Number(btimeLine.split(/\s+/)[1]);
-      const raw = await readFile(`/proc/${pid}/stat`, 'utf8');
-      // `comm` (the parenthesised field) may itself contain spaces or parens; split past
-      // the last `)` to reach the fixed-width fields reliably, per `man proc`.
-      const afterComm = raw.slice(raw.lastIndexOf(')') + 2).split(' ');
-      const startTicks = Number(afterComm[19]); // field 22; index 22 - 3, past state/ppid/pgrp... counted from field 3
-      if (!Number.isFinite(btime) || !Number.isFinite(startTicks) || !linuxClkTck) return null;
-      return new Date((btime + startTicks / linuxClkTck) * 1000).toISOString() as IsoTimestamp;
-    } catch {
-      return null;
-    }
-  }
-  const getOsCreatedAt = getOsCreatedAtOverride ?? realGetOsCreatedAt;
-
-  // D38: the tree, not the recorded pid — `taskkill /T /F` walks the live process table
-  // on Windows; on POSIX the recorded pid is the process-group leader (`detached: true`
-  // at spawn), so signalling the negated pid reaches everything it later spawned.
-  async function killProcessTree(pid: number, pgid: number | null): Promise<void> {
-    if (isWindows) {
-      await new Promise<void>((resolve) => {
-        const p = spawn('taskkill', ['/PID', String(pid), '/T', '/F']);
-        p.once('error', (err) => {
-          console.warn(`[session-manager] boot: taskkill /PID ${pid} /T /F failed to start: ${err.message}; the process may still be running`);
-          resolve();
-        });
-        p.once('exit', (code) => {
-          if (code !== 0) {
-            console.warn(`[session-manager] boot: taskkill /PID ${pid} /T /F exited with code ${code}; the process may still be running`);
-          }
-          resolve();
-        });
-      });
-      return;
-    }
-    try {
-      process.kill(-(pgid ?? pid), 'SIGKILL');
-    } catch {
-      // Already gone — nothing left to kill.
-    }
-  }
-
   // S29 (D181, D183, D186, I19): the pid-reuse guard, now five limbs and its own — the
   // lock no longer shares it (S30/D180 deleted the lock's own liveness probe; the lease
   // decides by watching a counter, never a process table). A record naming another host is
@@ -617,7 +504,7 @@ export function createSessionManager(deps: {
     } else {
       console.warn(`[session-manager] boot: not reaping pid ${record.pid} (${record.image}): ${reason}`);
     }
-    await store.tombstonePid(record.pid, nowIso());
+    await supervisor.ledger.tombstonePid(record.pid, nowIso());
   }
 
   // S16: burn, idle time and the budget subtraction are folds over the session's own
@@ -854,7 +741,7 @@ export function createSessionManager(deps: {
 
       // Step 1 (D23, D38): reap orphaned children before anything is rehydrated, so no
       // rehydrated session can be adopted by an orphan still holding its workspace.
-      const openPids = await store.readOpenPids();
+      const openPids = await supervisor.ledger.readOpenPids();
       for (const record of openPids) {
         await reapOne(record, hostBootAt);
       }
@@ -984,7 +871,7 @@ export function createSessionManager(deps: {
               // recording a dead pid as live, and D23's reuse guard tombstones it at the next
               // boot instead (S27.11) — logged rather than raised, since shutdown gains no
               // error union.
-              const tombstoned = await store.tombstonePid(pid, nowIso());
+              const tombstoned = await supervisor.ledger.tombstonePid(pid, nowIso());
               if (!tombstoned.ok) {
                 console.warn(`[session-manager] shutdown: failed to tombstone pid ${pid}: ${JSON.stringify(tombstoned.error)}`);
               }
@@ -1948,7 +1835,7 @@ export function createSessionManager(deps: {
         // appended exactly as if the read had simply come back empty; no envelope, no
         // notice.
         const osCreatedAt = await getOsCreatedAt(n.pid);
-        await store.appendPid({
+        await supervisor.ledger.appendPid({
           pid: n.pid,
           pgid: n.pgid,
           sessionId: entry.record.id,

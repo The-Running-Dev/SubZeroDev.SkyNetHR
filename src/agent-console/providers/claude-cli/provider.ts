@@ -1,3 +1,4 @@
+import { resolveSpawn } from '../../process/index.js';
 import { createClaudeAdapter } from './index.js';
 import { probeCommand } from '../probe.js';
 import { wrapAdapter } from '../adapter-session.js';
@@ -13,10 +14,8 @@ export function defineClaudeProvider(executableOverride?: string) {
     let result = cache.get(key);
     if (!result) {
       result = (async () => {
-        const script = /\.(mjs|js)$/.test(image);
-        const shell = process.platform === 'win32' && !script && (image === 'claude' || /\.(cmd|bat)$/i.test(image));
-        const command = script ? process.execPath : shell && /\s/.test(image) ? `"${image}"` : image;
-        const found = await probeCommand(command, script ? [image, '--version'] : ['--version'], context.cwd, shell);
+        const resolved = resolveSpawn(image, ['--version'], image === 'claude');
+        const found = await probeCommand(resolved.command, resolved.args, context.cwd, resolved.shell);
         return {
           available: found.ok,
           ...(found.ok ? (found.output ? { version: found.output } : {}) : { unavailableReason: 'agent_unavailable' }),
