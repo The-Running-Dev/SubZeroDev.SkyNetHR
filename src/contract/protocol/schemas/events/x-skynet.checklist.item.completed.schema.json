@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.skynet-hr.invalid/events/x-skynet.checklist.item.completed.schema.json",
+  "type": "object",
+  "properties": {
+    "kind": {
+      "const": "x-skynet.checklist.item.completed"
+    },
+    "data": {
+      "$ref": "checklist.item.completed.schema.json#/properties/data"
+    }
+  },
+  "required": ["kind", "data"]
+}

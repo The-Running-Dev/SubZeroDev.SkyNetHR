@@ -21,6 +21,9 @@
             },
             {
               "$ref": "events/checklist.item.completed.schema.json"
+            },
+            {
+              "$ref": "events/x-skynet.checklist.item.completed.schema.json"
             }
           ]
         }
