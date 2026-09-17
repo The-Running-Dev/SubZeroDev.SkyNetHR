@@ -40,6 +40,7 @@ export type AdapterEvent = {
 }[AdapterEmitted];
 
 export interface AdapterOptions {
+  readonly stdoutLineBytes?: number;
   readonly cwd: ResolvedPath;
   readonly model: string | null;
   readonly sandbox: SandboxMode | null;
@@ -125,6 +126,7 @@ export interface ProviderContext extends ProbeContext {
 }
 
 export interface ProviderOptions {
+  readonly stdoutLineBytes?: number;
   readonly model?: string;
   readonly sandbox: SandboxMode | null;
   readonly streamDeltas: boolean;

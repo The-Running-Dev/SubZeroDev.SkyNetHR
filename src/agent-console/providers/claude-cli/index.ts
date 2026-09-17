@@ -473,7 +473,13 @@ export function createClaudeAdapter(opts: AdapterOptions & { readonly executable
           }
         });
 
-        const splitter = new NdjsonSplitter();
+        const splitter = new NdjsonSplitter(opts.stdoutLineBytes, () => {
+          if (resultSeen) return;
+          resultSeen = true;
+          emitEvent('error', { kind: 'adapter_output_overflow', message: 'provider stdout line exceeds the configured cap', fatal: true }, null);
+          emitEvent('turn.ended', { stopReason: 'error', usage: null }, null);
+          terminate(proc);
+        });
         proc.stdout!.on('data', (chunk: Buffer) => {
           for (const line of splitter.push(chunk)) {
             let rec: Record<string, unknown>;

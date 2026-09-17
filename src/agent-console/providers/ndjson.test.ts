@@ -59,3 +59,17 @@ test('S1.2 — an explicit chunk boundary inside the object and inside the multi
   assert.deepEqual(lines, whole);
   assert.deepEqual(JSON.parse(lines[1]!), { type: 'assistant', text: '\u{1F600}' });
 });
+
+test('Phase 4 — configurable overflow is reported once after preceding records; the default is 64 MiB', async () => {
+  const observed: string[] = [];
+  const splitter = new NdjsonSplitter(4, () => observed.push('overflow'));
+  observed.push(...splitter.push(Buffer.from('{}\n12345\nignored\n')));
+  await Promise.resolve(); assert.deepEqual(observed, ['{}', 'overflow']);
+  splitter.push(Buffer.alloc(20)); await Promise.resolve(); assert.equal(observed.length, 2);
+  let overflow = 0;
+  const defaultCap = new NdjsonSplitter(undefined, () => { overflow++; });
+  defaultCap.push(Buffer.alloc(32 * 1024 * 1024, 120));
+  assert.equal(overflow, 0);
+  defaultCap.push(Buffer.alloc(32 * 1024 * 1024 + 1, 120));
+  await Promise.resolve(); assert.equal(overflow, 1);
+});

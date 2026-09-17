@@ -29,7 +29,8 @@ export async function wrapAdapter(
       active.finish(event.data);
     }
   }
-  const made = await factory({ cwd: context.cwd, model: options.model ?? null, sandbox: options.sandbox, streamDeltas: options.streamDeltas, notify });
+  const made = await factory({ cwd: context.cwd, model: options.model ?? null, sandbox: options.sandbox, streamDeltas: options.streamDeltas, notify,
+    ...(options.stdoutLineBytes === undefined ? {} : { stdoutLineBytes: options.stdoutLineBytes }) });
   const result = 'ok' in made ? made : { ok: true as const, value: made };
   if (!result.ok) return result;
   const adapter = result.value;
