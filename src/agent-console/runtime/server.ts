@@ -1,5 +1,7 @@
 import type { Readable, Writable } from 'node:stream';
+import { realpathSync } from 'node:fs';
 import path from 'node:path';
+import { stripExtendedPrefix } from '../core/workspaces/jail.js';
 import { createSessionCore } from '../core/index.js';
 import { createHostAttempts, type HostCreateCallbacks, type CreateAttemptState } from '../core/create-attempts.js';
 import type { SessionCore, SessionStore, RuntimeOptions, Result, SessionId, Seq, TurnId, CallId, AttachmentId, RequestId,
@@ -97,8 +99,12 @@ export function runRuntime(input: Readable, output: Writable, dependencies: Runt
     const storage = object(p.storage), kind = choice(storage, 'kind', ['fs', 'memory']);
     const root = text(storage, 'root'), roots = strings(p, 'workspaceRoots');
     if (!path.isAbsolute(root) || !roots.length || roots.some(r => !path.isAbsolute(r))) throw new RpcError(-32602, 'Absolute storage root and workspace roots required');
+    // Match host configuration and the jail, including Windows 8.3 names and junctions.
+    let resolvedRoots: RuntimeOptions['workspaceRoots'];
+    try { resolvedRoots = roots.map(r => stripExtendedPrefix(realpathSync.native(r))) as unknown as RuntimeOptions['workspaceRoots']; }
+    catch { throw new RpcError(-32602, 'Workspace roots must resolve to existing paths'); }
     const settings = object(p.options ?? {}), caps = object(settings.caps ?? {});
-    options = { storageRoot: root as RuntimeOptions['storageRoot'], workspaceRoots: roots as unknown as RuntimeOptions['workspaceRoots'],
+    options = { storageRoot: root as RuntimeOptions['storageRoot'], workspaceRoots: resolvedRoots,
       includeRaw: bool(settings, 'includeRaw'), streamDeltas: bool(settings, 'streamDeltas'),
       maxLiveSessionsPerWorkspace: integer(settings, 'maxLiveSessionsPerWorkspace', 1, 1000, 1),
       caps: { ringCapacity: integer(caps, 'ringCapacity', 2000, 1_000_000, 1), toolResultBytes: integer(caps, 'toolResultBytes', 16_384, 1024 * 1024, 1),

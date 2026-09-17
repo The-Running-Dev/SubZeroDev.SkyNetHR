@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, rm, readFile, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, rm, readFile, writeFile, symlink } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { PassThrough } from 'node:stream';
@@ -24,9 +24,11 @@ const capabilities = { workspace: 'required', permissions: 'interactive', attach
 const schema = JSON.parse(await readFile('src/agent-console/protocol/schemas/wire.schema.json', 'utf8'));
 const ajv = new Ajv2020({ strict: true }); addFormats.default(ajv); ajv.addSchema(schema);
 
-async function fixture(t: TestContext, settings: { root?: string; fs?: boolean; budget?: number; stdoutCap?: number; version?: string; expectHelloError?: string; sendError?: boolean; registry?: ProviderRegistry; host?: (message: Message) => Promise<unknown>; checkpoints?: Partial<Checkpoints>; start?: (input: TurnInput, turn: TurnContext) => Promise<void> } = {}) {
+async function fixture(t: TestContext, settings: { root?: string; rootAlias?: boolean; fs?: boolean; budget?: number; stdoutCap?: number; version?: string; expectHelloError?: string; sendError?: boolean; registry?: ProviderRegistry; host?: (message: Message) => Promise<unknown>; checkpoints?: Partial<Checkpoints>; start?: (input: TurnInput, turn: TurnContext) => Promise<void> } = {}) {
   const root = settings.root ?? await mkdtemp(path.join(os.tmpdir(), 'protocol-conformance-'));
   const cwd = path.join(root, 'workspace'); await mkdir(cwd, { recursive: true });
+  const workspaceRoot = settings.rootAlias ? path.join(root, 'workspace-alias') : cwd;
+  if (settings.rootAlias) await symlink(cwd, workspaceRoot, process.platform === 'win32' ? 'junction' : 'dir');
   const input = new PassThrough(), output = new PassThrough(), messages: Message[] = [], pending = new Map<number, (m: Message) => void>(), methods = new Map<number, string>();
   let sequence = 0, active: TurnContext | undefined, kills = 0;
   const registry = settings.registry ?? createProviderRegistry();
@@ -68,13 +70,21 @@ async function fixture(t: TestContext, settings: { root?: string; fs?: boolean; 
     methods.set(id, method);
     input.write(JSON.stringify({ jsonrpc: '2.0', id, method, params }) + '\n'); return result;
   };
-  const hello = await request('runtime.hello', { version: settings.version ?? '1.0.0', storage: { kind: settings.fs ? 'fs' : 'memory', root }, workspaceRoots: [cwd],
+  const hello = await request('runtime.hello', { version: settings.version ?? '1.0.0', storage: { kind: settings.fs ? 'fs' : 'memory', root }, workspaceRoots: [workspaceRoot],
     hostMethods: settings.host ? hostMethods : [], options: { hostAttemptTimeoutMs: 200, providerStdoutLineBytes: settings.stdoutCap ?? 64 * 1024 * 1024, caps: { subscriberQueueHighWater: settings.budget ?? 256 } } });
   if (settings.expectHelloError) assert.equal(hello.error?.data?.code, settings.expectHelloError);
   else assert.ok(hello.result, JSON.stringify(hello));
   const create = () => request('sessions.create', { principal: 'alice', provider: 'fixture', cwd });
   return { root, cwd, request, create, close, messages, input, hello, active: () => active!, kills: () => kills };
 }
+
+test('Phase 4 hello resolves workspace aliases with the same normalization as session creation', async t => {
+  const f = await fixture(t, { rootAlias: true });
+  const made = await f.create();
+  assert.ok(made.result, JSON.stringify(made));
+  const outside = await f.request('sessions.create', { principal: 'alice', provider: 'fixture', cwd: f.root });
+  assert.equal(outside.error?.data?.code, 'jail');
+});
 
 test('Phase 4 ownership, handles, chunking, extension append and privileged administration', async t => {
   const f = await fixture(t), made = await f.create(), sessionId = made.result.sessionId;
