@@ -263,11 +263,13 @@ type GitShaBefore = Assert<Equals<Host.GitSha, Before.GitSha>>;
 type GitShaReexport = Assert<Equals<Host.GitSha, Extracted.GitSha>>;
 type ResultBefore = Assert<Equals<<T, E>() => Host.Result<T, E>, <T, E>() => Before.Result<T, E>>>;
 type ResultReexport = Assert<Equals<<T, E>() => Host.Result<T, E>, <T, E>() => Extracted.Result<T, E>>>;
-type EventPayloadMapBefore = Assert<Equals<Host.EventPayloadMap, Before.EventPayloadMap>>;
+// D239: pin the historical subset and the one authorized addition independently.
+// The literal Before declarations remain frozen; unexpected new kinds still fail.
+type EventPayloadMapBefore = Assert<Equals<Pick<Host.EventPayloadMap, Before.EventKind>, Before.EventPayloadMap>>;
 type EventPayloadMapReexport = Assert<Equals<Host.EventPayloadMap, Extracted.EventPayloadMap>>;
-type EventKindBefore = Assert<Equals<Host.EventKind, Before.EventKind>>;
+type EventKindBefore = Assert<Equals<Exclude<Host.EventKind, 'x-skynet.checklist.item.completed'>, Before.EventKind>>;
 type EventKindReexport = Assert<Equals<Host.EventKind, Extracted.EventKind>>;
-type EnvelopeBefore = Assert<Equals<Host.Envelope, Before.Envelope>>;
+type EnvelopeBefore = Assert<Equals<Host.Envelope<Before.EventKind>, Before.Envelope>>;
 type EnvelopeReexport = Assert<Equals<Host.Envelope, Extracted.Envelope>>;
 type FrameKindBefore = Assert<Equals<Host.FrameKind, Before.FrameKind>>;
 type FrameKindReexport = Assert<Equals<Host.FrameKind, Extracted.FrameKind>>;
@@ -311,7 +313,21 @@ type ErrorEventKindBefore = Assert<Equals<Host.ErrorEventKind, Before.ErrorEvent
 type ErrorEventKindReexport = Assert<Equals<Host.ErrorEventKind, Extracted.ErrorEventKind>>;
 type ErrorEventBefore = Assert<Equals<Host.ErrorEvent, Before.ErrorEvent>>;
 type ErrorEventReexport = Assert<Equals<Host.ErrorEvent, Extracted.ErrorEvent>>;
-type isFrameBefore = Assert<Equals<typeof hostIsFrame, typeof Before.isFrame>>;
+type ChecklistCutoverEnvelope = {
+  readonly seq: Before.Seq;
+  readonly sessionId: Before.SessionId;
+  readonly ts: Before.IsoTimestamp;
+  readonly kind: 'x-skynet.checklist.item.completed';
+  readonly data: Before.ChecklistItemCompleted;
+  readonly raw?: unknown;
+};
+type ChecklistCutoverKind = Assert<Equals<Exclude<Host.EventKind, Before.EventKind>, 'x-skynet.checklist.item.completed'>>;
+type ChecklistCutoverPayload = Assert<Equals<Host.EventPayloadMap['x-skynet.checklist.item.completed'], Before.ChecklistItemCompleted>>;
+type ChecklistCutoverShape = Assert<Equals<Host.Envelope<'x-skynet.checklist.item.completed'>, ChecklistCutoverEnvelope>>;
+type isFrameBefore = Assert<Equals<typeof hostIsFrame,
+  (envelope: Before.Envelope | ChecklistCutoverEnvelope | Before.Frame) => envelope is Before.Frame>>;
+type ChecklistNotProviderEmitted = Assert<Equals<Extract<Host.AdapterEmitted,
+  'checklist.item.completed' | 'x-skynet.checklist.item.completed'>, never>>;
 type isFrameReexport = Assert<Equals<typeof hostIsFrame, typeof extractedIsFrame>>;
 // Check distribution as well as the default full union.
 type EnvelopeSubset = Assert<Equals<

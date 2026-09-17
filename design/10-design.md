@@ -768,11 +768,17 @@ value as a cap. It is **not** per-requisition and not per-vendor; a checklist th
 who raised the requisition is a workflow engine, which nothing has asked for.
 
 **Completion lives in the session's own event stream, and the checklist is the fold** (D71).
-A `checklist.item.completed { itemId, by }` envelope goes through the same `emit` as
+A checklist completion envelope goes through the same event ordering path as
 everything else, which buys ordering, replay, multi-client fan-out and durability with no
 new machinery. The alternative — a `checklist.json` per session — is a second per-session
 mutable file needing its own write protocol, its own atomic-rename discipline and its own
 torn-write failure row, for a handful of booleans.
+
+D239 authorizes the Phase 3b cutover to `x-skynet.checklist.item.completed` for new
+writes through `events.append`. The host folds that kind and historical
+`checklist.item.completed` together, without rewriting history or allowing a second
+completion for an already-completed item. Until that cutover, the existing producer
+continues writing the historical kind.
 
 **Derived, like `Turn`.** No checklist entity is stored. It dies with its session under D25,
 and that is correct: it is first-run provisioning, not evidence.

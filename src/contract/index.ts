@@ -81,13 +81,14 @@ export type {
 } from '../agent-console/contract/index.js';
 export { isFrame } from '../agent-console/contract/index.js';
 
-// Host-dependent payloads stay here. Augmentation preserves the existing closed
-// SkyNetHR vocabulary, including historical checklist events, without a reverse import.
+// Host-dependent payloads stay here. D239 adds the Phase 3b checklist kind while
+// preserving historical events, without a reverse import.
 declare module '../agent-console/contract/index.js' {
   interface EventPayloadMap {
     'session.started': SessionStarted;
     'permission.resolved': PermissionResolved;
     'checklist.item.completed': ChecklistItemCompleted;
+    'x-skynet.checklist.item.completed': ChecklistItemCompleted;
   }
 }
 

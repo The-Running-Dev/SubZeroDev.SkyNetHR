@@ -5696,6 +5696,24 @@ Rejected: retaining I27's blanket prohibition — prevents the handoff's A11/A22
 Reversibility: cheap before Phase 3b lands. Landing point: this separate I27 contract amendment;
 Phase 3b implements against it after merge. No implementation or other invariant changes here.
 
+### 2026-09-17 — D239 Phase 3b checklist cutover preserves the historical vocabulary
+Context: the handoff requires new checklist writes under
+`x-skynet.checklist.item.completed`, while the closed vocabulary and Phase 1a's exact
+whole-vocabulary assertions still permit only the historical kind. The owner authorized
+this narrow amendment and migration of the four affected equivalence assertions.
+Chosen: authorize only that additional host event kind with the existing checklist
+payload. Phase 3b writes it through `events.append`; the host folds both kinds and
+suppresses duplicates across them. Historical envelopes replay without rewriting.
+The equivalence test retains the literal pre-extraction declarations, checks every
+historical payload and envelope against them, and separately pins the sole added kind,
+its payload, and the complete discriminator signature. The host/core re-export checks
+remain exact. This is an explicitly authorized addition to the handoff's named test
+migrations, not permission to relax unrelated tests. I27 and process semantics do not change.
+Rejected: rewriting historical events; retaining the old kind for new Phase 3b writes;
+dropping type equivalence checks; permitting arbitrary extra event kinds.
+Reversibility: cheap before the cutover; after new writes exist, both kinds must remain
+readable. Landing point: the Phase 3b checklist contract prerequisite and implementation.
+
 ## Open
 
 Staging only. Once an item becomes an issue it leaves this list.
