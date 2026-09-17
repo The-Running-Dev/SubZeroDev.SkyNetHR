@@ -5652,6 +5652,22 @@ document states and it changes S5.1's clearing rule. That is `/design`'s call, n
 edit.
 Reversibility: cheap — one criterion, one test, one handler block.
 
+### 2026-09-17 — D238 I27 permits only Phase 3b's bounded session and workspace guards
+Context: the AgentConsole implementation handoff requires A11 workspace allocation and A22
+per-session lanes, while I27 prohibited caller locks outright. The owner authorized a narrow
+contract amendment before Phase 3b implementation.
+Chosen: permit short-lived session lanes for seq assignment and atomic state transitions,
+plus a short-lived global workspace-allocation guard over live, pending and exclusive
+reservation decisions. Guarded sections are synchronous; I/O, provider execution, permission
+waits, host callbacks and other long-running awaits remain outside them. Persistent busy
+state and reservations are distinct from held guards. I5's same-tick exclusivity, existing
+event ordering including I64, and the separate process-level `server.lock` lease are unchanged.
+Rejected: a general caller mutex or a lane spanning an operation's awaits — broadens the
+authorized extraction and can delay interrupt or permission handling behind ongoing work.
+Rejected: retaining I27's blanket prohibition — prevents the handoff's A11/A22 mechanisms.
+Reversibility: cheap before Phase 3b lands. Landing point: this separate I27 contract amendment;
+Phase 3b implements against it after merge. No implementation or other invariant changes here.
+
 ## Open
 
 Staging only. Once an item becomes an issue it leaves this list.

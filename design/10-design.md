@@ -1880,21 +1880,23 @@ Very little, and that is deliberate. The Node event loop is single-threaded, and
 event in the system passes through one `emit` function per session. **`emit`'s synchronous
 prefix is the serialisation point** — assigning `seq`, pushing the ring, and handing the
 envelope to every subscriber all happen before the function yields — and it is what makes
-`seq` gap-free and totally ordered without a lock. There is no mutex anywhere in this design,
-and if one appears, something has been built wrong.
+`seq` gap-free and totally ordered. For the Phase 3b extraction, I27 permits only the bounded
+session and workspace-allocation mechanisms specified there (D238); it does not authorize a
+general concurrency rewrite. Their guarded sections are synchronous. A busy slot or workspace
+reservation can remain active while work proceeds outside the guard.
 
 **The durable append is not in that prefix, and saying so is the difference between the
 argument holding and merely sounding right** (D89). Writing a line to `events.ndjson` is I/O,
 and two writes issued in `seq` order do not complete in `seq` order on their own — so `emit`
 chains each session's append onto that session's own append chain and awaits it. The chain
 is ordering, not mutual exclusion: it excludes nothing, blocks no other session, and cannot
-deadlock, which is why "no mutex" survives it intact. Awaiting it is what lets a failed
+deadlock. It remains outside I27's guarded sections. Awaiting it is what lets a failed
 append end the session (D41) instead of leaving the ring holding events the spill never gets.
 
 **That argument covers `emit` and stops there.** `emit`'s prefix is synchronous; the request
 handlers are not, and a guard tested before an `await` is not held across it. What replaces
-the lock in those paths is a rule rather than a primitive — see *The single-writer invariant*
-(D32).
+holding a lock across those paths is the same check-and-claim rule — see *The single-writer
+invariant* (D32). The Phase 3b guards do not relax that rule or I64's notification ordering.
 
 Genuinely simultaneous:
 
@@ -2116,9 +2118,9 @@ correctly as the lock, not the state it will eventually hold.
 This is why the races table below can name "manager turn state" as an enforcer and be
 telling the truth. Without the rule, that column describes an intention.
 
-A mutex would also solve it, and is rejected for the reason the section opens with: an async
-lock is a scheduler, it has to be acquired correctly in six places instead of one, and
-"there is no mutex anywhere in this design" is a claim worth being able to keep making.
+A mutex held across the protected operation remains rejected: it would introduce scheduling
+across awaits in place of the synchronous check-and-claim rule. The narrow Phase 3b mechanisms
+authorized by I27 release before that work begins (D238).
 
 ### Ordering guarantees the renderer may rely on
 
@@ -2590,8 +2592,8 @@ From the structural review pass (D29–D43):
   has just tracked. The goal and both rejections stand.
 - **D32 — a guard is claimed in the same synchronous block that tests it.** Chosen: state the
   rule once and apply it to the turn slot and the workspace claim. Rejected: a per-session
-  async mutex — solves it and makes "no mutex anywhere" false, in five call sites instead of
-  one.
+  async mutex across the protected operation. D238 narrows I27 for Phase 3b's short-lived
+  guards without changing this same-tick rule.
 - **D33 — the `pending` delete precedes the audit append, and a failed append denies.**
   Chosen: synchronous delete, durable append, then respond; on append failure send a denial
   carrying the reason. Rejected: appending before the delete — duplicate responses on one
