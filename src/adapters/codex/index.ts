@@ -542,6 +542,10 @@ export function createCodexAdapter(
       });
 
       proc.on('close', (code, signal) => {
+        // #360: mirrors ../claude/index.ts's identical guard — a close arriving after
+        // this child has already been replaced by the next turn's own spawn must not
+        // clear that turn's child reference or report an exit that is not its own.
+        if (proc !== child) return;
         child = null;
         notify({ kind: 'exited', code, signal });
         if (!resultSeen) {
@@ -739,6 +743,8 @@ export function createCodexAdapter(
       });
 
       proc.on('close', (code, signal) => {
+        // #360: mirrors ../claude/index.ts's identical guard.
+        if (proc !== child) return;
         child = null;
         notify({ kind: 'exited', code, signal });
         if (!resultSeen) {

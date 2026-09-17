@@ -246,6 +246,92 @@ test('app-server: the child closing with no turn/completed seen maps to turn.end
   assert.equal((eventsOf(notifications, 'turn.ended')[0]!.event.data as { stopReason: string }).stopReason, 'process_exit');
 });
 
+// #360 — mirrors ../claude/index.test.ts's identical case. The second turn is started
+// from a microtask scheduled inside the first turn's own turn.ended notification — after
+// `terminate()` has read the correct (still-current) child, but strictly before that
+// killed child's OS 'close' event can fire (always a later macrotask) — making the race
+// deterministic rather than dependent on real kill timing, which differs by platform.
+test('#360 — app-server: a late close from a replaced child is ignored rather than misattributed to the new turn', async () => {
+  delete process.env['SKYNET_CODEX_NO_APP_SERVER'];
+  process.env['SKYNET_CODEX_SCENARIO'] = 'full';
+  resetCodexTransportCacheForTests();
+  const notifications: AdapterNotification[] = [];
+  let triggerSecondSend: (() => void) | null = null;
+  let secondSendStarted = false;
+  const notify = (n: AdapterNotification) => {
+    notifications.push(n);
+    if (!secondSendStarted && n.kind === 'event' && n.event.kind === 'turn.ended') {
+      secondSendStarted = true;
+      queueMicrotask(() => triggerSecondSend?.());
+    }
+  };
+  const result = createCodexAdapter({
+    executable: FIXTURE,
+    cwd: process.cwd() as never,
+    model: null,
+    sandbox: 'workspace-write',
+    notify,
+    streamDeltas: false,
+  });
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  triggerSecondSend = () => {
+    void result.value.send('hi again', [], null, 'turn-2' as never);
+  };
+
+  await result.value.send('hello', [], null, 'turn-1' as never);
+  await waitUntil(() => eventsOf(notifications, 'turn.ended').length >= 2);
+  await waitUntil(() => notifications.some((n) => n.kind === 'exited'));
+  // Give any second (misattributed) close a further beat to land before asserting it didn't.
+  await new Promise((r) => setTimeout(r, 300));
+
+  assert.equal(eventsOf(notifications, 'turn.ended').length, 2);
+  assert.equal(notifications.filter((n) => n.kind === 'exited').length, 1);
+});
+
+// #360 — the exec fallback's identical close handler, same technique as above.
+test('#360 — exec fallback: a late close from a replaced child is ignored rather than misattributed to the new turn', async () => {
+  process.env['SKYNET_CODEX_NO_APP_SERVER'] = '1';
+  process.env['SKYNET_CODEX_SCENARIO'] = 'full';
+  resetCodexTransportCacheForTests();
+  try {
+    const notifications: AdapterNotification[] = [];
+    let triggerSecondSend: (() => void) | null = null;
+    let secondSendStarted = false;
+    const notify = (n: AdapterNotification) => {
+      notifications.push(n);
+      if (!secondSendStarted && n.kind === 'event' && n.event.kind === 'turn.ended') {
+        secondSendStarted = true;
+        queueMicrotask(() => triggerSecondSend?.());
+      }
+    };
+    const result = createCodexAdapter({
+      executable: FIXTURE,
+      cwd: process.cwd() as never,
+      model: null,
+      sandbox: 'workspace-write',
+      notify,
+      streamDeltas: false,
+    });
+    assert.equal(result.ok, true);
+    if (!result.ok) return;
+    triggerSecondSend = () => {
+      void result.value.send('hi again', [], null, 'turn-2' as never);
+    };
+
+    await result.value.send('hello', [], null, 'turn-1' as never);
+    await waitUntil(() => eventsOf(notifications, 'turn.ended').length >= 2);
+    await waitUntil(() => notifications.some((n) => n.kind === 'exited'));
+    // Give any second (misattributed) close a further beat to land before asserting it didn't.
+    await new Promise((r) => setTimeout(r, 300));
+
+    assert.equal(eventsOf(notifications, 'turn.ended').length, 2);
+    assert.equal(notifications.filter((n) => n.kind === 'exited').length, 1);
+  } finally {
+    delete process.env['SKYNET_CODEX_NO_APP_SERVER'];
+  }
+});
+
 test('app-server: a malformed JSON line is non-fatal and the stream continues', async () => {
   process.env['SKYNET_CODEX_SCENARIO'] = 'bad-line';
   const { result, notifications } = makeAdapter();
