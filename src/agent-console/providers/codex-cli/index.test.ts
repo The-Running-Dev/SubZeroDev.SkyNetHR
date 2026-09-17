@@ -265,7 +265,7 @@ test('#360 — app-server: a late close from a replaced child is ignored rather 
       queueMicrotask(() => triggerSecondSend?.());
     }
   };
-  const result = createCodexAdapter({
+  const result = await createCodexAdapter({
     executable: FIXTURE,
     cwd: process.cwd() as never,
     model: null,
@@ -305,7 +305,7 @@ test('#360 — exec fallback: a late close from a replaced child is ignored rath
         queueMicrotask(() => triggerSecondSend?.());
       }
     };
-    const result = createCodexAdapter({
+    const result = await createCodexAdapter({
       executable: FIXTURE,
       cwd: process.cwd() as never,
       model: null,
