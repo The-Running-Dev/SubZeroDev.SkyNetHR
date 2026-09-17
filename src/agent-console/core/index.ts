@@ -956,7 +956,7 @@ export function createSessionCore(deps: {
       return { ok: true, value: toSummary(entry.record) };
     },
 
-    async send(sessionId, owner, text, attachments) {
+    async send(sessionId, owner, text, attachments, model) {
       const entry = sessions.get(sessionId);
       if (!entry || entry.record.owner !== owner) return { ok: false, error: { code: 'not_found', sessionId } };
       if (entry.record.state === 'ended') return { ok: false, error: { code: 'session_ended', sessionId } };
@@ -1084,7 +1084,7 @@ export function createSessionCore(deps: {
 
       // `state === 'ended'` was refused above; only a live session's entry reaches here,
       // and only `create` sets `state: 'live'`, always alongside a real adapter.
-      const sendResult = await entry.adapter!.send(text, attachmentPayloads, entry.record.cliSessionId, turnId);
+      const sendResult = await entry.adapter!.send(text, attachmentPayloads, entry.record.cliSessionId, turnId, model);
       if (!sendResult.ok) {
         // D143/#131: the operator learns why, not just that the turn ended, whenever the
         // cause is the agent CLI being unreachable.

@@ -367,7 +367,7 @@ export interface SessionCore {
     }, SessionError>>;
     list(owner: PrincipalId): readonly SessionSummary[];
     get(sessionId: SessionId, owner: PrincipalId): Result<SessionSummary, SessionError>;
-    send(sessionId: SessionId, owner: PrincipalId, text: string, attachments: readonly UploadId[]): Promise<Result<{
+    send(sessionId: SessionId, owner: PrincipalId, text: string, attachments: readonly UploadId[], model?: string): Promise<Result<{
         turnId: TurnId;
     }, SessionError>>;
     answerPermission(sessionId: SessionId, owner: PrincipalId, answer: PermissionAnswer): Promise<Result<{
