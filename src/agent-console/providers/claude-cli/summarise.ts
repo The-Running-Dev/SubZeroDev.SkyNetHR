@@ -1,5 +1,5 @@
 // `Bash`'s command lives in this field on the wire — the one fact this summary and
-// `matchTarget`'s projection table (D109, `src/adapters/claude/index.ts`) both need, so
+// `matchTarget`'s projection table (D109, `src/agent-console/providers/claude-cli/index.ts`) both need, so
 // they share it rather than each hardcoding 'command' independently.
 export const BASH_COMMAND_FIELD = 'command';
 

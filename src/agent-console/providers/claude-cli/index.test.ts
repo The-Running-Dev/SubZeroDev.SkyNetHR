@@ -7,11 +7,11 @@ import path from 'node:path';
 import { test } from 'node:test';
 import { promisify } from 'node:util';
 import { createClaudeAdapter } from './index.js';
-import type { AdapterNotification } from '../../contract/index.js';
+import type { AdapterNotification } from '../types.js';
 
 const execFileAsync = promisify(execFile);
 
-const FIXTURE = path.join(process.cwd(), 'src', 'adapters', 'claude', 'fixtures', 'fake-claude-cli.mjs');
+const FIXTURE = path.join(process.cwd(), 'src', 'agent-console', 'providers', 'claude-cli', 'fixtures', 'fake-claude-cli.mjs');
 
 function makeAdapter(scenario: string, opts: { readonly streamDeltas?: boolean } = {}) {
   const notifications: AdapterNotification[] = [];
@@ -189,7 +189,7 @@ test('S21.1/D160 — the Claude adapter declares acceptsAttachments: true', () =
 // is summable: the adapter's emitted usage events sum to the same total as an
 // independent dedup-by-message-id computation over the raw fixture.
 test('S1.11 — usage events emitted from a real captured run sum to the independently computed total', async () => {
-  const fixturePath = path.join(process.cwd(), 'src', 'adapters', 'claude', 'fixtures', 'usage-probe-two-reads.ndjson');
+  const fixturePath = path.join(process.cwd(), 'src', 'agent-console', 'providers', 'claude-cli', 'fixtures', 'usage-probe-two-reads.ndjson');
   process.env['SKYNET_TEST_SCENARIO'] = 'usage-real';
   process.env['SKYNET_USAGE_FIXTURE'] = fixturePath;
   const { adapter, notifications } = makeAdapter('usage-real');

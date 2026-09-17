@@ -3,16 +3,9 @@ import { readFile, readdir } from 'node:fs/promises';
 import path from 'node:path';
 import { test } from 'node:test';
 
-// S1.10/I20 says "no module above `adapters/*`" — not just the five S1.10 happened to
-// name; `edge/*` and `client/` sit above `adapters/*` too and are scanned for the same
-// reason (#238, #92). `adapters/*` itself is exempt (it is the one module allowed to know
-// a vendor exists). Test sources are excluded: the criterion is about the shipped modules'
-// control flow, not fixtures.
-//
-// `client` is the one entry rooted outside `src/`: it ships as plain JS with no build step,
-// at the repo-root `client/` directory — `src/client/` holds only this file's own
-// cross-cutting test (`src/client/index.test.ts` reads `client/`'s sources directly), not a
-// TypeScript module of its own.
+// Concrete provider directories and host composition own vendor identity. Shared
+// provider modules, the host core, edges and renderer remain neutral (I20).
+// Tests are excluded; production imports and comments are scanned too.
 const SRC_ROOT = path.join(process.cwd(), 'src');
 const RESTRICTED_DIRS: ReadonlyArray<{ dir: string; extension: string }> = [
   { dir: path.join(SRC_ROOT, 'config'), extension: '.ts' },
@@ -36,19 +29,24 @@ async function sourceFilesUnder(dir: string, extension: string): Promise<string[
   return files;
 }
 
-test('S1.10 — the literals "claude" and "codex" appear in config, jail, store, session-manager, contract, edge and client sources only as the Vendor type declaration', async () => {
+function vendorNames(source: string): string[] {
+  return source.split('\n').filter(line => /claude|codex/i.test(line));
+}
+function vendorBranches(source: string): string[] {
+  return source.split('\n').filter(line => /\bvendor\s*[!=]==(?!\s*'')/i.test(line));
+}
+
+test('S1.10 — vendor names are confined to concrete providers and host registration', async () => {
   const offendingLines: string[] = [];
 
   for (const { dir, extension } of RESTRICTED_DIRS) {
-    const files = await sourceFilesUnder(dir, extension);
+    const files = (await sourceFilesUnder(dir, extension)).filter(file => {
+      const relative = path.relative(SRC_ROOT, file).split(path.sep).join('/');
+      return relative !== 'config/providers.ts' && !/^agent-console\/providers\/[^/]+\//.test(relative);
+    });
     for (const file of files) {
       const content = await readFile(file, 'utf8');
-      const lines = content.split('\n');
-      for (const line of lines) {
-        if (!/claude|codex/i.test(line)) continue;
-        const isVendorDeclaration = /export type Vendor = 'claude' \| 'codex';/.test(line);
-        if (!isVendorDeclaration) offendingLines.push(`${file}: ${line.trim()}`);
-      }
+      for (const line of vendorNames(content)) offendingLines.push(`${file}: ${line.trim()}`);
     }
   }
 
@@ -58,20 +56,26 @@ test('S1.10 — the literals "claude" and "codex" appear in config, jail, store,
 test('S1.10 — no conditional above adapters/* tests a `vendor` field', async () => {
   const offendingLines: string[] = [];
   for (const { dir, extension } of RESTRICTED_DIRS) {
-    const files = await sourceFilesUnder(dir, extension);
+    const files = (await sourceFilesUnder(dir, extension)).filter(file => {
+      const relative = path.relative(SRC_ROOT, file).split(path.sep).join('/');
+      return relative !== 'config/providers.ts' && !/^agent-console\/providers\/[^/]+\//.test(relative);
+    });
     for (const file of files) {
       const content = await readFile(file, 'utf8');
-      const lines = content.split('\n');
-      for (const line of lines) {
-        // Looks for `.vendor ===`, `.vendor !==`, `vendor ===`, `vendor !==` compared
-        // against a vendor identity — the pass-through `input.vendor` argument to
-        // `createAdapter` is not a comparison and does not match this pattern. Excluded:
-        // comparison against `''`, a required-field presence check (`client/app.js` reads
-        // it exactly like the `cwd`/`title` checks beside it) rather than a branch on
-        // which vendor it is.
-        if (/\bvendor\s*[!=]==(?!\s*'')/i.test(line)) offendingLines.push(`${file}: ${line.trim()}`);
-      }
+      for (const line of vendorBranches(content)) offendingLines.push(`${file}: ${line.trim()}`);
     }
   }
   assert.deepEqual(offendingLines, []);
+});
+
+// These are intentionally outside every provider leaf, so the exemptions cannot mask them.
+test('Phase 2 — vendor neutrality rejects planted names in shared provider and core code', () => {
+  const sources = [
+    "export const vendor = 'claude';",
+    "import { codexProvider } from './codex-cli/provider.js';",
+    "if (input.vendor === providerId) choose();",
+  ];
+  assert.equal(vendorNames(sources[0]!).length, 1);
+  assert.equal(vendorNames(sources[1]!).length, 1);
+  assert.equal(vendorBranches(sources[2]!).length, 1);
 });

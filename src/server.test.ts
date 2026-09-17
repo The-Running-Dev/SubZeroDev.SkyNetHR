@@ -15,7 +15,7 @@ import { after, test } from 'node:test';
 // for this: a second `SIGTERM` is a real `process.exit(1)` (S27.1), and running that against
 // the test runner's own process would abort every other test still in flight.
 const SERVER_ENTRY = path.join(process.cwd(), 'dist', 'server.js');
-const FIXTURE = path.join(process.cwd(), 'src', 'adapters', 'claude', 'fixtures', 'fake-claude-cli.mjs');
+const FIXTURE = path.join(process.cwd(), 'src', 'agent-console', 'providers', 'claude-cli', 'fixtures', 'fake-claude-cli.mjs');
 
 const liveServers: ChildProcess[] = [];
 after(() => {

@@ -1,5 +1,7 @@
-import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
+import { spawn, type ChildProcess } from 'node:child_process';
 import { platform } from 'node:process';
+import { probeCommand } from '../probe.js';
+import type { ProbeContext, ProviderStatus } from '../types.js';
 import type {
   Adapter,
   AdapterError,
@@ -13,18 +15,12 @@ import type {
   Result,
   SandboxMode,
   TurnId,
-} from '../../contract/index.js';
+} from '../types.js';
 import { NdjsonSplitter } from '../ndjson.js';
 import { summariseCommand } from './summarise.js';
 
 const isWindows = platform === 'win32';
 const KILL_GRACE_MS = 2000; // mirrors the Claude adapter's SIGTERM-then-SIGKILL grace (D38)
-// `detectTransport` below runs up to two of these, synchronously, in the middle of session
-// creation (D107 — transport selection happens once, at create). A `--help` on a responsive
-// binary returns near-instantly; this bounds how long a slow-to-respond one can block the
-// whole server's single thread — and therefore every other operator's session — per probe.
-const PROBE_TIMEOUT_MS = 2000;
-
 type Transport = 'app-server' | 'exec';
 
 // `SandboxMode` is this contract's vendor-neutral vocabulary; the CLI's own flag values
@@ -53,7 +49,7 @@ interface ResolvedSpawn {
   readonly shell: boolean;
 }
 
-// Shared by the transport probe (spawnSync, below) and the real per-turn spawn: a
+// Shared by the asynchronous transport probe and the real per-turn spawn: a
 // `.mjs`/`.js` executable is a test fixture, run under this same Node; the bare `codex`
 // name or an explicit `.cmd`/`.bat` needs a shell on Windows for PATH/PATHEXT resolution
 // (Node refuses to spawn those directly). Mirrors `../claude/index.ts`'s identical need.
@@ -77,47 +73,57 @@ function reportableImage(executable: string, usedShell: boolean): string {
   return comspec.replace(/^.*[\\/]/, '').replace(/\.exe$/i, '');
 }
 
-function probeOk(executable: string, cwd: string, subcommand: string): boolean {
+async function probeOk(executable: string, cwd: string, subcommand: string): Promise<boolean> {
   const resolved = resolveSpawn(executable, [subcommand, '--help']);
-  const result = spawnSync(resolved.command, resolved.args, { cwd, shell: resolved.shell, timeout: PROBE_TIMEOUT_MS });
-  return result.error === undefined && result.status === 0;
+  return (await probeCommand(resolved.command, resolved.args, cwd, resolved.shell)).ok;
 }
 
-// `createAdapter` is synchronous (20-contract.md § adapters/*), so transport selection
-// happens here, once, via a short-lived `--help` probe rather than during the first
-// `send()` — matching D107's "once, at create". Whichever subcommand fails or is absent
-// falls through to the next; if neither responds, the caller reports `agent_unavailable`
-// exactly as it would for a missing binary, because from here the two cases are
-// indistinguishable and D107 says they should be treated the same.
-function detectTransportUncached(executable: string, cwd: string): Transport | null {
-  if (probeOk(executable, cwd, 'app-server')) return 'app-server';
-  if (probeOk(executable, cwd, 'exec')) return 'exec';
-  return null;
-}
-
-// (#134) A real deployment names one executable for its whole life, so a result probed
-// once is valid for every session after it — re-probing inside every `manager.create`
-// (up to two 2-second `spawnSync` calls) stalled the single-threaded server for every
-// other operator waiting on an unrelated session. Keyed on `(executable, cwd)`, the same
-// two inputs `detectTransportUncached` already takes, so this changes nothing about what
-// is detected — only how many times.
-const transportCache = new Map<string, Transport | null>();
-
-function detectTransport(executable: string, cwd: string): Transport | null {
+// Cache the in-flight promise as well as failures: concurrent creates share one probe.
+const transportCache = new Map<string, Promise<Transport | null>>();
+function detectTransport(executable: string, cwd: string, refresh = false): Promise<Transport | null> {
   const key = JSON.stringify([executable, cwd]);
-  if (transportCache.has(key)) return transportCache.get(key)!;
-  const detected = detectTransportUncached(executable, cwd);
-  transportCache.set(key, detected);
-  return detected;
+  if (refresh) transportCache.delete(key);
+  let result = transportCache.get(key);
+  if (!result) {
+    result = (async () => {
+      if (await probeOk(executable, cwd, 'app-server')) return 'app-server';
+      if (await probeOk(executable, cwd, 'exec')) return 'exec';
+      return null;
+    })();
+    transportCache.set(key, result);
+  }
+  return result;
 }
 
-// Test seam only: a real deployment never needs this, because its executable's transport
-// never changes mid-process — but a test that toggles the fixture's own behaviour (e.g.
-// `SKYNET_CODEX_NO_APP_SERVER`) against the *same* executable path needs a fresh probe per
-// case, not the first case's cached answer.
-export function resetCodexTransportCacheForTests(): void {
-  transportCache.clear();
+function statusForTransport(transport: Transport | null): ProviderStatus {
+  return {
+    available: transport !== null,
+    ...(transport === null ? { unavailableReason: 'agent_unavailable' } : {}),
+    capabilities: {
+      workspace: 'required', permissions: 'preauthorised', attachments: { supported: false },
+      usage: transport === 'app-server', resume: transport !== null,
+      streamingDeltas: transport === 'app-server', models: 'free-form',
+      sandboxModes: ['read-only', 'workspace-write', 'unrestricted'],
+      needsProcess: true, conversationState: 'provider',
+    },
+  };
 }
+
+// A create and its capability snapshot share this exact resolution, even if a
+// concurrent refresh replaces the cache while the original probe is still running.
+export async function prepareCodex(executable: string, context: ProbeContext) {
+  const transport = await detectTransport(executable, context.cwd, context.refresh);
+  return {
+    status: statusForTransport(transport),
+    create: (options: AdapterOptions) => buildCodexAdapter(options, executable, transport),
+  };
+}
+
+export async function probeCodex(executable: string, context: ProbeContext): Promise<ProviderStatus> {
+  return (await prepareCodex(executable, context)).status;
+}
+
+export function resetCodexTransportCacheForTests(): void { transportCache.clear(); }
 
 // Notification methods observed on a real `codex app-server 0.146.0` session
 // (a plain "say hello" turn) that carry no content the operator needs and are not in
@@ -211,25 +217,28 @@ function makeFailSchemaMismatch(
   };
 }
 
-export function createCodexAdapter(
+export async function createCodexAdapter(
   opts: AdapterOptions & { readonly executable?: string },
-): Result<Adapter, AdapterError> {
+): Promise<Result<Adapter, AdapterError>> {
+  if (opts.sandbox === null || !SANDBOX_MODES.has(opts.sandbox)) {
+    return { ok: false, error: { code: 'unsupported_sandbox', sandbox: String(opts.sandbox) } };
+  }
   const executable = opts.executable ?? process.env['SKYNET_CODEX_EXECUTABLE'] ?? 'codex';
-  // The dispatcher (../index.ts) refuses `sandbox: null`, but does not validate a non-null
-  // value against the enum — a caller that reaches this function directly (a test, or a
-  // future caller) must still fail closed on a malformed value rather than let it fall
-  // through `cliSandboxValue`'s switch as `undefined`.
+  return (await prepareCodex(executable, { cwd: opts.cwd })).create(opts);
+}
+
+function buildCodexAdapter(opts: AdapterOptions, executable: string, transport: Transport | null): Result<Adapter, AdapterError> {
   if (opts.sandbox === null || !SANDBOX_MODES.has(opts.sandbox)) {
     return { ok: false, error: { code: 'unsupported_sandbox', sandbox: String(opts.sandbox) } };
   }
   const sandbox = opts.sandbox;
-  const transport = detectTransport(executable, opts.cwd);
   if (transport === null) {
     return { ok: false, error: { code: 'agent_unavailable', image: executable, detail: 'neither `codex app-server` nor `codex exec` responded to --help' } };
   }
 
   let child: ChildProcess | null = null;
   let killRequested = false;
+  let currentModel = opts.model;
 
   function notify(n: AdapterNotification): void {
     opts.notify(n);
@@ -239,15 +248,7 @@ export function createCodexAdapter(
     notify({ kind: 'event', event: { kind, data, raw } as never });
   }
 
-  // D146/D149: the `exec --json` fallback reports no `usage` events at all (its basis is
-  // undetermined, `20-contract.md § Vendor mapping — Codex § Usage`), so `PayrollView.burn`
-  // would otherwise sum to zero indistinguishable from an idle session. Queued rather than
-  // called inline: `createCodexAdapter` returns synchronously, before the manager has
-  // registered this session's entry against `opts.notify`'s closure (`session-manager`'s
-  // `create` sets it right after this call returns), so a synchronous `notify` here would
-  // be dropped. Queuing lets that registration finish first — it is still session-manager's
-  // very next synchronous step, well ahead of any `turn.started`, which cannot fire before
-  // an operator's first `message()` call.
+  // Session notices are buffered by the host until its registry entry exists.
   if (transport === 'exec') {
     queueMicrotask(() => {
       emitEvent('session.notice', { level: 'warn', code: 'usage_unavailable', text: "this session's transport reports no token usage; its burn is unknown, not zero" }, null);
@@ -578,7 +579,7 @@ export function createCodexAdapter(
             if (typeof startedId !== 'string') throw new Error('thread/start response carried no thread.id');
             threadId = startedId;
           }
-          await rpcCall('turn/start', { threadId, input: [{ type: 'text', text }] });
+          await rpcCall('turn/start', { threadId, input: [{ type: 'text', text }], ...(currentModel === null ? {} : { model: currentModel }) });
           if (!settled) {
             settled = true;
             resolve({ ok: true, value: undefined });
@@ -695,6 +696,7 @@ export function createCodexAdapter(
       // The specific thread, not `--last`: `--last` names whichever thread the CLI
       // considers most recent on the whole host, which a concurrent exec-transport
       // session elsewhere on the same host could make the wrong one.
+      if (currentModel !== null) args.push('--model', currentModel);
       if (resume !== null) args.push('resume', resume);
 
       let proc: ChildProcess;
@@ -775,7 +777,9 @@ export function createCodexAdapter(
       _attachments: readonly AttachmentPayload[],
       resume: CliSessionId | null,
       _turnId: TurnId,
+      model?: string,
     ): Promise<Result<void, AdapterError>> {
+      currentModel = model ?? opts.model;
       return transport === 'app-server' ? runAppServer(text, resume) : runExec(text, resume);
     },
 
