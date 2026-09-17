@@ -337,7 +337,7 @@ describe('config — storage may not overlap a workspace root (S31, D185, I60)',
       if (!entry.endsWith('.ts') || entry.endsWith('.test.ts')) continue;
       const filePath = path.join(srcRoot, entry);
       const contents = await readFile(filePath, 'utf8');
-      // Exclude the definition itself (`jail/index.ts`'s `export function pathsOverlap`)
+      // Exclude the runtime jail's `export function pathsOverlap`
       // and the type-only import lines every caller also carries.
       const calls = (contents.match(/(?<!function )pathsOverlap\(/g) ?? []).length;
       if (calls > 0) callers.set(entry, calls);
@@ -347,9 +347,9 @@ describe('config — storage may not overlap a workspace root (S31, D185, I60)',
       normalised,
       new Map([
         ['config/index.ts', 1],
-        ['session-manager/index.ts', 1],
+        ['agent-console/core/workspaces/allocator.ts', 2],
       ]),
-      'pathsOverlap has exactly these two callers, each calling it once',
+      'pathsOverlap has only the config check and the allocator reservation/restore checks',
     );
   });
 

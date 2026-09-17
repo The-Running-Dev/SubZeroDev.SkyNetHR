@@ -915,7 +915,7 @@ refusal**: the server does not decline to start under `shared-secret`.
 ### `jail`
 
 `resolveInsideRoot`, `pathsOverlap` and `stripExtendedPrefix` are declared in
-`src/jail/index.ts`.
+`src/agent-console/core/workspaces/jail.ts`, re-exported by `src/jail/index.ts`.
 
 - **`resolveInsideRoot` is the only minter of a `ResolvedPath`.** It accepts a candidate only
   if its fully resolved real path — symlinks followed, `..` collapsed, case-normalised on
@@ -924,7 +924,7 @@ refusal**: the server does not decline to start under `shared-secret`.
 - **`pathsOverlap` is the one containment predicate in this server**, and no module may
   hand-roll a second. It is true when the two paths are equal **or either contains the other**,
   under the same normalisation `resolveInsideRoot` applies. Both arguments must already be
-  jail-resolved. It has two callers and no others: `session-manager`'s workspace busy check
+  jail-resolved. It has two callers and no others: the AgentConsole workspace allocator's reservation and exclusive-restore checks
   (D30, I6), and `config`'s startup check that storage does not sit inside a workspace root
   (D185, I60). **The second is why "both arguments must already be jail-resolved" is a
   requirement on `config` and not only on this module** — a raw `storageRoot` string could not
@@ -945,9 +945,14 @@ sandbox.
 `LoadedMeta`, `Store` and `createStore` are declared in `src/contract/index.ts` (the types) and
 `src/store/index.ts` (the factory).
 
-`store` owns `meta.json`, the spill, the tool-output and attachment blobs, `audit.ndjson`,
-`pids.ndjson`, `server.lock`, the ring buffer, and the two record logs. It depends on `config`
-and `contract` and on nothing else.
+The host factory composes `src/agent-console/store/fs.ts` for session metadata, spill,
+tool-output and attachment blobs, audit and ring storage, and the Phase 3 process ledger
+for `pids.ndjson`. `src/store/index.ts` retains `server.lock` and the two HR record logs.
+The generic `SessionStore` boundary is declared in `src/agent-console/core/types.ts`;
+`src/agent-console/store/memory.ts` provides the in-memory implementation.
+The filesystem backend's runtime lease is in `runtime-leases/`, separate from the host's
+unchanged `server.lock` lease. `SessionCore.boot()` acquires it before reaping or scanning;
+`SessionStore.close()` releases it after closing the runtime append handles.
 
 What the declarations cannot say:
 
@@ -1108,9 +1113,9 @@ the holder that wrote it is gone either way.
 ### `checkpoints`
 
 `Checkpoints` and `createCheckpoints` are declared in `src/contract/index.ts` (the type) and
-`src/checkpoints/index.ts` (the factory). It depends on `config` and `contract` and **never on
-adapters**, which is what let the shadow-git mechanism survive the move to two backends
-unchanged.
+`src/checkpoints/index.ts` (the host factory). The shadow-git implementation and pure runtime
+hooks are in `src/agent-console/extensions/checkpoints/`; the host supplies the existing Git
+author identity. Neither implementation nor hooks depend on adapters.
 
 **`restore` returns the safety checkpoint, never the target** — as `RestoreResult.safety`,
 since the return type carries the report as well (D182). Its sequence is five operations of
@@ -1392,11 +1397,14 @@ What the declarations cannot say:
 ### `session-manager`
 
 `CreateSessionInput`, `PermissionAnswer`, `SubscriberSink`, `Subscription` and `SessionManager`
-are declared in `src/contract/index.ts`; `createSessionManager`, `parseStandingRule` and `match`
-in `src/session-manager/index.ts`.
+are declared in `src/contract/index.ts`; `createSessionManager` is in
+`src/session-manager/index.ts`. The host re-exports `parseStandingRule` and `match` from
+`src/agent-console/core/index.ts`.
 
-It owns ownership, turn state, `seq`, fan-out, reaping, the payroll fold, and the audit read and
-the incident view over it. **The audit read is here and not on `records`** because `records` is
+The host facade delegates ownership, turn state, `seq`, fan-out and reaping to
+`src/agent-console/core/index.ts`. It retains requisition callbacks, the checklist and payroll
+folds, and host audit/review reads through the core's admin surface. **The audit read is here
+and not on `records`** because `records` is
 tier two and `GET /api/audit` is tier one, which must work in a build where tier two's module
 does not exist (D157, `## Unresolved` 5).
 

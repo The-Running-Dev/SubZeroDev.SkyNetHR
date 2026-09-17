@@ -3434,10 +3434,12 @@ test('S13.7 — a claim against the wrong state, or an unknown id, is refused an
 });
 
 test('S13.9 — a creation that fails after the requisition claim releases it; a retry succeeds', async () => {
+  let fail = true;
   const { manager, workspaceRoot, records } = await makeManager('full', {}, (store) => ({
     ...store,
-    async createSession() {
-      return { ok: false, error: { code: 'io', path: 'meta.json', detail: 'disk full' } };
+    async createSession(record) {
+      if (fail) { fail = false; return { ok: false, error: { code: 'io', path: 'meta.json', detail: 'disk full' } }; }
+      return store.createSession(record);
     },
   }), undefined, (c, s) => createRecords({ config: c, store: s }));
   const owner = 'operator-1' as OperatorId;
@@ -3455,6 +3457,11 @@ test('S13.9 — a creation that fails after the requisition claim releases it; a
   const stillApproved = records.getRequisition(raised.value.requisitionId);
   assert.equal(stillApproved.ok, true);
   if (stillApproved.ok) assert.equal(stillApproved.value.state, 'approved');
+  const retried = await manager.create(owner, { vendor: 'claude', cwd: projectDir, model: null, sandbox: null, requisitionId: raised.value.requisitionId });
+  assert.ok(retried.ok);
+  const consumed = records.getRequisition(raised.value.requisitionId);
+  assert.ok(consumed.ok);
+  assert.equal(consumed.value.state, 'consumed');
 });
 
 test('S13.6 — two creates naming the same approved requisition in the same tick: exactly one wins, the other is requisition_consumed', async () => {
@@ -3538,7 +3545,7 @@ test('S14.2/S14.9 — a tick emits one checklist.item.completed { itemId, by } a
   const ticked = await manager.tickChecklistItem(sessionId, owner, 'welcome' as ChecklistItemId);
   assert.equal(ticked.ok, true);
 
-  const completed = received.filter((e) => e.kind === 'checklist.item.completed');
+  const completed = received.filter((e) => e.kind === 'x-skynet.checklist.item.completed');
   assert.equal(completed.length, 1);
   assert.deepEqual(completed[0]!.data, { itemId: 'welcome', by: owner });
   assert.equal(completed[0]!.seq as unknown as number, seqBefore + 1);
@@ -3586,12 +3593,12 @@ test('S14.3 — a tick carries no turnId and lands between turn.started and turn
 
   const kinds = received.map((e) => e.kind);
   const turnStartedIdx = kinds.indexOf('turn.started');
-  const checklistIdx = kinds.indexOf('checklist.item.completed');
+  const checklistIdx = kinds.indexOf('x-skynet.checklist.item.completed');
   const turnEndedIdx = kinds.indexOf('turn.ended');
   assert.ok(turnStartedIdx !== -1 && checklistIdx !== -1 && turnEndedIdx !== -1);
   assert.ok(turnStartedIdx < checklistIdx && checklistIdx < turnEndedIdx, 'the tick lands between turn.started and turn.ended');
 
-  const checklistEnvelope = received.find((e) => e.kind === 'checklist.item.completed')!;
+  const checklistEnvelope = received.find((e) => e.kind === 'x-skynet.checklist.item.completed')!;
   assert.equal('turnId' in (checklistEnvelope.data as object), false, 'the envelope carries no turnId');
 });
 
@@ -3616,7 +3623,7 @@ test('S14.4 — a second tick for an already-complete item is idempotent: 200, n
   const second = await manager.tickChecklistItem(sessionId, owner, 'welcome' as ChecklistItemId);
   assert.equal(second.ok, true);
 
-  assert.equal(received.filter((e) => e.kind === 'checklist.item.completed').length, 1, 'a second tick emits no second envelope');
+  assert.equal(received.filter((e) => e.kind === 'x-skynet.checklist.item.completed').length, 1, 'a second tick emits no second envelope');
 
   const afterSecond = await manager.checklist(sessionId, owner);
   assert.equal(afterSecond.ok, true);
@@ -3682,7 +3689,8 @@ test('S14.7 — the fold survives a reload: a rehydrated session reports the sam
     (await store.appendEvent(record.id, bootEnvelope(sessionId, 1, 'checklist.item.completed', { itemId: 'welcome', by: record.owner }))).ok,
     true,
   );
-  await store.writeMeta({ ...record, lastSeq: 1 as never });
+  assert.ok((await store.appendEvent(record.id, bootEnvelope(sessionId, 2, 'x-skynet.checklist.item.completed', { itemId: 'workspace', by: record.owner }))).ok);
+  await store.writeMeta({ ...record, lastSeq: 2 as never });
 
   const manager2 = createSessionManager({ config, store, checkpoints, records: notImplementedProxy<Records>('records') });
   assert.equal((await manager2.boot()).ok, true);
@@ -3694,7 +3702,7 @@ test('S14.7 — the fold survives a reload: a rehydrated session reports the sam
   assert.equal(welcome.completedBy, record.owner);
   assert.notEqual(welcome.completedAt, null);
   const workspaceItem = got.value.find((i) => i.id === 'workspace')!;
-  assert.equal(workspaceItem.completedBy, null);
+  assert.equal(workspaceItem.completedBy, record.owner, 'new and historical checklist kinds fold together');
 
   // A rehydrated session is always `ended` — the write half of D122's rule applies to it too.
   const ticked = await manager2.tickChecklistItem(sessionId as never, record.owner, 'workspace' as ChecklistItemId);
@@ -3742,7 +3750,7 @@ test('S14.11 — a spill failure on the checklist.item.completed append is repor
   const { manager, workspaceRoot } = await makeManager('full', {}, (store) => ({
     ...store,
     async appendEvent(sessionId, envelope) {
-      if (failNextChecklistTick && envelope.kind === 'checklist.item.completed') {
+      if (failNextChecklistTick && envelope.kind === 'x-skynet.checklist.item.completed') {
         failNextChecklistTick = false;
         return { ok: false, error: { code: 'io', path: 'events.ndjson', detail: 'disk full' } };
       }
