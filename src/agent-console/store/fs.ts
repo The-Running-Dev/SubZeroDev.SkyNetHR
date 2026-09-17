@@ -28,6 +28,7 @@ import type {
 } from '../core/types.js';
 
 import { isSafePathSegment } from './paths.js';
+import { createFsAttemptStore } from './create-attempts.js';
 
 
 function ioError(filePath: string, detail: string): Result<never, StoreError> {
@@ -346,6 +347,7 @@ export async function createFsSessionStore(config: RuntimeOptions): Promise<Resu
   const auditCursorSecret = randomBytes(32);
   const lease = createFsRuntimeLease(storageRoot);
   const store: SessionStore = {
+    createAttempts: createFsAttemptStore(storageRoot),
     lease,
     async createSession(record: SessionRecord) {
       if (!isSafePathSegment(record.id)) return ioError(storageRoot, 'invalid session id');

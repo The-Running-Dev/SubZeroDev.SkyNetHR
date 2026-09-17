@@ -52,7 +52,7 @@ import { isFrame } from './types.js';
 
 import type { Checkpoints } from './types.js';
 import type { HostCreateCallbacks } from './create-attempts.js';
-import { coordinateHostAttempts } from './create-attempts.js';
+import { coordinateHostAttempts, recoverHostAttempt } from './create-attempts.js';
 import { createLane } from './lane.js';
 import { createWorkspaceAllocator } from './workspaces/allocator.js';
 import { createAttachmentStaging } from './attachments.js';
@@ -267,6 +267,12 @@ export function createSessionCore(deps: {
     const destroyed = await checkpoints.destroy(sessionId);
     const deleted = await store.deleteSession(sessionId);
     return { destroyed, deleted };
+  }
+
+  async function releaseCreateAttempt(sessionId: SessionId): Promise<Result<void, StoreError>> {
+    const removed = await store.createAttempts.remove(sessionId);
+    if (removed.ok) allocation.release(sessionId);
+    return removed;
   }
 
   // `raw` is attached under the one rule both `emit` and `emitFrame` share: only when
@@ -598,6 +604,27 @@ export function createSessionCore(deps: {
         await reapOne(record, hostBootAt);
       }
 
+      // A5: restore every reservation before callbacks. An unfinished create is
+      // not ordinary ended history, even when its session metadata already exists.
+      const recovered = await store.createAttempts.readAll();
+      if (!recovered.ok) return recovered;
+      const pending = new Set(recovered.value.map(a => a.sessionId));
+      const committed = new Set<SessionId>();
+      for (const attempt of recovered.value) allocation.recoverPending(attempt.sessionId, attempt.cwd, attempt.principal);
+      for (const attempt of recovered.value) {
+        const state = await recoverHostAttempt(deps.hostCreate, attempt.sessionId, deps.hostAttemptTimeoutMs);
+        if (state === 'committed') committed.add(attempt.sessionId);
+        else if (state === 'aborted') {
+          const cleanup = await destroySessionStorage(attempt.sessionId);
+          if (cleanup.destroyed.ok && cleanup.deleted.ok) {
+            const released = await releaseCreateAttempt(attempt.sessionId);
+            if (released.ok) pending.delete(attempt.sessionId);
+          }
+        }
+        // new/prepared/committing/unavailable are not terminal proof. In
+        // particular, a fresh host helper's "new" must never release this claim.
+      }
+
       // D130: which sessions were still `live` on disk when the process went down. Boot
       // marks exactly those with one `session.notice / server_restart` in step 3 — never a
       // session already `ended`, which would append to every dead session's spill on every
@@ -616,7 +643,8 @@ export function createSessionCore(deps: {
           continue;
         }
         const record = result.value;
-        if (record.state === 'live') liveAtShutdown.add(sessionId);
+        const quarantined = pending.has(sessionId) && !committed.has(sessionId);
+        if (!quarantined && record.state === 'live') liveAtShutdown.add(sessionId);
         const lastSeqResult = await store.readLastSeq(sessionId);
         if (!lastSeqResult.ok) {
           console.warn(`[session-manager] boot: skipping session ${sessionId}: ${JSON.stringify(lastSeqResult.error)}`);
@@ -627,7 +655,7 @@ export function createSessionCore(deps: {
         // `endedAt` for it is synthesised, and #115 wants that told apart from a real end:
         // `'server_restart'` records that the reason is boot itself, not a fabrication of
         // one the session never had.
-        const rehydrated: SessionRecord = {
+        const rehydrated: SessionRecord = quarantined ? record : {
           ...record,
           state: 'ended',
           endedAt: record.endedAt ?? nowIso(),
@@ -644,7 +672,7 @@ export function createSessionCore(deps: {
           checkpointsAvailable: false,
           storageFailed: false,
           standingRules: [],
-          lane: createLane(), creating: false, operation: null,
+          lane: createLane(), creating: pending.has(sessionId), operation: null,
           subscribers: new Set(),
           writeQueue: Promise.resolve(),
           livePid: null,
@@ -652,7 +680,10 @@ export function createSessionCore(deps: {
         };
         sessions.set(sessionId, entry);
         // One of the three occasions `store`'s table names: a `state` transition.
-        if (record.state === 'live') await store.writeMeta(rehydrated);
+        if (!quarantined && record.state === 'live') {
+          const written = await store.writeMeta(rehydrated);
+          if (!written.ok && pending.has(sessionId)) committed.delete(sessionId);
+        }
       }
 
       // Step 3 (D39): a spill left on an unpaired `turn.started` is closed on disk —
@@ -661,6 +692,7 @@ export function createSessionCore(deps: {
       // ordering guarantees in `20-contract.md § Rules the renderer may rely on` hold
       // unconditionally rather than acquiring a "the transcript might just stop" case.
       for (const entry of sessions.values()) {
+        if (entry.creating && !committed.has(entry.record.id)) continue;
         // D130: the restart notice goes in *before* the synthetic close, and the order is
         // the whole of why one rule covers both cases. Where the spill ends on an unpaired
         // `turn.started`, the notice lands inside that still-open turn — so the payroll
@@ -678,6 +710,10 @@ export function createSessionCore(deps: {
           });
         }
         await closeUnterminatedTurn(entry);
+        if (entry.creating && !entry.storageFailed) {
+          const released = await releaseCreateAttempt(entry.record.id);
+          if (released.ok) entry.lane.run(() => { entry.creating = false; });
+        }
       }
 
       return { ok: true, value: undefined };
@@ -788,10 +824,14 @@ export function createSessionCore(deps: {
       const sessionId = randomUUID() as SessionId;
       const overlap = allocation.reserve(sessionId, cwd, owner);
       if (overlap) return { ok: false, error: { code: 'workspace_busy', holder: { cwd: overlap.cwd, owner: overlap.principal } } };
-      // Host code runs after the allocation guard has released, in the same tick.
+      // A5's internal recovery record is durable before any host side effect.
+      // No allocation guard is held while this I/O or the host callbacks run.
+      const savedAttempt = await store.createAttempts.write({ sessionId, principal: owner, cwd });
+      if (!savedAttempt.ok) { allocation.release(sessionId); return { ok: false, error: { code: 'storage', cause: savedAttempt.error } }; }
+      // Host code runs after the allocation guard has released.
       checkpointExtension.hooks.beforeCreate();
       const prepared = await hostCreate.prepare(sessionId, owner, input.hostData);
-      if (!prepared.ok) { allocation.release(sessionId); return { ok: false, error: { code: 'host_create', cause: prepared.error } }; }
+      if (!prepared.ok) { await hostCreate.abort(sessionId); await releaseCreateAttempt(sessionId); return { ok: false, error: { code: 'host_create', cause: prepared.error } }; }
       const pendingNotifications: AdapterNotification[] = [];
       let registered = false;
       let adapterResult: Result<Adapter, AdapterError>;
@@ -811,15 +851,15 @@ export function createSessionCore(deps: {
       }
       if (notifyMuted && adapterResult.ok) {
         await adapterResult.value.kill();
-        allocation.release(sessionId);
         await hostCreate.abort(sessionId);
+        await releaseCreateAttempt(sessionId);
         return { ok: false, error: { code: 'adapter', cause: { code: 'agent_unavailable', image: input.vendor, detail: 'server is shutting down' } } };
       }
       if (!adapterResult.ok) {
         // S13.9: any failure after the claim releases it — the requisition reads
         // `approved` again and a retry can spend it.
-        allocation.release(sessionId);
         await hostCreate.abort(sessionId);
+        await releaseCreateAttempt(sessionId);
         return { ok: false, error: { code: 'adapter', cause: adapterResult.error } };
       }
 
@@ -859,10 +899,10 @@ export function createSessionCore(deps: {
       const created = await store.createSession(record);
       if (!created.ok) {
         sessions.delete(sessionId);
-        allocation.release(sessionId);
         await hostCreate.abort(sessionId);
         await entry.adapter!.kill();
-        await destroySessionStorage(sessionId);
+        const cleanup = await destroySessionStorage(sessionId);
+        if (cleanup.destroyed.ok && cleanup.deleted.ok) await releaseCreateAttempt(sessionId);
         return { ok: false, error: { code: 'storage', cause: created.error } };
       }
 
@@ -885,11 +925,14 @@ export function createSessionCore(deps: {
       if (!committed.ok) {
         if (committed.error === 'create_outcome_unknown') return { ok: false, error: { code: 'create_outcome_unknown', sessionId } };
         await hostCreate.abort(sessionId);
-        sessions.delete(sessionId); allocation.release(sessionId);
-        await destroySessionStorage(sessionId);
+        sessions.delete(sessionId);
+        const cleanup = await destroySessionStorage(sessionId);
         await entry.adapter!.kill();
+        if (cleanup.destroyed.ok && cleanup.deleted.ok) await releaseCreateAttempt(sessionId);
         return { ok: false, error: { code: 'host_create', cause: committed.error } };
       }
+      const published = await store.createAttempts.remove(sessionId);
+      if (!published.ok) return { ok: false, error: { code: 'storage', cause: published.error } };
       entry.lane.run(() => { entry.creating = false; });
       allocation.activate(sessionId);
       return { ok: true, value: { sessionId } };

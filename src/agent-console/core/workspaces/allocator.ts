@@ -19,6 +19,11 @@ export function createWorkspaceAllocator(maxLiveSessionsPerWorkspace = 1) {
   const guard = createLane();
   const reservations = new Map<string, Reservation>();
   return {
+    recoverPending(id: string, cwd: ResolvedPath, principal: string): void {
+      // Existing ownership cannot be dropped because configuration now has a lower
+      // limit. Restore every pending claim before admitting any new allocation.
+      guard.run(() => { reservations.set(id, { id, cwd, principal, state: 'pending', exclusive: false }); });
+    },
     reserve(id: string, cwd: ResolvedPath, principal: string): Reservation | null {
       return guard.run(() => {
         const overlaps = [...reservations.values()].filter(r => pathsOverlap(cwd, r.cwd));

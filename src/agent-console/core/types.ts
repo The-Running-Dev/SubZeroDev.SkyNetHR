@@ -6,6 +6,7 @@ import type { ProcessRecord } from '../process/ledger.js';
 import type { RuntimeLease } from '../store/lease.js';
 import type { RuntimeLeaseError } from '../store/lease.js';
 import type { AttachmentStaging, UploadId } from './attachments.js';
+import type { CreateAttemptStore } from '../store/create-attempts.js';
 export type * from '../contract/index.js';
 export type * from '../providers/types.js';
 export type { ProcessRecord } from '../process/ledger.js';
@@ -224,6 +225,7 @@ export interface LoadedMeta {
 }
 
 export interface SessionStore {
+    readonly createAttempts: CreateAttemptStore;
     readonly lease: RuntimeLease;
     createSession(record: SessionRecord): Promise<Result<void, StoreError>>;
     writeMeta(record: SessionRecord): Promise<Result<void, StoreError>>;

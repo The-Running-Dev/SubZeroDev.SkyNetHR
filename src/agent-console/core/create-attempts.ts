@@ -86,6 +86,13 @@ async function within<T>(work: Promise<T>, ms: number): Promise<T | typeof timeo
 
 // Never abort an uncertain commit. The reservation and busy slot are retained by
 // the caller when reconciliation cannot establish a terminal state.
+export async function recoverHostAttempt(host: HostCreateCallbacks, id: SessionId, timeoutMs = 30_000): Promise<CreateAttemptState | 'unknown'> {
+  try {
+    const state = await within(host.status(id), timeoutMs);
+    return state === timeout ? 'unknown' : state;
+  } catch { return 'unknown'; }
+}
+
 export function coordinateHostAttempts(host: HostCreateCallbacks, timeoutMs = 30_000): HostCreateCallbacks {
   return {
     ...host,

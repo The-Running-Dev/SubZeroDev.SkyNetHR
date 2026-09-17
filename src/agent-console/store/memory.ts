@@ -2,6 +2,7 @@ import { randomBytes } from 'node:crypto';
 import { Readable } from 'node:stream';
 import { auditRecordMatches, decodeAuditCursor, encodeAuditCursor } from './audit.js';
 import { isSafePathSegment } from './paths.js';
+import { createMemoryAttemptStore } from './create-attempts.js';
 import type { AuditRecord, Envelope, ProcessRecord, RuntimeOptions, SessionId, SessionRecord, SessionStore, StoreError, Result } from '../core/types.js';
 
 // Copies at every storage boundary keep callers from changing persisted history
@@ -20,6 +21,7 @@ export function createMemorySessionStore(config: Pick<RuntimeOptions, 'caps'>): 
   const invalid = (path: string): Result<never, StoreError> => ({ ok: false, error: { code: 'io', path, detail: 'not a safe path segment' } });
   const key = (...parts: string[]) => parts.join('/');
   return {
+    createAttempts: createMemoryAttemptStore(),
     lease: { async claim() { return ok(undefined); }, async release() {} },
     async createSession(record) { if (!isSafePathSegment(record.id)) return invalid(record.id); meta.set(record.id, structuredClone(record)); if (!events.has(record.id)) events.set(record.id, []); return ok(undefined); },
     async writeMeta(record) { if (!isSafePathSegment(record.id)) return invalid(record.id); if (!meta.has(record.id)) return missing(record.id); meta.set(record.id, structuredClone(record)); return ok(undefined); },
