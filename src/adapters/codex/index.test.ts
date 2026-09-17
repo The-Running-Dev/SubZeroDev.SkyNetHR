@@ -13,7 +13,7 @@ const execFileAsync = promisify(execFile);
 
 const FIXTURE = path.join(process.cwd(), 'src', 'adapters', 'codex', 'fixtures', 'fake-codex-cli.mjs');
 
-function makeAdapter(sandbox: 'read-only' | 'workspace-write' | 'unrestricted' = 'workspace-write') {
+function makeAdapter(sandbox: 'read-only' | 'workspace-write' | 'unrestricted' = 'workspace-write', model: string | null = null) {
   // (#134) Transport detection is now cached per (executable, cwd) for the life of the
   // process — every test here reuses the same FIXTURE path, and several toggle
   // SKYNET_CODEX_NO_APP_SERVER between cases to force a different transport out of that
@@ -24,7 +24,7 @@ function makeAdapter(sandbox: 'read-only' | 'workspace-write' | 'unrestricted' =
   const result = createCodexAdapter({
     executable: FIXTURE,
     cwd: process.cwd() as never,
-    model: null,
+    model,
     sandbox,
     notify: (n) => notifications.push(n),
     streamDeltas: false,
@@ -144,6 +144,45 @@ test('S8.3, S8.4 — app-server: the mapped table, and zero permission.request e
 
   const turnEnded = eventsOf(notifications, 'turn.ended')[0]!;
   assert.equal((turnEnded.event.data as { stopReason: string }).stopReason, 'completed');
+});
+
+// D217 — both a fresh thread/start and a resumed thread/resume carry the session's
+// sandbox and policy, not just the fresh path; the resumed thread must not silently run
+// under the CLI's own defaults. Same for model (never read before D217).
+test('D217 — thread/start and thread/resume both carry cwd, sandbox, approvalPolicy: never, and model', async () => {
+  delete process.env['SKYNET_CODEX_NO_APP_SERVER'];
+  process.env['SKYNET_CODEX_SCENARIO'] = 'full';
+  const dir = await mkdtemp(path.join(tmpdir(), 'skynet-codex-params-'));
+  const paramsLog = path.join(dir, 'params.log');
+  process.env['SKYNET_CODEX_PARAMS_LOG'] = paramsLog;
+
+  const fresh = makeAdapter('read-only', 'gpt-5-codex');
+  assert.equal(fresh.result.ok, true);
+  if (!fresh.result.ok) return;
+  await fresh.result.value.send('hello', [], null, 'turn-d217-1' as never);
+  await waitUntil(() => eventsOf(fresh.notifications, 'turn.ended').length > 0);
+
+  const resumed = makeAdapter('read-only', 'gpt-5-codex');
+  assert.equal(resumed.result.ok, true);
+  if (!resumed.result.ok) return;
+  await resumed.result.value.send('hello again', [], 'fake-thread-resumed' as never, 'turn-d217-2' as never);
+  await waitUntil(() => eventsOf(resumed.notifications, 'turn.ended').length > 0);
+
+  const lines = (await readFileOrEmpty(paramsLog)).split('\n').filter((l) => l.length > 0).map((l) => JSON.parse(l));
+  const startCall = lines.find((l) => l.method === 'thread/start');
+  const resumeCall = lines.find((l) => l.method === 'thread/resume');
+  assert.ok(startCall, 'thread/start was called');
+  assert.ok(resumeCall, 'thread/resume was called');
+  assert.equal(startCall.params.sandbox, 'read-only');
+  assert.equal(startCall.params.approvalPolicy, 'never');
+  assert.equal(startCall.params.model, 'gpt-5-codex');
+  assert.equal(resumeCall.params.threadId, 'fake-thread-resumed');
+  assert.equal(resumeCall.params.sandbox, 'read-only');
+  assert.equal(resumeCall.params.approvalPolicy, 'never');
+  assert.equal(resumeCall.params.model, 'gpt-5-codex');
+  assert.equal(typeof resumeCall.params.cwd, 'string');
+
+  delete process.env['SKYNET_CODEX_PARAMS_LOG'];
 });
 
 // S8.5 — an app-server notification outside the mapped table (and outside the harmless
