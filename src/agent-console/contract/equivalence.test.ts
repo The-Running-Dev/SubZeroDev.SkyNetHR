@@ -265,11 +265,17 @@ type ResultBefore = Assert<Equals<<T, E>() => Host.Result<T, E>, <T, E>() => Bef
 type ResultReexport = Assert<Equals<<T, E>() => Host.Result<T, E>, <T, E>() => Extracted.Result<T, E>>>;
 // D239: pin the historical subset and the one authorized addition independently.
 // The literal Before declarations remain frozen; unexpected new kinds still fail.
-type EventPayloadMapBefore = Assert<Equals<Pick<Host.EventPayloadMap, Before.EventKind>, Before.EventPayloadMap>>;
+// Frozen v5 Phase 4 adds exactly one error discriminator for the stdout cap.
+// Keep the literal historical declarations untouched and pin the delta separately.
+type HistoricalError = { readonly kind: Exclude<Host.ErrorEventKind, 'adapter_output_overflow'>; readonly message: Host.ErrorEvent['message']; readonly fatal: Host.ErrorEvent['fatal'] };
+type HistoricalPayloadMap = { [K in Before.EventKind]: K extends 'error' ? HistoricalError : Host.EventPayloadMap[K] };
+type HistoricalEnvelope<E> = E extends { readonly kind: 'error' } ? { [P in keyof E]: P extends 'data' ? HistoricalError : E[P] } : E;
+type OutputOverflowAddition = Assert<Equals<Exclude<Host.ErrorEventKind, Before.ErrorEventKind>, 'adapter_output_overflow'>>;
+type EventPayloadMapBefore = Assert<Equals<HistoricalPayloadMap, Before.EventPayloadMap>>;
 type EventPayloadMapReexport = Assert<Equals<Host.EventPayloadMap, Extracted.EventPayloadMap>>;
 type EventKindBefore = Assert<Equals<Exclude<Host.EventKind, 'x-skynet.checklist.item.completed'>, Before.EventKind>>;
 type EventKindReexport = Assert<Equals<Host.EventKind, Extracted.EventKind>>;
-type EnvelopeBefore = Assert<Equals<Host.Envelope<Before.EventKind>, Before.Envelope>>;
+type EnvelopeBefore = Assert<Equals<HistoricalEnvelope<Host.Envelope<Before.EventKind>>, Before.Envelope>>;
 type EnvelopeReexport = Assert<Equals<Host.Envelope, Extracted.Envelope>>;
 type FrameKindBefore = Assert<Equals<Host.FrameKind, Before.FrameKind>>;
 type FrameKindReexport = Assert<Equals<Host.FrameKind, Extracted.FrameKind>>;
@@ -309,9 +315,9 @@ type UsageBefore = Assert<Equals<Host.Usage, Before.Usage>>;
 type UsageReexport = Assert<Equals<Host.Usage, Extracted.Usage>>;
 type UsageEventBefore = Assert<Equals<Host.UsageEvent, Before.UsageEvent>>;
 type UsageEventReexport = Assert<Equals<Host.UsageEvent, Extracted.UsageEvent>>;
-type ErrorEventKindBefore = Assert<Equals<Host.ErrorEventKind, Before.ErrorEventKind>>;
+type ErrorEventKindBefore = Assert<Equals<Exclude<Host.ErrorEventKind, 'adapter_output_overflow'>, Before.ErrorEventKind>>;
 type ErrorEventKindReexport = Assert<Equals<Host.ErrorEventKind, Extracted.ErrorEventKind>>;
-type ErrorEventBefore = Assert<Equals<Host.ErrorEvent, Before.ErrorEvent>>;
+type ErrorEventBefore = Assert<Equals<HistoricalError, Before.ErrorEvent>>;
 type ErrorEventReexport = Assert<Equals<Host.ErrorEvent, Extracted.ErrorEvent>>;
 type ChecklistCutoverEnvelope = {
   readonly seq: Before.Seq;
@@ -325,7 +331,7 @@ type ChecklistCutoverKind = Assert<Equals<Exclude<Host.EventKind, Before.EventKi
 type ChecklistCutoverPayload = Assert<Equals<Host.EventPayloadMap['x-skynet.checklist.item.completed'], Before.ChecklistItemCompleted>>;
 type ChecklistCutoverShape = Assert<Equals<Host.Envelope<'x-skynet.checklist.item.completed'>, ChecklistCutoverEnvelope>>;
 type isFrameBefore = Assert<Equals<typeof hostIsFrame,
-  (envelope: Before.Envelope | ChecklistCutoverEnvelope | Before.Frame) => envelope is Before.Frame>>;
+  (envelope: Host.Envelope | Before.Frame) => envelope is Before.Frame>>;
 type ChecklistNotProviderEmitted = Assert<Equals<Extract<Host.AdapterEmitted,
   'checklist.item.completed' | 'x-skynet.checklist.item.completed'>, never>>;
 type isFrameReexport = Assert<Equals<typeof hostIsFrame, typeof extractedIsFrame>>;

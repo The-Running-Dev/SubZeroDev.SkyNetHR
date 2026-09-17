@@ -8,6 +8,7 @@ export async function createRegisteredAdapter(registry: ProviderRegistry, id: st
   };
   const created = await registry.create(id, { cwd: options.cwd, notify: options.notify, emit: event }, {
     sandbox: options.sandbox, streamDeltas: options.streamDeltas,
+    ...(options.stdoutLineBytes === undefined ? {} : { stdoutLineBytes: options.stdoutLineBytes }),
     ...(options.model === null ? {} : { model: options.model }),
   });
   if (!created.ok) return created;

@@ -760,6 +760,7 @@ export function createSessionCore(deps: {
       return { items, next: start + items.length < all.length ? items.at(-1)!.id : null };
     },
 
+    async flush(): Promise<void> { await Promise.all([...sessions.values()].map(entry => entry.writeQueue)); },
     async shutdown(): Promise<void> {
       // D178, I55: set before anything below runs — every notification `handleNotification`
       // would otherwise dispatch, for every session, is dropped from this point on. One-way;

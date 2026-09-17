@@ -1,5 +1,11 @@
 # Event schema fixtures
 
+The Phase 4 stdio surface is documented in [PROTOCOL.md](PROTOCOL.md), with
+`schemas/wire.schema.json`, TypeScript wire types and paired operation fixtures.
+The persisted/core event corpus below remains separate. Frozen v5's authorized
+`adapter_output_overflow` discriminator is pinned alongside the historical error
+subset; existing end, notice and stop-reason unions remain unchanged.
+
 These JSON Schema 2020-12 files describe the Phase 1 contract. They are test assets;
 no runtime module loads them. The TypeScript declarations in `../contract/index.ts`
 own shape, and `design/20-contract.md` owns meaning.

@@ -1,0 +1,3437 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.agent-console.invalid/wire.schema.json",
+  "$defs": {
+    "event": {
+      "type": "object",
+      "properties": {
+        "sessionId": {
+          "type": "string"
+        },
+        "ts": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "Z$"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "data": {
+          "type": "object"
+        },
+        "seq": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "raw": {
+          "anyOf": [
+            {
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "sessionId",
+        "ts",
+        "kind",
+        "data"
+      ],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "message.delta"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "then": {
+            "properties": {
+              "seq": {
+                "type": "null"
+              }
+            }
+          },
+          "else": {
+            "required": [
+              "seq"
+            ],
+            "properties": {
+              "seq": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              }
+            }
+          }
+        }
+      ]
+    },
+    "session": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "owner": {
+          "type": "string"
+        },
+        "vendor": {
+          "type": "string"
+        },
+        "cwd": {
+          "type": "string"
+        },
+        "model": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "policy": {
+          "type": "object",
+          "properties": {
+            "mode": {
+              "type": "string"
+            },
+            "sandbox": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "banner": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "mode"
+          ]
+        },
+        "sandbox": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "lastSeq": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "state": {
+          "type": "string"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "Z$"
+        },
+        "endedAt": {
+          "anyOf": [
+            {
+              "type": "string",
+              "format": "date-time",
+              "pattern": "Z$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "endReason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "owner",
+        "vendor",
+        "cwd",
+        "policy",
+        "lastSeq",
+        "state",
+        "createdAt"
+      ]
+    },
+    "chunk": {
+      "type": "object",
+      "properties": {
+        "data": {
+          "type": "string"
+        },
+        "nextOffset": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "eof": {
+          "type": "boolean"
+        },
+        "contentType": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "data",
+        "nextOffset",
+        "eof"
+      ]
+    },
+    "runtime.hello.params": {
+      "type": "object",
+      "properties": {
+        "version": {
+          "type": "string"
+        },
+        "storage": {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "enum": [
+                "fs",
+                "memory"
+              ]
+            },
+            "root": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "root"
+          ]
+        },
+        "workspaceRoots": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1
+        },
+        "hostMethods": {
+          "anyOf": [
+            {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "options": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "includeRaw": {
+                  "anyOf": [
+                    {
+                      "type": "boolean"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "streamDeltas": {
+                  "anyOf": [
+                    {
+                      "type": "boolean"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "maxLiveSessionsPerWorkspace": {
+                  "anyOf": [
+                    {
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 9007199254740991
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "hostAttemptTimeoutMs": {
+                  "anyOf": [
+                    {
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 9007199254740991
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "providerStdoutLineBytes": {
+                  "anyOf": [
+                    {
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 9007199254740991
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "caps": {
+                  "anyOf": [
+                    {
+                      "type": "object",
+                      "additionalProperties": {
+                        "anyOf": [
+                          {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 9007199254740991
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      }
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              },
+              "required": []
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "version",
+        "storage",
+        "workspaceRoots"
+      ]
+    },
+    "runtime.hello.result": {
+      "type": "object",
+      "properties": {
+        "version": {
+          "type": "string"
+        },
+        "storage": {
+          "type": "string"
+        },
+        "extensions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "schema": {},
+              "mutates": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "name",
+              "schema",
+              "mutates"
+            ]
+          }
+        }
+      },
+      "required": [
+        "version",
+        "storage",
+        "extensions"
+      ]
+    },
+    "runtime.hello.request": {
+      "type": "object",
+      "properties": {
+        "jsonrpc": {
+          "const": "2.0"
+        },
+        "id": {
+          "type": "integer",
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991
+        },
+        "method": {
+          "const": "runtime.hello"
+        },
+        "params": {
+          "$ref": "#/$defs/runtime.hello.params"
+        }
+      },
+      "required": [
+        "jsonrpc",
+        "id",
+        "method",
+        "params"
+      ]
+    },
+    "sessions.create.params": {
+      "type": "object",
+      "properties": {
+        "principal": {
+          "type": "string"
+        },
+        "provider": {
+          "type": "string"
+        },
+        "cwd": {
+          "type": "string"
+        },
+        "model": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "sandbox": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "input": {}
+      },
+      "required": [
+        "principal",
+        "provider",
+        "cwd"
+      ]
+    },
+    "sessions.create.result": {
+      "type": "object",
+      "properties": {
+        "sessionId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "sessionId"
+      ]
+    },
+    "sessions.create.request": {
+      "type": "object",
+      "properties": {
+        "jsonrpc": {
+          "const": "2.0"
+        },
+        "id": {
+          "type": "integer",
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991
+        },
+        "method": {
+          "const": "sessions.create"
+        },
+        "params": {
+          "$ref": "#/$defs/sessions.create.params"
+        }
+      },
+      "required": [
+        "jsonrpc",
+        "id",
+        "method",
+        "params"
+      ]
+    },
+    "sessions.list.params": {
+      "type": "object",
+      "properties": {
+        "principal": {
+          "type": "string"
+        },
+        "cursor": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "limit": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "principal"
+      ]
+    },
+    "sessions.list.result": {
+      "type": "object",
+      "properties": {
+        "items": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "owner": {
+                "type": "string"
+              },
+              "vendor": {
+                "type": "string"
+              },
+              "cwd": {
+                "type": "string"
+              },
+              "model": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "policy": {
+                "type": "object",
+                "properties": {
+                  "mode": {
+                    "type": "string"
+                  },
+                  "sandbox": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "banner": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "mode"
+                ]
+              },
+              "sandbox": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "lastSeq": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "state": {
+                "type": "string"
+              },
+              "createdAt": {
+                "type": "string",
+                "format": "date-time",
+                "pattern": "Z$"
+              },
+              "endedAt": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "format": "date-time",
+                    "pattern": "Z$"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "endReason": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "id",
+              "owner",
+              "vendor",
+              "cwd",
+              "policy",
+              "lastSeq",
+              "state",
+              "createdAt"
+            ]
+          }
+        },
+        "next": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "items"
+      ]
+    },
+    "sessions.list.request": {
+      "type": "object",
+      "properties": {
+        "jsonrpc": {
+          "const": "2.0"
+        },
+        "id": {
+          "type": "integer",
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991
+        },
+        "method": {
+          "const": "sessions.list"
+        },
+        "params": {
+          "$ref": "#/$defs/sessions.list.params"
+        }
+      },
+      "required": [
+        "jsonrpc",
+        "id",
+        "method",
+        "params"
+      ]
+    },
+    "sessions.get.params": {
+      "type": "object",
+      "properties": {
+        "sessionId": {
+          "type": "string"
+        },
+        "principal": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "sessionId",
+        "principal"
+      ]
+    },
+    "sessions.get.result": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "owner": {
+          "type": "string"
+        },
+        "vendor": {
+          "type": "string"
+        },
+        "cwd": {
+          "type": "string"
+        },
+        "model": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "policy": {
+          "type": "object",
+          "properties": {
+            "mode": {
+              "type": "string"
+            },
+            "sandbox": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "banner": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "mode"
+          ]
+        },
+        "sandbox": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "lastSeq": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "state": {
+          "type": "string"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "Z$"
+        },
+        "endedAt": {
+          "anyOf": [
+            {
+              "type": "string",
+              "format": "date-time",
+              "pattern": "Z$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "endReason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "owner",
+        "vendor",
+        "cwd",
+        "policy",
+        "lastSeq",
+        "state",
+        "createdAt"
+      ]
+    },
+    "sessions.get.request": {
+      "type": "object",
+      "properties": {
+        "jsonrpc": {
+          "const": "2.0"
+        },
+        "id": {
+          "type": "integer",
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991
+        },
+        "method": {
+          "const": "sessions.get"
+        },
+        "params": {
+          "$ref": "#/$defs/sessions.get.params"
+        }
+      },
+      "required": [
+        "jsonrpc",
+        "id",
+        "method",
+        "params"
+      ]
+    },
+    "sessions.end.params": {
+      "type": "object",
+      "properties": {
+        "sessionId": {
+          "type": "string"
+        },
+        "principal": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "sessionId",
+        "principal"
+      ]
+    },
+    "sessions.end.result": {
+      "type": "null"
+    },
+    "sessions.end.request": {
+      "type": "object",
+      "properties": {
+        "jsonrpc": {
+          "const": "2.0"
+        },
+        "id": {
+          "type": "integer",
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991
+        },
+        "method": {
+          "const": "sessions.end"
+        },
+        "params": {
+          "$ref": "#/$defs/sessions.end.params"
+        }
+      },
+      "required": [
+        "jsonrpc",
+        "id",
+        "method",
+        "params"
+      ]
+    },
+    "sessions.remove.params": {
+      "type": "object",
+      "properties": {
+        "sessionId": {
+          "type": "string"
+        },
+        "principal": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "sessionId",
+        "principal"
+      ]
+    },
+    "sessions.remove.result": {
+      "type": "null"
+    },
+    "sessions.remove.request": {
+      "type": "object",
+      "properties": {
+        "jsonrpc": {
+          "const": "2.0"
+        },
+        "id": {
+          "type": "integer",
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991
+        },
+        "method": {
+          "const": "sessions.remove"
+        },
+        "params": {
+          "$ref": "#/$defs/sessions.remove.params"
+        }
+      },
+      "required": [
+        "jsonrpc",
+        "id",
+        "method",
+        "params"
+      ]
+    },
+    "turns.send.params": {
+      "type": "object",
+      "properties": {
+        "sessionId": {
+          "type": "string"
+        },
+        "principal": {
+          "type": "string"
+        },
+        "text": {
+          "type": "string"
+        },
+        "model": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "uploads": {
+          "anyOf": [
+            {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "sessionId",
+        "principal",
+        "text"
+      ]
+    },
+    "turns.send.result": {
+      "type": "object",
+      "properties": {
+        "turnId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "turnId"
+      ]
+    },
+    "turns.send.request": {
+      "type": "object",
+      "properties": {
+        "jsonrpc": {
+          "const": "2.0"
+        },
+        "id": {
+          "type": "integer",
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991
+        },
+        "method": {
+          "const": "turns.send"
+        },
+        "params": {
+          "$ref": "#/$defs/turns.send.params"
+        }
+      },
+      "required": [
+        "jsonrpc",
+        "id",
+        "method",
+        "params"
+      ]
+    },
+    "turns.interrupt.params": {
+      "type": "object",
+      "properties": {
+        "sessionId": {
+          "type": "string"
+        },
+        "principal": {
+          "type": "string"
+        },
+        "turnId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "sessionId",
+        "principal",
+        "turnId"
+      ]
+    },
+    "turns.interrupt.result": {
+      "type": "null"
+    },
+    "turns.interrupt.request": {
+      "type": "object",
+      "properties": {
+        "jsonrpc": {
+          "const": "2.0"
+        },
+        "id": {
+          "type": "integer",
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991
+        },
+        "method": {
+          "const": "turns.interrupt"
+        },
+        "params": {
+          "$ref": "#/$defs/turns.interrupt.params"
+        }
+      },
+      "required": [
+        "jsonrpc",
+        "id",
+        "method",
+        "params"
+      ]
+    },
+    "permissions.respond.params": {
+      "type": "object",
+      "properties": {
+        "sessionId": {
+          "type": "string"
+        },
+        "principal": {
+          "type": "string"
+        },
+        "requestId": {
+          "type": "string"
+        },
+        "decision": {
+          "enum": [
+            "allow",
+            "deny"
+          ]
+        },
+        "scope": {
+          "anyOf": [
+            {
+              "enum": [
+                "once",
+                "always"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "rule": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "sessionId",
+        "principal",
+        "requestId",
+        "decision"
+      ]
+    },
+    "permissions.respond.result": {
+      "type": "object",
+      "properties": {
+        "accepted": {
+          "type": "boolean"
+        },
+        "resolution": {
+          "anyOf": [
+            {
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "accepted"
+      ]
+    },
+    "permissions.respond.request": {
+      "type": "object",
+      "properties": {
+        "jsonrpc": {
+          "const": "2.0"
+        },
+        "id": {
+          "type": "integer",
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991
+        },
+        "method": {
+          "const": "permissions.respond"
+        },
+        "params": {
+          "$ref": "#/$defs/permissions.respond.params"
+        }
+      },
+      "required": [
+        "jsonrpc",
+        "id",
+        "method",
+        "params"
+      ]
+    },
+    "events.subscribe.params": {
+      "type": "object",
+      "properties": {
+        "sessionId": {
+          "type": "string"
+        },
+        "principal": {
+          "type": "string"
+        },
+        "fromSeq": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "sessionId",
+        "principal"
+      ]
+    },
+    "events.subscribe.result": {
+      "type": "object",
+      "properties": {
+        "subscriptionId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "subscriptionId"
+      ]
+    },
+    "events.subscribe.request": {
+      "type": "object",
+      "properties": {
+        "jsonrpc": {
+          "const": "2.0"
+        },
+        "id": {
+          "type": "integer",
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991
+        },
+        "method": {
+          "const": "events.subscribe"
+        },
+        "params": {
+          "$ref": "#/$defs/events.subscribe.params"
+        }
+      },
+      "required": [
+        "jsonrpc",
+        "id",
+        "method",
+        "params"
+      ]
+    },
+    "events.unsubscribe.params": {
+      "type": "object",
+      "properties": {
+        "subscriptionId": {
+          "type": "string"
+        },
+        "principal": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "subscriptionId",
+        "principal"
+      ]
+    },
+    "events.unsubscribe.result": {
+      "type": "null"
+    },
+    "events.unsubscribe.request": {
+      "type": "object",
+      "properties": {
+        "jsonrpc": {
+          "const": "2.0"
+        },
+        "id": {
+          "type": "integer",
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991
+        },
+        "method": {
+          "const": "events.unsubscribe"
+        },
+        "params": {
+          "$ref": "#/$defs/events.unsubscribe.params"
+        }
+      },
+      "required": [
+        "jsonrpc",
+        "id",
+        "method",
+        "params"
+      ]
+    },
+    "events.credit.params": {
+      "type": "object",
+      "properties": {
+        "subscriptionId": {
+          "type": "string"
+        },
+        "principal": {
+          "type": "string"
+        },
+        "count": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "subscriptionId",
+        "principal",
+        "count"
+      ]
+    },
+    "events.credit.result": {
+      "type": "null"
+    },
+    "events.credit.request": {
+      "type": "object",
+      "properties": {
+        "jsonrpc": {
+          "const": "2.0"
+        },
+        "id": {
+          "type": "integer",
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991
+        },
+        "method": {
+          "const": "events.credit"
+        },
+        "params": {
+          "$ref": "#/$defs/events.credit.params"
+        }
+      },
+      "required": [
+        "jsonrpc",
+        "id",
+        "method",
+        "params"
+      ]
+    },
+    "events.read.params": {
+      "type": "object",
+      "properties": {
+        "sessionId": {
+          "type": "string"
+        },
+        "principal": {
+          "type": "string"
+        },
+        "fromSeq": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "limit": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "sessionId",
+        "principal"
+      ]
+    },
+    "events.read.result": {
+      "type": "object",
+      "properties": {
+        "events": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "sessionId": {
+                "type": "string"
+              },
+              "ts": {
+                "type": "string",
+                "format": "date-time",
+                "pattern": "Z$"
+              },
+              "kind": {
+                "type": "string"
+              },
+              "data": {
+                "type": "object"
+              },
+              "seq": {
+                "anyOf": [
+                  {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "raw": {
+                "anyOf": [
+                  {
+                    "type": "object"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "sessionId",
+              "ts",
+              "kind",
+              "data"
+            ]
+          }
+        },
+        "nextSeq": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "events",
+        "nextSeq"
+      ]
+    },
+    "events.read.request": {
+      "type": "object",
+      "properties": {
+        "jsonrpc": {
+          "const": "2.0"
+        },
+        "id": {
+          "type": "integer",
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991
+        },
+        "method": {
+          "const": "events.read"
+        },
+        "params": {
+          "$ref": "#/$defs/events.read.params"
+        }
+      },
+      "required": [
+        "jsonrpc",
+        "id",
+        "method",
+        "params"
+      ]
+    },
+    "events.append.params": {
+      "type": "object",
+      "properties": {
+        "sessionId": {
+          "type": "string"
+        },
+        "principal": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string",
+          "pattern": "^x-[a-z][a-z0-9-]*\\.[a-zA-Z0-9_.-]+$"
+        },
+        "data": {
+          "type": "object"
+        }
+      },
+      "required": [
+        "sessionId",
+        "principal",
+        "kind",
+        "data"
+      ]
+    },
+    "events.append.result": {
+      "type": "object",
+      "properties": {
+        "sessionId": {
+          "type": "string"
+        },
+        "ts": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "Z$"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "data": {
+          "type": "object"
+        },
+        "seq": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "raw": {
+          "anyOf": [
+            {
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "sessionId",
+        "ts",
+        "kind",
+        "data"
+      ]
+    },
+    "events.append.request": {
+      "type": "object",
+      "properties": {
+        "jsonrpc": {
+          "const": "2.0"
+        },
+        "id": {
+          "type": "integer",
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991
+        },
+        "method": {
+          "const": "events.append"
+        },
+        "params": {
+          "$ref": "#/$defs/events.append.params"
+        }
+      },
+      "required": [
+        "jsonrpc",
+        "id",
+        "method",
+        "params"
+      ]
+    },
+    "toolOutput.read.params": {
+      "type": "object",
+      "properties": {
+        "sessionId": {
+          "type": "string"
+        },
+        "principal": {
+          "type": "string"
+        },
+        "turnId": {
+          "type": "string"
+        },
+        "offset": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "length": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 262144
+        },
+        "callId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "sessionId",
+        "principal",
+        "turnId",
+        "offset",
+        "length",
+        "callId"
+      ]
+    },
+    "toolOutput.read.result": {
+      "type": "object",
+      "properties": {
+        "data": {
+          "type": "string"
+        },
+        "nextOffset": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "eof": {
+          "type": "boolean"
+        },
+        "contentType": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "data",
+        "nextOffset",
+        "eof"
+      ]
+    },
+    "toolOutput.read.request": {
+      "type": "object",
+      "properties": {
+        "jsonrpc": {
+          "const": "2.0"
+        },
+        "id": {
+          "type": "integer",
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991
+        },
+        "method": {
+          "const": "toolOutput.read"
+        },
+        "params": {
+          "$ref": "#/$defs/toolOutput.read.params"
+        }
+      },
+      "required": [
+        "jsonrpc",
+        "id",
+        "method",
+        "params"
+      ]
+    },
+    "attachments.begin.params": {
+      "type": "object",
+      "properties": {
+        "sessionId": {
+          "type": "string"
+        },
+        "principal": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "size": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "contentType": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "sessionId",
+        "principal",
+        "name",
+        "size"
+      ]
+    },
+    "attachments.begin.result": {
+      "type": "object",
+      "properties": {
+        "uploadId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "uploadId"
+      ]
+    },
+    "attachments.begin.request": {
+      "type": "object",
+      "properties": {
+        "jsonrpc": {
+          "const": "2.0"
+        },
+        "id": {
+          "type": "integer",
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991
+        },
+        "method": {
+          "const": "attachments.begin"
+        },
+        "params": {
+          "$ref": "#/$defs/attachments.begin.params"
+        }
+      },
+      "required": [
+        "jsonrpc",
+        "id",
+        "method",
+        "params"
+      ]
+    },
+    "attachments.write.params": {
+      "type": "object",
+      "properties": {
+        "uploadId": {
+          "type": "string"
+        },
+        "principal": {
+          "type": "string"
+        },
+        "offset": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "data": {
+          "type": "string",
+          "maxLength": 349528,
+          "pattern": "^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$"
+        }
+      },
+      "required": [
+        "uploadId",
+        "principal",
+        "offset",
+        "data"
+      ]
+    },
+    "attachments.write.result": {
+      "type": "object",
+      "properties": {
+        "nextOffset": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "nextOffset"
+      ]
+    },
+    "attachments.write.request": {
+      "type": "object",
+      "properties": {
+        "jsonrpc": {
+          "const": "2.0"
+        },
+        "id": {
+          "type": "integer",
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991
+        },
+        "method": {
+          "const": "attachments.write"
+        },
+        "params": {
+          "$ref": "#/$defs/attachments.write.params"
+        }
+      },
+      "required": [
+        "jsonrpc",
+        "id",
+        "method",
+        "params"
+      ]
+    },
+    "attachments.commit.params": {
+      "type": "object",
+      "properties": {
+        "uploadId": {
+          "type": "string"
+        },
+        "principal": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "uploadId",
+        "principal"
+      ]
+    },
+    "attachments.commit.result": {
+      "type": "object",
+      "properties": {
+        "committedUploadId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "committedUploadId"
+      ]
+    },
+    "attachments.commit.request": {
+      "type": "object",
+      "properties": {
+        "jsonrpc": {
+          "const": "2.0"
+        },
+        "id": {
+          "type": "integer",
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991
+        },
+        "method": {
+          "const": "attachments.commit"
+        },
+        "params": {
+          "$ref": "#/$defs/attachments.commit.params"
+        }
+      },
+      "required": [
+        "jsonrpc",
+        "id",
+        "method",
+        "params"
+      ]
+    },
+    "attachments.abort.params": {
+      "type": "object",
+      "properties": {
+        "uploadId": {
+          "type": "string"
+        },
+        "principal": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "uploadId",
+        "principal"
+      ]
+    },
+    "attachments.abort.result": {
+      "type": "null"
+    },
+    "attachments.abort.request": {
+      "type": "object",
+      "properties": {
+        "jsonrpc": {
+          "const": "2.0"
+        },
+        "id": {
+          "type": "integer",
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991
+        },
+        "method": {
+          "const": "attachments.abort"
+        },
+        "params": {
+          "$ref": "#/$defs/attachments.abort.params"
+        }
+      },
+      "required": [
+        "jsonrpc",
+        "id",
+        "method",
+        "params"
+      ]
+    },
+    "attachments.read.params": {
+      "type": "object",
+      "properties": {
+        "sessionId": {
+          "type": "string"
+        },
+        "principal": {
+          "type": "string"
+        },
+        "turnId": {
+          "type": "string"
+        },
+        "offset": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "length": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 262144
+        },
+        "attachmentId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "sessionId",
+        "principal",
+        "turnId",
+        "offset",
+        "length",
+        "attachmentId"
+      ]
+    },
+    "attachments.read.result": {
+      "type": "object",
+      "properties": {
+        "data": {
+          "type": "string"
+        },
+        "nextOffset": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "eof": {
+          "type": "boolean"
+        },
+        "contentType": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "data",
+        "nextOffset",
+        "eof"
+      ]
+    },
+    "attachments.read.request": {
+      "type": "object",
+      "properties": {
+        "jsonrpc": {
+          "const": "2.0"
+        },
+        "id": {
+          "type": "integer",
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991
+        },
+        "method": {
+          "const": "attachments.read"
+        },
+        "params": {
+          "$ref": "#/$defs/attachments.read.params"
+        }
+      },
+      "required": [
+        "jsonrpc",
+        "id",
+        "method",
+        "params"
+      ]
+    },
+    "providers.list.params": {
+      "type": "object",
+      "properties": {},
+      "required": []
+    },
+    "providers.list.result": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "label": {
+            "type": "string"
+          },
+          "available": {
+            "type": "boolean"
+          },
+          "unavailableReason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "cliVersion": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "capabilities": {
+            "type": "object"
+          }
+        },
+        "required": [
+          "id",
+          "label",
+          "available",
+          "capabilities"
+        ]
+      }
+    },
+    "providers.list.request": {
+      "type": "object",
+      "properties": {
+        "jsonrpc": {
+          "const": "2.0"
+        },
+        "id": {
+          "type": "integer",
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991
+        },
+        "method": {
+          "const": "providers.list"
+        },
+        "params": {
+          "$ref": "#/$defs/providers.list.params"
+        }
+      },
+      "required": [
+        "jsonrpc",
+        "id",
+        "method",
+        "params"
+      ]
+    },
+    "providers.refresh.params": {
+      "type": "object",
+      "properties": {},
+      "required": []
+    },
+    "providers.refresh.result": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "label": {
+            "type": "string"
+          },
+          "available": {
+            "type": "boolean"
+          },
+          "unavailableReason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "cliVersion": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "capabilities": {
+            "type": "object"
+          }
+        },
+        "required": [
+          "id",
+          "label",
+          "available",
+          "capabilities"
+        ]
+      }
+    },
+    "providers.refresh.request": {
+      "type": "object",
+      "properties": {
+        "jsonrpc": {
+          "const": "2.0"
+        },
+        "id": {
+          "type": "integer",
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991
+        },
+        "method": {
+          "const": "providers.refresh"
+        },
+        "params": {
+          "$ref": "#/$defs/providers.refresh.params"
+        }
+      },
+      "required": [
+        "jsonrpc",
+        "id",
+        "method",
+        "params"
+      ]
+    },
+    "checkpoints.list.params": {
+      "type": "object",
+      "properties": {
+        "sessionId": {
+          "type": "string"
+        },
+        "principal": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "sessionId",
+        "principal"
+      ]
+    },
+    "checkpoints.list.result": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "sha": {
+            "type": "string"
+          },
+          "label": {
+            "type": "string"
+          },
+          "ts": {
+            "type": "string",
+            "format": "date-time",
+            "pattern": "Z$"
+          }
+        },
+        "required": [
+          "sha",
+          "label",
+          "ts"
+        ]
+      }
+    },
+    "checkpoints.list.request": {
+      "type": "object",
+      "properties": {
+        "jsonrpc": {
+          "const": "2.0"
+        },
+        "id": {
+          "type": "integer",
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991
+        },
+        "method": {
+          "const": "checkpoints.list"
+        },
+        "params": {
+          "$ref": "#/$defs/checkpoints.list.params"
+        }
+      },
+      "required": [
+        "jsonrpc",
+        "id",
+        "method",
+        "params"
+      ]
+    },
+    "checkpoints.restore.params": {
+      "type": "object",
+      "properties": {
+        "sessionId": {
+          "type": "string"
+        },
+        "principal": {
+          "type": "string"
+        },
+        "sha": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "sessionId",
+        "principal",
+        "sha"
+      ]
+    },
+    "checkpoints.restore.result": {
+      "type": "object",
+      "properties": {
+        "safety": {
+          "type": "object",
+          "properties": {
+            "sha": {
+              "type": "string"
+            },
+            "label": {
+              "type": "string"
+            },
+            "ts": {
+              "type": "string",
+              "format": "date-time",
+              "pattern": "Z$"
+            }
+          },
+          "required": [
+            "sha",
+            "label",
+            "ts"
+          ]
+        },
+        "unreached": {
+          "anyOf": [
+            {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "path": {
+                    "type": "string"
+                  },
+                  "change": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "path",
+                  "change"
+                ]
+              }
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "safety"
+      ]
+    },
+    "checkpoints.restore.request": {
+      "type": "object",
+      "properties": {
+        "jsonrpc": {
+          "const": "2.0"
+        },
+        "id": {
+          "type": "integer",
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991
+        },
+        "method": {
+          "const": "checkpoints.restore"
+        },
+        "params": {
+          "$ref": "#/$defs/checkpoints.restore.params"
+        }
+      },
+      "required": [
+        "jsonrpc",
+        "id",
+        "method",
+        "params"
+      ]
+    },
+    "admin.sessions.list.params": {
+      "type": "object",
+      "properties": {
+        "cursor": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "limit": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "principal": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": []
+    },
+    "admin.sessions.list.result": {
+      "type": "object",
+      "properties": {
+        "items": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "owner": {
+                "type": "string"
+              },
+              "vendor": {
+                "type": "string"
+              },
+              "cwd": {
+                "type": "string"
+              },
+              "model": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "policy": {
+                "type": "object",
+                "properties": {
+                  "mode": {
+                    "type": "string"
+                  },
+                  "sandbox": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "banner": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "mode"
+                ]
+              },
+              "sandbox": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "lastSeq": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "state": {
+                "type": "string"
+              },
+              "createdAt": {
+                "type": "string",
+                "format": "date-time",
+                "pattern": "Z$"
+              },
+              "endedAt": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "format": "date-time",
+                    "pattern": "Z$"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "endReason": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "id",
+              "owner",
+              "vendor",
+              "cwd",
+              "policy",
+              "lastSeq",
+              "state",
+              "createdAt"
+            ]
+          }
+        },
+        "next": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "items"
+      ]
+    },
+    "admin.sessions.list.request": {
+      "type": "object",
+      "properties": {
+        "jsonrpc": {
+          "const": "2.0"
+        },
+        "id": {
+          "type": "integer",
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991
+        },
+        "method": {
+          "const": "admin.sessions.list"
+        },
+        "params": {
+          "$ref": "#/$defs/admin.sessions.list.params"
+        }
+      },
+      "required": [
+        "jsonrpc",
+        "id",
+        "method",
+        "params"
+      ]
+    },
+    "admin.sessions.snapshot.params": {
+      "type": "object",
+      "properties": {
+        "sessionId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "sessionId"
+      ]
+    },
+    "admin.sessions.snapshot.result": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "owner": {
+          "type": "string"
+        },
+        "vendor": {
+          "type": "string"
+        },
+        "cwd": {
+          "type": "string"
+        },
+        "model": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "policy": {
+          "type": "object",
+          "properties": {
+            "mode": {
+              "type": "string"
+            },
+            "sandbox": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "banner": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "mode"
+          ]
+        },
+        "sandbox": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "lastSeq": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "state": {
+          "type": "string"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "Z$"
+        },
+        "endedAt": {
+          "anyOf": [
+            {
+              "type": "string",
+              "format": "date-time",
+              "pattern": "Z$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "endReason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "owner",
+        "vendor",
+        "cwd",
+        "policy",
+        "lastSeq",
+        "state",
+        "createdAt"
+      ]
+    },
+    "admin.sessions.snapshot.request": {
+      "type": "object",
+      "properties": {
+        "jsonrpc": {
+          "const": "2.0"
+        },
+        "id": {
+          "type": "integer",
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991
+        },
+        "method": {
+          "const": "admin.sessions.snapshot"
+        },
+        "params": {
+          "$ref": "#/$defs/admin.sessions.snapshot.params"
+        }
+      },
+      "required": [
+        "jsonrpc",
+        "id",
+        "method",
+        "params"
+      ]
+    },
+    "admin.sessions.remove.params": {
+      "type": "object",
+      "properties": {
+        "sessionId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "sessionId"
+      ]
+    },
+    "admin.sessions.remove.result": {
+      "type": "null"
+    },
+    "admin.sessions.remove.request": {
+      "type": "object",
+      "properties": {
+        "jsonrpc": {
+          "const": "2.0"
+        },
+        "id": {
+          "type": "integer",
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991
+        },
+        "method": {
+          "const": "admin.sessions.remove"
+        },
+        "params": {
+          "$ref": "#/$defs/admin.sessions.remove.params"
+        }
+      },
+      "required": [
+        "jsonrpc",
+        "id",
+        "method",
+        "params"
+      ]
+    },
+    "admin.sessions.reassignPrincipal.params": {
+      "type": "object",
+      "properties": {
+        "sessionId": {
+          "type": "string"
+        },
+        "principal": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "sessionId",
+        "principal"
+      ]
+    },
+    "admin.sessions.reassignPrincipal.result": {
+      "type": "null"
+    },
+    "admin.sessions.reassignPrincipal.request": {
+      "type": "object",
+      "properties": {
+        "jsonrpc": {
+          "const": "2.0"
+        },
+        "id": {
+          "type": "integer",
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991
+        },
+        "method": {
+          "const": "admin.sessions.reassignPrincipal"
+        },
+        "params": {
+          "$ref": "#/$defs/admin.sessions.reassignPrincipal.params"
+        }
+      },
+      "required": [
+        "jsonrpc",
+        "id",
+        "method",
+        "params"
+      ]
+    },
+    "admin.audit.read.params": {
+      "type": "object",
+      "properties": {
+        "cursor": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "limit": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "query": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "sessionId": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "principal": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "since": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "format": "date-time",
+                      "pattern": "Z$"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "until": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "format": "date-time",
+                      "pattern": "Z$"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "incidentsOnly": {
+                  "anyOf": [
+                    {
+                      "type": "boolean"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              },
+              "required": []
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": []
+    },
+    "admin.audit.read.result": {
+      "type": "object",
+      "properties": {
+        "records": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          }
+        },
+        "nextCursor": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "records"
+      ]
+    },
+    "admin.audit.read.request": {
+      "type": "object",
+      "properties": {
+        "jsonrpc": {
+          "const": "2.0"
+        },
+        "id": {
+          "type": "integer",
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991
+        },
+        "method": {
+          "const": "admin.audit.read"
+        },
+        "params": {
+          "$ref": "#/$defs/admin.audit.read.params"
+        }
+      },
+      "required": [
+        "jsonrpc",
+        "id",
+        "method",
+        "params"
+      ]
+    },
+    "host.create.prepare.params": {
+      "type": "object",
+      "properties": {
+        "createAttemptId": {
+          "type": "string"
+        },
+        "principal": {
+          "type": "string"
+        },
+        "input": {}
+      },
+      "required": [
+        "createAttemptId",
+        "principal"
+      ]
+    },
+    "host.create.prepare.result": {
+      "type": "null"
+    },
+    "host.create.prepare.request": {
+      "type": "object",
+      "properties": {
+        "jsonrpc": {
+          "const": "2.0"
+        },
+        "id": {
+          "type": "string",
+          "pattern": "^r:[1-9][0-9]*$"
+        },
+        "method": {
+          "const": "host.create.prepare"
+        },
+        "params": {
+          "$ref": "#/$defs/host.create.prepare.params"
+        }
+      },
+      "required": [
+        "jsonrpc",
+        "id",
+        "method",
+        "params"
+      ]
+    },
+    "host.create.commit.params": {
+      "type": "object",
+      "properties": {
+        "createAttemptId": {
+          "type": "string"
+        },
+        "sessionId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "createAttemptId",
+        "sessionId"
+      ]
+    },
+    "host.create.commit.result": {
+      "type": "null"
+    },
+    "host.create.commit.request": {
+      "type": "object",
+      "properties": {
+        "jsonrpc": {
+          "const": "2.0"
+        },
+        "id": {
+          "type": "string",
+          "pattern": "^r:[1-9][0-9]*$"
+        },
+        "method": {
+          "const": "host.create.commit"
+        },
+        "params": {
+          "$ref": "#/$defs/host.create.commit.params"
+        }
+      },
+      "required": [
+        "jsonrpc",
+        "id",
+        "method",
+        "params"
+      ]
+    },
+    "host.create.abort.params": {
+      "type": "object",
+      "properties": {
+        "createAttemptId": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "createAttemptId",
+        "reason"
+      ]
+    },
+    "host.create.abort.result": {
+      "type": "object",
+      "properties": {
+        "state": {
+          "type": "string"
+        },
+        "sessionId": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "state"
+      ]
+    },
+    "host.create.abort.request": {
+      "type": "object",
+      "properties": {
+        "jsonrpc": {
+          "const": "2.0"
+        },
+        "id": {
+          "type": "string",
+          "pattern": "^r:[1-9][0-9]*$"
+        },
+        "method": {
+          "const": "host.create.abort"
+        },
+        "params": {
+          "$ref": "#/$defs/host.create.abort.params"
+        }
+      },
+      "required": [
+        "jsonrpc",
+        "id",
+        "method",
+        "params"
+      ]
+    },
+    "host.create.status.params": {
+      "type": "object",
+      "properties": {
+        "createAttemptId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "createAttemptId"
+      ]
+    },
+    "host.create.status.result": {
+      "type": "object",
+      "properties": {
+        "state": {
+          "type": "string"
+        },
+        "sessionId": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "state"
+      ]
+    },
+    "host.create.status.request": {
+      "type": "object",
+      "properties": {
+        "jsonrpc": {
+          "const": "2.0"
+        },
+        "id": {
+          "type": "string",
+          "pattern": "^r:[1-9][0-9]*$"
+        },
+        "method": {
+          "const": "host.create.status"
+        },
+        "params": {
+          "$ref": "#/$defs/host.create.status.params"
+        }
+      },
+      "required": [
+        "jsonrpc",
+        "id",
+        "method",
+        "params"
+      ]
+    },
+    "request": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/runtime.hello.request"
+        },
+        {
+          "$ref": "#/$defs/sessions.create.request"
+        },
+        {
+          "$ref": "#/$defs/sessions.list.request"
+        },
+        {
+          "$ref": "#/$defs/sessions.get.request"
+        },
+        {
+          "$ref": "#/$defs/sessions.end.request"
+        },
+        {
+          "$ref": "#/$defs/sessions.remove.request"
+        },
+        {
+          "$ref": "#/$defs/turns.send.request"
+        },
+        {
+          "$ref": "#/$defs/turns.interrupt.request"
+        },
+        {
+          "$ref": "#/$defs/permissions.respond.request"
+        },
+        {
+          "$ref": "#/$defs/events.subscribe.request"
+        },
+        {
+          "$ref": "#/$defs/events.unsubscribe.request"
+        },
+        {
+          "$ref": "#/$defs/events.credit.request"
+        },
+        {
+          "$ref": "#/$defs/events.read.request"
+        },
+        {
+          "$ref": "#/$defs/events.append.request"
+        },
+        {
+          "$ref": "#/$defs/toolOutput.read.request"
+        },
+        {
+          "$ref": "#/$defs/attachments.begin.request"
+        },
+        {
+          "$ref": "#/$defs/attachments.write.request"
+        },
+        {
+          "$ref": "#/$defs/attachments.commit.request"
+        },
+        {
+          "$ref": "#/$defs/attachments.abort.request"
+        },
+        {
+          "$ref": "#/$defs/attachments.read.request"
+        },
+        {
+          "$ref": "#/$defs/providers.list.request"
+        },
+        {
+          "$ref": "#/$defs/providers.refresh.request"
+        },
+        {
+          "$ref": "#/$defs/checkpoints.list.request"
+        },
+        {
+          "$ref": "#/$defs/checkpoints.restore.request"
+        },
+        {
+          "$ref": "#/$defs/admin.sessions.list.request"
+        },
+        {
+          "$ref": "#/$defs/admin.sessions.snapshot.request"
+        },
+        {
+          "$ref": "#/$defs/admin.sessions.remove.request"
+        },
+        {
+          "$ref": "#/$defs/admin.sessions.reassignPrincipal.request"
+        },
+        {
+          "$ref": "#/$defs/admin.audit.read.request"
+        },
+        {
+          "$ref": "#/$defs/host.create.prepare.request"
+        },
+        {
+          "$ref": "#/$defs/host.create.commit.request"
+        },
+        {
+          "$ref": "#/$defs/host.create.abort.request"
+        },
+        {
+          "$ref": "#/$defs/host.create.status.request"
+        }
+      ]
+    },
+    "response": {
+      "type": "object",
+      "properties": {
+        "jsonrpc": {
+          "const": "2.0"
+        },
+        "id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^r:[1-9][0-9]*$"
+            },
+            {
+              "type": "integer",
+              "minimum": -9007199254740991,
+              "maximum": 9007199254740991
+            }
+          ]
+        },
+        "result": {}
+      },
+      "required": [
+        "jsonrpc",
+        "id",
+        "result"
+      ]
+    },
+    "error": {
+      "type": "object",
+      "properties": {
+        "jsonrpc": {
+          "const": "2.0"
+        },
+        "id": {
+          "anyOf": [
+            {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "pattern": "^r:[1-9][0-9]*$"
+                },
+                {
+                  "type": "integer",
+                  "minimum": -9007199254740991,
+                  "maximum": 9007199254740991
+                }
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "error": {
+          "type": "object",
+          "properties": {
+            "code": {
+              "enum": [
+                -32700,
+                -32600,
+                -32601,
+                -32602,
+                -32603,
+                -32000
+              ]
+            },
+            "message": {
+              "type": "string"
+            },
+            "data": {
+              "anyOf": [
+                {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "string"
+                    },
+                    "detail": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "retryable": {
+                      "anyOf": [
+                        {
+                          "type": "boolean"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    }
+                  },
+                  "required": [
+                    "code"
+                  ]
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "code",
+            "message"
+          ],
+          "allOf": [
+            {
+              "if": {
+                "properties": {
+                  "code": {
+                    "const": -32000
+                  }
+                },
+                "required": [
+                  "code"
+                ]
+              },
+              "then": {
+                "required": [
+                  "data"
+                ],
+                "properties": {
+                  "data": {
+                    "type": "object",
+                    "properties": {
+                      "code": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "code"
+                    ]
+                  }
+                }
+              }
+            }
+          ]
+        }
+      },
+      "required": [
+        "jsonrpc",
+        "id",
+        "error"
+      ]
+    },
+    "notification": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "jsonrpc": {
+              "const": "2.0"
+            },
+            "method": {
+              "const": "events.event"
+            },
+            "params": {
+              "type": "object",
+              "properties": {
+                "subscriptionId": {
+                  "type": "string"
+                },
+                "event": {
+                  "$ref": "#/$defs/event"
+                }
+              },
+              "required": [
+                "subscriptionId",
+                "event"
+              ]
+            }
+          },
+          "required": [
+            "jsonrpc",
+            "method",
+            "params"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "jsonrpc": {
+              "const": "2.0"
+            },
+            "method": {
+              "const": "$/cancel"
+            },
+            "params": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "pattern": "^r:[1-9][0-9]*$"
+                    },
+                    {
+                      "type": "integer",
+                      "minimum": -9007199254740991,
+                      "maximum": 9007199254740991
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "id"
+              ]
+            }
+          },
+          "required": [
+            "jsonrpc",
+            "method",
+            "params"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "jsonrpc": {
+              "const": "2.0"
+            },
+            "method": {
+              "const": "runtime.heartbeat"
+            },
+            "params": {
+              "type": "object",
+              "properties": {},
+              "required": []
+            }
+          },
+          "required": [
+            "jsonrpc",
+            "method",
+            "params"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "jsonrpc": {
+              "const": "2.0"
+            },
+            "method": {
+              "const": "runtime.protocolError"
+            },
+            "params": {
+              "type": "object",
+              "properties": {
+                "code": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "code"
+              ]
+            }
+          },
+          "required": [
+            "jsonrpc",
+            "method",
+            "params"
+          ]
+        }
+      ]
+    }
+  },
+  "oneOf": [
+    {
+      "$ref": "#/$defs/request"
+    },
+    {
+      "$ref": "#/$defs/response"
+    },
+    {
+      "$ref": "#/$defs/error"
+    },
+    {
+      "$ref": "#/$defs/notification"
+    }
+  ]
+}

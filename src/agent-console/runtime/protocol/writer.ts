@@ -13,6 +13,7 @@ export class RpcWriter {
   private blocked = false;
   private stopped = false;
   private scheduled = false;
+  private controlBurst = 0;
   constructor(private output: Writable, private fault: (reason: string) => void,
     private budget = 2 * LINE_BYTES, private controlLimit = 256) {
     output.on('drain', () => { this.blocked = false; this.wake(); });
@@ -20,7 +21,9 @@ export class RpcWriter {
   }
   private fail(reason: string) { if (!this.stopped) { this.close(); this.fault(reason); } }
   encode(value: unknown): Delivery | undefined {
-    const line = JSON.stringify(value) + '\n', bytes = Buffer.byteLength(line);
+    let line: string;
+    try { line = JSON.stringify(value) + '\n'; } catch { this.fail('invalid_outgoing_value'); return; }
+    const bytes = Buffer.byteLength(line);
     if (bytes - 1 > LINE_BYTES) { this.fail('outgoing_line_too_large'); return; }
     return { line, bytes, delivered() {} };
   }
@@ -46,15 +49,17 @@ export class RpcWriter {
     if (this.stopped || this.blocked) return;
     // Yield after a bounded batch, so a fully credited replay cannot starve reads.
     for (let batch = 0; batch < 32; batch++) {
-      let item = this.controls.shift();
-      if (item) this.bytes -= item.bytes;
-      else {
+      let item: Delivery | undefined;
+      if (this.controls.length && this.controlBurst < 8) {
+        item = this.controls.shift()!; this.bytes -= item.bytes; this.controlBurst++;
+      } else {
         const sources = [...this.sources.values()];
         for (let n = 0; n < sources.length; n++) {
           this.cursor %= sources.length;
           item = sources[this.cursor++]!.next();
-          if (item) break;
+          if (item) { this.controlBurst = 0; break; }
         }
+        if (!item && this.controls.length) { item = this.controls.shift()!; this.bytes -= item.bytes; this.controlBurst++; }
       }
       if (!item) return;
       if (this.output.writableLength + item.bytes > this.budget) { this.fail('writer_budget_exhausted'); return; }

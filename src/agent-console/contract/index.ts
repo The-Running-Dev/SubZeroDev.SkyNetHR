@@ -231,6 +231,7 @@ export type ErrorEventKind =
   | 'adapter_unknown_record'
   | 'adapter_bad_line'
   | 'adapter_schema_mismatch'
+  | 'adapter_output_overflow'
   | 'checkpoint_restore_failed'
   | 'session_delete_incomplete';
 

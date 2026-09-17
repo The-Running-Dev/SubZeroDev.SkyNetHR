@@ -3,15 +3,21 @@ import type { Envelope, Frame, SessionCore, SessionId, Seq, Subscription } from 
 import { isFrame } from '../../core/types.js';
 import { applicationError } from './peer.js';
 import { RpcWriter, type Delivery } from './writer.js';
+import { wireEvent } from './events.js';
 
 export class Subscriptions {
   private entries = new Map<string, { principal: string; sessionId: SessionId; credit: number; queue: Delivery[]; bytes: number;
     through: number; stopped: boolean; subscription?: Subscription }>();
   constructor(private core: SessionCore, private writer: RpcWriter, private budget: number) {}
   async subscribe(sessionId: SessionId, principal: string, fromSeq: number) {
+    if (this.entries.size >= 1024) throw applicationError('bad_request', 'subscription limit reached');
     const id = randomUUID();
     const entry: NonNullable<ReturnType<typeof this.entries.get>> = { principal, sessionId, credit: 0, queue: [], bytes: 0, through: fromSeq, stopped: false };
     this.entries.set(id, entry);
+    const retire = () => {
+      entry.stopped = true; entry.queue = []; entry.bytes = 0; entry.subscription?.close();
+      this.writer.remove(id); this.entries.delete(id);
+    };
     this.writer.add(id, { next: () => {
       if (entry.credit === 0) return;
       const item = entry.queue.shift();
@@ -21,7 +27,7 @@ export class Subscriptions {
     const gap = () => {
       if (entry.stopped) return;
       if (this.writer.backpressured) { this.writer.linkFault(); return; }
-      entry.stopped = true; entry.queue = []; entry.bytes = 0; entry.subscription?.close();
+      retire();
       // A control notification consumes no credit; the watermark never advances.
       this.writer.control({ jsonrpc: '2.0', method: 'events.event', params: { subscriptionId: id,
         event: { sessionId, seq: entry.through, ts: new Date().toISOString(), kind: 'error',
@@ -30,18 +36,18 @@ export class Subscriptions {
     const deliver = (event: Envelope | Frame) => {
       if (entry.stopped) return;
       if (!isFrame(event) && event.kind === 'error' && event.data.kind === 'replay_gap') {
-        entry.stopped = true; entry.queue = []; entry.bytes = 0;
+        retire();
         this.writer.control({ jsonrpc: '2.0', method: 'events.event', params: { subscriptionId: id, event } });
-        entry.subscription?.close(); return;
+        return;
       }
-      const item = this.writer.encode({ jsonrpc: '2.0', method: 'events.event', params: { subscriptionId: id, event } });
+      const item = this.writer.encode({ jsonrpc: '2.0', method: 'events.event', params: { subscriptionId: id, event: wireEvent(event) } });
       if (!item) return;
       if (entry.queue.length >= this.budget || entry.bytes + item.bytes > 8 * 1024 * 1024) { gap(); return; }
       item.delivered = () => { if (!isFrame(event)) entry.through = event.seq; };
       entry.queue.push(item); entry.bytes += item.bytes; this.writer.wake();
     };
     const result = await this.core.subscribe(sessionId, principal, fromSeq as Seq | 0, { deliver,
-      close: () => { entry.stopped = true; entry.queue = []; entry.bytes = 0; } });
+      close: retire });
     if (!result.ok) { this.writer.remove(id); this.entries.delete(id); return result; }
     entry.subscription = result.value;
     if (entry.stopped) result.value.close();

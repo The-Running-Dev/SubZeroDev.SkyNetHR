@@ -14,6 +14,8 @@ import type { ProviderRegistry } from '../providers/registry.js';
 import { RpcPeer, RpcError, applicationError } from './protocol/peer.js';
 import { Subscriptions } from './protocol/subscriptions.js';
 import { object, text, optionalText, integer, strings, bool, choice } from './protocol/params.js';
+import { wireEvent } from './protocol/events.js';
+import { UploadFiles } from './uploads.js';
 
 export const PROTOCOL_VERSION = '1.0.0';
 const HOST_METHODS = ['host.create.prepare', 'host.create.commit', 'host.create.abort', 'host.create.status'] as const;
@@ -36,27 +38,40 @@ export function runRuntime(input: Readable, output: Writable, dependencies: Runt
   let options: RuntimeOptions | undefined;
   let hello = false, ready = false, stopped = false;
   const registry = dependencies.registry ?? createBuiltinRegistry();
-  const uploads = new Map<string, { sessionId: SessionId; principal: string; expires: number }>();
+  const uploads = new Map<string, { sessionId: SessionId; principal: string; expires: number; busy: boolean }>();
+  let uploadFiles = new UploadFiles(undefined);
+  const expiry = setInterval(() => {
+    for (const [id, handle] of uploads) if (!handle.busy && handle.expires <= Date.now()) {
+      uploads.delete(id); void uploadFiles.remove(handle.sessionId, id);
+    }
+  }, 30_000);
+  expiry.unref();
   const peer = new RpcPeer(input, output, dispatch, reason => { void shutdown(reason); }, dependencies.heartbeat);
   let done!: () => void;
   const closed = new Promise<void>(resolve => { done = resolve; });
 
   async function shutdown(reason: string) {
     if (stopped) return;
-    stopped = true; ready = false; subscriptions?.close(); input.pause();
+    stopped = true; ready = false; subscriptions?.close(); input.pause(); clearInterval(expiry);
     const deadline = setTimeout(() => { dependencies.onExit?.(reason); done(); }, 4900);
     deadline.unref();
-    try { await core?.shutdown(); await store?.lease.release(); await store?.close(); }
-    finally { clearTimeout(deadline); dependencies.onExit?.(reason); done(); }
+    try {
+      await core?.shutdown().catch(error => console.warn('shutdown', error));
+      await core?.flush().catch(error => console.warn('flush', error));
+      await Promise.all([...uploads].map(([id, handle]) => uploadFiles.remove(handle.sessionId, id)));
+      uploads.clear();
+      await store?.close().catch(error => console.warn('store close', error));
+      await store?.lease.release().catch(error => console.warn('lease release', error));
+    } finally { clearTimeout(deadline); dependencies.onExit?.(reason); done(); }
   }
-  function hostCallbacks(methods: string[]): HostCreateCallbacks {
-    if (methods.length === 0) return createHostAttempts({ prepare: () => ({ ok: true, value: undefined }),
+  function hostCallbacks(methods: string[], timeoutMs: number): HostCreateCallbacks {
+    if (!HOST_METHODS.some(method => methods.includes(method))) return createHostAttempts({ prepare: () => ({ ok: true, value: undefined }),
       commit: async () => ({ ok: true, value: undefined }), abort: () => {} });
     if (HOST_METHODS.some(m => !methods.includes(m))) throw new RpcError(-32602, 'Declare all four host create methods together');
     const preparing = new Map<string, string>();
     async function invoke(method: string, params: unknown) {
       if (!methods.includes(method)) throw applicationError('host_method_unavailable');
-      return peer.call(method, params).result;
+      return peer.call(method, params, timeoutMs).result;
     }
     return {
       async prepare(id, principal, data) {
@@ -90,16 +105,19 @@ export function runRuntime(input: Readable, output: Writable, dependencies: Runt
         subscriberQueueHighWater: integer(caps, 'subscriberQueueHighWater', 256, 100_000, 1), auditPageMax: integer(caps, 'auditPageMax', 1000, 10_000, 1),
         standingRuleBytes: integer(caps, 'standingRuleBytes', 4096, 1_000_000, 1), attachmentBytes: integer(caps, 'attachmentBytes', 10 * 1024 * 1024, 1024 ** 3, 1),
         attachmentCount: integer(caps, 'attachmentCount', 10, 1000, 1), sessionToolOutputBytes: integer(caps, 'sessionToolOutputBytes', 256 * 1024 * 1024, Number.MAX_SAFE_INTEGER, 1) } };
-    const callbacks = hostCallbacks(strings(p, 'hostMethods', []));
     const timeoutMs = integer(settings, 'hostAttemptTimeoutMs', 30_000, 300_000, 1);
+    const callbacks = hostCallbacks(strings(p, 'hostMethods', []), timeoutMs);
+    const stdoutLineBytes = integer(settings, 'providerStdoutLineBytes', 64 * 1024 * 1024, 1024 ** 3, 1);
     hello = true;
     store = kind === 'fs' ? unwrap(await createFsSessionStore(options)) : createMemorySessionStore(options);
     core = createSessionCore({ config: options, store, hostCreate: callbacks, hostAttemptTimeoutMs: timeoutMs,
       checkpoints: dependencies.checkpoints ?? createCheckpoints(options, { name: 'AgentConsole', email: 'agentconsole@localhost' }),
-      createAdapter: (id, adapterOptions) => createRegisteredAdapter(registry, id, adapterOptions) });
+      createAdapter: (id, adapterOptions) => createRegisteredAdapter(registry, id, { ...adapterOptions, stdoutLineBytes }) });
     if (stopped) { await core.shutdown(); await store.close(); throw applicationError('RuntimeTerminated'); }
     unwrap(await core.boot());
     if (stopped) { await core.shutdown(); await store.lease.release(); await store.close(); throw applicationError('RuntimeTerminated'); }
+    uploadFiles = new UploadFiles(kind === 'fs' ? root : undefined);
+    await uploadFiles.recover((await store.readAllMeta()).map(m => m.sessionId));
     subscriptions = new Subscriptions(core, peer.writer, options.caps.subscriberQueueHighWater);
     ready = true;
     return { version: PROTOCOL_VERSION, storage: kind, extensions: core.extensions.operations };
@@ -107,7 +125,9 @@ export function runRuntime(input: Readable, output: Writable, dependencies: Runt
   function upload(id: string, principal: string) {
     const handle = uploads.get(id);
     if (!handle || handle.principal !== principal || handle.expires <= Date.now()) { if (handle?.expires && handle.expires <= Date.now()) uploads.delete(id); throw applicationError('not_found'); }
-    unwrap(core!.get(handle.sessionId, principal)); return handle;
+    unwrap(core!.get(handle.sessionId, principal));
+    if (handle.busy) throw applicationError('bad_request', 'upload operation in progress');
+    return handle;
   }
   async function bytes(stream: NodeJS.ReadableStream, offset: number, length: number) {
     const source = stream as Readable;
@@ -141,7 +161,7 @@ export function runRuntime(input: Readable, output: Writable, dependencies: Runt
         const id = sessionId(), owner = principal(), handles = strings(p, 'uploads', []) as UploadId[];
         for (const handle of handles) if (upload(handle, owner).sessionId !== id) throw applicationError('not_found');
         const result = await core.send(id, owner, text(p, 'text'), handles, optionalText(p, 'model') ?? undefined);
-        if (result.ok) for (const handle of handles) uploads.delete(handle);
+        if (result.ok) for (const handle of handles) { uploads.delete(handle); await uploadFiles.remove(id, handle); }
         return unwrap(result);
       }
       case 'turns.interrupt': return unwrap(await core.interrupt(sessionId(), principal(), text(p, 'turnId') as TurnId));
@@ -154,7 +174,7 @@ export function runRuntime(input: Readable, output: Writable, dependencies: Runt
       case 'events.read': {
         const id = sessionId(); unwrap(core.get(id, principal()));
         const events = [], limit = integer(p, 'limit', 100, 1000, 1);
-        for await (const result of core.admin.readEvents(id, integer(p, 'fromSeq', 0) as Seq | 0)) { events.push(unwrap(result)); if (events.length >= limit) break; }
+        for await (const result of core.admin.readEvents(id, integer(p, 'fromSeq', 0) as Seq | 0)) { if (signal.aborted) throw applicationError('cancelled'); events.push(wireEvent(unwrap(result))); if (events.length >= limit) break; }
         return { events, nextSeq: events.at(-1)?.seq ?? integer(p, 'fromSeq', 0) };
       }
       case 'events.append': {
@@ -162,23 +182,29 @@ export function runRuntime(input: Readable, output: Writable, dependencies: Runt
         if (!/^x-[a-z][a-z0-9-]*\.[a-zA-Z0-9_.-]+$/.test(kind)) throw new RpcError(-32602, 'Host event kind must use x-namespace.name');
         // A6 extension payloads are opaque JSON. The core's typed host augmentation
         // cannot enumerate namespaces belonging to another trusted embedder.
-        return unwrap(await core.events.append(sessionId(), principal(), kind as EventKind, object(p.data) as unknown as EventPayloadMap[EventKind]));
+        return wireEvent(unwrap(await core.events.append(sessionId(), principal(), kind as EventKind, object(p.data) as unknown as EventPayloadMap[EventKind])));
       }
       case 'attachments.begin': {
         const id = sessionId(), owner = principal();
         const handle = unwrap(core.attachments.begin(id, owner, { filename: text(p, 'name'), sizeBytes: integer(p, 'size'), mediaType: text(p, 'contentType', 'application/octet-stream') }));
-        uploads.set(handle, { sessionId: id, principal: owner, expires: Date.now() + 300_000 }); return { uploadId: handle };
+        try { await uploadFiles.begin(id, handle); }
+        catch (error) { core.attachments.abort(id, owner, handle); throw error; }
+        uploads.set(handle, { sessionId: id, principal: owner, expires: Date.now() + 300_000, busy: false }); return { uploadId: handle };
       }
       case 'attachments.write': {
         const id = text(p, 'uploadId') as UploadId, owner = principal(), handle = upload(id, owner), data = text(p, 'data');
         if (data.length > Math.ceil(256 * 1024 / 3) * 4 || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(data)) throw new RpcError(-32602, 'Invalid base64 chunk');
         const content = Buffer.from(data, 'base64'); if (content.length > 256 * 1024) throw new RpcError(-32602, 'Chunk exceeds 256 KiB');
-        return { nextOffset: unwrap(core.attachments.write(handle.sessionId, owner, id, integer(p, 'offset'), content)) };
+        handle.busy = true;
+        try {
+          const offset = integer(p, 'offset'), nextOffset = unwrap(core.attachments.write(handle.sessionId, owner, id, offset, content));
+          await uploadFiles.write(handle.sessionId, id, offset, content); return { nextOffset };
+        } finally { handle.busy = false; }
       }
       case 'attachments.commit': case 'attachments.abort': {
         const id = text(p, 'uploadId') as UploadId, owner = principal(), handle = upload(id, owner);
         if (method === 'attachments.commit') return { committedUploadId: unwrap(core.attachments.commit(handle.sessionId, owner, id)) };
-        unwrap(core.attachments.abort(handle.sessionId, owner, id)); uploads.delete(id); return null;
+        unwrap(core.attachments.abort(handle.sessionId, owner, id)); uploads.delete(id); await uploadFiles.remove(handle.sessionId, id); return null;
       }
       case 'toolOutput.read': case 'attachments.read': {
         const id = sessionId(), owner = principal(), turn = text(p, 'turnId') as TurnId;

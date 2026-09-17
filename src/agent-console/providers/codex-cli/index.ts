@@ -403,7 +403,15 @@ function buildCodexAdapter(opts: AdapterOptions, executable: string, transport: 
         }
       }
 
-      const splitter = new NdjsonSplitter();
+      const splitter = new NdjsonSplitter(opts.stdoutLineBytes, () => {
+        if (resultSeen) return;
+        resultSeen = true;
+        const detail = 'provider stdout line exceeds the configured cap';
+        emitEvent('error', { kind: 'adapter_output_overflow', message: detail, fatal: true }, null);
+        if (!settled) { settled = true; resolve({ ok: false, error: { code: 'schema_mismatch', detail } }); }
+        else emitEvent('turn.ended', { stopReason: 'error', usage: null }, null);
+        if (child) terminate(child);
+      });
 
       function handleLine(line: string): void {
         let msg: Record<string, unknown>;
@@ -627,7 +635,15 @@ function buildCodexAdapter(opts: AdapterOptions, executable: string, transport: 
         }
       }
 
-      const splitter = new NdjsonSplitter();
+      const splitter = new NdjsonSplitter(opts.stdoutLineBytes, () => {
+        if (resultSeen) return;
+        resultSeen = true;
+        const detail = 'provider stdout line exceeds the configured cap';
+        emitEvent('error', { kind: 'adapter_output_overflow', message: detail, fatal: true }, null);
+        if (!settled) { settled = true; resolve({ ok: false, error: { code: 'schema_mismatch', detail } }); }
+        else emitEvent('turn.ended', { stopReason: 'error', usage: null }, null);
+        if (child) terminate(child);
+      });
       // `-s` applies on every turn, including a resume — mirrors `runAppServer`'s
       // `thread/start` call, which sets `sandbox` regardless of fresh vs. resumed.
       const args = ['exec', '--json', '--skip-git-repo-check', '-s', cliSandboxValue(sandbox)];

@@ -1,0 +1,647 @@
+[
+  {
+    "method": "runtime.hello",
+    "request": {
+      "jsonrpc": "2.0",
+      "id": 0,
+      "method": "runtime.hello",
+      "params": {
+        "version": "1.0.0",
+        "storage": {
+          "kind": "fs",
+          "root": "/workspace"
+        },
+        "workspaceRoots": [
+          "fixture"
+        ]
+      }
+    },
+    "response": {
+      "jsonrpc": "2.0",
+      "id": 0,
+      "result": {
+        "version": "1.0.0",
+        "storage": "fixture",
+        "extensions": []
+      }
+    }
+  },
+  {
+    "method": "sessions.create",
+    "request": {
+      "jsonrpc": "2.0",
+      "id": 0,
+      "method": "sessions.create",
+      "params": {
+        "principal": "fixture",
+        "provider": "fixture",
+        "cwd": "/workspace"
+      }
+    },
+    "response": {
+      "jsonrpc": "2.0",
+      "id": 0,
+      "result": {
+        "sessionId": "fixture"
+      }
+    }
+  },
+  {
+    "method": "sessions.list",
+    "request": {
+      "jsonrpc": "2.0",
+      "id": 0,
+      "method": "sessions.list",
+      "params": {
+        "principal": "fixture"
+      }
+    },
+    "response": {
+      "jsonrpc": "2.0",
+      "id": 0,
+      "result": {
+        "items": []
+      }
+    }
+  },
+  {
+    "method": "sessions.get",
+    "request": {
+      "jsonrpc": "2.0",
+      "id": 0,
+      "method": "sessions.get",
+      "params": {
+        "sessionId": "fixture",
+        "principal": "fixture"
+      }
+    },
+    "response": {
+      "jsonrpc": "2.0",
+      "id": 0,
+      "result": {
+        "id": "fixture",
+        "owner": "fixture",
+        "vendor": "fixture",
+        "cwd": "/workspace",
+        "policy": {
+          "mode": "fixture"
+        },
+        "lastSeq": 0,
+        "state": "fixture",
+        "createdAt": "2026-09-17T00:00:00.000Z"
+      }
+    }
+  },
+  {
+    "method": "sessions.end",
+    "request": {
+      "jsonrpc": "2.0",
+      "id": 0,
+      "method": "sessions.end",
+      "params": {
+        "sessionId": "fixture",
+        "principal": "fixture"
+      }
+    },
+    "response": {
+      "jsonrpc": "2.0",
+      "id": 0,
+      "result": null
+    }
+  },
+  {
+    "method": "sessions.remove",
+    "request": {
+      "jsonrpc": "2.0",
+      "id": 0,
+      "method": "sessions.remove",
+      "params": {
+        "sessionId": "fixture",
+        "principal": "fixture"
+      }
+    },
+    "response": {
+      "jsonrpc": "2.0",
+      "id": 0,
+      "result": null
+    }
+  },
+  {
+    "method": "turns.send",
+    "request": {
+      "jsonrpc": "2.0",
+      "id": 0,
+      "method": "turns.send",
+      "params": {
+        "sessionId": "fixture",
+        "principal": "fixture",
+        "text": "fixture"
+      }
+    },
+    "response": {
+      "jsonrpc": "2.0",
+      "id": 0,
+      "result": {
+        "turnId": "fixture"
+      }
+    }
+  },
+  {
+    "method": "turns.interrupt",
+    "request": {
+      "jsonrpc": "2.0",
+      "id": 0,
+      "method": "turns.interrupt",
+      "params": {
+        "sessionId": "fixture",
+        "principal": "fixture",
+        "turnId": "fixture"
+      }
+    },
+    "response": {
+      "jsonrpc": "2.0",
+      "id": 0,
+      "result": null
+    }
+  },
+  {
+    "method": "permissions.respond",
+    "request": {
+      "jsonrpc": "2.0",
+      "id": 0,
+      "method": "permissions.respond",
+      "params": {
+        "sessionId": "fixture",
+        "principal": "fixture",
+        "requestId": "fixture",
+        "decision": "allow"
+      }
+    },
+    "response": {
+      "jsonrpc": "2.0",
+      "id": 0,
+      "result": {
+        "accepted": true
+      }
+    }
+  },
+  {
+    "method": "events.subscribe",
+    "request": {
+      "jsonrpc": "2.0",
+      "id": 0,
+      "method": "events.subscribe",
+      "params": {
+        "sessionId": "fixture",
+        "principal": "fixture"
+      }
+    },
+    "response": {
+      "jsonrpc": "2.0",
+      "id": 0,
+      "result": {
+        "subscriptionId": "fixture"
+      }
+    }
+  },
+  {
+    "method": "events.unsubscribe",
+    "request": {
+      "jsonrpc": "2.0",
+      "id": 0,
+      "method": "events.unsubscribe",
+      "params": {
+        "subscriptionId": "fixture",
+        "principal": "fixture"
+      }
+    },
+    "response": {
+      "jsonrpc": "2.0",
+      "id": 0,
+      "result": null
+    }
+  },
+  {
+    "method": "events.credit",
+    "request": {
+      "jsonrpc": "2.0",
+      "id": 0,
+      "method": "events.credit",
+      "params": {
+        "subscriptionId": "fixture",
+        "principal": "fixture",
+        "count": 1
+      }
+    },
+    "response": {
+      "jsonrpc": "2.0",
+      "id": 0,
+      "result": null
+    }
+  },
+  {
+    "method": "events.read",
+    "request": {
+      "jsonrpc": "2.0",
+      "id": 0,
+      "method": "events.read",
+      "params": {
+        "sessionId": "fixture",
+        "principal": "fixture"
+      }
+    },
+    "response": {
+      "jsonrpc": "2.0",
+      "id": 0,
+      "result": {
+        "events": [],
+        "nextSeq": 0
+      }
+    }
+  },
+  {
+    "method": "events.append",
+    "request": {
+      "jsonrpc": "2.0",
+      "id": 0,
+      "method": "events.append",
+      "params": {
+        "sessionId": "fixture",
+        "principal": "fixture",
+        "kind": "x-fixture.note",
+        "data": {}
+      }
+    },
+    "response": {
+      "jsonrpc": "2.0",
+      "id": 0,
+      "result": {
+        "sessionId": "fixture",
+        "ts": "2026-09-17T00:00:00.000Z",
+        "kind": "fixture",
+        "data": {},
+        "seq": 0
+      }
+    }
+  },
+  {
+    "method": "toolOutput.read",
+    "request": {
+      "jsonrpc": "2.0",
+      "id": 0,
+      "method": "toolOutput.read",
+      "params": {
+        "sessionId": "fixture",
+        "principal": "fixture",
+        "turnId": "fixture",
+        "offset": 0,
+        "length": 1,
+        "callId": "fixture"
+      }
+    },
+    "response": {
+      "jsonrpc": "2.0",
+      "id": 0,
+      "result": {
+        "data": "YWJj",
+        "nextOffset": 0,
+        "eof": true
+      }
+    }
+  },
+  {
+    "method": "attachments.begin",
+    "request": {
+      "jsonrpc": "2.0",
+      "id": 0,
+      "method": "attachments.begin",
+      "params": {
+        "sessionId": "fixture",
+        "principal": "fixture",
+        "name": "fixture",
+        "size": 0
+      }
+    },
+    "response": {
+      "jsonrpc": "2.0",
+      "id": 0,
+      "result": {
+        "uploadId": "fixture"
+      }
+    }
+  },
+  {
+    "method": "attachments.write",
+    "request": {
+      "jsonrpc": "2.0",
+      "id": 0,
+      "method": "attachments.write",
+      "params": {
+        "uploadId": "fixture",
+        "principal": "fixture",
+        "offset": 0,
+        "data": "YWJj"
+      }
+    },
+    "response": {
+      "jsonrpc": "2.0",
+      "id": 0,
+      "result": {
+        "nextOffset": 0
+      }
+    }
+  },
+  {
+    "method": "attachments.commit",
+    "request": {
+      "jsonrpc": "2.0",
+      "id": 0,
+      "method": "attachments.commit",
+      "params": {
+        "uploadId": "fixture",
+        "principal": "fixture"
+      }
+    },
+    "response": {
+      "jsonrpc": "2.0",
+      "id": 0,
+      "result": {
+        "committedUploadId": "fixture"
+      }
+    }
+  },
+  {
+    "method": "attachments.abort",
+    "request": {
+      "jsonrpc": "2.0",
+      "id": 0,
+      "method": "attachments.abort",
+      "params": {
+        "uploadId": "fixture",
+        "principal": "fixture"
+      }
+    },
+    "response": {
+      "jsonrpc": "2.0",
+      "id": 0,
+      "result": null
+    }
+  },
+  {
+    "method": "attachments.read",
+    "request": {
+      "jsonrpc": "2.0",
+      "id": 0,
+      "method": "attachments.read",
+      "params": {
+        "sessionId": "fixture",
+        "principal": "fixture",
+        "turnId": "fixture",
+        "offset": 0,
+        "length": 1,
+        "attachmentId": "fixture"
+      }
+    },
+    "response": {
+      "jsonrpc": "2.0",
+      "id": 0,
+      "result": {
+        "data": "YWJj",
+        "nextOffset": 0,
+        "eof": true
+      }
+    }
+  },
+  {
+    "method": "providers.list",
+    "request": {
+      "jsonrpc": "2.0",
+      "id": 0,
+      "method": "providers.list",
+      "params": {}
+    },
+    "response": {
+      "jsonrpc": "2.0",
+      "id": 0,
+      "result": []
+    }
+  },
+  {
+    "method": "providers.refresh",
+    "request": {
+      "jsonrpc": "2.0",
+      "id": 0,
+      "method": "providers.refresh",
+      "params": {}
+    },
+    "response": {
+      "jsonrpc": "2.0",
+      "id": 0,
+      "result": []
+    }
+  },
+  {
+    "method": "checkpoints.list",
+    "request": {
+      "jsonrpc": "2.0",
+      "id": 0,
+      "method": "checkpoints.list",
+      "params": {
+        "sessionId": "fixture",
+        "principal": "fixture"
+      }
+    },
+    "response": {
+      "jsonrpc": "2.0",
+      "id": 0,
+      "result": []
+    }
+  },
+  {
+    "method": "checkpoints.restore",
+    "request": {
+      "jsonrpc": "2.0",
+      "id": 0,
+      "method": "checkpoints.restore",
+      "params": {
+        "sessionId": "fixture",
+        "principal": "fixture",
+        "sha": "fixture"
+      }
+    },
+    "response": {
+      "jsonrpc": "2.0",
+      "id": 0,
+      "result": {
+        "safety": {
+          "sha": "fixture",
+          "label": "fixture",
+          "ts": "2026-09-17T00:00:00.000Z"
+        }
+      }
+    }
+  },
+  {
+    "method": "admin.sessions.list",
+    "request": {
+      "jsonrpc": "2.0",
+      "id": 0,
+      "method": "admin.sessions.list",
+      "params": {}
+    },
+    "response": {
+      "jsonrpc": "2.0",
+      "id": 0,
+      "result": {
+        "items": []
+      }
+    }
+  },
+  {
+    "method": "admin.sessions.snapshot",
+    "request": {
+      "jsonrpc": "2.0",
+      "id": 0,
+      "method": "admin.sessions.snapshot",
+      "params": {
+        "sessionId": "fixture"
+      }
+    },
+    "response": {
+      "jsonrpc": "2.0",
+      "id": 0,
+      "result": {
+        "id": "fixture",
+        "owner": "fixture",
+        "vendor": "fixture",
+        "cwd": "/workspace",
+        "policy": {
+          "mode": "fixture"
+        },
+        "lastSeq": 0,
+        "state": "fixture",
+        "createdAt": "2026-09-17T00:00:00.000Z"
+      }
+    }
+  },
+  {
+    "method": "admin.sessions.remove",
+    "request": {
+      "jsonrpc": "2.0",
+      "id": 0,
+      "method": "admin.sessions.remove",
+      "params": {
+        "sessionId": "fixture"
+      }
+    },
+    "response": {
+      "jsonrpc": "2.0",
+      "id": 0,
+      "result": null
+    }
+  },
+  {
+    "method": "admin.sessions.reassignPrincipal",
+    "request": {
+      "jsonrpc": "2.0",
+      "id": 0,
+      "method": "admin.sessions.reassignPrincipal",
+      "params": {
+        "sessionId": "fixture",
+        "principal": "fixture"
+      }
+    },
+    "response": {
+      "jsonrpc": "2.0",
+      "id": 0,
+      "result": null
+    }
+  },
+  {
+    "method": "admin.audit.read",
+    "request": {
+      "jsonrpc": "2.0",
+      "id": 0,
+      "method": "admin.audit.read",
+      "params": {}
+    },
+    "response": {
+      "jsonrpc": "2.0",
+      "id": 0,
+      "result": {
+        "records": []
+      }
+    }
+  },
+  {
+    "method": "host.create.prepare",
+    "request": {
+      "jsonrpc": "2.0",
+      "id": "r:1",
+      "method": "host.create.prepare",
+      "params": {
+        "createAttemptId": "fixture",
+        "principal": "fixture"
+      }
+    },
+    "response": {
+      "jsonrpc": "2.0",
+      "id": "r:1",
+      "result": null
+    }
+  },
+  {
+    "method": "host.create.commit",
+    "request": {
+      "jsonrpc": "2.0",
+      "id": "r:1",
+      "method": "host.create.commit",
+      "params": {
+        "createAttemptId": "fixture",
+        "sessionId": "fixture"
+      }
+    },
+    "response": {
+      "jsonrpc": "2.0",
+      "id": "r:1",
+      "result": null
+    }
+  },
+  {
+    "method": "host.create.abort",
+    "request": {
+      "jsonrpc": "2.0",
+      "id": "r:1",
+      "method": "host.create.abort",
+      "params": {
+        "createAttemptId": "fixture",
+        "reason": "fixture"
+      }
+    },
+    "response": {
+      "jsonrpc": "2.0",
+      "id": "r:1",
+      "result": {
+        "state": "fixture"
+      }
+    }
+  },
+  {
+    "method": "host.create.status",
+    "request": {
+      "jsonrpc": "2.0",
+      "id": "r:1",
+      "method": "host.create.status",
+      "params": {
+        "createAttemptId": "fixture"
+      }
+    },
+    "response": {
+      "jsonrpc": "2.0",
+      "id": "r:1",
+      "result": {
+        "state": "fixture"
+      }
+    }
+  }
+]

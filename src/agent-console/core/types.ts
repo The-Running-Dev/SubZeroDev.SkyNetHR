@@ -362,6 +362,7 @@ export interface SessionCore {
     };
     listPage(owner: PrincipalId, after: SessionId | null, limit: number): { items: readonly SessionSummary[]; next: SessionId | null };
     shutdown(): Promise<void>;
+    flush(): Promise<void>;
     create(owner: PrincipalId, input: CreateSessionInput): Promise<Result<{
         sessionId: SessionId;
     }, SessionError>>;
