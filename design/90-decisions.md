@@ -5714,6 +5714,26 @@ dropping type equivalence checks; permitting arbitrary extra event kinds.
 Reversibility: cheap before the cutover; after new writes exist, both kinds must remain
 readable. Landing point: the Phase 3b checklist contract prerequisite and implementation.
 
+### 2026-09-17 — D240 AgentConsole v1 keeps shared OS/CLI identity and strict principal ownership
+Context: the extraction handoff requires owner decisions on v5 Q1 and Q6 before the
+Phase 4 protocol is frozen. The owner confirmed shared host OS/CLI identity, strict
+principal equality and no cross-principal sharing. The authoritative
+`agentconsole-redteam-amended-v5.md` has SHA-256
+`7ff21345f020babecc93c99519232ea16622c6a66a165dbb4772367b9afee8e8`.
+Chosen: record those choices in `20-contract.md` under *AgentConsole v1 identity and
+ownership — Phase 4 prerequisite*, preserving v5 A2/A4. Principals constrain API access,
+not the filesystem authority of CLI processes. Ordinary session access remains strict
+equality, including reads and handle continuations. V5's separate host-only admin surface
+and explicit principal-migration operation remain as designed; migration replaces an
+owner rather than sharing a session. SkyNetHR's existing audit/review policies remain.
+Rejected: per-principal CLI accounts or OS/container isolation in this v1 deployment
+model — a different deployment model; shared viewers, delegated access or an ownership
+bypass on ordinary session operations — contradicts the confirmed Q6 choice; removing
+v5's host-only admin operations — would redesign the settled host boundary.
+Reversibility: expensive after protocol consumers rely on the trust boundary. Landing
+point: this separate contract prerequisite; Phase 4 implementation follows its merge.
+No runtime code, wire shape, persisted schema or I27 change is included.
+
 ## Open
 
 Staging only. Once an item becomes an issue it leaves this list.
