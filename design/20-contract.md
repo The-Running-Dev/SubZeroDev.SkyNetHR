@@ -912,6 +912,35 @@ the operator record that would fix it. Four consequences follow and are stated i
 `404 no_such_session` stops being access control under that mode. **Nothing here enforces a
 refusal**: the server does not decline to start under `shared-secret`.
 
+### AgentConsole v1 identity and ownership — Phase 4 prerequisite
+
+D240 settles v5's Q1 and Q6. The principal and core surfaces are declared in
+`src/agent-console/core/types.ts`; their in-process enforcement lives in
+`src/agent-console/core/index.ts`. Phase 4 must preserve these ownership semantics at
+the protocol boundary:
+
+- **Shared host OS/CLI identity.** CLI sessions use the host OS user's CLI identity and
+  filesystem authority. A principal is API ownership, not an OS or filesystem tenant
+  boundary; it does not restrict what an agent process can read with that shared identity.
+  Mutually untrusted tenants and per-principal OS/container isolation are outside this
+  v1 deployment model.
+- **Strict principal equality.** The host supplies a stable opaque principal from trusted
+  authentication; browser input cannot supply or override it. The runtime compares it to
+  the session owner by equality only, on every session-scoped operation, including reads,
+  subscriptions, uploads and handle continuations. Handles remain bound to their opening
+  principal and session; possession alone grants no access. Lists are owner-filtered and
+  the principal remains the audit actor. A non-owner receives `not_found` at the AgentConsole
+  boundary; SkyNetHR's existing HTTP `404 no_such_session` mapping is unchanged.
+- **No cross-principal sharing.** V1 provides no shared viewers, delegated session access
+  or ownership bypass on ordinary session operations. The separate host-only `admin.*`
+  operations already specified by v5 A2/A4 remain host privileges and are never routed by
+  browser bridges. `admin.sessions.reassignPrincipal` remains the explicit identity-mapping
+  migration path; it replaces the owner and does not grant simultaneous access to both
+  principals. Existing SkyNetHR audit and review access policies remain unchanged.
+
+These choices constrain the Phase 4 protocol; they introduce no new authentication mode,
+persisted-data migration or change to I27, process identity selection or CLI credentials.
+
 ### `jail`
 
 `resolveInsideRoot`, `pathsOverlap` and `stripExtendedPrefix` are declared in
