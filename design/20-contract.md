@@ -934,7 +934,7 @@ the protocol boundary:
 - **No cross-principal sharing.** V1 provides no shared viewers, delegated session access
   or ownership bypass on ordinary session operations. The separate host-only `admin.*`
   operations already specified by v5 A2/A4 remain host privileges and are never routed by
-  browser bridges. `admin.sessions.reassignPrincipal` remains the explicit identity-mapping
+  browser bridges. `admin.reassignPrincipal` remains the explicit identity-mapping
   migration path; it replaces the owner and does not grant simultaneous access to both
   principals. Existing SkyNetHR audit and review access policies remain unchanged.
 
