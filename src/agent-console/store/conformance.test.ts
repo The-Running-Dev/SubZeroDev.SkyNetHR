@@ -11,7 +11,17 @@ import { createHostAttempts } from '../core/create-attempts.js';
 import type { Checkpoints, Envelope, RuntimeOptions, SessionId, SessionMetaFile, SessionRecord, SessionStore } from '../core/types.js';
 
 const caps = { ringCapacity: 2, toolResultBytes: 1024, subscriberQueueHighWater: 20, auditPageMax: 10, standingRuleBytes: 1024, attachmentBytes: 1024, attachmentCount: 2, sessionToolOutputBytes: 4096 };
-async function root(t: TestContext) { const dir = await mkdtemp(path.join(tmpdir(), 'agent-store-')); t.after(() => rm(dir, { recursive: true, force: true })); return dir; }
+async function root(t: TestContext) {
+  const dir = await mkdtemp(path.join(tmpdir(), 'agent-store-'));
+  const closers: (() => Promise<void>)[] = [];
+  // One teardown owns the ordering on every supported Node version: append handles
+  // and leases must close before Windows can remove their containing directory.
+  t.after(async () => {
+    for (const close of closers) await close();
+    await rm(dir, { recursive: true, force: true });
+  });
+  return { dir, beforeRemove: (close: () => Promise<void>) => { closers.push(close); } };
+}
 const configuration = (dir: string): RuntimeOptions => ({ storageRoot: dir as never, workspaceRoots: [dir as never], caps, includeRaw: false, streamDeltas: false });
 const record: SessionRecord = { id: 'fixture-session' as SessionId, owner: 'opaque:alice', vendor: 'fixture', cwd: '/fixture' as never, model: null, policy: { mode: 'interactive', sandbox: null, banner: null }, sandbox: null, cliSessionId: null, lastSeq: 0, state: 'live', createdAt: '2020-01-01T00:00:00.000Z' as never, endedAt: null, endReason: null };
 const envelope = (seq: number): Envelope => ({ seq: seq as never, sessionId: record.id, ts: record.createdAt, kind: 'session.notice', data: { level: 'info', code: 'usage_unavailable', text: String(seq) } });
@@ -19,11 +29,11 @@ async function bytes(stream: NodeJS.ReadableStream) { const chunks: Buffer[] = [
 
 for (const backend of ['fs', 'memory'] as const) {
   test(`SessionStore ${backend} — metadata, ordered replay, ring, blobs, audit and ledger conformance`, async t => {
-    const dir = await root(t), config = configuration(dir);
+    const { dir, beforeRemove } = await root(t), config = configuration(dir);
     let store: SessionStore;
     if (backend === 'memory') store = createMemorySessionStore(config);
     else { const created = await createFsSessionStore(config); assert.ok(created.ok); store = created.value; }
-    t.after(() => store.close());
+    beforeRemove(() => store.close());
     assert.ok((await store.createSession(record)).ok);
     assert.deepEqual((await store.readAllMeta())[0]!.result, { ok: true, value: record });
     for (let seq = 1; seq <= 3; seq++) { assert.ok((await store.appendEvent(record.id, envelope(seq))).ok); store.pushRing(record.id, envelope(seq)); }
@@ -52,10 +62,10 @@ for (const backend of ['fs', 'memory'] as const) {
 }
 
 test('A13 — runtime lease refuses a second holder immediately and never changes server.lock', async t => {
-  const dir = await root(t), legacy = path.join(dir, 'server.lock');
+  const { dir, beforeRemove } = await root(t), legacy = path.join(dir, 'server.lock');
   await writeFile(legacy, 'legacy host lease');
   const first = createFsRuntimeLease(dir), second = createFsRuntimeLease(dir);
-  t.after(async () => { await first.release(); await second.release(); });
+  beforeRemove(async () => { await first.release(); await second.release(); });
   assert.ok((await first.claim()).ok);
   const started = Date.now(), refused = await second.claim();
   assert.ok(!refused.ok && refused.error.code === 'storage_locked');
@@ -67,12 +77,12 @@ test('A13 — runtime lease refuses a second holder immediately and never change
 });
 
 test('pre-cutover fixture — full boot rebuilds ended history without rewriting stored bytes', async t => {
-  const dir = await root(t), config = configuration(dir);
+  const { dir, beforeRemove } = await root(t), config = configuration(dir);
   const fixture = JSON.parse(await readFile(path.join(process.cwd(), 'src/agent-console/store/fixtures/pre-cutover.json'), 'utf8')) as { meta: SessionMetaFile; events: Envelope[] };
   const sessionDir = path.join(dir, 'sessions', fixture.meta.session.id); await mkdir(sessionDir, { recursive: true });
   const meta = JSON.stringify(fixture.meta), events = fixture.events.map(e => JSON.stringify(e)).join('\n') + '\n';
   await writeFile(path.join(sessionDir, 'meta.json'), meta); await writeFile(path.join(sessionDir, 'events.ndjson'), events);
-  const created = await createFsSessionStore(config); assert.ok(created.ok); const store = created.value; t.after(() => store.close());
+  const created = await createFsSessionStore(config); assert.ok(created.ok); const store = created.value; beforeRemove(() => store.close());
   const checkpoints = new Proxy({} as Checkpoints, { get() { return () => assert.fail('ended boot must not invoke checkpoints'); } });
   const core = createSessionCore({ config, store, checkpoints, hostCreate: createHostAttempts({ prepare() { return { ok: true, value: undefined }; }, async commit() { return { ok: true, value: undefined }; }, abort() {} }), createAdapter() { assert.fail('ended boot never creates a provider'); } });
   assert.ok((await core.boot()).ok);
