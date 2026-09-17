@@ -23,6 +23,7 @@ export type AdapterEmitted = Exclude<
   | 'session.ended'
   | 'checkpoint.created'
   | 'checklist.item.completed'
+  | 'x-skynet.checklist.item.completed'
   // D97: the manager is the sole emitter. It holds the `pending` map, deletes from it
   // synchronously (D33) and appends the `AuditRecord` every resolution owes (I11), so an
   // adapter resolving a request of its own would produce a resolution with no audit record

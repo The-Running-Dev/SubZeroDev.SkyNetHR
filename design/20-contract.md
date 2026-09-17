@@ -278,7 +278,8 @@ one (D193).
 
 Declared in `src/agent-console/contract/index.ts` and re-exported by `src/contract/index.ts`:
 `EventPayloadMap`, `EventKind`, `Envelope`. The host augments the map with the payloads whose
-declarations remain there; its complete vocabulary is unchanged.
+declarations remain there. D239 authorizes the Phase 3b checklist cutover below; every
+historical event kind and payload remains readable without rewriting stored events.
 
 **`(sessionId, seq)` is the primary key of the entire system.** Everything replayable is keyed
 on it, which is why `seq` assignment sits in the session manager (D2) and why it is expensive
@@ -287,9 +288,13 @@ the sequence.
 
 **The vocabulary is closed** (D44). A vendor record that fits none of it is
 `error / adapter_unknown_record` with the record preserved in `raw`, never a new kind invented
-at the edge. `checklist.item.completed` is the one kind tier two adds, and it is
-session-scoped: it carries no `turnId` and may land between a `turn.started` and its
-`turn.ended`.
+at the edge. Tier two's checklist event remains session-scoped: it carries no `turnId`
+and may land between a `turn.started` and its `turn.ended`. At the Phase 3b cutover,
+new checklist completions use `x-skynet.checklist.item.completed`; historical
+`checklist.item.completed` envelopes replay unchanged. Both kinds carry the same payload
+and feed the same host-owned fold and duplicate suppression. This is the only vocabulary
+addition authorized by D239; providers cannot emit either checklist kind. A successful
+completion still requires a durable append through the session's event ordering path.
 
 **Not everything a client receives is an envelope, and `message.delta` is the one exception**
 (D168). A delta is a **frame**: delivered to live subscribers and to nobody else, carrying no
@@ -2440,7 +2445,7 @@ highest-value section in this document.
 | **I33** | *(tier two)* A requisition is consumed at most once. A second claim is refused, never queued | `records` |
 | **I34** | *(tier two)* `Requisition.workspace` is never a `ResolvedPath` and is never resolved before session creation; only `jail` mints a `ResolvedPath` | `records`, `session-manager` |
 | **I35** | *(tier two)* PIP status is the `pip` of the `final` review for that subject with the greatest `updatedAt`, ties broken by the later line. Drafts never contribute | `records` |
-| **I36** | *(tier two)* At most one `checklist.item.completed` envelope exists per `(sessionId, itemId)`; a second tick emits nothing and still succeeds | `session-manager` |
+| **I36** | *(tier two)* At most one checklist completion envelope exists per `(sessionId, itemId)`, counting historical `checklist.item.completed` and Phase 3b's `x-skynet.checklist.item.completed` together; a second tick emits nothing and still succeeds | SkyNetHR checklist fold and session event append |
 | **I37** | *(tier two)* A record-log append that fails leaves the in-memory registry and the file agreeing, with nothing changed in either | `records` |
 | **I38** | *(tier two)* An unreadable or partly corrupt record log yields an empty or shortened registry and a log line. It never aborts boot, and never denies an operator tier one | `records` |
 | **I39** | Every read of `audit.ndjson` is bounded by `Caps.auditPageMax` and resumed by cursor. Nothing scans the whole file | `store` |
