@@ -5614,7 +5614,7 @@ Node test gate before either language has a consumer in this slice;
 **runtime validation** — changes behavior and belongs outside Phase 1b.
 Reversibility: cheap — test tooling only; the schemas and fixture files are portable JSON.
 
-### 2026-09-15 — D235 Phase 2 registers providers without changing SkyNetHR turn ownership
+### 2026-09-15 — D236 Phase 2 registers providers without changing SkyNetHR turn ownership
 Context: the approved AgentConsole extraction handoff replaces the vendor dispatch switch
 with probed provider definitions and turn handles. Its interface outline leaves the context
 and acknowledgement details to be materialised from the existing behavior.
@@ -5634,7 +5634,7 @@ registration-only extension. No dependency or persisted schema changes are requi
 Reversibility: cheap before package extraction; the old adapter surface remains a host
 compatibility seam. Landing point: AgentConsole Phase 2 in this PR.
 
-### 2026-09-16 — D236 S28.4 follows I59 and I64: the `turn.ended` kill is issued, not awaited, before the slot clears
+### 2026-09-16 — D235 S28.4 follows I59 and I64: the `turn.ended` kill is issued, not awaited, before the slot clears
 Context: #358 landed I64's `cli-session` half of #329 and stopped at the `turn.ended` half. Moving
 that handler's `emit` ahead of its first `await` breaks S28.4, which requires the kill to **complete**
 before the turn slot is cleared and before `turn.ended` is emitted, and whose test checks for

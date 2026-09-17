@@ -1233,7 +1233,7 @@ holds no reference to a live session's adapter, and giving it one would put an a
 on `SessionManager`'s interface to relocate a check whose refusal is identical either way.
 
 **`VENDORS` and the host `Vendor` type derive from the registered provider definitions**
-(D235). There is no dispatch switch or independently maintained enumeration. The generic
+(D236). There is no dispatch switch or independently maintained enumeration. The generic
 registry accepts string ids; the host configuration selects which definitions it exposes.
 The edge checks membership in that configured list. It never selects behavior by identity.
 Existing persisted vendor values and the host event schemas are unchanged for this build.
@@ -1253,6 +1253,26 @@ does not expose it, so nothing above `adapters/*` can reach it.
 **Transport selection is the adapter's alone and it ends there.** `createConfiguredAdapter` takes no
 transport parameter and none is added: a transport is a vendor fact and I20 forbids one above
 `adapters/*`.
+
+### AgentConsole process mechanism — Phase 3
+
+The internal mechanism lives in `src/agent-console/process`. Provider adapters call shared
+spawn, environment, stdin and tree-termination primitives and retain their protocol callbacks
+and superseded-child close guards. The manager retains all lifecycle decisions, including
+the synchronous kill/slot-clear/emit ordering, muted-spawn handling and orphan-reap guard.
+OS image and creation-time lookup move into the mechanism without changing their readings
+or fail-closed behavior.
+
+`ProcessLedger` is an injected internal interface. `ProcessRecord` and `ProcessTombstone`
+live beside it and are re-exported by the host contract without a shape change. The filesystem
+implementation preserves `pids.ndjson`, its two line shapes, latest-line-per-pid fold and lazy
+append handle. The host store composes and closes this ledger; session storage, audit and
+`server.lock` remain host-owned. No HTTP, event, provider or persistence schema changes.
+
+Environment mode defaults to `inherit`: the host environment plus existing provider overrides,
+including `FORCE_COLOR=0` and `NO_COLOR=1`. An explicit `constructed` mode retains OS essentials,
+proxy/TLS settings, provider-declared names and host-supplied entries, with provider overrides
+applied last. Executable overrides and provider transport selection retain their existing scope.
 
 ### AgentConsole provider boundary — Phase 2
 
