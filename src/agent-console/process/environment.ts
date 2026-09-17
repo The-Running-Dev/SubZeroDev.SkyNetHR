@@ -20,12 +20,15 @@ export function buildEnvironment(options: EnvironmentOptions = {}): NodeJS.Proce
   if ((options.mode ?? 'inherit') === 'inherit') {
     base = { ...source };
   } else {
-    const providerNames = new Set(options.providerNames ?? []);
+    // Declared names are folded the same way every other name here is: Windows environment
+    // names are case-insensitive, so a provider declaring `PROVIDER_CONFIG` against a host
+    // holding `Provider_Config` must retain it, exactly as `Path` and `http_proxy` are.
+    const providerNames = new Set((options.providerNames ?? []).map((name) => name.toUpperCase()));
     base = Object.fromEntries(Object.entries(source).filter(([name]) => {
       // Preserve original spelling/values, including Windows Path and lowercase proxies.
       const upper = name.toUpperCase();
       return BASE_NAMES.has(upper) || upper.startsWith('PROGRAMFILES') ||
-        upper.startsWith('XDG_') || upper.startsWith('LC_') || providerNames.has(name);
+        upper.startsWith('XDG_') || upper.startsWith('LC_') || providerNames.has(upper);
     }));
   }
   return { ...base, ...options.host, ...options.overrides };

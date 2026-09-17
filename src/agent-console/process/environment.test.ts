@@ -24,4 +24,9 @@ test('Phase 3 environment — constructed mode retains essentials, proxy/TLS and
     { ...retained, ...host, ...overrides });
   assert.equal(buildEnvironment({ mode: 'constructed', source }).PROVIDER_CONFIG, undefined);
   assert.equal(source.UNRELATED_SECRET, 'omit');
+  // Windows environment names are case-insensitive, so a declared name is folded the same
+  // way every other retained name is — and still retains nothing it did not declare.
+  const cased = { Provider_Config: 'kept', UNRELATED_SECRET: 'omit' };
+  assert.deepEqual(buildEnvironment({ mode: 'constructed', source: cased, providerNames: ['PROVIDER_CONFIG'] }), { Provider_Config: 'kept' });
+  assert.deepEqual(buildEnvironment({ mode: 'constructed', source: cased, providerNames: ['OTHER_CONFIG'] }), {});
 });
