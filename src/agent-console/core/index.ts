@@ -898,7 +898,10 @@ export function createSessionCore(deps: {
     list(owner) {
       const out: SessionSummary[] = [];
       for (const entry of sessions.values()) {
-        if (entry.record.owner !== owner) continue;
+        // A5: pending/indeterminate host commits are recovery state, not sessions
+        // an ordinary caller may treat as successfully created. Keep the entry and
+        // its allocation intact; confirmed commit alone clears `creating`.
+        if (entry.creating || entry.record.owner !== owner) continue;
         out.push(toSummary(entry.record));
       }
       return out;
@@ -906,7 +909,7 @@ export function createSessionCore(deps: {
 
     get(sessionId, owner) {
       const entry = sessions.get(sessionId);
-      if (!entry || entry.record.owner !== owner) return { ok: false, error: { code: 'not_found', sessionId } };
+      if (!entry || entry.creating || entry.record.owner !== owner) return { ok: false, error: { code: 'not_found', sessionId } };
       return { ok: true, value: toSummary(entry.record) };
     },
 
@@ -1239,7 +1242,7 @@ export function createSessionCore(deps: {
     },
     async listCheckpoints(sessionId, owner): Promise<Result<readonly Checkpoint[], SessionError>> {
       const entry = sessions.get(sessionId);
-      if (!entry || entry.record.owner !== owner) return { ok: false, error: { code: 'not_found', sessionId } };
+      if (!entry || entry.creating || entry.record.owner !== owner) return { ok: false, error: { code: 'not_found', sessionId } };
       const listed = await checkpointExtension.operations['checkpoints.list'].run(sessionId, entry.record.cwd);
       if (!listed.ok) return { ok: false, error: { code: 'checkpoint', cause: listed.error } };
       return { ok: true, value: listed.value };
@@ -1299,7 +1302,7 @@ export function createSessionCore(deps: {
       // another operator gets `no_such_session`, not a distinguishable `no_such_output`
       // that would confirm the session exists.
       const entry = sessions.get(sessionId);
-      if (!entry || entry.record.owner !== owner) return { ok: false, error: { code: 'not_found', sessionId } };
+      if (!entry || entry.creating || entry.record.owner !== owner) return { ok: false, error: { code: 'not_found', sessionId } };
       const opened = await store.openToolOutput(sessionId, turnId, callId);
       if (!opened.ok) return { ok: false, error: { code: 'storage', cause: opened.error } };
       return { ok: true, value: opened.value };
@@ -1308,7 +1311,7 @@ export function createSessionCore(deps: {
     async openAttachment(sessionId, owner, turnId, attachmentId) {
       // (D160) Same ownership check as `openToolOutput` (S21.7).
       const entry = sessions.get(sessionId);
-      if (!entry || entry.record.owner !== owner) return { ok: false, error: { code: 'not_found', sessionId } };
+      if (!entry || entry.creating || entry.record.owner !== owner) return { ok: false, error: { code: 'not_found', sessionId } };
       const opened = await store.openAttachment(sessionId, turnId, attachmentId);
       if (!opened.ok) return { ok: false, error: { code: 'storage', cause: opened.error } };
       return { ok: true, value: opened.value };
@@ -1316,7 +1319,7 @@ export function createSessionCore(deps: {
 
     async subscribe(sessionId, owner, after, sink: SubscriberSink): Promise<Result<Subscription, SessionError>> {
       const found = sessions.get(sessionId);
-      if (!found || found.record.owner !== owner) return { ok: false, error: { code: 'not_found', sessionId } };
+      if (!found || found.creating || found.record.owner !== owner) return { ok: false, error: { code: 'not_found', sessionId } };
       const entry = found; // captured once so closures below narrow past `| undefined`
       const receiver = sink;
       let active = true;

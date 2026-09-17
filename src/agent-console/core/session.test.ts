@@ -93,17 +93,80 @@ test('A22 — send claims synchronously; stale interrupt is inert and end/remove
   assert.equal((await f.events(id)).filter(e => e.kind === 'session.ended').length, 1);
 });
 
-test('A5/A22 — unknown commit outcome retains allocation and refuses end/remove/send', async t => {
+test('A5/A22 — unknown commit outcome is hidden from ordinary reads and retains quarantine', async t => {
   const never = new Promise<never>(() => {});
   const host: HostCreateCallbacks = { async prepare() { return success(); }, commit: () => never, async status() { return 'committing'; }, async abort() { assert.fail('must not abort uncertain commit'); } };
   const f = await fixture(t, { host });
-  error(await f.core.create('alice', f.input), 'create_outcome_unknown');
-  const id = f.core.list('alice')[0]!.id;
+  const created = await f.core.create('alice', f.input);
+  assert.ok(!created.ok && created.error.code === 'create_outcome_unknown');
+  const id = created.error.sessionId;
+  assert.equal(f.core.admin.snapshot(id)?.id, id, 'recovery keeps internal visibility');
   error(await f.core.end(id, 'alice'), 'turn_in_flight');
   error(await f.core.remove(id, 'alice'), 'turn_in_flight');
   error(await f.core.send(id, 'alice', 'x', []), 'turn_in_flight');
+  error(await f.core.restore(id, 'alice', checkpoint.sha), 'turn_in_flight');
+  error(await f.core.events.append(id, 'alice', 'session.notice', { level: 'info', code: 'usage_unavailable', text: 'blocked' }), 'turn_in_flight');
+  error(f.core.attachments.begin(id, 'alice', { filename: 'x', mediaType: 'text/plain', sizeBytes: 0 }), 'turn_in_flight');
+  error(await f.core.admin.remove(id), 'turn_in_flight');
+  error(await f.core.admin.reassignPrincipal(id, 'bob'), 'turn_in_flight');
   error(await f.core.create('bob', f.input), 'workspace_busy');
+  assert.deepEqual(f.core.list('alice'), []);
+  assert.deepEqual(f.core.listPage('alice', null, 1), { items: [], next: null });
+  error(f.core.get(id, 'alice'), 'not_found');
+  error(await f.core.listCheckpoints(id, 'alice'), 'not_found');
+  error(await f.core.subscribe(id, 'alice', 0, { deliver() { assert.fail('quarantined event delivered'); }, close() {} }), 'not_found');
+  error(await f.core.openToolOutput(id, 'alice', 'turn' as TurnId, 'call' as never), 'not_found');
+  error(await f.core.openAttachment(id, 'alice', 'turn' as TurnId, 'attachment' as never), 'not_found');
 });
+
+for (const terminal of ['committed', 'aborted'] as const) {
+  test(`A5 — pending create stays hidden until reconciliation reports ${terminal}`, async t => {
+    const entered = deferred<SessionId>(), state = deferred<'committed' | 'aborted'>();
+    let claimed = false, firstAttempt: SessionId | undefined, aborts = 0;
+    const host: HostCreateCallbacks = {
+      async prepare(id) { assert.equal(claimed, false); claimed = true; firstAttempt ??= id; return success(); },
+      async commit(id) { if (id === firstAttempt) throw Error('lost commit reply'); return success(); },
+      status(id) { entered.resolve(id); return state.promise; },
+      async abort() { assert.equal(terminal, 'aborted'); claimed = false; aborts++; },
+    };
+    const f = await fixture(t, { host });
+    const creating = f.core.create('alice', f.input);
+    const id = await entered.promise;
+    // Resolve immediately after synchronous assertions: no timing/sleep dependence.
+    const pendingList = f.core.list('alice');
+    const pendingPage = f.core.listPage('alice', null, 1);
+    const pendingGet = f.core.get(id, 'alice');
+    assert.ok(f.core.admin.snapshot(id));
+    assert.equal(claimed, true);
+    state.resolve(terminal);
+    const result = await creating;
+    assert.deepEqual(pendingList, []);
+    assert.deepEqual(pendingPage, { items: [], next: null });
+    error(pendingGet, 'not_found');
+    if (terminal === 'committed') {
+      assert.ok(result.ok);
+      assert.equal(result.value.sessionId, id);
+      assert.equal(f.core.list('alice')[0]?.id, id);
+      assert.equal(f.core.listPage('alice', null, 1).items[0]?.id, id);
+      assert.ok(f.core.get(id, 'alice').ok);
+      assert.equal(aborts, 0);
+      assert.equal(claimed, true);
+      error(await f.core.create('bob', f.input), 'workspace_busy');
+    } else {
+      error(result, 'host_create');
+      assert.equal(f.core.admin.snapshot(id), null);
+      assert.deepEqual(await f.store.readAllMeta(), []);
+      assert.deepEqual(f.core.list('alice'), []);
+      error(f.core.get(id, 'alice'), 'not_found');
+      assert.equal(aborts, 1);
+      assert.equal(claimed, false);
+      assert.equal(f.kills(), 1);
+      // Actually retry against the released workspace and host reservation.
+      assert.ok((await f.core.create('alice', f.input)).ok);
+      assert.equal(claimed, true);
+    }
+  });
+}
 
 test('A5 — prepare timeout cancels then aborts, including a late asynchronous claim', async () => {
   const prepare = deferred<Result<void, unknown>>();
