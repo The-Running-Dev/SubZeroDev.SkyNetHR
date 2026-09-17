@@ -1443,10 +1443,14 @@ What the declarations cannot say:
   `Adapter.kill()` dispatches and returns without awaiting the child — deliberately, so that an
   operator's interrupt is not held open across an OS round trip — so what is established when
   `turn.ended` is emitted is that the kill went out while the tree's root was still alive and
-  therefore still walkable. On POSIX the `SIGKILL` to the process group has been delivered by the
-  time the call returns; on Windows `taskkill /T /F` is itself a spawned process, so a
-  descendant's final teardown may briefly outlive the envelope. I59 states what a caller may rely
-  on, and it is that guarantee and not a stronger one.
+  therefore still walkable. On POSIX the adapter issues `SIGTERM` to the process group before
+  returning, falling back to the child pid if the group signal cannot be issued. After the
+  existing two-second grace period, it issues `SIGKILL` to the group, with the same child-pid
+  fallback, only if that child is still the adapter's current child. The delayed escalation is
+  skipped if `close` has cleared the child or a later turn has replaced it. On Windows
+  `taskkill /T /F` is itself a spawned process. On either platform, termination may outlive the
+  envelope; returning from `Adapter.kill()` does not confirm that the tree is gone. I59 states
+  what a caller may rely on, and it is that guarantee and not a stronger one.
 
   **A child's exit status is therefore not diagnostic on this path**: a non-zero code or a signal
   behind a `result` records the server's own act and must never turn a completed turn into a failed
