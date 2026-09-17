@@ -1,0 +1,7 @@
+{
+  "meta": {"schemaVersion":1,"session":{"id":"historical-session","owner":"operator-legacy","vendor":"fixture","cwd":"/historical/workspace","model":null,"policy":{"mode":"interactive","sandbox":null,"banner":null},"sandbox":null,"cliSessionId":null,"lastSeq":0,"state":"ended","createdAt":"2020-01-01T00:00:00.000Z","endedAt":"2020-01-01T01:00:00.000Z"}},
+  "events": [
+    {"seq":1,"sessionId":"historical-session","ts":"2020-01-01T00:01:00.000Z","kind":"checklist.item.completed","data":{"itemId":"welcome","by":"operator-legacy"}},
+    {"seq":2,"sessionId":"historical-session","ts":"2020-01-01T01:00:00.000Z","kind":"session.ended","data":{"reason":"operator","endedAt":"2020-01-01T01:00:00.000Z"}}
+  ]
+}

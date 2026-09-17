@@ -4,8 +4,10 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
-import { computeUnreached, createCheckpoints } from './index.js';
+import { computeUnreached, createCheckpoints as createRuntimeCheckpoints } from '../agent-console/extensions/checkpoints/index.js';
 import type { Config, GitSha, IgnoredManifest, SessionId } from '../contract/index.js';
+
+const createCheckpoints = (config: Config) => createRuntimeCheckpoints(config, { name: 'skynet-hr', email: 'checkpoints@skynet-hr.local' });
 
 function baseConfig(storageRoot: string): Config {
   return {

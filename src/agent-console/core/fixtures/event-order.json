@@ -1,0 +1,5 @@
+{
+  "happy": ["checkpoint.created", "turn.started", "message", "session.started", "message", "turn.ended"],
+  "checkpointFailure": ["session.notice:checkpoint_skipped", "turn.started", "message", "session.started", "message", "turn.ended"],
+  "unspawnable": ["checkpoint.created", "turn.started", "message", "error:agent_unavailable", "turn.ended"]
+}

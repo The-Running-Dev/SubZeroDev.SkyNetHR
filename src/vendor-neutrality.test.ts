@@ -79,3 +79,18 @@ test('Phase 2 — vendor neutrality rejects planted names in shared provider and
   assert.equal(vendorNames(sources[1]!).length, 1);
   assert.equal(vendorBranches(sources[2]!).length, 1);
 });
+
+test('Phase 3b — generic lifecycle, storage and extensions have no host imports', async () => {
+  const root = path.join(SRC_ROOT, 'agent-console');
+  const violations: string[] = [];
+  for (const area of ['core', 'store', 'extensions']) {
+    for (const file of await sourceFilesUnder(path.join(root, area), '.ts')) {
+      const source = await readFile(file, 'utf8');
+      for (const match of source.matchAll(/\bfrom\s+['"]([^'"]+)['"]/g)) {
+        const specifier = match[1]!;
+        if (specifier.startsWith('.') && !path.resolve(path.dirname(file), specifier).startsWith(root + path.sep)) violations.push(`${file}: ${specifier}`);
+      }
+    }
+  }
+  assert.deepEqual(violations, []);
+});
