@@ -1008,6 +1008,7 @@ flowchart TD
     ST["store"]
     CK["checkpoints"]
     AD["adapters/*"]
+    PS["agent-console/process<br/>ProcessSupervisor"]
     RC["records<br/>tier two"]
     SM["session-manager"]
     HC["edge/http-common"]
@@ -1050,6 +1051,11 @@ flowchart TD
     RC --> CF
     RC --> CT
     AD --> CT
+    AD --> PS
+    SM --> PS
+    ST --> PS
+    CT --> PS
+    PS --> AC
     JL --> CT
     ST --> CT
     CL --> CT
@@ -1058,7 +1064,7 @@ flowchart TD
 | Module | Owns | Depends on | Exposes |
 |---|---|---|---|
 | `agent-console/contract` | The self-contained generic vocabulary | *nothing* | Generic types and `isFrame` (D171) |
-| `contract` | The host vocabulary and generic re-exports | `agent-console/contract` | Types, `RATINGS` (D150), and the re-exported `isFrame` (D171) |
+| `contract` | The host vocabulary and generic re-exports | `agent-console/contract`, `agent-console/process` | Types, `RATINGS` (D150), and the re-exported `isFrame` (D171) |
 | `config` | Roots, auth mode, bind address, origin allow-list, caps | `contract`, `jail` | A validated config object |
 | `identity` | Request → `OperatorId`, or rejection | `config` | One function per deployment mode |
 | `jail` | Path resolution, normalisation and containment | `contract` | `resolveInsideRoot`, `pathsOverlap`, `stripExtendedPrefix` |
@@ -1067,7 +1073,7 @@ flowchart TD
 | `agent-console/providers/*-cli` | **The only vendor knowledge**, behind the provider compatibility adapters | `agent-console/contract`, `agent-console/process`, provider types/helpers | `send`, `respond`, `kill`, and one inbound `notify` (D46) |
 | `agent-console/process` | Spawn, environment, stdin, child/stream handles, termination, OS identity, injected PID ledger | `agent-console/contract`, Node built-ins | Internal ProcessSupervisor mechanism and filesystem ledger |
 | `records` *(tier two)* | Review and requisition lifecycle, and their registries | `config`, `store`, `contract` | Raise / decide / claim, author / finalise, read |
-| `session-manager` | Ownership, turn state, `seq`, fan-out, reaping, the payroll fold, **the audit read and the incident view over it** | `config`, `jail`, `store`, `checkpoints`, `adapters`, `records`, `contract` | Session CRUD, subscribe, `readAudit` |
+| `session-manager` | Ownership, turn state, `seq`, fan-out, reaping, the payroll fold, **the audit read and the incident view over it** | `config`, `jail`, `store`, `checkpoints`, `adapters`, `agent-console/process`, `records`, `contract` | Session CRUD, subscribe, `readAudit` |
 | `edge/error-envelope` | The one `ApiErrorCode` → HTTP status mapping | `contract` | `statusForCode`, `sendError` |
 | `edge/http-common` | Everything about a request that is not framing: **the origin check**, identity resolution, login, body reading, the `AuditQuery` parse, and the handlers both edges share | `config`, `session-manager`, `records`, `identity`, `adapters`, `contract`, `edge/error-envelope` | Handlers and helpers, to the two edges only |
 | `edge/sse` | SSE framing and `Last-Event-ID` reconnect; its own routing table | `config`, `session-manager`, `records`, `contract`, `edge/http-common`, `edge/error-envelope` | HTTP routes |
