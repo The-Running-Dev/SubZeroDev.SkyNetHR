@@ -1,5 +1,6 @@
 import { createSessionCore, match, parseStandingRule } from '../agent-console/core/index.js';
 import { createFsRuntimeLease } from '../agent-console/store/lease.js';
+import { createFsAttemptStore } from '../agent-console/store/create-attempts.js';
 import { createHostAttempts } from '../agent-console/core/create-attempts.js';
 import type { SessionError as RuntimeError, SessionStore, SessionCore } from '../agent-console/core/types.js';
 import type { ProcessLedger } from '../agent-console/process/ledger.js';
@@ -60,9 +61,12 @@ export function createSessionManager(deps: {
   });
   const runtime = createSessionCore({
     config: { ...config, maxLiveSessionsPerWorkspace: 1 },
-    // The legacy Store injection surface predates runtime leases. A supplied store
-    // still receives a real, separate lease at this compatibility boundary.
-    store: { ...store, lease: (store as unknown as Partial<SessionStore>).lease ?? createFsRuntimeLease(config.storageRoot) } as unknown as SessionStore,
+    // Legacy Store injections predate the runtime lease and recovery journal.
+    // Supply both durable facilities at this compatibility boundary when absent.
+    store: { ...store,
+      lease: (store as unknown as Partial<SessionStore>).lease ?? createFsRuntimeLease(config.storageRoot),
+      createAttempts: (store as unknown as Partial<SessionStore>).createAttempts ?? createFsAttemptStore(config.storageRoot),
+    } as unknown as SessionStore,
     checkpoints: deps.checkpoints,
     hostCreate,
     createAdapter: (id, options) => (deps.createAdapter ?? createConfiguredAdapter)(id as Vendor, options),
