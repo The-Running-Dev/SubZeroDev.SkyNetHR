@@ -41,8 +41,14 @@ ARG CLAUDE_CODE_VERSION
 # (src/checkpoints/index.ts) — the slim base ships none, and without it every checkpoint
 # fails ENOENT and the feature is silently dead in the only artifact that ships it.
 # `tini` because of the CMD below: see the ENTRYPOINT comment.
+# `ca-certificates` because the slim base ships no system trust store at all (no
+# /etc/ssl/certs/ca-certificates.crt) — Node's own TLS client bundles its own root
+# certificates and doesn't need one, which is why the server's own outbound calls were
+# never affected, but codex's Rust TLS stack reads the system store and, without it, fails
+# every HTTPS/WSS connection with "invalid peer certificate: UnknownIssuer" (observed
+# investigating #389) — including the one it needs for a turn to complete at all.
 RUN apt-get update \
- && apt-get install -y --no-install-recommends git tini \
+ && apt-get install -y --no-install-recommends git tini ca-certificates \
  && rm -rf /var/lib/apt/lists/*
 
 # The CLI this server drives (src/agent-console/providers/claude-cli/index.ts spawns `claude` on PATH by

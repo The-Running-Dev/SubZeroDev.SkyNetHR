@@ -24,11 +24,15 @@
 # Session transcripts, checkpoints and the audit log persist in a Docker-managed volume
 # unless STORAGE_ROOT_HOST_DIR names a host path — see the note on that mount below.
 #
-# The container runs as the image's non-root `node` user (uid 1000), not root. A bind
-# mount's ownership always comes from the host side regardless of the image, so if
+# The container runs as the image's non-root `node` user (uid 1000), not root. On a Linux
+# host, a bind mount's ownership comes from the host side regardless of the image, so if
 # CLAUDE_CREDENTIALS_DIR, CODEX_CREDENTIALS_DIR — or a STORAGE_ROOT_HOST_DIR you do set —
 # is owned by a different host user, `chown -R 1000:1000` it first, or the container will
-# fail to write session data or read/refresh a CLI's credentials.
+# fail to write session data or read/refresh a CLI's credentials. On Windows under Docker
+# Desktop this does not apply: the bind-mount translation layer presents every mounted path
+# as root:root mode 777 regardless of the Windows-side NTFS owner, and uid 1000 can read
+# and write it freely — no chown step, and none is possible from a Windows host anyway
+# (observed investigating #389).
 #
 # AUTH_MODE defaults to shared-secret here only because it needs no reverse proxy to test
 # locally — src/config/index.ts still refuses to start with none configured (S2.8).
