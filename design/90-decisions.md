@@ -5878,8 +5878,67 @@ produced D191, and a decision entry is not somewhere a future reading of the Con
 Reversibility: cheap, in D191's own terms — the same two files under `tools/`, one README section,
 and no product code touched in either direction.
 
+### 2026-09-19 — D245 S18.5 is a computed-value pass over CDP with no new dependency, on both platforms
+Context: #75 asked two questions S18.5 does not settle — whether the pass takes a browser-test
+dependency, and whether it runs on one platform or two. Both were asked before S18 landed; it has
+since landed with S18.5 ticked, on a one-off agent-driven pass ([#116](https://github.com/The-Running-Dev/SubZeroDev.SkyNetHR/pull/116)) that earned its keep by finding
+`.panel--audit`'s unconditional `display: flex` beating the UA `[hidden]` rule, but left nothing
+repeatable behind and never stated the count the criterion demands. S18.5 is the only S18
+criterion with no automated check — every other one has a `describe` block against the fake DOM —
+and it is the only one that cannot have a useful automated check without real rendering, which is
+why it is the one that was skipped. Two facts reframe the questions as asked. First, `npm test`
+already matrixes `ubuntu-latest` and `windows-latest`, so anything added to it is a two-platform
+gate by construction, and committed pixel baselines would immediately reproduce
+`SubZeroDev.Adventures`' non-Linux exclusion — a spec that passes on one leg by not running,
+inside a repository whose S19 exists to stop exactly that. Second, the stance this decision is
+tested against is stronger than "few dependencies": the client is tested through a hand-rolled
+fake `document` rather than `jsdom`, so the bar is not "is this dependency small" but "can this be
+done with builtins at acceptable cost".
+Chosen: a real-browser pass driven over the Chrome DevTools Protocol using Node builtins only —
+`WebSocket` has been a global since Node 22 and the engine floor here is 22.11.0, and CDP is
+otherwise HTTP and JSON — against whichever Chromium-family browser the host already has. It
+asserts **computed** values read back out of a rendered page (font size in rem, line height as a
+multiple, hit area from the element's own bounding box, effective `display` under `[hidden]`,
+and whether the document scrolls horizontally), and compares no images. Both platforms, because
+with no baseline artifact there is nothing platform-shaped left to diverge; the run is its own
+npm script wired into `verify.yml` on both legs, and where no browser can be found it **fails by
+name rather than skipping**, per S19's own rule about checks that cannot be made saying so.
+Two costs, stated rather than buried. We own and maintain the CDP plumbing, including locating a
+browser across both platforms — on the order of the fake DOM's own size, which is the precedent
+being followed, not an argument that it is free. And the pass now requires a Chromium-family
+browser on the host; both GitHub runners ship one, a development box effectively always has one,
+and the loud failure above is what keeps that requirement from decaying into a silent skip.
+Rejected: **Playwright with committed pixel baselines**, `Adventures`' shape. Cheapest to write
+and the strongest catch, and rejected on three counts — it is a large devDependency plus browser
+binaries on both CI legs against a four-devDependency baseline; baselines must be regenerated on
+every intentional visual change, which is a standing tax paid in a directory nothing else in this
+repository has; and the Windows leg would carry the same exclusion `Adventures` had to write,
+which is a documented hole in the two-platform promise D64 and S19 exist to close. Rejected
+**`jsdom` or `happy-dom`** — they perform no layout, so they cannot back a computed-style, hit-area
+or overflow assertion at all, which means the dependency buys nothing this criterion asks for.
+Rejected **static assertions over `client/app.css`'s text** — zero cost and it runs everywhere, but
+it checks source text rather than rendering, would not have caught the `[hidden]` defect that is
+the only evidence this criterion has ever produced, and its natural target (a component reading a
+literal colour) is one S18.5 itself assigns to S2.14 rather than to this pass. Rejected **leaving
+it a one-off manual pass and amending the criterion to say so** — it is honest, but it protects
+nothing against regression and preserves a ticked box backed by a run nobody can repeat.
+Amends: **S18.5**, reworded in `design/30-slices.md` in this same commit — "a screenshot pass" is
+no longer accurate, and the surfaces the count ranges over were never defined, which is part of
+why no count was ever stated. The amendment names the rule for what counts as a themeable
+surface and requires the run to fail on one it did not cover, so the number stays recoverable
+from the tree instead of being restated here and going stale.
+Reversibility: cheap in one direction, expensive in the other. Adding Playwright later is an
+ordinary dependency decision; the CDP driver is deleted when it is. Going the other way — having
+committed baselines and wanting rid of them — means unpicking a per-platform artifact set and
+whatever grew to maintain it, which is the asymmetry that decided this.
+
 ## Open
 
 Staging only. Once an item becomes an issue it leaves this list.
 
-None at present.
+- **Build S18.5's computed-value browser pass** (D245). A CDP driver over Node builtins, the
+  assertion helpers it backs, the npm script, and both `verify.yml` legs wired to it with a loud
+  failure where no browser is found. Prior art to read first, not copy: `SubZeroDev.Adventures` @
+  `5f9a32a` — `src/test/browser/assertions.ts` for the five computed-value assertions and the
+  self-test proving each fails when violated, `src/test/browser/cdp.ts` for the protocol calls.
+  Closes the open half of #75.

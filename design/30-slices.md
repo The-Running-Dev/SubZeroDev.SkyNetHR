@@ -1047,9 +1047,11 @@ Acceptance:
     it, and a search of the server sources for the storage key returns nothing (D60).
   - S18.4 The choice survives a reload with no flash of an unthemed document — the attribute is
     set before first paint, asserted on a cold load.
-  - S18.5 Every component renders correctly under all four: a screenshot pass over each screen in
-    each theme, with the count of screens times themes stated in the slice report. A component
-    that reads a literal colour instead of a token is an S2.14 failure, not this slice's.
+  - S18.5 Every component renders correctly under all four, proven by reading **computed** values
+    back out of a really-rendered page rather than by comparing images (D245): a themeable surface
+    is each top-level panel and each in-console fold, and the pass covers every one of them under
+    every theme, stating the count it covered and failing on a surface it did not reach. A
+    component that reads a literal colour instead of a token is an S2.14 failure, not this slice's.
   - S18.6 The status badge is a projection with no field behind it: `CLOCKED OUT` is
     `state === 'ended'`, `BLOCKED` is a live session with an unresolved `permission.request`,
     `ON SHIFT` is a live turn, `IDLE` is the remainder. Asserted by driving one session through
