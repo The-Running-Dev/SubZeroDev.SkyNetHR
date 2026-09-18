@@ -2013,6 +2013,24 @@ resolved** — `POST /api/login` included (I24). **Read routes are deliberately 
 cross-origin `GET` cannot be read back by the attacking page, and checking `GET /events` would
 break the one client shape that is otherwise legitimate, a reverse proxy rewriting `Origin`.
 
+### Health
+
+| Method | Path | Request | Success | Refusals |
+|---|---|---|---|---|
+| `GET` | `/livez` | — | `200 { status: 'ok' }` | — |
+| `GET` | `/readyz` | — | `200 { status: 'ok' }` | `503 { status: 'unavailable' }` |
+
+Outside `/api/` and outside the authentication and origin rules above, for the same reason the
+static assets are (#73): a reverse proxy has to reach these before it can decide whether the
+console is even there to authenticate against, and neither carries an operator's data. Checked
+ahead of the static-asset and catch-all dispatch in both `edge/sse` and `edge/ws`, so a probe is
+never mistaken for a client-asset request or a missing route. `/livez` answers unconditionally —
+it never reads `manager`, `store`, or the readiness flag below — because a liveness probe that
+consulted a dependency would start doing work nobody asked for the moment anything downstream
+stalled. `/readyz` reads a flag `server` sets once the request surfaces are built and its
+listener has bound (D243, I18); it is `false` for every request up to that point and `true` for
+every one after, and it never reaches into `manager` or `store` either.
+
 ### Identity
 
 | Method | Path | Request | Success | Refusals |

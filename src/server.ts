@@ -8,7 +8,7 @@ import { createSessionManager } from './session-manager/index.js';
 import { createStore, LOCK_RENEWAL_INTERVAL_MS } from './store/index.js';
 import { createCheckpoints } from './checkpoints/index.js';
 import { loadConfig } from './config/index.js';
-import type { ConfigError } from './contract/index.js';
+import type { ConfigError, ReadinessState } from './contract/index.js';
 
 /** Fail closed, out loud, naming the fix. Never a warning (S2.8). */
 function refuseToStart(error: ConfigError): never {
@@ -91,11 +91,17 @@ async function main(): Promise<void> {
   }
   await records.boot();
 
+  // #73: false until the listener's own `'listening'` event fires below — before that,
+  // the request surfaces built just above exist but nothing can reach them yet, so
+  // `/readyz` must not claim otherwise.
+  const readiness: ReadinessState = { ready: false };
+
   const edgeDeps = {
     config: config.value,
     identity: resolverFor(config.value.auth, config.value.trustProxy),
     manager,
     records,
+    readiness,
   };
 
   // D10/D117: exactly one edge binds (S11.5).
@@ -268,6 +274,7 @@ async function main(): Promise<void> {
   let bound = false;
   server.once('listening', () => {
     bound = true;
+    readiness.ready = true; // #73: request surfaces were already built above; this is the bind
   });
   server.on('error', (err) => {
     if (bound) {

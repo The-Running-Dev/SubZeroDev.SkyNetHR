@@ -14,7 +14,7 @@ import { createStore } from '../../store/index.js';
 import { createCheckpoints } from '../../checkpoints/index.js';
 import { createRecords } from '../../records/index.js';
 import { stripExtendedPrefix } from '../../jail/index.js';
-import type { Config } from '../../contract/index.js';
+import type { Config, ReadinessState } from '../../contract/index.js';
 
 const readFileAsync = promisify(readFile);
 
@@ -94,7 +94,7 @@ async function makeSharedEdges(): Promise<Harness> {
     checkpoints: createCheckpoints(config),
     records,
   });
-  const deps = { config, identity: resolverFor(config.auth, config.trustProxy), manager, records };
+  const deps = { config, identity: resolverFor(config.auth, config.trustProxy), manager, records, readiness: { ready: true } as ReadinessState };
 
   const sseServer = createServer(createSseEdge(deps));
   servers.push(sseServer);

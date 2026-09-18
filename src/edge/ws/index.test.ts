@@ -14,7 +14,7 @@ import { createSessionManager } from '../../session-manager/index.js';
 import { createStore } from '../../store/index.js';
 import { createCheckpoints } from '../../checkpoints/index.js';
 import { stripExtendedPrefix } from '../../jail/index.js';
-import type { AuthConfig, Config, Records } from '../../contract/index.js';
+import type { AuthConfig, Config, ReadinessState, Records } from '../../contract/index.js';
 
 const FIXTURE = path.join(process.cwd(), 'src', 'agent-console', 'providers', 'claude-cli', 'fixtures', 'fake-claude-cli.mjs');
 const ALLOWED_ORIGIN = 'https://console.example';
@@ -113,7 +113,7 @@ async function makeSharedEdges(
     checkpoints: createCheckpoints(config),
     records: notImplementedProxy<Records>('records'),
   });
-  const deps = { config, identity: resolverFor(config.auth, config.trustProxy), manager, records: notImplementedProxy<Records>('records') };
+  const deps = { config, identity: resolverFor(config.auth, config.trustProxy), manager, records: notImplementedProxy<Records>('records'), readiness: { ready: true } as ReadinessState };
 
   const sseServer = createServer(createSseEdge(deps));
   servers.push(sseServer);

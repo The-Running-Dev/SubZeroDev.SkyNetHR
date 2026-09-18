@@ -7,6 +7,7 @@ import {
   createBackpressureGuard,
   createHttpHandlers,
   failWith,
+  handleProbe,
   headerValue,
   isMutating,
   originAllowed,
@@ -42,7 +43,7 @@ function decodeSegment(res: ServerResponse, raw: string, label: string, field: s
 }
 
 export function createSseEdge(deps: EdgeDeps): RequestListener {
-  const { config, identity, manager } = deps;
+  const { config, identity, manager, readiness } = deps;
 
   const {
     handleCreate,
@@ -202,6 +203,8 @@ export function createSseEdge(deps: EdgeDeps): RequestListener {
         const method = req.method ?? 'GET';
         const url = new URL(req.url ?? '/', 'http://placeholder');
         const pathname = url.pathname;
+
+        if (handleProbe(method, pathname, res, readiness)) return;
 
         if (method === 'GET' && (await serveStatic(pathname, res, stampEdgeTag))) return;
 

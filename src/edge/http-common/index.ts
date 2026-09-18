@@ -16,6 +16,7 @@ import type {
   IsoTimestamp,
   OperatorId,
   Rating,
+  ReadinessState,
   RecordsError,
   RequisitionId,
   Result,
@@ -91,6 +92,25 @@ export function createBackpressureGuard(
 export function sendJson(res: ServerResponse, status: number, body: unknown): void {
   res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'x-content-type-options': 'nosniff' });
   res.end(JSON.stringify(body));
+}
+
+// #73: outside `/api/`, unauthenticated, one copy shared by both edges so neither can drift
+// from the other on what a proxy probes. `/livez` answers unconditionally — it never reads
+// `readiness`, `manager`, or `store` — because a liveness check that consulted a dependency
+// would start work nobody asked for the moment anything downstream stalled. `/readyz` reads
+// only the flag `server.ts` flips once boot has finished and the listener is bound (I18);
+// it never reaches into `manager` or `store` either, for the same reason as `/livez`.
+export function handleProbe(method: string, pathname: string, res: ServerResponse, readiness: ReadinessState): boolean {
+  if (method !== 'GET') return false;
+  if (pathname === '/livez') {
+    sendJson(res, 200, { status: 'ok' });
+    return true;
+  }
+  if (pathname === '/readyz') {
+    sendJson(res, readiness.ready ? 200 : 503, { status: readiness.ready ? 'ok' : 'unavailable' });
+    return true;
+  }
+  return false;
 }
 
 /**

@@ -5804,6 +5804,33 @@ retro-fitting decision entries for Phase 1a (#352) and Phase 3b (#370), which la
 that a move happened, which the tree already says.
 Reversibility: cheap. Prose in two design documents; no code moves.
 
+### 2026-09-18 — D243 `/livez` and `/readyz` are tier one, outside `/api/`, and unauthenticated
+Context: #73 found the definition of done silent on health endpoints — neither tier one's seven
+items nor tier two's five mention them — while the deployment already exposes a port with no
+health check for a reverse proxy to probe. `design/FROZEN.md` does not exist (D111: D105's freeze
+was decided but the marker was never written), so this is an ordinary contract amendment, not
+work against a frozen document.
+Chosen: tier one. A container or reverse proxy in front of a tier-one deployment needs something
+to probe from the moment it exists, not from whenever tier two lands. `/livez` and `/readyz` sit
+outside `/api/`, alongside the static client assets, and outside both the authentication rule and
+the origin-check rule — see *HTTP routes* § *Health*. `/livez` answers unconditionally, reading
+neither `manager` nor `store`, so a probe can never be starved by a stalled dependency; `/readyz`
+reads a `ReadinessState` flag that `server.ts` flips once the request surfaces are built and its
+listener is bound, and that flag is a plain object never derived from `manager` or `store`, so
+neither route can structurally reach either dependency (I18). No authentication, for the same
+reason the static assets carry none: a proxy has to reach these before it can decide whether the
+console is up enough to authenticate against, and neither route carries or accepts operator data.
+Both are checked ahead of static-asset and catch-all dispatch in `edge/sse` and `edge/ws`, so a
+probe is never shadowed by either.
+Rejected: tier two — leaves a tier-one deployment with no way for a proxy to detect it is down,
+which is the exact gap #73 exists to close, and there is no tier-two-only capability these routes
+depend on; requiring authentication — defeats the purpose, since the proxy configuration that
+needs these routes runs before, and independently of, whatever authenticates an operator; nesting
+under `/api/health/*` — would pull the routes under the origin-check and (absent an explicit
+carve-out) the authentication rule, reintroducing the dependency this decision removes for no
+benefit, since neither route is a client-facing API surface.
+Reversibility: cheap. Two GET routes and one boolean flag; no persisted state, no stored data.
+
 ## Open
 
 Staging only. Once an item becomes an issue it leaves this list.
