@@ -5935,10 +5935,3 @@ whatever grew to maintain it, which is the asymmetry that decided this.
 ## Open
 
 Staging only. Once an item becomes an issue it leaves this list.
-
-- **Build S18.5's computed-value browser pass** (D245). A CDP driver over Node builtins, the
-  assertion helpers it backs, the npm script, and both `verify.yml` legs wired to it with a loud
-  failure where no browser is found. Prior art to read first, not copy: `SubZeroDev.Adventures` @
-  `5f9a32a` — `src/test/browser/assertions.ts` for the five computed-value assertions and the
-  self-test proving each fails when violated, `src/test/browser/cdp.ts` for the protocol calls.
-  Closes the open half of #75.
