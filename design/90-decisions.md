@@ -5744,23 +5744,29 @@ twice already: `wire.ts` and `schemas/wire.schema.json` declare its shape, and
 Chosen: `20-contract.md` points at all three for shape and mechanics and states only what
 none of them can carry — that this phase publishes a wire without adopting one; that the
 stdio parent is the trust boundary and `browserMethods` is an unenforced routing obligation
-(I66); that the runtime's `runtime-leases/` lease, not `server.lock`, is what excludes it,
-with I50 amended to say it governs servers only and I65 stating the runtime's own rule; that
+(I65); that the runtime's `runtime-leases/` lease, not `server.lock`, is what excludes it —
+**I50 absorbs both mechanisms rather than gaining a companion**, so the property "a storage
+root is held by at most one process" is stated once and the two mechanisms are the two halves
+of it, joined by the claim-before-reap ordering that is the only thing they share; that
 a `storage_locked` holder may now be a runtime with a placeholder `renewals`; that credit is
 admission control and an exhausted subscription is closed with a control-delivered
 `replay_gap` consuming no `seq`, per I1's existing carve-out on the other transport; that the
 three outcomes are distinct and neither an RPC failure nor a cancellation rolls back an
 emitted event; and that an unresolved create attempt is quarantined rather than rolled back
-(I67). Error semantics are written in full rather than pointed at, per that section's standing
+(I66). Error semantics are written in full rather than pointed at, per that section's standing
 rule, including that `RpcError.data.retryable` is declared and never populated.
 Rejected: restating the method table or the framing, delivery and shutdown rules here — two
 copies of a rule is a promise they will diverge, and this is the copy that rots
 (*Single ownership*); a pointer for `## Error semantics` — a variant's name is in the tree but
-when it fires and what the caller does about it is not; folding the runtime lease into I50 —
-the two share no evidence, and a caller that polls `storage_locked` on a runtime is waiting
-for a renewal counter that mechanism never writes; treating the missing section as drift to
-correct silently — a public interface absent from the contract is exactly what *Hard rules*
-requires be surfaced.
+when it fires and what the caller does about it is not; a separate invariant for the runtime
+lease, with I50 scoped to servers — drafted that way first, on the ground that the two
+mechanisms share no evidence, and **rejected by the owner**: the evidence differs but the
+property does not, and two invariants asserting one property is where a reader checking
+"can two processes hold this root?" reads one of them and stops. The cost is accepted and
+stated inside I50 — its two halves are not interchangeable, and a caller that polls a
+runtime's `storage_locked` is waiting for a renewal counter that half never writes; treating
+the missing section as drift to correct silently — a public interface absent from the contract
+is exactly what *Hard rules* requires be surfaced.
 Reversibility: cheap while nothing consumes the wire, which is itself the reason this phase
 publishes without adopting. Expensive once an SDK or bridge ships against it.
 
