@@ -742,6 +742,8 @@ bytes one session may store, enforced at the `writeToolOutput` call site.
 <storage>/audit.ndjson                        one AuditRecord per line, append-only
 <storage>/pids.ndjson                         ProcessRecord and ProcessTombstone lines
 <storage>/server.lock                         one ServerLock object; a renewed lease   (D180)
+<storage>/runtime-leases/<instanceId>.json    one RuntimeLeaseHolder per contender     (I50)
+<storage>/create-attempts/<sessionId>.json    one PendingCreate per unpublished create (I66)
 <storage>/reviews.ndjson                      (tier two) one Review per line, append-only
 <storage>/requisitions.ndjson                 (tier two) one Requisition per line, append-only
 ```
@@ -760,17 +762,22 @@ though it were new is silent wrong state rather than a parse error.
 | `audit.ndjson` | append order | append order, read newest first | Server-wide. fsync'd before the decision it records reaches the child (I10). Never truncated, never deleted with a session (I13). Every read is a bounded window resumed by `AuditCursor` (I39) |
 | `pids.ndjson` | append order; `pid` is not unique over time | append order | Server-wide. Two line shapes: a `ProcessRecord` at spawn, a `ProcessTombstone` at exit (D95). The latest line for a `pid` decides liveness; the spawn line carries everything else |
 | `server.lock` | — | — | Server-wide, one `ServerLock` object, written before boot's first step and removed as shutdown's last act, after the children are gone (D161, D175). A shutdown that does not get that far leaves it. **Not append-only, and alone among these files rewritten repeatedly while the server runs**: every renewal is a whole-file write (D180). Reclaimed only on a holder whose `renewals` did not move across one observation window, whichever host wrote it. **Every write publishes the file whole, so a sample observes the previous contents or the next and never a torn file** (D196, I61). The mechanism differs by which write it is, and the difference is not cosmetic: a **claim on an absent lock is an exclusive create**, which must fail rather than overwrite when a second booting server got there first, while a **reclaim and every renewal are a temp-file-then-atomic-rename**, the shape I16 already gives `meta.json`, which must overwrite. Each sample is a fresh open-read-close. **The one file here where durability is irrelevant**: it is not fsync'd, because a lock lost to a host crash and a lock that survived one lead a booting server to the same correct outcome — claim with no wait, or reclaim one window later |
+| `runtime-leases/<instanceId>.json` | `instanceId`, minted per run | — | Server-wide, and the **second** mechanism holding I50's one-process-per-root property — `server.lock` is the host's, this is the runtime's, and a host claims both. One file per contender, published whole by exclusive-create-then-`link` so a generation is never overwritten and never read torn. A contender publishes before it enumerates, so two can both refuse but cannot both see themselves alone; **there is no observation window and no retry delay**, which is what distinguishes this from `server.lock`'s reclaim. A holder is disregarded only on proven local death — same hostname, `ESRCH`, and a matching OS creation time; **another hostname, or a liveness that cannot be established, fails closed**. Not durable: a lease lost to a host crash is a dead holder, which is the same answer. Removed on release |
+| `create-attempts/<sessionId>.json` | `sessionId` | — | Server-wide recovery state, not a session artifact and not reachable through any session read. Present means a create has **not** been durably published by this runtime; the record never asserts an outcome, because the host remains the authority for it (I66). Written before the first host side effect and removed only at publication, by temp-file-then-`rename` with the contents fsync'd on both platforms and the directory name fsync'd on POSIX — Windows cannot open a directory for fsync. **An unreadable record answers `corrupt`, never "absent"**: losing a reservation would release a workspace an already-committed session may hold, which is the failure `pathsOverlap` exists to prevent |
 | `reviews.ndjson` *(tier two)* | `reviewId` | append order; the latest line for an id wins | Server-wide. Never rewritten. Survives deletion of the session it names (D67). Durable per line (D128). A `final` line is terminal — no later line for that id is written |
 | `requisitions.ndjson` *(tier two)* | `requisitionId` | append order; the latest line for an id wins | Server-wide. Never rewritten. **Not durable per line**, which is why a lost consumption line reverts an approval to spendable — D68's written exception |
 | `ckpt.git/` | git object ids | git history | Git is the store. `add -A` honours the workspace's own `.gitignore`, and neither `read-tree` nor `clean -fd` takes `-x`, so exactly the same set is left alone — which is what `ignored/<sha>.json` exists to report on |
 | `ignored/<sha>.json` | the checkpoint `sha` | — | **Written by `checkpoints`, not by `store`** — it is the only artifact in this directory that is, because it is derived from the same `git status` the checkpoint is built from and is meaningless apart from a sha (D187). Written once after the commit that names it, never appended, never rewritten. Not durable: a lost manifest degrades a later restore's report to unknown and costs nothing else. **A checkpoint whose manifest is absent is still a valid checkpoint** — capture failure never fails the commit. Removed with the session directory (D25) |
 
-**The four server-wide append files are the design's only shared mutable state on disk**, and
-the claim that no lock is needed rests on each being opened once, as a single append stream
-owned by `store`, with every writer going through it. Ordered appends through one stream in one
-single-threaded process cannot interleave a partial line. **Two server processes over one
-storage root would break that for all four, which is what `server.lock` prevents** (D161, D180) —
-so the single-process premise is enforced rather than assumed.
+**The four server-wide append files are the design's only shared mutable state that is
+*appended*** — `server.lock`, the runtime leases and the create-attempt records are shared and
+mutable too, but none of them is an append stream, which is why the argument below reaches them
+not at all. For the four, the claim that no lock is needed rests on each being opened once, as a
+single append stream owned by `store`, with every writer going through it. Ordered appends
+through one stream in one single-threaded process cannot interleave a partial line. **Two
+server processes over one storage root would break that for all four, which is what
+`server.lock` prevents** (D161, D180) — so the single-process premise is enforced rather
+than assumed.
 
 **The one case the lease cannot cover is out of reach rather than tolerated, and that is what
 draws the supported scope** (D180, D194). A holder that is alive but whose renewals are invisible to

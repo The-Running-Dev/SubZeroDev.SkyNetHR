@@ -5770,6 +5770,34 @@ is exactly what *Hard rules* requires be surfaced.
 Reversibility: cheap while nothing consumes the wire, which is itself the reason this phase
 publishes without adopting. Expensive once an SDK or bridge ships against it.
 
+### 2026-09-18 — D242 `10-design.md` is reconciled to the AgentConsole extraction, and the two non-append storage locations enter the contract
+Context: Phases 1a, 1b, 2, 3, 3b and 4 each kept `20-contract.md` current and touched
+`10-design.md` **zero times**. By the time this reconcile ran, § *Module boundaries* described
+fifteen modules against a tree holding twenty-one, drew `adapters/*` — a path deleted in Phase 2
+(`d619e89`) — and had no node for `agent-console/{core,store,protocol,runtime,extensions}`; and
+§ *Control flow* 1 still ended "on any failure, release BOTH claims", which I66 contradicts
+outright. Separately, § *Persisted schemas* listed neither `create-attempts/` nor
+`runtime-leases/`, although I66 is only true across a restart because the first survives one and
+I50's second half only holds because the second exists.
+Chosen: the documents change to match the tree, in three places. § *Module boundaries* is
+rewritten — two enforced layers rather than a count, a diagram with `generic`/`host` subgraphs
+and all eight `agent-console/*` nodes, and `session-manager`'s ownership cell restated as
+*composition, not lifecycle*. § *Control flow* 1 is rewritten as the two-phase create it now is,
+carrying the quarantine, the restart story, and the `agent_unavailable` the SkyNetHR edge maps
+`create_outcome_unknown` to. § *Persisted schemas* gains both locations with their durability
+and reader semantics, and its "only shared mutable state on disk" claim is narrowed to "only
+shared mutable state that is *appended*" — the scope word was the false part; the
+append-interleaving argument it defends is untouched and still reaches exactly four files.
+Rejected: the code changing to match the documents — it would mean deleting the create-attempt
+protocol and the runtime lease, taking I66 and half of I50 with them, and that is a `/contract`
+amendment rather than a reconciliation; adding five rows and leaving the diagram and the
+ownership cells alone — cheaper, but it leaves the graph asserting a shape gone since `d619e89`
+and `session-manager` claiming work it delegates, which is the half that actively misleads;
+retro-fitting decision entries for Phase 1a (#352) and Phase 3b (#370), which landed without one
+— D238 and D239 state there were no invariant changes in them, so the entry would record only
+that a move happened, which the tree already says.
+Reversibility: cheap. Prose in two design documents; no code moves.
+
 ## Open
 
 Staging only. Once an item becomes an issue it leaves this list.

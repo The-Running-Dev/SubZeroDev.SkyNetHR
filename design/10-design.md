@@ -988,12 +988,17 @@ the append-only-file property that makes it evidence — or stays out, leaving t
 
 ## Module boundaries
 
-Fifteen modules — the two transport edges are two modules, not one with a slash in its name,
-which is the whole point of D10; `records` is the twelfth, added by tier two (D77); and
-`edge/http-common` and `edge/error-envelope` are the thirteenth and fourteenth, which the two
-edges compose through. `agent-console/contract` holds the generic vocabulary re-exported by
-the host `contract` facade. The dependency graph is acyclic, and the edges most likely to be drawn
-backwards are called out below the diagram.
+**Two layers, not one list.** `src/agent-console/*` is the generic console — vocabulary, provider
+registry, process mechanism, session core, durable store, protocol and extensions — and it never
+imports anything above it. `src/*` is the SkyNetHR host: the two transport edges, identity,
+config, records, and a `session-manager` that composes the core rather than reimplementing it.
+The split is enforced, not merely intended: `src/agent-console/import-boundary.test.ts` fails any
+production file under that subtree that imports outside it, `node:` built-ins excepted.
+
+The two transport edges are two modules, not one with a slash in its name, which is the whole
+point of D10; `records` is tier two's (D77); and `edge/http-common` and `edge/error-envelope` are
+what the two edges compose through. The dependency graph is acyclic, and the edges most likely to
+be drawn backwards are called out below the diagram.
 
 **D10 forbids the two edges importing each other; it does not forbid a third module both
 compose through**, and the distinction is what keeps two transports answering one request
@@ -1006,31 +1011,60 @@ and first-message auth, and each one's routing table.
 
 ```mermaid
 flowchart TD
-    CT["contract<br/>host facade"]
-    AC["agent-console/contract<br/>generic vocabulary"]
-    CF["config"]
-    ID["identity"]
-    JL["jail"]
-    ST["store"]
-    CK["checkpoints"]
-    AD["adapters/*"]
-    PS["agent-console/process<br/>ProcessSupervisor"]
-    RC["records<br/>tier two"]
-    SM["session-manager"]
-    HC["edge/http-common"]
-    EE["edge/error-envelope"]
-    EH["edge/sse"]
-    EW["edge/ws"]
-    CL["client"]
+    subgraph generic["src/agent-console — generic console"]
+      AC["contract<br/>generic vocabulary"]
+      PS["process<br/>ProcessSupervisor"]
+      PV["providers/*<br/>vendor CLIs"]
+      CO["core<br/>session lifecycle"]
+      AS["store<br/>durable state"]
+      EX["extensions<br/>checkpoints"]
+      RT["runtime<br/>stdio server"]
+      PR["protocol<br/>wire + schemas"]
+    end
+    subgraph host["src — SkyNetHR host"]
+      CT["contract<br/>host facade"]
+      CF["config"]
+      ID["identity"]
+      JL["jail"]
+      ST["store"]
+      CK["checkpoints"]
+      RC["records<br/>tier two"]
+      SM["session-manager"]
+      HC["edge/http-common"]
+      EE["edge/error-envelope"]
+      EH["edge/sse"]
+      EW["edge/ws"]
+      CL["client"]
+    end
+
+    PS --> AC
+    PV --> AC
+    PV --> PS
+    CO --> AC
+    CO --> PS
+    CO --> PV
+    CO --> AS
+    CO --> EX
+    AS --> CO
+    AS --> PS
+    EX --> CO
+    RT --> CO
+    RT --> AS
+    RT --> PV
+    RT --> EX
 
     CT --> AC
+    CT --> PS
+    SM --> CO
+    SM --> AS
     SM --> JL
     SM --> ST
     SM --> CK
-    SM --> AD
+    SM --> PV
     SM --> RC
     SM --> CT
     SM --> CF
+    SM --> PS
     EH --> HC
     EH --> EE
     EH --> SM
@@ -1046,42 +1080,42 @@ flowchart TD
     HC --> RC
     HC --> ID
     HC --> CF
-    HC --> AD
+    HC --> PV
     EE --> CT
     ID --> CF
     CF --> JL
     CF --> CT
     ST --> CF
+    ST --> CT
+    ST --> PS
     CK --> CF
     RC --> ST
     RC --> CF
     RC --> CT
-    AD --> CT
-    AD --> PS
-    SM --> PS
-    ST --> PS
-    CT --> PS
-    PS --> AC
     JL --> CT
-    ST --> CT
     CL --> CT
 ```
 
 | Module | Owns | Depends on | Exposes |
 |---|---|---|---|
 | `agent-console/contract` | The self-contained generic vocabulary | *nothing* | Generic types and `isFrame` (D171) |
+| `agent-console/process` | Spawn, environment, stdin, child/stream handles, termination, OS identity, injected PID ledger | `agent-console/contract`, Node built-ins | ProcessSupervisor mechanism and filesystem ledger |
+| `agent-console/providers/*` | **The only vendor knowledge**, behind the provider compatibility adapters, and the registry that resolves one | `agent-console/contract`, `agent-console/process` | `send`, `respond`, `kill`, one inbound `notify` (D46), and provider registration |
+| `agent-console/core` | **The session lifecycle itself**: ownership, turn state, `seq` assignment, fan-out, reaping, the boot and shutdown sequences, and the A5 create attempt | `agent-console/contract`, `process`, `providers`, `store`, `extensions` | `createSessionCore`, its `SessionStore` and host-callback seams |
+| `agent-console/store` | Durable generic state: session meta, spill, audit, the runtime lease, the create-attempt journal, and the memory backend the conformance suite runs both against | `agent-console/core`, `agent-console/process` | Filesystem and in-memory `SessionStore` implementations |
+| `agent-console/extensions` | Optional capability the core calls through hooks rather than depends on — checkpoints today | `agent-console/core` | One extension object per capability |
+| `agent-console/protocol` | The Phase 4 wire: method table, JSON Schema, fixtures, and the browser routing whitelist (I65) | *nothing* | `Operations`, `browserMethods`, schemas and fixtures |
+| `agent-console/runtime` | The stdio JSON-RPC server that exposes the core to a parent process — framing, subscriptions, credit admission, uploads | `agent-console/core`, `store`, `providers`, `extensions` | `main.ts` entry point and the server factory |
 | `contract` | The host vocabulary and generic re-exports | `agent-console/contract`, `agent-console/process` | Types, `RATINGS` (D150), and the re-exported `isFrame` (D171) |
 | `config` | Roots, auth mode, bind address, origin allow-list, caps | `contract`, `jail` | A validated config object |
 | `identity` | Request → `OperatorId`, or rejection | `config` | One function per deployment mode |
 | `jail` | Path resolution, normalisation and containment | `contract` | `resolveInsideRoot`, `pathsOverlap`, `stripExtendedPrefix` |
-| `store` | meta, spill, tool-output blobs, audit, process-ledger composition, **the two record logs**, ring buffer | `config`, `contract`, `agent-console/process` | Read/append primitives |
-| `checkpoints` | Shadow git lifecycle | `config`, `contract` | create / list / restore |
-| `agent-console/providers/*-cli` | **The only vendor knowledge**, behind the provider compatibility adapters | `agent-console/contract`, `agent-console/process`, provider types/helpers | `send`, `respond`, `kill`, and one inbound `notify` (D46) |
-| `agent-console/process` | Spawn, environment, stdin, child/stream handles, termination, OS identity, injected PID ledger | `agent-console/contract`, Node built-ins | Internal ProcessSupervisor mechanism and filesystem ledger |
+| `store` | The host's own durable state — tool-output blobs, **the two record logs**, `server.lock`, process-ledger composition, ring buffer — and the legacy `Store` shape the manager adapts to `SessionStore` | `config`, `contract`, `agent-console/process` | Read/append primitives |
+| `checkpoints` | Shadow git lifecycle, as the host still declares it | `config`, `contract` | create / list / restore |
 | `records` *(tier two)* | Review and requisition lifecycle, and their registries | `config`, `store`, `contract` | Raise / decide / claim, author / finalise, read |
-| `session-manager` | Ownership, turn state, `seq`, fan-out, reaping, the payroll fold, **the audit read and the incident view over it** | `config`, `jail`, `store`, `checkpoints`, `adapters`, `agent-console/process`, `records`, `contract` | Session CRUD, subscribe, `readAudit` |
+| `session-manager` | **Composition, not lifecycle**: HR identity and vendor vocabulary over generic principals and providers, the host create callbacks that spend a requisition, `server.lock` at boot, the payroll fold, and **the audit read and the incident view over it** | `agent-console/core`, `agent-console/store`, `config`, `jail`, `store`, `checkpoints`, `agent-console/providers`, `agent-console/process`, `records`, `contract` | Session CRUD, subscribe, `readAudit` |
 | `edge/error-envelope` | The one `ApiErrorCode` → HTTP status mapping | `contract` | `statusForCode`, `sendError` |
-| `edge/http-common` | Everything about a request that is not framing: **the origin check**, identity resolution, login, body reading, the `AuditQuery` parse, and the handlers both edges share | `config`, `session-manager`, `records`, `identity`, `adapters`, `contract`, `edge/error-envelope` | Handlers and helpers, to the two edges only |
+| `edge/http-common` | Everything about a request that is not framing: **the origin check**, identity resolution, login, body reading, the `AuditQuery` parse, and the handlers both edges share | `config`, `session-manager`, `records`, `identity`, `agent-console/providers`, `contract`, `edge/error-envelope` | Handlers and helpers, to the two edges only |
 | `edge/sse` | SSE framing and `Last-Event-ID` reconnect; its own routing table | `config`, `session-manager`, `records`, `contract`, `edge/http-common`, `edge/error-envelope` | HTTP routes |
 | `edge/ws` | WebSocket framing and first-message auth; its own routing table | `config`, `session-manager`, `records`, `contract`, `edge/http-common`, `edge/error-envelope` | HTTP routes, plus `.handleUpgrade` (D117) |
 | `client` | Rendering, **under the CSP and no-`innerHTML` rules** (D43, D74); the four themes (D58, D78) | `contract` | — |
@@ -1102,6 +1136,14 @@ implementer either adds the adapter→store edge this section forbids or smuggle
 carrying no `seq`, `sessionId`, `ts` or `turnId`, and the manager assigns all four. `spawn` is
 internal to `send` for the same reason — *Control flow § 2* spawns the child inside the turn,
 not at session creation, so it was never a boundary-crossing call.
+
+**`agent-console/protocol` is an isolated node on purpose, and that is not a drawing error**
+(D241). The Phase 4 wire is published without being adopted: `runtime` serves the same method
+set but imports nothing from `protocol`, so the schemas and fixtures constrain a future
+consumer rather than the current server. The one thing that does bind today is the compiler —
+`browserMethods` is declared `satisfies readonly Method[]`, so a name that is not an operation
+fails the build. Its *routing* half stays an obligation on whoever writes a browser bridge,
+which is I65 and is unenforced by construction.
 
 Two edges that must not be drawn, because each looks natural and each creates a cycle:
 
@@ -1159,9 +1201,10 @@ sessions. The composition happens one level up instead: the **edge** resolves th
 through `session-manager`, applies the ownership check it already applies to every session
 route, and hands the snapshot to `records` as a parameter. `records` never learns that a
 session registry exists. The direction that *is* drawn — `session-manager → records` — exists
-for exactly one protocol, the once-only requisition claim during session creation (`claim`,
-`attachSession` and `release`, the three steps control flow 1 draws), and it is the right way
-round: consuming a requisition is part of creating a session, not the reverse.
+for exactly one protocol, the once-only requisition claim during session creation — `claim`,
+`attachSession` and `release`, which the manager supplies to the core as the three host
+callbacks control flow 1 draws as `host.prepare`, `host.commit` and the abort path. It is the
+right way round: consuming a requisition is part of creating a session, not the reverse.
 
 **The audit read is `session-manager`'s and not `records`', which this table said and the tree
 never did** (D157). The incident view is that read with filters, so both land in the same place,
@@ -1184,21 +1227,25 @@ POST /api/sessions {vendor, cwd, model?, sandbox?, requisitionId?}
   edge          → origin allow-list check               → 403 bad_origin       (D29)
   edge          → identity: resolve OperatorId, else 401
   edge          → session-manager.create(owner, vendor, cwd, model, sandbox, requisitionId)
-  manager       → jail.resolveInsideRoot(cwd, roots)     → 409 outside_workspace_root
-  manager       : resolved path overlaps a live session's cwd?
-                                                         → 409 workspace_busy   (D30)
-  manager       : requisitionId given?  (tier two)          SYNCHRONOUS         (D68)
-                    records.claim(id) — must be 'approved'
+  manager       → core.create(owner, input) — the manager supplies the host callbacks
+                  and the provider factory; the sequence below is the core's
+  core          → jail.resolveInsideRoot(cwd, roots)     → 409 outside_workspace_root
+  core          : reserve the path in the allocator         SYNCHRONOUS      (D32, I5, I6)
+                    overlaps a live or reserved cwd?     → 409 workspace_busy   (D30)
+  ──────────── phase 1: prepare ────────────────────────────────────
+  core          → store.createAttempts.write(sessionId, principal, cwd)
+                  A5's recovery record is durable BEFORE any host side effect
+  core          → host.prepare — claims the requisition  SYNCHRONOUS          (D68, I5)
                     not found          → 404 no_such_requisition
                     not approved       → 409 requisition_not_approved
                     already consumed   → 409 requisition_consumed
-  manager       : claim the path in the registry            SYNCHRONOUS         (D32)
-  ──────────────── every check above completes before the first await ─────────────
-  manager       → store: mkdir, write meta.json, open spill
-  manager       → checkpoints: init ckpt.git             → notice on failure, not fatal
-  manager       → adapters[vendor].create({cwd: resolved, model, sandbox, notify})   (D46)
-  manager       → records: attach sessionId to the requisition   (tier two)
-  manager       ← {sessionId}                            → on any failure, release BOTH claims
+  core          → store: mkdir, write meta.json, open spill
+  core          → providers[vendor].create({cwd: resolved, model, sandbox, notify})  (D46)
+  core          → checkpoints: init ckpt.git             → notice on failure, not fatal
+  ──────────── phase 2: commit ─────────────────────────────────────
+  core          → host.commit — attaches sessionId to the requisition   (tier two)
+  core          → store.createAttempts.remove(sessionId) — publication
+  core          ← {sessionId}; the session leaves `creating` and becomes reachable
 ```
 
 Nothing is spawned. A session with no turn has no child process. The vendor's `policy` is
@@ -1234,7 +1281,26 @@ deliberate.** A requisition names an unresolved workspace string (*Data model §
 and the approval was permission to try, so the path can still be outside every root or held
 by a live session at the moment it is used. Claiming first would burn the requisition on a
 refusal that has nothing to do with it, leaving an operator holding an approval they cannot
-spend and a second approval to ask for. Both claims release on any later failure.
+spend and a second approval to ask for. A failure that resolves — the provider refusing, a
+storage write failing, the host aborting — releases both claims and the attempt record with them.
+
+**A create that cannot establish its own outcome is quarantined, not rolled back** (I66). The
+two phases above exist because the host callback and the runtime are separable, so the commit
+reply can be lost. The core's bounded status-and-commit reconciliation then fails to learn
+whether the host committed, and it answers `create_outcome_unknown` — **retaining** the hidden
+session, its durable attempt record and its workspace reservation rather than releasing them.
+Releasing on an unknown outcome is the one thing it must not do: it hands the workspace to a
+second session while a committed one may already own it, which is exactly the failure the busy
+check above exists to prevent — one workspace held by two sessions. `20-contract.md` § *Unresolved*
+carries the invariant and the rejected alternative; what is recorded here is that the trace has
+two phases for this reason and not for durability.
+
+**Quarantine survives a restart, and that is what the attempt record is for.** The record is
+written before any host side effect precisely so that a boot after a crash can find it; boot
+observes host status before publishing anything, and only `committed` and `aborted` are terminal.
+Everything else stays hidden and reserved until host recovery clears it — never the runtime.
+At the SkyNetHR edge this surfaces as `agent_unavailable`, because the operator's true situation
+is that the workspace is unusable until someone looks, not that their request was refused.
 
 ### 2. A turn, interrupted by a permission request — the path that justifies the project
 
