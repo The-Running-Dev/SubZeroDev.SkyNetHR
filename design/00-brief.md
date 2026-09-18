@@ -93,13 +93,20 @@ Binding. Out of scope even where a change looks trivial.
 - Node/TypeScript on the server. This is the stack the operators already maintain.
 - No inbound internet exposure assumed. Deployment sits behind either a reverse proxy that
   authenticates, or a LAN boundary.
-- Must run on Windows and Linux servers. The primary host is Windows. Both are supported
-  targets held to the same definition of done, and both are gated by an automated run — path
-  handling, process termination and workspace rollback all differ between them. That gate
-  exists: `.github/workflows/verify.yml` runs the suite on `ubuntu-latest` and
-  `windows-latest` from one matrix, `fail-fast: false` (S19). What it proves, and which
-  surfaces still have a code path on both platforms and no criterion naming them, are in
+- Must run on Windows and Linux. The primary host is Windows. Both are supported targets held
+  to the same definition of done, and both are gated by an automated run — path handling,
+  process termination and workspace rollback all differ between them. That gate exists:
+  `.github/workflows/verify.yml` runs the suite on `ubuntu-latest` and `windows-latest` from
+  one matrix, `fail-fast: false` (S19). What it proves, and which surfaces still have a code
+  path on both platforms and no criterion naming them, are in
   `10-design.md § Platform divergence`.
+- One deployment artifact serves both: the Linux container, run natively on Linux and under
+  Docker Desktop on Windows. **Windows Server is not a target.** Docker Desktop does not run
+  there, so the two statements are one decision rather than two — and reading the constraint
+  above as though the server SKUs were in scope is exactly what produced a second, native
+  Windows delivery mechanism, since withdrawn (D191, reversed by D244). Supporting a platform
+  and deploying natively on it are separate things: the Windows code paths above stay
+  supported and stay gated, they are simply no longer what production runs.
 
 ## What we are copying, and from where
 
