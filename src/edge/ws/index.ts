@@ -10,6 +10,7 @@ import {
   createBackpressureGuard,
   createHttpHandlers,
   failWith,
+  handleProbe,
   headerValue,
   isMutating,
   originAllowed,
@@ -173,7 +174,7 @@ function writeCloseFrame(socket: Socket, code: number, reason: string): void {
 // ---------------------------------------------------------------------------
 
 export function createWsEdge(deps: EdgeDeps): WsRequestListener {
-  const { config, identity, manager } = deps;
+  const { config, identity, manager, readiness } = deps;
 
   const {
     handleCreate,
@@ -439,6 +440,8 @@ export function createWsEdge(deps: EdgeDeps): WsRequestListener {
         const method = req.method ?? 'GET';
         const url = new URL(req.url ?? '/', 'http://placeholder');
         const pathname = url.pathname;
+
+        if (handleProbe(method, pathname, res, readiness)) return;
 
         if (method === 'GET' && (await serveStatic(pathname, res, stampEdgeTag))) return;
 

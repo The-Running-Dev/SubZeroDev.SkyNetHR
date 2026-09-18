@@ -12,7 +12,7 @@ import { createStore } from '../../store/index.js';
 import { createCheckpoints } from '../../checkpoints/index.js';
 import { createRecords } from '../../records/index.js';
 import { stripExtendedPrefix } from '../../jail/index.js';
-import type { AuthConfig, Config, Records, Store } from '../../contract/index.js';
+import type { AuthConfig, Config, ReadinessState, Records, SessionManager, Store } from '../../contract/index.js';
 
 const FIXTURE = path.join(process.cwd(), 'src', 'agent-console', 'providers', 'claude-cli', 'fixtures', 'fake-claude-cli.mjs');
 
@@ -64,6 +64,7 @@ interface Harness {
   readonly workspaceRoot: string;
   readonly storageRoot: string;
   readonly records: Records;
+  readonly readiness: ReadinessState;
 }
 
 async function makeEdge(
@@ -71,6 +72,8 @@ async function makeEdge(
   over: Partial<Config> = {},
   scenario = 'full',
   recordsOverride: ((config: Config, store: Store) => Records) | null = null,
+  readiness: ReadinessState = { ready: true },
+  managerOverride: SessionManager | null = null,
 ): Promise<Harness> {
   process.env['SKYNET_TEST_SCENARIO'] = scenario;
   process.env['SKYNET_CLAUDE_EXECUTABLE'] = FIXTURE;
@@ -111,19 +114,19 @@ async function makeEdge(
   const storeResult = await createStore(config);
   if (!storeResult.ok) throw new Error('store failed to init');
   const records = recordsOverride ? recordsOverride(config, storeResult.value) : notImplementedProxy<Records>('records');
-  const manager = createSessionManager({
+  const manager = managerOverride ?? createSessionManager({
     config,
     store: storeResult.value,
     checkpoints: createCheckpoints(config),
     records,
   });
-  const listener = createSseEdge({ config, identity: resolverFor(config.auth, config.trustProxy), manager, records });
+  const listener = createSseEdge({ config, identity: resolverFor(config.auth, config.trustProxy), manager, records, readiness });
   const server = createServer(listener);
   servers.push(server);
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   const addr = server.address();
   if (addr === null || typeof addr === 'string') throw new Error('no port');
-  return { base: `http://127.0.0.1:${addr.port}`, workspaceRoot, storageRoot, records };
+  return { base: `http://127.0.0.1:${addr.port}`, workspaceRoot, storageRoot, records, readiness };
 }
 
 /** A same-origin browser POST from an authenticated operator. */
@@ -1695,5 +1698,42 @@ describe('S12 — GET /api/audit', () => {
     assert.equal(body.records.length, 2, 'the ordinary allow is excluded; the forced deny and the standing allow are not');
     const sessionIds = body.records.map((r) => r.sessionId).sort();
     assert.deepEqual(sessionIds, ['s-deleted', 's-not-owned'], 'neither record belongs to carol, and one names a session that never existed for her');
+  });
+});
+
+describe('#73 — GET /livez, GET /readyz', () => {
+  it('livez answers 200 with manager and records replaced by proxies that throw on any access', async () => {
+    const h = await makeEdge(
+      undefined,
+      undefined,
+      undefined,
+      () => notImplementedProxy<Records>('records'),
+      undefined,
+      notImplementedProxy<SessionManager>('manager'),
+    );
+    const res = await get(h, '/livez');
+    assert.equal(res.status, 200);
+    assert.deepEqual(await res.json(), { status: 'ok' });
+  });
+
+  it('readyz is 503 before boot completes and 200 once the flag flips, on the same object server.ts mutates', async () => {
+    const readiness: ReadinessState = { ready: false };
+    const h = await makeEdge(undefined, undefined, undefined, null, readiness);
+
+    const before = await get(h, '/readyz');
+    assert.equal(before.status, 503);
+    assert.deepEqual(await before.json(), { status: 'unavailable' });
+
+    h.readiness.ready = true;
+
+    const after = await get(h, '/readyz');
+    assert.equal(after.status, 200);
+    assert.deepEqual(await after.json(), { status: 'ok' });
+  });
+
+  it('neither /livez nor /readyz require an identity header', async () => {
+    const h = await makeEdge();
+    const res = await fetch(`${h.base}/readyz`);
+    assert.equal(res.status, 200);
   });
 });

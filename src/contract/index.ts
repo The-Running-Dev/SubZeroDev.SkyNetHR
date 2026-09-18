@@ -799,11 +799,20 @@ export interface Checkpoints {
 // edge/sse, edge/ws deps
 // ---------------------------------------------------------------------------
 
+// Mutated in place by `server.ts` once boot has finished and the listener is bound (I18,
+// #73) — a fresh object per process, never derived from `manager` or `store`, so a route
+// reading `ready` never touches either (readiness/liveness both hold the same restriction
+// this shape makes structurally true rather than merely followed).
+export interface ReadinessState {
+  ready: boolean;
+}
+
 export interface EdgeDeps {
   readonly config: Config;
   readonly identity: IdentityResolver;
   readonly manager: SessionManager;
   readonly records: Records; // (tier two) the edge composes it with the manager (D77)
+  readonly readiness: ReadinessState;
 }
 
 // ---------------------------------------------------------------------------
