@@ -5801,3 +5801,12 @@ Reversibility: cheap. Prose in two design documents; no code moves.
 ## Open
 
 Staging only. Once an item becomes an issue it leaves this list.
+
+- **`tools/Update-SlicesDocument.ps1`'s retirement check cannot evaluate `30-slices.md` in its
+  current shape.** `Get-SliceDocumentModel` requires `## Outstanding` to appear before
+  `## Landed` in the document; this document has them in the opposite order — `## Landed` at
+  line 103, holding the full bodies of all landed slices, with `## Outstanding` following at
+  line 2038, currently empty. The script exits 2 (`NoLandedSection`) every time `/track` runs
+  it, even though there is nothing under Outstanding to retire right now. Fix is either the
+  script (support both section orders) or the document (reorder sections) — a repo-kit tooling
+  decision, not a SkyNetHR one.
