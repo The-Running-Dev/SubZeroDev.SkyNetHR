@@ -3186,6 +3186,11 @@ gets wrong; and I1 as it stood read as forbidding what the tree does.
 Reversibility: cheap. Prose plus one invariant clause; the behaviour is unchanged.
 
 ### 2026-08-29 — D191 Windows runs the server natively, supervised by NSSM, not the same container
+**Superseded by D244** — the premise, not the reasoning. This entry names Docker Desktop's
+absence on Windows Server as the one argument that decides it, and disclaims the others itself.
+Windows Server is not a target, so the argument no longer reaches anything; Windows runs the same
+Linux container under Docker Desktop, and the installer this entry introduced is deleted.
+
 Context: issue #72. The Linux delivery mechanism was already decided (2026-08-19 entry above,
 corrected by D179) and ships as `Dockerfile`/`docker-compose.yml` — a runnable artifact `README.md`
 already documents. No decision existed for Windows, the brief's own primary host
@@ -5292,6 +5297,9 @@ Also found in the same pass, and kept on the contract's side: from `respond`, th
 Reversibility: cheap — prose.
 
 ### 2026-09-13 — D214 The Windows installer refuses an NSSM build below 2.25.0.0
+**Superseded by D244** — moot rather than wrong. This entry guards the graceful-stop route of an
+installer D244 deletes; with no NSSM in the deployment there is no build floor to enforce.
+
 Context: D191 made the post-stop `server.lock` check the guard against NSSM 2.24's documented need
 for `AppNoConsole=1` on newer Windows — a setting that removes the console the Ctrl+C graceful-stop
 route needs, turning every stop into a hard kill that still reports success. #233 asked the
@@ -5830,6 +5838,45 @@ under `/api/health/*` — would pull the routes under the origin-check and (abse
 carve-out) the authentication rule, reintroducing the dependency this decision removes for no
 benefit, since neither route is a client-facing API surface.
 Reversibility: cheap. Two GET routes and one boolean flag; no persisted state, no stored data.
+
+### 2026-09-18 — D244 Windows runs the same Linux container under Docker Desktop; D191 is reversed
+Context: D191 chose a native Windows Service over the container, and was explicit about which
+argument carried it — "the reason that decides it is deployment reach, not code shape: **Docker
+Desktop is not supported on Windows Server.**" It disclaimed the rest itself: the jail's Windows
+handling was "**not** on its own decisive", the `win32` branches stay gated by `windows-latest`
+either way, and bind-mounting Windows paths into a Linux container "works on supported desktop
+Windows and would be the cheaper option there." The operator has now stated Windows Server is not
+a target. That removes the single load-bearing premise, and with it the decision — nothing else in
+D191 was ever claimed to stand on its own. The premise came from `00-brief.md`'s Constraints
+saying "Windows and Linux **servers**", which D191 read as the Windows Server SKU; both readings
+were defensible, which is precisely how the inference passed unchallenged, so the constraint is
+rewritten here rather than left to produce the same reading again.
+Chosen: one deployment artifact for both platforms — the Linux container, run natively on Linux
+and under Docker Desktop on Windows. `tools/Install-WindowsService.ps1` and its Pester suite are
+deleted rather than kept as an unsupported extra, and D214 (the installer's NSSM ≥ 2.25 floor)
+goes with them, having existed only to guard the Ctrl+C stop route that installer set up. #232 —
+observe a real NSSM stop reaping a live turn's children — is closed unobserved, because the route
+it would have observed is no longer shipped.
+Two costs, stated plainly rather than buried. First, the Windows code paths — the jail's 8.3,
+`\\?\` and case-insensitivity handling, D91's `.cmd` shim spawn, D38's `taskkill /PID <pid> /T /F`
+— no longer have a production deployment exercising them. They remain supported and remain gated
+on every push by `windows-latest`, but development and CI are now the only things that run them.
+Second, this replaces one unverified half with another: credential parity was a non-question while
+the service ran under the operator's own Windows account and the CLIs resolved
+`%USERPROFILE%\.claude` with no boundary to cross. The container reintroduces it, and whether
+credential state written by the Windows build of each CLI is readable by the Linux build inside
+the container has never been checked in either direction. #389 tracks that, including the
+ownership wrinkle `docker-compose.dev.yml`'s own header already warns about.
+Rejected: keeping the installer as an unsupported extra — 357 lines and 15 Pester cases carried on
+every CI run for a path with no target host, and git history holds the option more cheaply than
+the working tree does; amending D191 in place — the log is append-only, and D191's reasoning was
+correct given its premise, so what is recorded here is a premise that changed, not an error in the
+argument; treating this as descriptive drift correctable on the spot — a deployment mechanism is a
+decision, not a transcription error, and *Hard rules* puts it on the escalating side of that line;
+leaving `00-brief.md`'s wording alone and recording the reversal here only — the ambiguity is what
+produced D191, and a decision entry is not somewhere a future reading of the Constraints will look.
+Reversibility: cheap, in D191's own terms — the same two files under `tools/`, one README section,
+and no product code touched in either direction.
 
 ## Open
 

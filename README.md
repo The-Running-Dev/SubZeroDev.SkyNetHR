@@ -81,49 +81,30 @@ file's header for the full set of environment variables a deployment needs to se
 
 ### Running it on Windows
 
-The container above is Linux-only by construction — its `tini`/SIGTERM shutdown path
-validates the Linux process model, which `design/00-brief.md`'s Constraints already name as
-one of the things that differs between the two platforms Windows is the primary one of.
-Running the same image under Docker Desktop's WSL2 layer would exercise Linux's termination
-path a second time, not Windows'. So Windows runs the compiled server natively instead, no
-container, supervised as a Windows Service via [NSSM](https://nssm.cc) (an operator-installed
-tool, the Windows analogue to Docker itself):
+Windows runs the same Linux container, under [Docker Desktop](https://docs.docker.com/desktop/).
+There is no second delivery mechanism and no native Windows build to deploy — the compose files
+above are the whole story on both platforms. **Windows Server is not a target**, because Docker
+Desktop does not run there; `design/00-brief.md`'s Constraints state that, and
+`design/90-decisions.md` D244 records why the earlier native-service path was withdrawn.
+
+Paths on either side of a bind mount are the only real difference. Give Docker Desktop Windows
+paths and let it translate:
 
 ```powershell
-npm run build
-# Write your own deploy.env — KEY=VALUE lines, not committed — with at least AUTH_MODE, its
-# per-mode fields, ALLOWED_ORIGINS, WORKSPACE_ROOTS and STORAGE_ROOT (see
-# tools/Install-WindowsService.ps1's own comment-based help for the full list; it refuses to
-# install with any of them left to a default).
-./tools/Install-WindowsService.ps1 -EnvFile C:\skynet-hr\deploy.env -ServiceAccount .\skynet-operator
-# then run the sc.exe line it prints to set the service account, and:
-nssm start SkyNetHR
+$env:WORKSPACE_ROOTS_HOST_DIR = 'C:\src\a-repo'
+$env:CLAUDE_CREDENTIALS_DIR   = "$env:USERPROFILE\.claude"
+$env:CODEX_CREDENTIALS_DIR    = "$env:USERPROFILE\.codex"
+$env:AUTH_SECRET              = 'dev-secret'
+docker compose -f docker-compose.dev.yml up -d --build
 ```
 
-The service should run as the operator's own Windows account (or a dedicated one whose
-profile already holds `.claude`/`.codex`) so the CLIs resolve `%USERPROFILE%\.claude` and
-`%USERPROFILE%\.codex` exactly as they would running interactively — no bind mount needed,
-because there is no container boundary to cross. The script does not set that account:
-doing so non-interactively would put a password on a command line, so it prints the
-`sc.exe config` line for you to run instead. For the same reason it writes the environment
-block — which holds `AUTH_SECRET` under `shared-secret` — straight to the service's registry
-key rather than passing it as an `nssm set` argument.
+`WORKSPACE_ROOTS` inside the container stays `/workspaces` — it names container paths, not host
+ones, and the jail resolves real paths on the container's side of the mount.
 
-**Verify the stop path once, before trusting the deployment.** `nssm stop` attaches to the
-child's console and raises a Ctrl+C event, which Node delivers as `SIGINT` — the same
-handler `src/server.ts` installs for a local Ctrl+C, on the same path as the container's
-`SIGTERM`. That route works, but it depends on the child having a console. NSSM 2.24 is
-documented as unable to launch services on newer Windows without `AppNoConsole=1` — a
-setting that removes exactly that console and turns every stop into a hard kill which still
-reports success — so the installer refuses any NSSM build below 2.25, or one whose version it
-cannot read. `AppNoConsole` set by hand breaks the same route on any build, so confirm it once:
-
-```powershell
-nssm stop SkyNetHR
-Test-Path "$env:STORAGE_ROOT\server.lock"   # must be False
-```
-
-`False` means the stop reached the server's own shutdown path. `True` means it did not: the
-graceful path was skipped and the next boot will log a stale-lock reclaim. Check whether
-`AppNoConsole` is set before anything else, then record the result on issue #232, which
-tracks this observation.
+**The credential mounts have not been observed working from a Windows host yet.** The CLIs
+inside the container are Linux builds reading state written by the Windows builds on your
+profile, and `docker-compose.dev.yml`'s header already notes that a bind mount's ownership comes
+from the host while the container runs as uid 1000. Whether either matters on Docker Desktop is
+open — [#389](https://github.com/The-Running-Dev/SubZeroDev.SkyNetHR/issues/389) tracks it. If a
+turn fails to authenticate, that is the first thing to suspect, and the issue is where to record
+what you find.
