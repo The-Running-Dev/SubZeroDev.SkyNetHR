@@ -5773,13 +5773,3 @@ publishes without adopting. Expensive once an SDK or bridge ships against it.
 ## Open
 
 Staging only. Once an item becomes an issue it leaves this list.
-
-- **`src/agent-console/protocol/PROTOCOL.md` carries meaning inside `src/`, and its own
-  `README.md` says it does not.** That README states the TypeScript declarations own shape and
-  `design/20-contract.md` owns meaning; PROTOCOL.md then states delivery policy, timeout
-  defaults, the three-outcomes rule and the A5 state machine, which are meaning by that
-  definition. D241 resolved the immediate duplication by pointing rather than copying, so
-  nothing is stale today, but the two documents now have no stated boundary and the next
-  change to either will have to invent one. Decide where the line falls — PROTOCOL.md as an
-  implementer's reference that may restate the contract, or as the canonical home for link
-  mechanics with the contract pointing at it — and make the README say so.
