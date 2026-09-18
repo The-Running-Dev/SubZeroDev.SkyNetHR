@@ -745,14 +745,19 @@ body {
 /* ----------------------------------------------------------------- compose */
 
 .compose {
-  display: flex;
-  align-items: flex-end;
-  gap: var(--space-3);
   margin: var(--space-0);
   padding: var(--space-3) var(--space-5);
   border-top: var(--border-width) solid var(--line);
   background: var(--surface-raised);
   box-shadow: var(--shadow-1);
+}
+
+/* Same gotcha `.reviews:not([hidden])` above already guards against — an author `display`
+ * on the `[hidden]` element itself beats the UA `[hidden] { display: none }` regardless of
+ * selector order, so the flex layout is qualified here too. */
+.compose:not([hidden]) {
+  display: flex;
+  align-items: flex-end;
 }
 
 /*

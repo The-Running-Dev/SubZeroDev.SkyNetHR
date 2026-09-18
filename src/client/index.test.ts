@@ -7,8 +7,9 @@ import { describe, it } from 'node:test';
 const CLIENT = path.join(process.cwd(), 'client');
 
 async function clientSources(): Promise<Array<{ name: string; text: string }>> {
-  const names = await readdir(CLIENT);
-  return Promise.all(names.map(async (name) => ({ name, text: await readFile(path.join(CLIENT, name), 'utf8') })));
+  const entries = await readdir(CLIENT, { withFileTypes: true });
+  const files = entries.filter((entry) => entry.isFile());
+  return Promise.all(files.map(async ({ name }) => ({ name, text: await readFile(path.join(CLIENT, name), 'utf8') })));
 }
 
 // ---------------------------------------------------------------------------
