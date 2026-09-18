@@ -1367,6 +1367,101 @@ shim preserves the existing banner and message refusal without vendor-specific c
 No runtime-held conversation history, new process supervisor, public protocol operation,
 SDK, bridge or renderer is introduced in this phase.
 
+### AgentConsole runtime protocol — Phase 4
+
+The wire is declared twice in the tree and this document points at both.
+`src/agent-console/protocol/wire.ts` carries the `Operations` map, the request, response,
+error and notification unions, and the `browserMethods` routing table;
+`src/agent-console/protocol/schemas/wire.schema.json` beside it is the JSON Schema 2020-12
+counterpart, with a paired request and result for every method in
+`wire-fixtures/operations.json`. The runtime is `src/agent-console/runtime/server.ts`,
+entered by `src/agent-console/runtime/main.ts`.
+`src/agent-console/protocol/PROTOCOL.md` states the link's own mechanics — framing, the
+per-method inputs, delivery, cancellation, shutdown and liveness — and is the reference for
+them. **A fact recoverable there is not restated here**, for the reason the opening section
+gives: two copies of a rule is a promise they will diverge. What follows is what neither a
+declaration nor that file can carry — which of its rules are decisions, and what each costs
+to reverse.
+
+**This phase publishes a wire; it does not adopt one.** SkyNetHR keeps its in-process core and
+reaches AgentConsole through the module boundaries above, unchanged. There is no transport
+cutover, no SDK, no browser bridge and no automatic runtime restart in this phase, and the
+absence is deliberate rather than unfinished: freezing a wire that nothing yet consumes is
+cheap to amend, where a wire with a shipped consumer on the other side is not. The conformance
+coverage in `src/agent-console/runtime/conformance.test.ts` is what makes the freeze mean
+something before a consumer exists.
+
+**The parent is the trust boundary; the runtime is not.** The stdio parent is privileged: it
+supplies the storage root, the workspace roots and the principal on every session-scoped call,
+and it may call `admin.*`. The runtime compares the principal it is handed to the session owner
+and nothing else — it cannot tell a principal the parent authenticated from one a bridge
+invented, and it does not try. **`browserMethods` is therefore an obligation on whoever writes
+a bridge, not a guard the runtime enforces** (I66). Nothing in `server.ts` consults that table;
+`wire.test.ts` asserts only that it excludes the three privileged prefixes. A bridge that
+forwards `admin.*`, `host.*` or `runtime.hello` from a browser is a defect in the bridge that
+the runtime will serve without complaint, which is why the table is declared in the wire rather
+than left to each bridge to rediscover.
+
+**The runtime holds a storage root under its own lease, and that lease — not `server.lock` — is
+what excludes it** (I65). `SessionCore.boot()` claims `runtime-leases/` before its reap step,
+exactly as I50 requires `server.lock` to be claimed before a server's; the host claims both,
+`server.lock` first (*Public surface § `store`*). The two mechanisms share no evidence and are
+deliberately unlike: `server.lock` decides liveness by watching a counter move, because it must
+hold across a container and another host (D180), while the runtime lease publishes a uniquely
+named claim and then enumerates, deciding liveness from process existence and creation time and
+failing closed on a remote or unreadable holder. **Neither excludes the other's file, and
+nothing needs it to** — the host takes both, so a runtime pointed at a live SkyNetHR root is
+refused at the lease it does share. **What must not be built on this is a second holder of
+either kind reaching the reap step**: I19's guard tests hostname, image and creation time, not
+which lease recorded the pid, so a process that reaped a root it did not hold would kill another
+holder's live children and pass every check doing it.
+
+**A `storage_locked` refusal can now name a holder that is not a server.** Where the host's own
+`runtime.boot()` loses the runtime lease, `session-manager` reports `StartupError.storage_locked`
+with a synthesised `ServerLock` — `renewals: 0` and `image: 'runtime'`. The variant is reused
+rather than given a sibling (D227's precedent), and the cost is stated rather than hidden: that
+`renewals` is a placeholder and not a counter anyone may watch, so the reclaim rule I50 builds on
+does not apply to it and must not be attempted against it. `image: 'runtime'` is the
+discriminator, and it is informational like every other field on that type (I57).
+
+**Credit is the consumer's admission control, and a subscription that outruns its budget is
+closed rather than throttled.** A subscription returns its handle at zero credit and reads
+nothing until the parent grants capacity, so a slow consumer cannot be flooded by a replay it
+never asked to start. Exhausting the per-subscription event or byte budget ends that
+subscription with exactly one control-delivered `error/replay_gap` restating the last delivered
+watermark. **That gap is not an event**: it is never appended, never assigned a `seq`, and never
+advances a resume point, which is I1's existing carve-out for the HTTP stream's `replay_gap`
+reaching the same conclusion on a second transport. The client resubscribes from its own last
+accepted `seq`. Global stdout backpressure is the one thing that is *not* reported this way — it
+is a link fault, because a writer that cannot drain has no per-subscription story to tell.
+
+**Three outcomes are distinct and a caller may not collapse them.** An `error` event is durable
+transcript information; a JSON-RPC error answers one call and says nothing about the transcript;
+`turn.ended` records the turn's outcome. Events may arrive before the response that initiated
+them, and a `turns.send` can fail after a durable `turn.started` — so **neither an RPC failure
+nor a cancellation rolls back an event already emitted**, and a caller that renders a transcript
+error because its RPC failed is inventing history. `$/cancel` requests cooperative cancellation
+of a *call*: it never stops a turn and never compensates a create, and a mutation it raced may
+still return its real result. `turns.interrupt` is the only way to stop a turn.
+
+**An A5 create attempt whose outcome is unknown is quarantined, not rolled back** (I67). Where
+the host's commit reply is lost or its deadline passes, the core's bounded status-and-commit
+reconciliation may still fail to learn the outcome; it then answers `create_outcome_unknown` and
+**retains** the hidden session, its durable attempt record and its workspace reservation. Ordinary
+reads cannot expose them and mutations cannot release them. The alternative — releasing on an
+unknown outcome — was rejected because it hands the workspace to a second session while a
+committed one may already own it, and a workspace held by two sessions is the failure
+`pathsOverlap` exists to prevent. **A fresh host helper's empty state is not proof that an old
+commit aborted**, and boot observes host status before publication for that reason: only
+`committed` and `aborted` are terminal, and everything else stays quarantined across restarts.
+Clearing one is host recovery's, not the runtime's.
+
+**Ownership at the protocol boundary is the prerequisite section's, unchanged.** *Public surface
+§ AgentConsole v1 identity and ownership — Phase 4 prerequisite* (D240) governs strict principal
+equality, handle binding, owner-filtered lists and the `not_found` answer to a non-owner. The
+protocol adds no authentication mode and no second comparison; it is the first consumer of those
+rules rather than a revision of them.
+
 ### `records` *(tier two)*
 
 `RaiseRequisitionInput`, `CreateReviewInput`, `ReviewPatch` and `Records` are declared in
@@ -2297,6 +2392,50 @@ re-derived:
   where a registry claiming a `state` the disk does not have would silently revert at the next
   boot (D120).
 
+### Runtime protocol errors — Phase 4
+
+The runtime's link answers a call with a JSON-RPC error rather than a module error union, so the
+rows below are that transport's own contract. Spec-reserved numeric codes keep their JSON-RPC
+meanings; every application failure is `-32000`, and **`data.code` is authoritative — the message
+string is not.** Where the core supplied a structured error, `data.detail` carries it serialized,
+which is how a storage lease holder and age survive the crossing.
+
+**`RpcError.data.retryable` is declared and never populated** (`src/agent-console/runtime/protocol/peer.ts`).
+Retryability is a property of the code, stated here, not a flag a caller may branch on; a caller
+that reads the field gets `undefined` for every error the runtime raises today. The declaration
+is kept because a later phase may populate it, and a caller must not read it until one does.
+
+| `data.code` | Raised when | Retryable | The caller |
+|---|---|---|---|
+| `protocol_version_mismatch` | `runtime.hello` carried a major version this runtime does not implement. Same-major minor versions are accepted | No | Fails the link. There is no negotiation round |
+| `already_initialized` | A second `runtime.hello` | No | A parent defect. Initialization runs once per process |
+| `not_initialized` | Any other method before `runtime.hello` completed successfully | No | A parent defect — ordering, not timing. Waiting does not fix it |
+| `storage_locked` | The runtime lease is held by a live process. `data.detail` names the holder and its age | **Only on evidence**, never on a timer | Nothing automatic. There is no fixed retry delay and no observation window; a caller that polls is guessing where `server.lock` would have watched a counter (I65) |
+| `not_found` | The session, upload handle or admin target does not exist, **or exists and is not this principal's** | No | Must not distinguish the two. Conflating them is the ownership contract's (D240), not an imprecision |
+| `bad_request` | A malformed field, or a bound reached: 256 in-flight requests in either direction, 256 host callbacks, 1024 subscription handles, a credit grant overflowing a safe integer, or a second operation on a busy upload handle | **A bound, yes; a malformed field, no.** `detail` is what separates them | Backs off and retries a bound; fixes the call otherwise |
+| `cancelled` | `$/cancel` was honoured, or the peer that owed a reply went away | No | **Must not infer that the effect did not happen.** Cancellation is cooperative and never compensates — a mutation already committed stays committed |
+| `host_callback_timeout` | A host callback passed its deadline (`hostAttemptTimeoutMs`, default 30000) | No | Forgets the local reply waiter only. **The host effect is not rolled back**, and for a create attempt this is the path into `create_outcome_unknown` |
+| `host_method_unavailable` | A callback the host did not declare in `hello` | No | A parent defect. All four A5 callbacks are declared together or none is |
+| `create_outcome_unknown` | The core's bounded status-and-commit reconciliation could not establish whether a create attempt committed | **No — and it must not be treated as a failure** | Neither retries nor releases. The session, its attempt record and its workspace reservation are quarantined and reachable only by host recovery (I67) |
+| `RuntimeTerminated` | The link is shutting down, or already did | No | Fails every outstanding call and every stream. **There is no automatic restart in this phase** |
+| `host_create` | A host callback rejected without a recognisable `code` | No | Surfaces `detail`. The fallback exists so an unstructured host rejection is still attributable to the callback that produced it |
+| `storage` | An upload staging read or write failed | Sometimes | `detail` carries the underlying error text. The handle is not implicitly abandoned |
+
+Two failures are deliberately **not** in that table because they are not call answers:
+
+- **An oversized incoming line is a link fault, not an error reply.** The line is discarded — it
+  cannot be parsed, so there is no id to answer — and the runtime sends `runtime.protocolError`
+  and tears the link down. A parent that receives it must fault and kill the child rather than
+  continue on a stream whose framing is no longer trustworthy.
+- **Global stdout backpressure is a link fault too, and never a batch of subscription gaps.** A
+  writer that cannot drain has nothing per-subscription to report, and reporting it as many gaps
+  would tell each consumer its own stream broke when in fact the link did.
+
+And one is an event rather than either: **`adapter_output_overflow` is a durable transcript
+`error` event**, fatal to its turn and ordered before `turn.ended`, which reuses the existing
+`error` stop reason. It introduces no new end, notice or stop-reason union member — the overflow
+is a new cause of an existing outcome, not a new outcome.
+
 ### The divergence classes
 
 `tools/Test-DesignState.ps1` declares the same ids and `ClassListDisagreement` compares the two:
@@ -2493,7 +2632,7 @@ highest-value section in this document.
 | **I47** | `updatedPermissions` is never written to a child's stdin, under any decision or scope | `adapters/*`, `session-manager` |
 | **I48** | `ToolCall.summary` is display-only: above `adapters/*` it is rendered as a text node and nothing else. No module parses it, matches against it, or derives anything persisted or security-relevant from it; its shape is not contractual. Testing it for empty, to decide whether to show the line at all, is display and is permitted | `adapters/*`, `session-manager`, `client` |
 | **I49** | An attachment's bytes never enter `events.ndjson`, and an operator's `filename` never reaches a filesystem path — the server-minted `AttachmentId` is the only path segment. The blob is written and fsync'd before the `message` envelope naming it is constructed | `store`, `session-manager` |
-| **I50** | A storage root is held by at most one server process. `<storage>/server.lock` is claimed **before boot's reap step**, not merely before `listen`, and is reclaimed only where its `(instanceId, renewals)` pair is observed unchanged across one full observation window measured on the claiming process's own monotonic clock — **whichever host wrote it**, and with no wall clock compared anywhere in the decision (D180). **A reclaim is confirmed before boot work**: the reclaimer re-samples one renewal interval after its overwrite and proceeds only on its own `instanceId` (D216). A boot that refuses on a held lock has written nothing server-wide. **A storage root is supported on a local filesystem or a bind mount only** (D194): the one hole — a live holder whose renewals are invisible for a full window — needs a cache or a partition between writer and reader, which two processes on one host do not have, so it is out of reach rather than tolerated. It is what a network-share root would reintroduce, and closing it there would need a fencing service outside the storage root (D7) | `store`, `session-manager` |
+| **I50** | A storage root is held by at most one server process. `<storage>/server.lock` is claimed **before boot's reap step**, not merely before `listen`, and is reclaimed only where its `(instanceId, renewals)` pair is observed unchanged across one full observation window measured on the claiming process's own monotonic clock — **whichever host wrote it**, and with no wall clock compared anywhere in the decision (D180). **A reclaim is confirmed before boot work**: the reclaimer re-samples one renewal interval after its overwrite and proceeds only on its own `instanceId` (D216). A boot that refuses on a held lock has written nothing server-wide. **A storage root is supported on a local filesystem or a bind mount only** (D194): the one hole — a live holder whose renewals are invisible for a full window — needs a cache or a partition between writer and reader, which two processes on one host do not have, so it is out of reach rather than tolerated. It is what a network-share root would reintroduce, and closing it there would need a fencing service outside the storage root (D7). **This governs `server.lock` and server processes only**: an AgentConsole runtime holds a storage root without ever claiming it, under the separate and deliberately unlike mechanism I65 states | `store`, `session-manager` |
 | **I51** | A `message.delta` is a live-only frame, for **both** vendors: it is assigned no `seq`, no `Envelope` is ever constructed for it, it never enters the ring buffer, it is never appended to `events.ndjson`, and it is never replayed. It is delivered to the subscribers attached when it is produced and to no others. Deltas for one `turnId` concatenate in arrival order to the `message` that follows (D168) | `session-manager`, `adapters/*` |
 | **I52** | A shutdown establishes no durable state and holds no session invariant. It marks no session ended, closes no turn on disk, appends to no spill, writes no `session.notice`, and emits no envelope. Its only durable write is one `ProcessTombstone` per child it killed, which records what shutdown *did* rather than repairing what it found. Every repair stays boot's, so the crash path and the orderly path converge on one implementation of each (D174). **It is held by construction rather than by inspection**: I55 stops every notification at the sink, so no code below it is in a position to emit, resolve or append during teardown (D178) | `server`, `session-manager` |
 | **I53** | `<storage>/server.lock` is removed only as the last act **a successor can observe** — after the listener has closed and after the kill step has run, with nothing behind it but `store.close()`, which releases this process's own file handles, writes nothing, and is invisible to any other process (D202) — **except on `server.on('error')`, the failed-bind path**, where neither precondition can be met: `listen` never succeeded, so there is no listener to close, and no turn has been started, so there is no child to kill. There, release is the whole of shutdown: it runs at once, still ownership-checked like every other release, and exits non-zero. A shutdown that cannot get that far — on either path — leaves the lock rather than releasing it early, and the next boot reclaims it one observation window after the holder's last renewal (D175, D180, D199) | `server` |
@@ -2508,6 +2647,9 @@ highest-value section in this document.
 | **I62** | `LOCK_RENEWAL_INTERVAL_MS` is strictly less than `LOCK_OBSERVATION_WINDOW_MS`, by a margin of at least three renewals, so a live holder can never be sampled unchanged across a window. **Enforced by the two being declared in one file** — `src/store/index.ts`, with the interval exported for `server.ts` to import rather than written a second time beside the drain's bound — because a violation has no symptom short of two servers over one storage root (D194, D195) | `store`, `server` |
 | **I63** | No field is ever removed from, or retyped in, a line of `reviews.ndjson` or `requisitions.ndjson`. Added fields are optional and readers ignore unknown ones; a shape change those rules cannot absorb is written under a **new filename** — `reviews.v2.ndjson`, `requisitions.v2.ndjson` — which boot selects by presence, never by re-typing the file in place. **The filename is the discriminator these two have nowhere else to carry**: `meta.json`'s `schemaVersion` is per-session and both files are server-wide, so it gates no line of either, and an old reader meets no new-shaped line to misread — it does not meet the file (D200). It matters here and not for the other two server-wide logs because these rehydrate into an in-memory registry at boot (D65), which is D49's silent-wrong-state condition. **Held by review, not by code**: nothing at runtime can observe a field that was removed before the build shipped | `records`, `store` |
 | **I64** | Within one session, the envelopes an `AdapterNotification` directly produces take `seq` in the order the notifications reached the manager's `notify` sink: for A delivered before B, every envelope A directly produces has a lower `seq` than every envelope B directly produces. A notification directly produces an `event`'s own envelope, the `session.started` a first turn's `cli-session` produces, an `exited`'s `cancelled_process_exit` resolutions, and the `error / adapter_unknown_record` a turn-scoped fact arriving with no live turn is answered with. **Its handler reaches the `emit` of each before its first `await`** — I5's rule, applied to `seq` assignment rather than to a guard — so any work the notification also owes that yields is either started after that `emit`, or started ahead of it and not awaited: `cli-session`'s `meta.json` write is the first kind, and the `turn.ended` tree kill I59 describes as issued and not awaited is the second. **Outside it**: an envelope the manager emits on a notification's behalf *after* awaiting — a standing rule's auto-answer, an `audit_unavailable` notice — takes its position at emission, and I9 and I11 own what it owes; a `message.delta` has no `seq` (I51). **Held by review, not by code**: nothing observes an `await` inserted ahead of an `emit` until two notifications race across it (D215) | `session-manager` |
+| **I65** | A storage root is held by at most one AgentConsole runtime process, and the claim completes **before boot's reap step** — I50's ordering requirement, met by a different mechanism. `runtime-leases/<uuid>.json` is published and the directory then enumerated, so two contenders can both refuse but **cannot both see themselves alone**. Liveness is decided from process existence on this host plus a matching OS creation time; a holder on another hostname, or one whose liveness cannot be established, **fails closed**. There is no observation window, no renewal counter and no fixed retry delay, so **nothing may wait for evidence that this mechanism does not produce** — a `storage_locked` here is not I50's reclaimable lock. The host claims both leases, `server.lock` first, which is what keeps a runtime and a server off one root; the synthesised `renewals: 0` on a runtime holder reported through `StartupError.storage_locked` is a placeholder and not a counter (I57) | `store`, `session-manager` |
+| **I66** | `browserMethods` contains no `admin.*`, `host.*` or `runtime.*` member, and every method in it is a member of `Operations`. **That is the whole of what is enforced**, by `wire.test.ts`: no runtime code consults the table, so the rule it states — that a browser bridge routes nothing outside it and injects a principal the browser cannot select — is **held by the bridge author, not by the runtime**, which will serve a forwarded `admin.*` call without complaint. The table is declared in the wire rather than left to each bridge precisely because an obligation nothing checks must at least be written once | `agent-console/protocol` |
+| **I67** | A create attempt whose outcome is not established as `committed` or `aborted` leaves its session unreachable through every ordinary read, its durable attempt record present, and its workspace reservation unreleased — **across restarts**, since boot observes host status before publication and only those two states are terminal. `new`, `prepared`, `committing` and an unreachable host all stay quarantined. A quarantined reservation is never released to a second session, because a workspace held by two sessions is the failure I6 exists to prevent, and an unknown outcome is not evidence of an abort | `agent-console/core`, `store` |
 
 **I40, I41 and I42 were never allocated, and the gap is left open rather than closed.** The
 numbering jumps from I39 to I43 and nothing is missing. Ids here are cited by number in
