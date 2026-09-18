@@ -5152,6 +5152,12 @@ carries its full text under `## Landed`), which is real design work belonging to
 script for every consuming repo.
 Reversibility: cheap — reversible by later adapting the script or `design/30-slices.md`'s shape,
 should this stop being maintenance-free.
+Known and retained (2026-09-18): rediscovered by a `/track` run, which staged it into `## Open`
+as a fresh finding proposing a third option D207 had not weighed — fixing the script upstream in
+`SubZeroDev.AgentKit` rather than accepting the gap locally. Declined, and the staged entry
+removed. The upstream fix buys this repository nothing while `## Outstanding` is empty, and
+`.claude/commands/track-local.md` already states that the `NoLandedSection` exit is expected here
+rather than a finding. Recorded so the next rediscovery is recognised as one.
 
 ### 2026-09-07 — D208 `Update-DesignProjection.ps1` does not run against this repo; there is no `state-index.md` to project into
 Context: `tools/Update-DesignProjection.ps1` assumes the full design-state apparatus — a
@@ -5802,11 +5808,4 @@ Reversibility: cheap. Prose in two design documents; no code moves.
 
 Staging only. Once an item becomes an issue it leaves this list.
 
-- **`tools/Update-SlicesDocument.ps1`'s retirement check cannot evaluate `30-slices.md` in its
-  current shape.** `Get-SliceDocumentModel` requires `## Outstanding` to appear before
-  `## Landed` in the document; this document has them in the opposite order — `## Landed` at
-  line 103, holding the full bodies of all landed slices, with `## Outstanding` following at
-  line 2038, currently empty. The script exits 2 (`NoLandedSection`) every time `/track` runs
-  it, even though there is nothing under Outstanding to retire right now. Fix is either the
-  script (support both section orders) or the document (reorder sections) — a repo-kit tooling
-  decision, not a SkyNetHR one.
+None at present.
