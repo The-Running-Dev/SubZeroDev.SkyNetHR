@@ -101,10 +101,17 @@ docker compose -f docker-compose.dev.yml up -d --build
 `WORKSPACE_ROOTS` inside the container stays `/workspaces` — it names container paths, not host
 ones, and the jail resolves real paths on the container's side of the mount.
 
-**The credential mounts have not been observed working from a Windows host yet.** The CLIs
-inside the container are Linux builds reading state written by the Windows builds on your
-profile, and `docker-compose.dev.yml`'s header already notes that a bind mount's ownership comes
-from the host while the container runs as uid 1000. Whether either matters on Docker Desktop is
-open — [#389](https://github.com/The-Running-Dev/SubZeroDev.SkyNetHR/issues/389) tracks it. If a
-turn fails to authenticate, that is the first thing to suspect, and the issue is where to record
-what you find.
+**The credential mounts have been observed working from a Windows host** — see
+[#389](https://github.com/The-Running-Dev/SubZeroDev.SkyNetHR/issues/389) for what was checked.
+Mount ownership is not a Windows concern: Docker Desktop's bind-mount translation layer presents
+`CLAUDE_CREDENTIALS_DIR`/`CODEX_CREDENTIALS_DIR` as `root:root` mode `777` regardless of the
+Windows-side owner, and the container's uid-1000 `node` user can read and write them freely — no
+`chown` step, unlike the Linux-host case `docker-compose.dev.yml`'s header still describes. A
+`claude` turn runs to completion unmodified. A `codex` turn needs one more thing than the
+mount itself: the CLIs inside the container are Linux builds, and a `.codex` directory carrying
+state written by a *different* Linux- or Windows-built `codex` can include a session-state
+SQLite file (`state_5.sqlite`) at a schema migration the container's pinned build won't open —
+it fails fast with `failed to initialize in-process app-server client: Operation not permitted`
+before it ever reaches the network. `auth.json` and `config.toml` are unaffected; if a turn
+fails this way, delete or move aside the `state_*.sqlite` files in the mounted `.codex`
+directory and retry.

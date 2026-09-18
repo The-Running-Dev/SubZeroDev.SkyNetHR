@@ -41,8 +41,14 @@ ARG CLAUDE_CODE_VERSION
 # (src/checkpoints/index.ts) — the slim base ships none, and without it every checkpoint
 # fails ENOENT and the feature is silently dead in the only artifact that ships it.
 # `tini` because of the CMD below: see the ENTRYPOINT comment.
+# `ca-certificates` because the slim base ships no system trust store at all (no
+# /etc/ssl/certs/ca-certificates.crt) — Node's own TLS client bundles its own root
+# certificates and doesn't need one, which is why the server's own outbound calls were
+# never affected, but codex's Rust TLS stack reads the system store and, without it, fails
+# every HTTPS/WSS connection with "invalid peer certificate: UnknownIssuer" (observed
+# investigating #389) — including the one it needs for a turn to complete at all.
 RUN apt-get update \
- && apt-get install -y --no-install-recommends git tini \
+ && apt-get install -y --no-install-recommends git tini ca-certificates \
  && rm -rf /var/lib/apt/lists/*
 
 # The CLI this server drives (src/agent-console/providers/claude-cli/index.ts spawns `claude` on PATH by
@@ -50,14 +56,21 @@ RUN apt-get update \
 # of $HOME, which is left free for the credential bind mount below.
 RUN npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" && npm cache clean --force
 
-# The other half of the two-vendor contract (src/config/providers.ts's `VENDORS`). Pinned to
-# the exact build `design/findings/S8-codex-adapter.md` probed and the Codex adapter's own
-# tests were written against ("installed `codex-cli 0.146.0`", src/agent-console/providers/codex-cli/index.ts) —
-# a floating version could change `codex exec --json`/`codex app-server`'s record shapes out
-# from under the adapter with nothing to catch it, the same reasoning as the pin above.
+# The other half of the two-vendor contract (src/config/providers.ts's `VENDORS`). Pinned,
+# not floating, for the same reason as the pin above: a moving version could change
+# `codex exec --json`/`codex app-server`'s record shapes out from under the adapter with
+# nothing to catch it. `design/findings/S8-codex-adapter.md` probed 0.146.0, the build the
+# Codex adapter's own tests were originally written against — but those tests run against
+# `fixtures/fake-codex-cli.mjs`, a hand-written double of the wire protocol, not the real
+# binary, so they do not pin this version themselves and do not move when it changes.
+# Bumped to 0.155.1 (#389): 0.146.0 is rejected outright by the current backend for an
+# account on `gpt-6-astra` ("requires a newer version of Codex"); 0.155.1 was verified
+# against a real turn — `thread.started`/`turn.started` on the same shapes S8 documented,
+# reaching a live API call (an account usage-limit response, not a model-version rejection)
+# — before this pin was moved.
 # `codex --version` after install turns a broken/renamed package into a build failure instead
 # of a runtime `agent_unavailable` nobody sees until a session is opened.
-ARG CODEX_VERSION=0.146.0
+ARG CODEX_VERSION=0.155.1
 RUN npm install -g "@openai/codex@${CODEX_VERSION}" && npm cache clean --force \
  && codex --version
 
