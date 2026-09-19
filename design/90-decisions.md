@@ -5997,6 +5997,39 @@ Reversibility: cheap. Every change is client presentation — `client/index.html
 `app.js`, `render.js` — and touches no contract type, no event envelope and no server behaviour;
 the permission merge joins on a `callId` the contract already carries. Reverting is a revert.
 
+### 2026-09-19 — D247 A reclaim's confirming sample finding the lock absent retries the claim
+Context: #355. The D216 regression test intermittently fails under full-suite load with the losing
+reclaimer's `claimLock` returning `storage_unwritable` instead of `storage_locked`; in isolation it
+always passes. `claimLock` observes an absent `server.lock` at three points and answers the same
+observation two different ways — the two before the observation window retry the exclusive claim,
+the confirming sample after a reclaim's overwrite raises `StartupError.storage_unwritable`.
+§ *Server lock* determined neither: it said only that the reclaimer's own `instanceId` proceeds and
+a foreign one refuses, so the third answer was a judgement call with no contract cover. Two routes
+reach it, and only one needs the platform hypothesis in the issue: a winner that confirmed, booted
+and released cleanly before the loser's interval elapsed leaves the root genuinely free, which is
+the stalled-reclaimer case D194 already bounds; and a rename-over can expose a transient `ENOENT`
+to a concurrent sample, which is the only route that explains the test, whose winner never releases.
+Chosen: **the confirming sample's `absent` retries the claim, matching the loop's other two absent
+rows, and raises nothing.** Neither route is a write failing, so `storage_unwritable` is a category
+error; and `storage_locked` is required to name the holder it refuses over, which here would have
+to be invented — the placeholder hazard I57 already refuses for the runtime-lease half. The retry
+cannot spin: its first act is the exclusive create, so reaching the row twice needs the lock created
+and ownership-checked-removed again in between. It costs one stated dependency, that a live holder
+renews — a winner still running is observed at the retry's own window and refused there — which is
+D180's foundation rather than a new assumption. The consequence is on the D216 test, not the rule:
+a winner whose counter never moves is by this design's own staleness rule reclaimable, so the test
+must drive the winner's renewals, or assert the loser's error rather than count winners.
+Rejected: **refusing `storage_locked` with a synthesised holder**, which is what the test expects
+today and is the cheapest thing that makes it green. The refusal's whole value is naming the `pid`,
+`hostname` and `startedAt`, and on the genuine route it is also false: the root is free and the
+operator clears the refusal by starting the process again.
+Rejected: **a new `StartupError` variant** for a lost reclaim. Honest and needs no invented holder,
+but every consumer of `StartupError` grows a branch whose only correct response is to start again —
+which the retry does without an operator.
+Rejected: **bounding the retry with a counter.** The structural bound is stronger than a number and
+needs no constant; a counted bound would also be the only one of the three absent rows to have one.
+Reversibility: cheap — one paragraph in § *Server lock*, two error rows, and one branch.
+
 ## Open
 
 Staging only. Once an item becomes an issue it leaves this list.

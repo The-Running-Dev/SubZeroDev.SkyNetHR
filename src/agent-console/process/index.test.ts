@@ -53,15 +53,34 @@ test('Phase 3 metadata — reportable shell image and direct executable are pres
   assert.equal(reportableImage('agent.cmd', true), comspec.replace(/^.*[\\/]/, '').replace(/\.exe$/i, ''));
 });
 
-test('Phase 3 metadata — live process identity is stable and missing processes fail closed', { timeout: 20000 }, async () => {
+// Reports any single probe that took more than two seconds, because the timeout below cannot.
+// A cancelled test prints no assertion, so a recurrence is otherwise a bare `test timed out`
+// naming none of the five probes; the ones that did finish are in the log, and the hung one is
+// then the next in sequence by elimination.
+async function timedProbe<T>(label: string, probe: () => Promise<T>): Promise<T> {
+  const startedAt = Date.now();
+  const value = await probe();
+  const elapsed = Date.now() - startedAt;
+  if (elapsed > 2000) console.log(`[metadata probe] ${label} took ${elapsed}ms`);
+  return value;
+}
+
+// The budget is a hang detector, not a latency assertion. Five serial child processes are
+// unavoidable here: Windows reads the image with `tasklist` and the creation time by starting
+// `powershell` (`metadata.ts`), and the two same-pid reads are the stability claim itself
+// (S29.1), so neither can be dropped or cached. Measured on an idle Windows dev machine the
+// five cost about 1.1s in total; a contended four-vCPU windows-latest runner exceeded 20s
+// while the rest of the suite ran in parallel, which is what the old budget tripped on. 120s
+// keeps a genuinely hung probe failing rather than hanging CI, without policing contention.
+test('Phase 3 metadata — live process identity is stable and missing processes fail closed', { timeout: 120000 }, async () => {
   const metadata = createProcessMetadata();
-  assert.ok(await metadata.getProcessImage(process.pid));
-  const first = await metadata.getOsCreatedAt(process.pid);
+  assert.ok(await timedProbe('live image', () => metadata.getProcessImage(process.pid)));
+  const first = await timedProbe('live createdAt', () => metadata.getOsCreatedAt(process.pid));
   if (process.platform === 'win32' || process.platform === 'linux') assert.ok(first);
   else assert.equal(first, null);
-  assert.equal(await metadata.getOsCreatedAt(process.pid), first);
-  assert.equal(await metadata.getProcessImage(2147483647), null);
-  assert.equal(await metadata.getOsCreatedAt(2147483647), null);
+  assert.equal(await timedProbe('live createdAt again', () => metadata.getOsCreatedAt(process.pid)), first);
+  assert.equal(await timedProbe('absent image', () => metadata.getProcessImage(2147483647)), null);
+  assert.equal(await timedProbe('absent createdAt', () => metadata.getOsCreatedAt(2147483647)), null);
   assert.equal(metadata.imagesMatch('node.exe', 'node'), true);
   assert.equal(metadata.imagesMatch('NODE.EXE', 'node'), process.platform === 'win32');
   assert.equal(metadata.imagesMatch('other', 'node'), false);

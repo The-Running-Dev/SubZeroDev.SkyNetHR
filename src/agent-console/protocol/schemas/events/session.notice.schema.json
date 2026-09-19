@@ -26,7 +26,12 @@
             "audit_unavailable",
             "storage_failure",
             "server_restart",
-            "usage_unavailable"
+            "usage_unavailable",
+            "task_started",
+            "task_progress",
+            "task_completed",
+            "task_failed",
+            "task_cancelled"
           ]
         },
         "text": {
