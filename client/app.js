@@ -1,4 +1,4 @@
-import { appendMessageDeltaText, createIncidentGroupsBuilder, renderAuditRow, renderEvent, renderPayrollSummary, renderRequisitionRow, renderReviewRow, renderSummaryRow, renderUnreachedReport } from './render.js';
+import { appendMessageDeltaText, coalesceKey, createCoalesceGroup, createIncidentGroupsBuilder, renderAuditRow, renderEvent, renderPayrollSummary, renderRequisitionRow, renderReviewRow, renderSummaryRow, renderUnreachedReport } from './render.js';
 
 const $ = (id) => document.getElementById(id);
 
@@ -75,6 +75,12 @@ const state = {
   // (a tick from another operator, a `usage` envelope) and must not pop either panel
   // open over the whole screen just because that unrelated refresh ran.
   panelsOpen: { checklist: false, payroll: false },
+  // The transcript's last row, when it is one repeated notices or errors may fold into:
+  // `{ key, group }`, keyed by `coalesceKey`. `null` whenever the last row is any other kind,
+  // which is what makes the collapse adjacent-only rather than transcript-wide. Reset on
+  // every `openStream` for the same reason as `streamedMessages` — it names a node in a
+  // transcript that has just been cleared.
+  lastGroup: null,
 };
 
 function currentSession() {
@@ -577,6 +583,8 @@ function handleEnvelope(sessionId, envelope) {
         if (node !== null) {
           state.streamedMessages.set(turnId, node);
           transcript.appendChild(node);
+          // A new bubble is now the last row, so any open coalesce group is no longer adjacent.
+          state.lastGroup = null;
           transcript.scrollTop = transcript.scrollHeight;
         }
       }
@@ -593,10 +601,20 @@ function handleEnvelope(sessionId, envelope) {
   }
 
   state.lastSeq = envelope.seq;
+  // Fold into the last row when this envelope is identical to it. `lastSeq` has already
+  // moved, so a folded envelope is as consumed as a rendered one — a reconnect must not
+  // replay it looking for a row that was never added.
+  const key = coalesceKey(envelope);
+  const transcript = $('transcript');
+  if (key !== null && state.lastGroup !== null && state.lastGroup.key === key) {
+    state.lastGroup.group.bump(envelope.ts);
+    transcript.scrollTop = transcript.scrollHeight;
+    return;
+  }
   const node = renderEvent(document, envelope, handlers);
   if (node === null) return;
-  const transcript = $('transcript');
   transcript.appendChild(node);
+  state.lastGroup = key === null ? null : { key, group: createCoalesceGroup(document, node, envelope.ts) };
   transcript.scrollTop = transcript.scrollHeight;
 }
 
@@ -736,6 +754,7 @@ function openStream(sessionId) {
   state.lastEnvelopeAt = null;
   state.streamedMessages = new Map();
   state.toolCallsByCallId = new Map();
+  state.lastGroup = null;
   clear($('transcript'));
   applyStatusBadge();
   applyTurnControls();
@@ -1274,6 +1293,7 @@ async function confirmTerminate() {
   state.currentTurnId = null;
   state.lastEnvelopeAt = null;
   state.streamedMessages = new Map();
+  state.lastGroup = null;
   clear($('transcript'));
   resetReviewForm();
   $('compose').hidden = true;

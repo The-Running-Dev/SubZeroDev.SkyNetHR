@@ -251,3 +251,40 @@ test('#204 WebSocket — a delayed frame from a session switched away from does 
   await flush();
   assert.equal(transcript.children.length, 1, "B's own live frame still renders after the stale A frame was rejected");
 });
+
+// Brief item 19 — the transcript-level half of the collapse. `render.test.js` covers the key
+// and the group node; this covers what `app.js` decides: that a run of identical notices is
+// one row, and that adjacency is what bounds a run.
+test('item 19 — a run of identical notices renders as one counted row, and an intervening event starts a new run', async () => {
+  const { doc, sseInstances, selectA } = await setUpApp();
+  doc.__setEdge('sse');
+
+  selectA();
+  await flush();
+  const streamA = sseInstances[0];
+  const transcript = doc.getElementById('transcript');
+
+  const progress = (seq) => streamA.emit('session.notice', {
+    seq,
+    sessionId: 'sess-a',
+    ts: `2026-09-19T00:00:0${seq}.000Z`,
+    kind: 'session.notice',
+    data: { level: 'info', code: 'task_progress', text: 'classifying artefacts' },
+  });
+
+  progress(1);
+  progress(2);
+  progress(3);
+  assert.equal(transcript.children.length, 1, 'three identical notices are one transcript row, not three');
+
+  const counted = transcript.children[0].children.find((c) => c.className === 'event__count');
+  assert.equal(counted.textContent, '×3', 'the single row carries the repeat count');
+
+  // A different kind between the runs breaks adjacency: the notice recurring after a turn
+  // boundary is telling the operator something the earlier run did not.
+  streamA.emit('turn.started', { seq: 4, sessionId: 'sess-a', ts: '2026-09-19T00:00:04.000Z', kind: 'turn.started', data: { turnId: 'turn-1' } });
+  assert.equal(transcript.children.length, 2, 'an intervening event of another kind renders its own row');
+
+  progress(5);
+  assert.equal(transcript.children.length, 3, 'the same notice after an intervening event starts a new row rather than folding into the earlier run');
+});
