@@ -268,8 +268,17 @@ type ResultReexport = Assert<Equals<<T, E>() => Host.Result<T, E>, <T, E>() => E
 // Frozen v5 Phase 4 adds exactly one error discriminator for the stdout cap.
 // Keep the literal historical declarations untouched and pin the delta separately.
 type HistoricalError = { readonly kind: Exclude<Host.ErrorEventKind, 'adapter_output_overflow'>; readonly message: Host.ErrorEvent['message']; readonly fatal: Host.ErrorEvent['fatal'] };
-type HistoricalPayloadMap = { [K in Before.EventKind]: K extends 'error' ? HistoricalError : Host.EventPayloadMap[K] };
-type HistoricalEnvelope<E> = E extends { readonly kind: 'error' } ? { [P in keyof E]: P extends 'data' ? HistoricalError : E[P] } : E;
+// Same pinning treatment for the task-lifecycle addition to SessionNoticeCode: the
+// historical subset and the delta are pinned independently rather than widening the
+// frozen `Before.SessionNotice` declaration.
+type HistoricalSessionNoticeCode = Exclude<Host.SessionNoticeCode, 'task_started' | 'task_progress' | 'task_completed' | 'task_failed' | 'task_cancelled'>;
+type HistoricalSessionNotice = { readonly level: Host.SessionNotice['level']; readonly code: HistoricalSessionNoticeCode; readonly text: Host.SessionNotice['text'] };
+type HistoricalPayloadMap = { [K in Before.EventKind]: K extends 'error' ? HistoricalError : K extends 'session.notice' ? HistoricalSessionNotice : Host.EventPayloadMap[K] };
+type HistoricalEnvelope<E> = E extends { readonly kind: 'error' }
+  ? { [P in keyof E]: P extends 'data' ? HistoricalError : E[P] }
+  : E extends { readonly kind: 'session.notice' }
+    ? { [P in keyof E]: P extends 'data' ? HistoricalSessionNotice : E[P] }
+    : E;
 type OutputOverflowAddition = Assert<Equals<Exclude<Host.ErrorEventKind, Before.ErrorEventKind>, 'adapter_output_overflow'>>;
 type EventPayloadMapBefore = Assert<Equals<HistoricalPayloadMap, Before.EventPayloadMap>>;
 type EventPayloadMapReexport = Assert<Equals<Host.EventPayloadMap, Extracted.EventPayloadMap>>;
@@ -285,9 +294,9 @@ type SessionEndReasonBefore = Assert<Equals<Host.SessionEndReason, Before.Sessio
 type SessionEndReasonReexport = Assert<Equals<Host.SessionEndReason, Extracted.SessionEndReason>>;
 type SessionEndedBefore = Assert<Equals<Host.SessionEnded, Before.SessionEnded>>;
 type SessionEndedReexport = Assert<Equals<Host.SessionEnded, Extracted.SessionEnded>>;
-type SessionNoticeCodeBefore = Assert<Equals<Host.SessionNoticeCode, Before.SessionNoticeCode>>;
+type SessionNoticeCodeBefore = Assert<Equals<HistoricalSessionNoticeCode, Before.SessionNoticeCode>>;
 type SessionNoticeCodeReexport = Assert<Equals<Host.SessionNoticeCode, Extracted.SessionNoticeCode>>;
-type SessionNoticeBefore = Assert<Equals<Host.SessionNotice, Before.SessionNotice>>;
+type SessionNoticeBefore = Assert<Equals<HistoricalSessionNotice, Before.SessionNotice>>;
 type SessionNoticeReexport = Assert<Equals<Host.SessionNotice, Extracted.SessionNotice>>;
 type TurnStartedBefore = Assert<Equals<Host.TurnStarted, Before.TurnStarted>>;
 type TurnStartedReexport = Assert<Equals<Host.TurnStarted, Extracted.TurnStarted>>;

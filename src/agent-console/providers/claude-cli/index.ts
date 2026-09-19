@@ -39,6 +39,30 @@ const IGNORED_SYSTEM_SUBTYPES = new Set([
   'post_turn_summary',
 ]);
 
+// A subagent/task lifecycle subtype the CLI's `system` records carry (observed in
+// production as a flood of `unrecognised system subtype: task_started`/`task_progress`
+// noise — each one previously fell through to `adapter_unknown_record`, a non-fatal
+// error envelope, on every subagent step). Mapped to `session.notice` instead: real
+// runtime signal, not a diagnostic about this adapter's own mapping coverage.
+const TASK_SYSTEM_SUBTYPES = new Map<string, { readonly level: 'info' | 'warn' | 'error'; readonly code: string }>([
+  ['task_started', { level: 'info', code: 'task_started' }],
+  ['task_progress', { level: 'info', code: 'task_progress' }],
+  ['task_completed', { level: 'info', code: 'task_completed' }],
+  ['task_failed', { level: 'error', code: 'task_failed' }],
+  ['task_cancelled', { level: 'warn', code: 'task_cancelled' }],
+]);
+
+// Best-effort text for a task lifecycle notice: the CLI's own field names for this
+// family of `system` records have not been verified against a captured run, so this
+// reads only generic, commonly-present fields rather than guessing a payload shape.
+function describeTaskEvent(subtype: string, rec: Readonly<Record<string, unknown>>): string {
+  const label = typeof rec['description'] === 'string' ? rec['description']
+    : typeof rec['name'] === 'string' ? rec['name']
+    : typeof rec['task_id'] === 'string' ? rec['task_id']
+    : null;
+  return label ? `${subtype}: ${label}` : subtype;
+}
+
 // `stream_event` subtypes `--include-partial-messages` emits that this adapter does not
 // map to anything (S25.1, `design/findings/S25-token-streaming-probe.md`). `message_start`
 // and `message_delta` carry an interim/final `usage` the adapter already reads off the
@@ -161,6 +185,11 @@ export function createClaudeAdapter(opts: AdapterOptions & { readonly executable
           return;
         }
         if (typeof subtype === 'string' && IGNORED_SYSTEM_SUBTYPES.has(subtype)) return;
+        if (typeof subtype === 'string' && TASK_SYSTEM_SUBTYPES.has(subtype)) {
+          const mapped = TASK_SYSTEM_SUBTYPES.get(subtype)!;
+          emitEvent('session.notice', { level: mapped.level, code: mapped.code, text: describeTaskEvent(subtype, rec) }, rec);
+          return;
+        }
         emitEvent('error', { kind: 'adapter_unknown_record', message: `unrecognised system subtype: ${String(subtype)}`, fatal: false }, rec);
         return;
       }

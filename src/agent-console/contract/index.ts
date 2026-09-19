@@ -112,9 +112,14 @@ export type SessionNoticeCode =
   | 'audit_unavailable' // a permission was denied because the audit append failed
   | 'storage_failure' // a spill write failed; the session is ending
   | 'server_restart' // boot found this session live at shutdown (D130)
-  | 'usage_unavailable'; // this session's transport reports no token usage, so its burn is
+  | 'usage_unavailable' // this session's transport reports no token usage, so its burn is
   // unknown rather than zero (D146). Emitted once, at session start, before the first
   // `turn.started`, by an adapter whose selected transport cannot report usage.
+  | 'task_started' // a subagent/task lifecycle step began
+  | 'task_progress' // a subagent/task lifecycle step reported progress
+  | 'task_completed' // a subagent/task lifecycle step finished
+  | 'task_failed' // a subagent/task lifecycle step failed
+  | 'task_cancelled'; // a subagent/task lifecycle step was cancelled
 
 export interface SessionNotice {
   readonly level: 'info' | 'warn' | 'error';

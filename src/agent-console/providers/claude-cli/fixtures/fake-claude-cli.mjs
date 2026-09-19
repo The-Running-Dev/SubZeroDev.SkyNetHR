@@ -20,6 +20,8 @@ import { spawn } from 'node:child_process';
 //                   can_use_tool nor on IGNORED_CONTROL_REQUEST_SUBTYPES (#189).
 //   unknown-content-block-delta-type — a stream_event/content_block_delta whose delta.type
 //                   is neither text_delta nor on IGNORED_CONTENT_BLOCK_DELTA_TYPES (#189).
+//   task-lifecycle — the five subagent/task lifecycle `system` subtypes, each expected to
+//                   map to session.notice rather than adapter_unknown_record.
 //   many          — a long run of `assistant` text records with contiguous usage, for
 //                   volume assertions.
 //   many-big      — SKYNET_MANY_BIG_COUNT (default 1000) `assistant` text records, each
@@ -280,6 +282,17 @@ function runScenario() {
       line({ type: 'stream_event', event: { type: 'content_block_stop', index: 0 } });
       line({ type: 'stream_event', event: { type: 'message_stop' } });
       assistantText('after the unknown delta type', 'msg-ucd-2');
+      line({ type: 'result', subtype: 'success' });
+      return;
+    // A subagent/task lifecycle `system` subtype must map to `session.notice`, not
+    // `adapter_unknown_record` (D-task-lifecycle).
+    case 'task-lifecycle':
+      line({ type: 'system', subtype: 'task_started', name: 'reviewer' });
+      line({ type: 'system', subtype: 'task_progress', description: 'reading files' });
+      line({ type: 'system', subtype: 'task_completed', task_id: 'task-1' });
+      line({ type: 'system', subtype: 'task_failed' });
+      line({ type: 'system', subtype: 'task_cancelled' });
+      assistantText('after the task lifecycle', 'msg-tl-1');
       line({ type: 'result', subtype: 'success' });
       return;
     case 'malformed-content':
