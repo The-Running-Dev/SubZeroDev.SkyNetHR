@@ -25,6 +25,10 @@ jobs:
       - name: Run tests
         run: npm test
 
+      # verification: true
+      - name: Run S18.5 browser pass
+        run: npm run test:browser
+
   powershell:
     runs-on: windows-latest
     steps:
