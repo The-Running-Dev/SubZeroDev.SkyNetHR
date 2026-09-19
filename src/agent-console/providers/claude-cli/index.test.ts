@@ -389,6 +389,31 @@ test('#189 — a content_block_delta delta.type other than text_delta surfaces a
   assert.ok(eventsOf(notifications, 'message').some((m) => (m.event.data as { text: string }).text === 'after the unknown delta type'));
 });
 
+test('D-task-lifecycle — the five subagent/task system subtypes map to session.notice, never adapter_unknown_record', async () => {
+  process.env['SKYNET_TEST_SCENARIO'] = 'task-lifecycle';
+  const { adapter, notifications } = makeAdapter('task-lifecycle');
+  await adapter.send('hello', [], null, 'turn-tl' as never);
+  await waitUntil(() => eventsOf(notifications, 'turn.ended').length > 0);
+
+  const errors = eventsOf(notifications, 'error');
+  assert.equal(errors.filter((e) => (e.event.data as { kind: string }).kind === 'adapter_unknown_record').length, 0);
+
+  const notices = eventsOf(notifications, 'session.notice').map((n) => n.event.data as { level: string; code: string; text: string });
+  const byCode = new Map(notices.map((n) => [n.code, n]));
+  assert.equal(byCode.get('task_started')?.level, 'info');
+  assert.equal(byCode.get('task_started')?.text, 'task_started: reviewer');
+  assert.equal(byCode.get('task_progress')?.level, 'info');
+  assert.equal(byCode.get('task_progress')?.text, 'task_progress: reading files');
+  assert.equal(byCode.get('task_completed')?.level, 'info');
+  assert.equal(byCode.get('task_completed')?.text, 'task_completed: task-1');
+  assert.equal(byCode.get('task_failed')?.level, 'error');
+  assert.equal(byCode.get('task_failed')?.text, 'task_failed');
+  assert.equal(byCode.get('task_cancelled')?.level, 'warn');
+  assert.equal(byCode.get('task_cancelled')?.text, 'task_cancelled');
+
+  assert.ok(eventsOf(notifications, 'message').some((m) => (m.event.data as { text: string }).text === 'after the task lifecycle'));
+});
+
 // #201 — on Windows, `executable` ending in `.cmd` forces `shell: true` (mirrors the
 // bare `claude` name PATH/PATHEXT resolves to a shim); `proc.pid` then names the
 // `%ComSpec%` shell Node actually launched, not the `.cmd` shim itself. The `spawned`
