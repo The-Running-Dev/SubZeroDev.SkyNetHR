@@ -11,6 +11,28 @@ import { join } from 'node:path';
 const LAUNCH_TIMEOUT_MS = 15_000;
 const NAVIGATE_TIMEOUT_MS = 15_000;
 const PORT_POLL_INTERVAL_MS = 100;
+const CLEANUP_MAX_RETRIES = 5;
+const CLEANUP_RETRY_DELAY_MS = 200;
+
+// Deletes a browser profile directory, tolerating the Windows race where the OS (or an
+// antivirus scanner) still holds a handle inside it for a moment after the browser process
+// has exited — rmSync's own maxRetries/retryDelay is Node's documented answer to exactly this
+// EBUSY/ENOTEMPTY/EPERM pattern. A directory that still won't go away after retrying is left
+// for the OS's temp-dir cleanup rather than failing the run: cleanup is not what the pass is
+// checking, and letting it throw here previously skipped the caller's next cleanup step
+// (closing the static server), leaving the process hung rather than exited.
+export function removeUserDataDir(userDataDir, remove = rmSync) {
+  try {
+    remove(userDataDir, {
+      recursive: true,
+      force: true,
+      maxRetries: CLEANUP_MAX_RETRIES,
+      retryDelay: CLEANUP_RETRY_DELAY_MS,
+    });
+  } catch (err) {
+    console.warn(`warning: could not remove browser profile directory ${userDataDir}: ${err.message}`);
+  }
+}
 
 function launchArgs(userDataDir) {
   return [
@@ -163,7 +185,7 @@ export class Browser {
       port = await waitForDevToolsPort(userDataDir, child);
     } catch (err) {
       child.kill();
-      rmSync(userDataDir, { recursive: true, force: true });
+      removeUserDataDir(userDataDir);
       throw err;
     }
     return new Browser(child, `http://127.0.0.1:${port}`, userDataDir);
@@ -192,6 +214,6 @@ export class Browser {
       this.child.once('exit', resolve);
       setTimeout(resolve, 3000);
     });
-    rmSync(this.userDataDir, { recursive: true, force: true });
+    removeUserDataDir(this.userDataDir);
   }
 }
