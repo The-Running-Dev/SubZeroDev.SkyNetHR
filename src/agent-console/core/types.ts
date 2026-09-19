@@ -44,6 +44,7 @@ export interface SessionRecord {
     readonly createdAt: IsoTimestamp;
     endedAt: IsoTimestamp | null;
     endReason?: SessionEndReason | null;
+    name: string | null;
 }
 
 export interface SessionSummary {
@@ -58,6 +59,7 @@ export interface SessionSummary {
     readonly state: SessionState;
     readonly createdAt: IsoTimestamp;
     readonly endedAt: IsoTimestamp | null;
+    readonly name: string | null;
 }
 
 export interface SessionSnapshot {
@@ -378,6 +380,7 @@ export interface SessionCore {
     interrupt(sessionId: SessionId, owner: PrincipalId, turnId: TurnId): Promise<Result<void, SessionError>>;
     end(sessionId: SessionId, owner: PrincipalId): Promise<Result<void, SessionError>>;
     remove(sessionId: SessionId, owner: PrincipalId): Promise<Result<void, SessionError>>;
+    rename(sessionId: SessionId, owner: PrincipalId, name: string | null): Promise<Result<void, SessionError>>;
     listCheckpoints(sessionId: SessionId, owner: PrincipalId): Promise<Result<readonly Checkpoint[], SessionError>>;
     restore(sessionId: SessionId, owner: PrincipalId, sha: GitSha): Promise<Result<RestoreResult, SessionError>>;
     openToolOutput(sessionId: SessionId, owner: PrincipalId, turnId: TurnId, callId: CallId): Promise<Result<NodeJS.ReadableStream, SessionError>>;

@@ -135,6 +135,9 @@ export interface SessionRecord {
   // own synthesised `endedAt` (D130's still-`live`-on-disk case), so it is the one path that
   // writes `'server_restart'` here; every other write is the real reason for a real end.
   endReason?: SessionEndReason | null;
+  // Operator-set label (D249). Absent on a session persisted before this field existed —
+  // treated the same as null. Mutable for the life of the session, unlike the fields above.
+  name: string | null;
 }
 
 // What crosses to the client. The persisted record minus `cliSessionId`, which is
@@ -151,6 +154,7 @@ export interface SessionSummary {
   readonly state: SessionState;
   readonly createdAt: IsoTimestamp;
   readonly endedAt: IsoTimestamp | null;
+  readonly name: string | null;
 }
 
 // The denormalised session identity a review copies at authorship (D67). It is a copy,
@@ -653,6 +657,9 @@ export interface SessionManager {
   interrupt(sessionId: SessionId, owner: OperatorId, turnId: TurnId): Promise<Result<void, SessionError>>;
   end(sessionId: SessionId, owner: OperatorId): Promise<Result<void, SessionError>>;
   remove(sessionId: SessionId, owner: OperatorId): Promise<Result<void, SessionError>>;
+  // Trimmed; empty string is stored as null. Validation (length, trimming) is the route's,
+  // not the manager's — this signature takes the value already normalised (D249).
+  rename(sessionId: SessionId, owner: OperatorId, name: string | null): Promise<Result<void, SessionError>>;
 
   listCheckpoints(sessionId: SessionId, owner: OperatorId): Promise<Result<readonly Checkpoint[], SessionError>>;
   restore(sessionId: SessionId, owner: OperatorId, sha: GitSha): Promise<Result<RestoreResult, SessionError>>;

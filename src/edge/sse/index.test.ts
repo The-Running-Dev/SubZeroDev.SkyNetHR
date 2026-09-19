@@ -1155,6 +1155,50 @@ describe('S5 — POST .../interrupt, POST .../end, DELETE /api/sessions/:id', ()
     assert.equal(((await delRes.json()) as { error: { code: string } }).error.code, 'turn_in_flight');
   });
 
+  it('POST /rename sets, trims, overwrites and clears a session name (D249)', async () => {
+    const h = await makeEdge();
+    const id = await newSession(h, 'r1');
+
+    const set = await post(h, `/api/sessions/${id}/rename`, { name: '  staging deploy  ' });
+    assert.equal(set.status, 200);
+    let summary = await get(h, `/api/sessions/${id}`);
+    assert.equal(((await summary.json()) as { session: { name: string | null } }).session.name, 'staging deploy');
+
+    const overwrite = await post(h, `/api/sessions/${id}/rename`, { name: 'renamed again' });
+    assert.equal(overwrite.status, 200);
+    summary = await get(h, `/api/sessions/${id}`);
+    assert.equal(((await summary.json()) as { session: { name: string | null } }).session.name, 'renamed again');
+
+    const cleared = await post(h, `/api/sessions/${id}/rename`, { name: '' });
+    assert.equal(cleared.status, 200);
+    summary = await get(h, `/api/sessions/${id}`);
+    assert.equal(((await summary.json()) as { session: { name: string | null } }).session.name, null);
+  });
+
+  it('POST /rename refuses a non-string, non-null name with 422 bad_request', async () => {
+    const h = await makeEdge();
+    const id = await newSession(h, 'r2');
+    const res = await post(h, `/api/sessions/${id}/rename`, { name: 42 });
+    assert.equal(res.status, 422);
+    assert.equal(((await res.json()) as { error: { detail?: { field?: string } } }).error.detail?.field, 'name');
+  });
+
+  it('POST /rename refuses a name over 200 characters with 422 bad_request', async () => {
+    const h = await makeEdge();
+    const id = await newSession(h, 'r3');
+    const res = await post(h, `/api/sessions/${id}/rename`, { name: 'x'.repeat(201) });
+    assert.equal(res.status, 422);
+    assert.equal(((await res.json()) as { error: { detail?: { field?: string } } }).error.detail?.field, 'name');
+  });
+
+  it('POST /rename is 404 no_such_session for another operator', async () => {
+    const h = await makeEdge();
+    const id = await newSession(h, 'r4', 'ben');
+    const res = await post(h, `/api/sessions/${id}/rename`, { name: 'nope' }, 'mallory');
+    assert.equal(res.status, 404);
+    assert.equal(((await res.json()) as { error: { code: string } }).error.code, 'no_such_session');
+  });
+
   it('DELETE removes the session; a subsequent GET is 404 no_such_session (S5.9)', async () => {
     const h = await makeEdge();
     const id = await newSession(h, 'd1');

@@ -516,6 +516,29 @@ export function createHttpHandlers(deps: EdgeDeps) {
     sendJson(res, 200, { ok: true });
   }
 
+  async function handleRename(req: IncomingMessage, res: ServerResponse, owner: OperatorId, sessionId: SessionId): Promise<void> {
+    const raw = await readBody(req);
+    if (raw === null) return sendError(res, 'bad_request', 'request body too large', { field: 'body' });
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      return sendError(res, 'bad_request', 'body is not valid JSON', { field: 'body' });
+    }
+    const input = (parsed as { name?: unknown } | null)?.name;
+    if (input !== null && typeof input !== 'string') {
+      return sendError(res, 'bad_request', 'name must be a string or null', { field: 'name' });
+    }
+    const trimmed = typeof input === 'string' ? input.trim() : null;
+    if (trimmed !== null && trimmed.length > 200) {
+      return sendError(res, 'bad_request', 'name must be 200 characters or fewer', { field: 'name' });
+    }
+    const name = trimmed === '' ? null : trimmed;
+    const renamed = await manager.rename(sessionId, owner, name);
+    if (!renamed.ok) return failWith(res, renamed.error);
+    sendJson(res, 200, { ok: true });
+  }
+
   // `.pipe()` alone only unpipes on an early `res` close, it does not destroy `stream`
   // — without this, a client that aborts mid-download leaks the open file handle.
   // `Store.open*` is typed to the minimal `NodeJS.ReadableStream`, but every
@@ -922,6 +945,7 @@ export function createHttpHandlers(deps: EdgeDeps) {
     handleInterrupt,
     handleEnd,
     handleDelete,
+    handleRename,
     handleToolOutput,
     handleAttachment,
     handleListCheckpoints,

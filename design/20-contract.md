@@ -141,6 +141,10 @@ turn, buffer and subscribers (D49). What the declaration cannot say:
   requires and which is why it is copied onto every audit record — D25 deletes `meta.json` and
   keeps `audit.ndjson`.
 - `PermissionPolicy.banner` is non-null **exactly when** `mode === 'preauthorised'`.
+- **`name` is an operator-set label, mutable for the life of the session** (D249), unlike the
+  immutable fields above. Trimmed and empty-to-`null` normalisation happens in the route, not
+  the manager — `rename` receives the value already normalised. `null` means unset; the client
+  falls back to `cwd`.
 
 **`SessionSummary` is what crosses to the client**: the persisted record minus
 `cliSessionId`, which is vendor-opaque and has no client use. It is the authoritative
@@ -2090,6 +2094,7 @@ The `404` is `no_such_session` because `ApiErrorCode` carries no route-level not
 | `POST` | `/api/sessions/:id/permission` | `PermissionAnswer` | `200 { accepted: boolean }` | `403 bad_origin`, `404 no_such_session`, `422 bad_request` |
 | `POST` | `/api/sessions/:id/interrupt` | `{ turnId: TurnId }` | `200 { ok: true }` | `403 bad_origin`, `404 no_such_session`, `422 bad_request` |
 | `POST` | `/api/sessions/:id/end` | `{}` | `200 { ok: true }` | `403 bad_origin`, `404 no_such_session`, `409 turn_in_flight` |
+| `POST` | `/api/sessions/:id/rename` | `{ name: string \| null }` | `200 { ok: true }` | `403 bad_origin`, `404 no_such_session`, `422 bad_request` |
 | `POST` | `/api/sessions/:id/checkpoint/restore` | `{ sha: GitSha }` | `200 { ok: true, safety, unreached }` | `403 bad_origin`, `404 no_such_session`, `404 no_such_checkpoint`, `409 session_ended`, `409 turn_in_flight`, `422 bad_request`, `500 checkpoint_failed` |
 | `DELETE` | `/api/sessions/:id` | — | `200 { ok: true }` | `403 bad_origin`, `404 no_such_session`, `409 turn_in_flight` |
 | `GET` | `/api/sessions` | — | `200 { sessions: SessionSummary[] }`, caller's own only | `401 unauthenticated` |

@@ -1758,6 +1758,44 @@ test('S5.5/S5.6 — end sets ended, emits session.ended, refuses a further messa
   assert.equal(afterEnd.ok, true);
 });
 
+test('D249 — rename sets a mutable label, is last-write-wins, and is scoped to the owner', async () => {
+  const { manager, workspaceRoot } = await makeManager('full');
+  const owner = 'operator-1' as OperatorId;
+  const other = 'operator-2' as OperatorId;
+  const projectDir = path.join(workspaceRoot, 'proj-d249');
+  await mkdir(projectDir);
+  const created = await manager.create(owner, { vendor: 'claude', cwd: projectDir, model: null, sandbox: null, requisitionId: null });
+  assert.equal(created.ok, true);
+  if (!created.ok) return;
+  const { sessionId } = created.value;
+
+  const initial = manager.get(sessionId, owner);
+  assert.equal(initial.ok, true);
+  if (initial.ok) assert.equal(initial.value.name, null);
+
+  const renamed = await manager.rename(sessionId, owner, 'staging deploy');
+  assert.equal(renamed.ok, true);
+  const afterRename = manager.get(sessionId, owner);
+  assert.equal(afterRename.ok, true);
+  if (afterRename.ok) assert.equal(afterRename.value.name, 'staging deploy');
+
+  const overwritten = await manager.rename(sessionId, owner, 'renamed again');
+  assert.equal(overwritten.ok, true);
+  const afterOverwrite = manager.get(sessionId, owner);
+  assert.equal(afterOverwrite.ok, true);
+  if (afterOverwrite.ok) assert.equal(afterOverwrite.value.name, 'renamed again');
+
+  const cleared = await manager.rename(sessionId, owner, null);
+  assert.equal(cleared.ok, true);
+  const afterClear = manager.get(sessionId, owner);
+  assert.equal(afterClear.ok, true);
+  if (afterClear.ok) assert.equal(afterClear.value.name, null);
+
+  const refused = await manager.rename(sessionId, other, 'not mine');
+  assert.equal(refused.ok, false);
+  if (!refused.ok) assert.equal(refused.error.code, 'no_such_session');
+});
+
 test('S5.7 — the busy check tests overlap, not equality: a parent, a child, and a differently spelled version of a live session\'s cwd are each refused workspace_busy', async () => {
   const { manager, workspaceRoot } = await makeManager('full');
   const owner = 'operator-1' as OperatorId;
@@ -2138,6 +2176,7 @@ function bootSessionRecord(id: string, overrides: Partial<import('../contract/in
     state: 'live',
     createdAt: new Date().toISOString() as IsoTimestamp,
     endedAt: null,
+    name: null,
     ...overrides,
   };
 }
