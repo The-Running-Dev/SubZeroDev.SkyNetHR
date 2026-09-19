@@ -6065,28 +6065,3 @@ client's summary; nothing is persisted and no envelope changed.
 ## Open
 
 Staging only. Once an item becomes an issue it leaves this list.
-
-- **Set up the full design-state mechanism in this repo.** `design/state/` currently holds only
-  `WorkRef` mirrors (`design/state/work/`); `design/state-index.md` and the contract's marked
-  regions (e.g. an `invariants` region in `20-contract.md`) do not exist, so
-  `Update-DesignProjection.ps1` and `Test-DesignState.ps1` both refuse (2026-09-19 `/track` run).
-  Confirmed this repo should adopt the mechanism rather than staying mirror-only — scoping what
-  unit records, closures, and contract regions this repo needs is its own task, not mechanical
-  tracker sync.
-
-- **Host-level Claude Code hooks already run inside SkyNet-spawned sessions, unaudited.**
-  `buildEnvironment` defaults to `mode: 'inherit'` and keeps `HOME`/`USERPROFILE` even when
-  `constructed` (`src/agent-console/process/environment.ts`), so the spawned CLI reads the host
-  account's `~/.claude` config. The adapter's own fixtures show `hook_started`/`hook_response`
-  firing (`src/agent-console/providers/claude-cli/fixtures/usage-probe-bash.ndjson`), and
-  `claude-cli/index.ts` parses both subtypes but does not persist them as first-class events.
-  Host configuration can therefore alter what happens inside a session through a path SkyNet does
-  not own and cannot audit. Decide whether that is acceptable, and whether the two record types
-  should become audit events (2026-09-19, `design/findings/runtime-redesign-classification.md`).
-
-- **Two unmeasured premises in the runtime-redesign classification need one probe each.**
-  (a) Whether a Claude Code `PreToolUse` hook can *substitute* a tool result rather than only deny
-  the call - the load-bearing capability for brief items 2, 3 and 12's suppression half, currently
-  class A. (b) Whether SkyNet's `control_response` round trip contributes any model tokens at all -
-  if it does not, brief item 8 is already satisfied and needs no work. `harness/run-s26-multi.mjs`
-  is the pattern for both. A probe, not a slice.
