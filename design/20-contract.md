@@ -1075,6 +1075,26 @@ reclaimer stalled for longer than one interval between its last sample and its o
 the stalled-holder bound D194 already draws; a winner that proceeds past such a late overwrite
 finds it at its first renewal and stops (I56).
 
+**A confirming sample finding the lock absent retries the claim, and is an error of no kind**
+(D247). The two earlier `absent` observations in the same claim already answer the same way, and
+this is the third observation of one fact rather than a fourth kind of thing: a lock that is not
+there is not this process's, and names no holder to refuse over. Two routes reach it and neither is
+a write failing. The winner may have confirmed, booted and released cleanly before this reclaimer's
+interval elapsed — the stalled-reclaimer case D194 already bounds — leaving the root genuinely
+free; or the absence may be the transient one a rename-over can expose to a concurrent sample
+(below). Reporting either as `StartupError.storage_unwritable` asserts a write failed when none
+did, and reporting it as `StartupError.storage_locked` would have to invent the holder that
+refusal is required to name, which is the placeholder hazard I57 already refuses elsewhere.
+
+**The retry cannot spin, and the bound is structural rather than counted**: its first act is the
+exclusive create, so reaching this row twice requires the lock to have been created and then
+removed again in between by some process's ownership-checked release. What the retry does rest on
+is that a live holder renews — a winner still running is observed at the retry's own window and
+refused there — which is D180's foundation and not a new assumption. It is also what a test of two
+racing reclaimers must supply: a winner whose counter never moves is, by this document's own
+staleness rule, a lock the retrying loser is entitled to reclaim, so exactly-one-winner is a
+property of the rule plus a running holder and never of `claimLock` alone.
+
 **The holding host has left this table, and the deletion is the point.** D161's rule — a lock
 naming another `hostname` is never reclaimed — made a recreated container's refusal permanent,
 since recreating changes the hostname and nothing ever reclaims a foreign lock. It is deleted
@@ -1141,8 +1161,12 @@ create instead — atomic, and failing rather than clobbering. Both publish a co
 which is all I61 asks; only the claim additionally needs to lose a race it did not win — a reclaim
 loses its race by the confirming sample above, not by its write. That is what
 makes the unparseable row above a refusal rather than a guess: a reader observes the previous contents or the next, never a
-partial file, so a lock that will not parse is corruption and not a renewal caught in flight. **It
-is deliberately not fsync'd.** This is the one file here whose durability buys nothing — a lock lost
+partial file, so a lock that will not parse is corruption and not a renewal caught in flight.
+**Publishing whole is not a promise of continuous presence** (D247): I61 constrains what a reader
+sees when it sees something, not that a concurrent reader always sees something. A rename-over is a
+directory operation, and a sample racing one can find the file gone — which arrives as `ENOENT` and
+never as a short read, and is why absence is a retry above rather than corruption or a write
+failure. **It is deliberately not fsync'd.** This is the one file here whose durability buys nothing — a lock lost
 to a host crash and a lock that survived one lead a booting server to the same correct outcome, and
 the holder that wrote it is gone either way.
 
@@ -2349,9 +2373,9 @@ control rather than concealment (D50, D70).
 |---|---|---|---|
 | `ConfigError.insecure_bind` | A routable bind that no `trustProxy` allow-list covers, **under `proxy-header` or `open-webui` only** (D154) — those are the modes that trust a header the client could otherwise set. Under `shared-secret` the same bind is legitimate and this is never raised: a credential the caller must present is not a claim about who the peer is. **Not** a missing auth mode either: D93 makes one mandatory in every configuration, so that case is `missing_field` at parse time and never reaches here | No | Refuse to start, naming the fix |
 | `ConfigError.missing_field` / `invalid_field` | Validation of the environment. `invalid_field` additionally covers **`STORAGE_ROOT` overlapping any `WORKSPACE_ROOTS` entry** under `pathsOverlap`, once both are jail-normalised (D185, I60) — `detail` names the root it collides with. No variant is added for it: the field is genuinely invalid relative to another field | No | Refuse to start. On the overlap, naming both paths and which to move; nothing is written and the storage tree is untouched |
-| `StartupError.storage_unwritable` | The storage root cannot be written at boot | No | Refuse to start |
+| `StartupError.storage_unwritable` | The storage root cannot be written at boot. **A lock observation that found `server.lock` absent is never this** (D247): `ENOENT` from a sample is a meaningful observation and not a failed write, and every `absent` row in `claimLock` — the confirming sample's included — retries the claim rather than raising | No | Refuse to start |
 | `StartupError.storage_lock_corrupt` | `<storage>/server.lock` is present and will not parse (D196). **Not a renewal caught in flight** — every write publishes the file whole (I61), so a reader sees complete contents or none — and **not a lock predating the lease**, which parses and reaches the reclaim path on its absent counter (I61) | No | Refuse to start with a non-zero exit, naming the path. Nothing server-wide has been written. The operator's action is to remove the file, having satisfied themselves no server is running |
-| `StartupError.storage_locked` | Another server process holds this storage root: the lock's `renewals` moved across one observation window measured on this process's own monotonic clock (D180), **or a reclaim's confirming sample, one renewal interval after its overwrite, found another `instanceId`** (D216). **Never raised on a host comparison**, which no longer happens | No | Refuse to start with a non-zero exit, naming the holding `pid`, `hostname` and `startedAt`. **Nothing server-wide has been written**, because the claim precedes the reap step |
+| `StartupError.storage_locked` | Another server process holds this storage root: the lock's `renewals` moved across one observation window measured on this process's own monotonic clock (D180), **or a reclaim's confirming sample, one renewal interval after its overwrite, found another `instanceId`** (D216). A confirming sample finding the lock **absent** is not this row and raises nothing, there being no holder to name (D247). **Never raised on a host comparison**, which no longer happens | No | Refuse to start with a non-zero exit, naming the holding `pid`, `hostname` and `startedAt`. **Nothing server-wide has been written**, because the claim precedes the reap step |
 | `IdentityError.no_identity` | No header, no cookie, or an empty one | No | `401 unauthenticated` |
 | `IdentityError.untrusted_proxy` | The identity header arrived from an address not in `trustProxy` | No | `401 unauthenticated`; log the address |
 | `IdentityError.bad_secret` | The shared-secret cookie does not match | No | `401 unauthenticated` |
