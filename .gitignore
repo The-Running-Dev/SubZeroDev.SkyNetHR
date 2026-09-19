@@ -5,3 +5,7 @@ dist/
 .claude/session-costs.tsv
 .claude/settings.local.json
 .claude/verify-report.json
+
+# Written by tools/Start-SkyNetHR.ps1 for docker-compose.dev.yml. Holds this host's
+# paths and its shared secret, so it is local state, never committed.
+.env

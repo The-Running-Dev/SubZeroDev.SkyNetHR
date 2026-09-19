@@ -115,3 +115,20 @@ it fails fast with `failed to initialize in-process app-server client: Operation
 before it ever reaches the network. `auth.json` and `config.toml` are unaffected; if a turn
 fails this way, delete or move aside the `state_*.sqlite` files in the mounted `.codex`
 directory and retry.
+
+### One-command setup (Windows, PowerShell 7)
+
+`tools/Start-SkyNetHR.ps1` wraps the manual steps above for a local dev run: it resolves
+`WORKSPACE_ROOTS_HOST_DIR`, `CLAUDE_CREDENTIALS_DIR` and `CODEX_CREDENTIALS_DIR` (defaulting
+to `~/.claude`/`~/.codex`), generates and persists `AUTH_SECRET` in a git-ignored `.env` so
+restarts keep the same login, warns about the `state_*.sqlite` hazard above without touching
+the files itself, then runs `docker compose -f docker-compose.dev.yml up -d --build` and polls
+`/readyz` until the console is actually serving.
+
+```powershell
+./tools/Start-SkyNetHR.ps1
+```
+
+On success it prints the console URL and the secret to paste into the login box. Rerun with
+`-Recreate` to force-recreate the container, `-Logs` to tail it, `-Stop`/`-Down` to stop the
+stack. See `Get-Help ./tools/Start-SkyNetHR.ps1 -Full` for every parameter.
