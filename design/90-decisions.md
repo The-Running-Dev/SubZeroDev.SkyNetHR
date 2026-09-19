@@ -6033,3 +6033,11 @@ Reversibility: cheap — one paragraph in § *Server lock*, two error rows, and 
 ## Open
 
 Staging only. Once an item becomes an issue it leaves this list.
+
+- **Set up the full design-state mechanism in this repo.** `design/state/` currently holds only
+  `WorkRef` mirrors (`design/state/work/`); `design/state-index.md` and the contract's marked
+  regions (e.g. an `invariants` region in `20-contract.md`) do not exist, so
+  `Update-DesignProjection.ps1` and `Test-DesignState.ps1` both refuse (2026-09-19 `/track` run).
+  Confirmed this repo should adopt the mechanism rather than staying mirror-only — scoping what
+  unit records, closures, and contract regions this repo needs is its own task, not mechanical
+  tracker sync.
