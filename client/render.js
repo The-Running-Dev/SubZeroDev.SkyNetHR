@@ -152,6 +152,60 @@ function toolResultNode(doc, data, handlers) {
   return row(doc, 'tool-result', 'result', body);
 }
 
+// A burst of notices or errors identical in every rendered field is one thing happening to
+// an operator and N things in the audit log. `coalesceKey` decides that identity: equal keys
+// are the same row, `null` is a kind that never collapses. Only `session.notice` and `error`
+// return a key, because every other kind carries content of its own, and collapsing content
+// hides information rather than repetition — D246's folds are how those stay compact.
+//
+// Adjacency is the rule, and it is deliberate: seventeen consecutive `task_progress` notices
+// become one row reading `×17`, while the same notice recurring either side of a tool call
+// stays two rows — the second occurrence is then telling the operator something the first
+// did not. Nothing here touches the event log; every instance is still in `events.ndjson`.
+export function coalesceKey(envelope) {
+  if (envelope.kind === 'session.notice') {
+    const data = envelope.data;
+    return `session.notice ${data.level} ${data.code} ${data.text}`;
+  }
+  if (envelope.kind === 'error') {
+    const data = envelope.data;
+    return `error ${data.fatal ? 'fatal' : 'error'} ${data.kind} ${data.message ?? ''}`;
+  }
+  return null;
+}
+
+// Wraps an already-rendered row so later identical envelopes fold into it. The count badge
+// and the instance list are created on the first `bump` rather than up front, so a notice
+// that never repeats renders exactly as it did before this existed.
+//
+// Instances are listed by timestamp and nothing else: two envelopes reaching the same group
+// are by construction identical in every other rendered field, so a timestamp is the whole
+// of what distinguishes them.
+export function createCoalesceGroup(doc, node, firstTs) {
+  const timestamps = [firstTs];
+  let count = null;
+  let list = null;
+  return {
+    node,
+    bump(ts) {
+      timestamps.push(ts);
+      if (count === null) {
+        count = el(doc, 'span', 'event__count');
+        node.appendChild(count);
+        const details = el(doc, 'details', 'event__instances');
+        details.appendChild(el(doc, 'summary', 'event__instances-summary', 'instances'));
+        list = el(doc, 'ul', 'event__instances-list');
+        details.appendChild(list);
+        node.appendChild(details);
+        list.appendChild(el(doc, 'li', 'event__instance', timestamps[0]));
+      }
+      count.textContent = `×${timestamps.length}`;
+      list.appendChild(el(doc, 'li', 'event__instance', ts));
+      return timestamps.length;
+    },
+  };
+}
+
 function noticeNode(doc, data) {
   const body = el(doc, 'div', 'notice');
   body.appendChild(el(doc, 'div', 'notice__text', data.text));
