@@ -93,17 +93,38 @@ export function appendMessageDeltaText(node, text) {
   textNode.textContent = node.__messageText;
 }
 
-function thinkingNode(doc, data) {
+// D246: verbosity governs `thinking` text and `tool.call`/`tool.result` bodies via a
+// native `<details>` fold — never the permission block, which is exempt (I12/S4.11) and
+// built without one. `thinking` collapses at every level but Full; input/output collapse
+// only at Compact.
+function foldable(doc, label, contentNode, open) {
+  const details = el(doc, 'details', 'fold');
+  details.open = open;
+  details.appendChild(el(doc, 'summary', 'fold__summary', label));
+  details.appendChild(contentNode);
+  return details;
+}
+
+function thinkingNode(doc, data, handlers) {
   const body = el(doc, 'div', 'thinking');
-  body.appendChild(el(doc, 'div', 'thinking__text', data.text));
+  const verbosity = (handlers && handlers.verbosity) || 'normal';
+  const textNode = el(doc, 'div', 'thinking__text', data.text);
+  body.appendChild(foldable(doc, 'thinking', textNode, verbosity === 'full'));
   return row(doc, 'thinking', 'thinking', body);
 }
 
-function toolCallNode(doc, data) {
+// Registers itself with `handlers.onToolCallRendered(callId, refs)` when given one, so a
+// later `permission.request` sharing this `callId` can find and merge into this same row
+// (D246) rather than rendering the input a second time.
+function toolCallNode(doc, data, handlers) {
   const body = el(doc, 'div', 'tool');
   body.appendChild(el(doc, 'div', 'tool__name', data.name));
   if (data.summary) body.appendChild(el(doc, 'div', 'tool__summary', data.summary));
-  body.appendChild(el(doc, 'pre', 'tool__input', pretty(data.input)));
+  const inputPre = el(doc, 'pre', 'tool__input', pretty(data.input));
+  const verbosity = (handlers && handlers.verbosity) || 'normal';
+  const fold = foldable(doc, 'input', inputPre, verbosity !== 'compact');
+  body.appendChild(fold);
+  if (handlers && handlers.onToolCallRendered) handlers.onToolCallRendered(data.callId, { body, fold, inputPre });
   return row(doc, 'tool-call', 'tool', body);
 }
 
@@ -114,7 +135,9 @@ function toolResultNode(doc, data, handlers) {
   const body = el(doc, 'div', 'tool');
   const status = el(doc, 'div', 'tool__status', data.ok ? 'ok' : 'failed');
   body.appendChild(status);
-  body.appendChild(el(doc, 'pre', 'tool__output', data.output));
+  const outputPre = el(doc, 'pre', 'tool__output', data.output);
+  const verbosity = (handlers && handlers.verbosity) || 'normal';
+  body.appendChild(foldable(doc, 'output', outputPre, verbosity !== 'compact'));
   if (data.truncated) {
     body.appendChild(el(doc, 'div', 'tool__truncated', `truncated — ${data.bytes} bytes in full`));
     if (handlers && handlers.sessionId) {
@@ -203,10 +226,24 @@ function checklistItemCompletedNode(doc, data) {
 // hands the caller a `setResolved(text)` closure so a later `permission.resolved` —
 // including one answered from a different client — can update this same row without
 // the caller ever querying the DOM for it.
+//
+// D246: a request sharing `callId` with an already-rendered `tool.call` merges into that
+// row instead of drawing a second one — `handlers.getToolCallByCallId` finds it, and its
+// folded input is unwrapped to a plain, always-visible `<pre>` (I12/S4.11: the permission
+// prompt is exempt from every verbosity level, never just defaulted open). No match falls
+// back to a standalone block with its own exact input, unfolded the same way.
 function permissionRequestNode(doc, data, handlers) {
-  const body = el(doc, 'div', 'permission');
-  body.appendChild(el(doc, 'div', 'permission__tool', data.tool));
-  body.appendChild(el(doc, 'pre', 'permission__input', pretty(data.input)));
+  const merged = handlers && handlers.getToolCallByCallId ? handlers.getToolCallByCallId(data.callId) : null;
+
+  let body;
+  if (merged) {
+    body = merged.body;
+    if (merged.fold.parentNode === body) body.replaceChild(merged.inputPre, merged.fold);
+  } else {
+    body = el(doc, 'div', 'permission');
+    body.appendChild(el(doc, 'div', 'permission__tool', data.tool));
+    body.appendChild(el(doc, 'pre', 'permission__input', pretty(data.input)));
+  }
 
   const actions = el(doc, 'div', 'permission__actions');
   const allowBtn = el(doc, 'button', 'button button--allow', 'Allow');
@@ -245,7 +282,7 @@ function permissionRequestNode(doc, data, handlers) {
 
   if (handlers && handlers.onRequestRendered) handlers.onRequestRendered(data.requestId, { setResolved });
 
-  return row(doc, 'permission', 'permission', body);
+  return merged ? null : row(doc, 'permission', 'permission', body);
 }
 
 function permissionResolvedNode(doc, data) {
@@ -336,8 +373,9 @@ const RENDERERS = {
  * draw. `null` rather than a placeholder: an event a later slice introduces should be
  * invisible here, not rendered as damage.
  *
- * `handlers` is optional and reaches only `permission.request` and `tool.result` today
- * (see above); every other renderer ignores it.
+ * `handlers` is optional. `verbosity` reaches `thinking`, `tool.call` and `tool.result`;
+ * `sessionId` reaches `tool.result`; `onToolCallRendered`/`getToolCallByCallId` join
+ * `tool.call` and `permission.request` by `callId` (D246); the rest ignore it.
  */
 export function renderEvent(doc, envelope, handlers) {
   const renderer = RENDERERS[envelope.kind];

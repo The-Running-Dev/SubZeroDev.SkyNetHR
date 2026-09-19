@@ -18,8 +18,25 @@
       <option value="D">D — SaaS</option>
     </select>
   </label>
+  <label class="field field--inline">
+    <span class="field__label field__label--hidden">Verbosity</span>
+    <select id="verbosity-select" class="field__input">
+      <option value="compact">Compact</option>
+      <option value="normal">Normal</option>
+      <option value="full">Full</option>
+    </select>
+  </label>
   <button id="requisitions-open" class="button button--quiet" type="button">Requisitions</button>
   <button id="audit-open" class="button button--quiet" type="button">Audit log</button>
+  <details id="masthead-panels" class="masthead__panels" hidden>
+    <summary class="button button--quiet">Panels</summary>
+    <div class="masthead__panels-menu">
+      <button id="checkpoints-open" class="button button--quiet" type="button">Checkpoints</button>
+      <button id="checklist-open" class="button button--quiet" type="button">Checklist</button>
+      <button id="payroll-open" class="button button--quiet" type="button">Payroll</button>
+      <button id="reviews-open" class="button button--quiet" type="button">Reviews</button>
+    </div>
+  </details>
   <button id="interrupt" class="button button--quiet" type="button" hidden>Interrupt</button>
   <button id="end-session" class="button button--quiet" type="button" hidden>End session</button>
   <button id="terminate-open" class="button button--quiet" type="button" hidden>Terminate</button>
@@ -128,6 +145,79 @@
   <button id="terminate-confirm" class="button button--deny" type="button">Terminate employment</button>
 </section>
 
+<section id="checkpoints" class="checkpoints panel panel--audit" hidden>
+  <div class="audit__header">
+    <h2 class="panel__heading">Checkpoints</h2>
+    <button id="checkpoints-close" class="button button--quiet" type="button">Close</button>
+  </div>
+  <ul id="checkpoint-list" class="checkpoint-list"></ul>
+  <div id="restore-report" class="restore-report" hidden></div>
+</section>
+
+<section id="checklist" class="checklist panel panel--audit" hidden>
+  <div class="audit__header">
+    <h2 class="panel__heading">First-run checklist</h2>
+    <button id="checklist-close" class="button button--quiet" type="button">Close</button>
+  </div>
+  <ul id="checklist-list" class="checklist-list"></ul>
+</section>
+
+<section id="payroll" class="payroll panel panel--audit" hidden>
+  <div class="audit__header">
+    <h2 class="panel__heading">Payroll</h2>
+    <button id="payroll-close" class="button button--quiet" type="button">Close</button>
+  </div>
+  <div id="payroll-summary"></div>
+</section>
+
+<section id="reviews" class="reviews panel panel--audit" hidden>
+  <div class="audit__header">
+    <h2 class="panel__heading">Reviews</h2>
+    <span id="pip-badge" class="pip-badge" hidden>ON PIP</span>
+    <button id="reviews-close" class="button button--quiet" type="button">Close</button>
+  </div>
+  <div class="audit__table-wrap">
+    <table class="audit-table">
+      <thead>
+        <tr>
+          <th>Author</th>
+          <th>Rating</th>
+          <th>PIP</th>
+          <th>State</th>
+          <th>Body</th>
+        </tr>
+      </thead>
+      <tbody id="review-rows"></tbody>
+    </table>
+  </div>
+  <p id="reviews-empty" class="audit__empty" hidden>no published reviews yet</p>
+  <form id="review-form" class="form">
+    <label class="field">
+      <span class="field__label">Rating <span class="field__hint">optional</span></span>
+      <select id="review-rating" class="field__input">
+        <option value="">none</option>
+        <option value="does_not_meet">does not meet</option>
+        <option value="meets_some">meets some</option>
+        <option value="meets">meets</option>
+        <option value="exceeds">exceeds</option>
+        <option value="exceptional">exceptional</option>
+      </select>
+    </label>
+    <label class="field">
+      <span class="field__label">Puts this session on a plan</span>
+      <input id="review-pip" type="checkbox">
+    </label>
+    <label class="field">
+      <span class="field__label">Body</span>
+      <textarea id="review-body" class="field__input" rows="4"></textarea>
+    </label>
+    <div class="reviews__actions">
+      <button id="review-save" class="button button--quiet" type="submit">Save draft</button>
+      <button id="review-publish" class="button" type="button" disabled>Publish</button>
+    </div>
+  </form>
+</section>
+
 <section id="login" class="panel panel--login" hidden>
   <h2 class="panel__heading">Sign in</h2>
   <form id="login-form" class="form">
@@ -183,74 +273,16 @@
   <section class="transcript-pane">
     <div id="policy-banner" class="policy-banner" hidden></div>
     <div id="transcript" class="transcript"></div>
-    <section id="checkpoints" class="checkpoints" hidden>
-      <h2 class="panel__heading">Checkpoints</h2>
-      <ul id="checkpoint-list" class="checkpoint-list"></ul>
-      <div id="restore-report" class="restore-report" hidden></div>
-    </section>
-    <section id="checklist" class="checklist" hidden>
-      <h2 class="panel__heading">First-run checklist</h2>
-      <ul id="checklist-list" class="checklist-list"></ul>
-    </section>
-    <section id="payroll" class="payroll" hidden>
-      <h2 class="panel__heading">Payroll</h2>
-      <div id="payroll-summary"></div>
-    </section>
-    <section id="reviews" class="reviews" hidden>
-      <div class="reviews__header">
-        <h2 class="panel__heading">Reviews</h2>
-        <span id="pip-badge" class="pip-badge" hidden>ON PIP</span>
-      </div>
-      <div class="audit__table-wrap">
-        <table class="audit-table">
-          <thead>
-            <tr>
-              <th>Author</th>
-              <th>Rating</th>
-              <th>PIP</th>
-              <th>State</th>
-              <th>Body</th>
-            </tr>
-          </thead>
-          <tbody id="review-rows"></tbody>
-        </table>
-      </div>
-      <p id="reviews-empty" class="audit__empty" hidden>no published reviews yet</p>
-      <form id="review-form" class="form">
-        <label class="field">
-          <span class="field__label">Rating <span class="field__hint">optional</span></span>
-          <select id="review-rating" class="field__input">
-            <option value="">none</option>
-            <option value="does_not_meet">does not meet</option>
-            <option value="meets_some">meets some</option>
-            <option value="meets">meets</option>
-            <option value="exceeds">exceeds</option>
-            <option value="exceptional">exceptional</option>
-          </select>
-        </label>
-        <label class="field">
-          <span class="field__label">Puts this session on a plan</span>
-          <input id="review-pip" type="checkbox">
-        </label>
-        <label class="field">
-          <span class="field__label">Body</span>
-          <textarea id="review-body" class="field__input" rows="4"></textarea>
-        </label>
-        <div class="reviews__actions">
-          <button id="review-save" class="button button--quiet" type="submit">Save draft</button>
-          <button id="review-publish" class="button" type="button" disabled>Publish</button>
-        </div>
-      </form>
-    </section>
     <form id="compose" class="compose" hidden>
       <label class="field field--grow">
         <span class="field__label field__label--hidden">Message</span>
-        <input id="text" class="field__input" type="text" autocomplete="off" required>
+        <textarea id="text" class="field__input" rows="1" autocomplete="off" required></textarea>
       </label>
-      <label class="field">
-        <span class="field__label field__label--hidden">Attach a file</span>
-        <input id="attachments" class="field__input" type="file" multiple>
-      </label>
+      <div class="attachments">
+        <input id="attachments" class="attachments__input" type="file" multiple hidden>
+        <button id="attachments-button" class="button button--quiet" type="button">Attach</button>
+        <div id="attachment-chips" class="attachment-chips"></div>
+      </div>
       <button class="button" type="submit">Send</button>
     </form>
   </section>

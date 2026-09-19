@@ -700,6 +700,11 @@ async function runConsole(sessions: ReadonlyArray<Record<string, unknown>>) {
     'status-badge', 'theme-select', 'terminate-open', 'terminate', 'terminate-close',
     'terminate-summary', 'terminate-ended', 'terminate-confirm',
     'interrupt', 'end-session', 'turn-elapsed',
+    // D246: masthead verbosity control, panels overflow menu, and compose attachments
+    'verbosity-select', 'masthead-panels',
+    'checkpoints-open', 'checkpoints-close', 'checklist-open', 'checklist-close',
+    'payroll-open', 'payroll-close', 'reviews-open', 'reviews-close',
+    'attachments', 'attachments-button', 'attachment-chips',
   ]) {
     byId.set(id, fakeEl('div'));
   }
@@ -923,7 +928,9 @@ describe('S7.2 — an ended session offers no compose box', () => {
       for (const fn of button.listeners.get('click') ?? []) fn({});
 
       assert.equal(byId.get('compose')!.hidden, true, 'a rehydrated session refuses every message with 409 session_ended (D20)');
-      // Everything else stays readable: D20 keeps the transcript and the checkpoints.
+      // Everything else stays readable: D20 keeps the transcript and the checkpoints, though
+      // D246 moves checkpoints behind the panels opener rather than showing it unconditionally.
+      for (const fn of byId.get('checkpoints-open')!.listeners.get('click') ?? []) fn({});
       assert.equal(byId.get('checkpoints')!.hidden, false);
       const shown = byId.get('status')!.children.map((c) => c.textContent).join(' ');
       assert.match(shown, /ended/, 'a box that vanishes with no reason given is a bug report');
