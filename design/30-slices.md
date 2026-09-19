@@ -2097,13 +2097,37 @@ worse of the two irregularities. See S19 for why the verticality rule's purpose 
   aggregation. S16 covers the part with a source — burn and idle over a session's own event log.
   Whether the rest is in scope, and from what data, is unanswered.
 
+**A whole work stream, and it is the largest thing this section has ever listed:**
+
+- **The runtime-redesign items.** `design/findings/runtime-redesign-classification.md` classifies
+  40 of them, and this document reaches none — no slice cites it, and it cites no slice. That is
+  not an oversight to correct by writing slices, because **`design/00-brief.md` names no runtime-
+  redesign item and the brief that asks for them is not in this repository**
+  (`20-contract.md § Unresolved` 18 says so in those words). The stream is nonetheless shipping:
+  item 21 landed as D248, item 29 as D249, and the classification records items 10, 17, 18 and 19
+  as already shipped before those. Each carried a decision, a contract amendment and a pull
+  request, and none carried a slice, acceptance criteria with stable ids, or an `Out of scope`
+  line. **Whether that is the intended route or a gap is the owner's to settle**, and it is a
+  question about where this stream is specified rather than about any one item.
+- **Item 12's remaining half — indexed access to a tool-output blob.** Routed to `/design` by
+  D250 and answered there by D251, which is an open pull request at the time of this pass.
+  `20-contract.md § Unresolved` 18 is still open, so there is no surface to slice against: a
+  slice may introduce no signature the contract does not carry. `/contract` comes before any
+  slice here, and the design's own handoff says so.
+- **Most of the classification's other rows are not sliceable even in principle**, and its own
+  rule is why: a class-I or class-A row "is not a finding" and may not be built on without being
+  promoted to class S first. Sixteen of the 40 are Category 3 — structurally unreachable while a
+  vendor CLI owns the conversation — and are not work this repository can schedule at all.
+
 Next: run `/track` in a fresh session to open the issues for any slice above that still has none,
-and to sync the existing ones — including the criteria appended to S27 and S28 by the previous pass
-and to S30 by this one, all of them additions at the next free id rather than drift. **This pass
-appended two criteria and wrote no new slice**, which is the finding rather than a short run: every
-decision through D204 already has a home, and the one thing that had fallen through was I53's
-failed-bind clause, excluded by S30 while its `/contract` amendment was pending and left uncovered
-once that amendment landed. **#206 is not reopened**: D199 asked for it, D204
-settled that it stays closed, and #272 is the artifact holding S30 outstanding against the current
-slice text. `design/90-decisions.md § Open` is empty, so nothing needs clearing from it this pass.
+and to sync the existing ones. **This pass wrote no slice and appended no criterion**, which is
+the finding rather than a short run, and it has two halves. Against `10-design.md` and
+`20-contract.md` as they stand there is nothing uncovered: `## Outstanding` is empty, S1 to S32
+are landed, and what remains in `20-contract.md § Unresolved` — 12, 13 and 18 — is undetermined
+input rather than buildable surface. Against the work actually in flight there is a great deal
+uncovered, and all of it is the runtime-redesign stream listed immediately above, which no
+document in `design/` specifies. The decisions since the last pass, D205 to D251, are otherwise
+fixes and reconciliations carrying their own issues, which `/fix` owns and this document does not.
+**#206 is not reopened**: D199 asked for it, D204 settled that it stays closed.
+`design/90-decisions.md § Open` is empty, so nothing needs clearing from it this pass.
 `/slices` does not write to GitHub.
