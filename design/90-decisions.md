@@ -6213,6 +6213,39 @@ Reversibility: cheap. Nothing is built and no code moves — this settles one se
 revisit this repository's copy, and would arrive through `/kit-sync` alongside the script
 implementing it.
 
+### 2026-09-19 — D253 A windowed tool-output read carries totals only when its scan reaches the blob's true end
+Context: `20-contract.md` § Unresolved 19 left D251's line-addressed window with the totals question
+open. `10-design.md` § *Failure modes* already answers a past-end read with "the blob's true line
+and byte totals", and two readings of that sentence are both defensible: every windowed response
+carries totals, or only a response whose scan happened to reach the true end does. The two readings
+cost differently, and item 19 named the tension without picking one — resolving it is what this
+decision does.
+Chosen: **the scan stops where the window does, and totals accompany the response only when that
+scan reaches the blob's true end** — the case the failure-mode row already specifies, now stated as
+the general rule rather than a special case of it. § *Concurrency and ordering*'s argument is written
+against the other reading: "the **deepest** scan any one request can provoke" is bounded by
+`Caps.sessionToolOutputBytes` only if a window's depth is what the scan does, and a rule requiring
+totals on every response makes every scan maximal regardless of the window asked for, which is the
+bound D251 priced and this would spend back. It also keeps the response able to stream the way the
+whole-blob path does: a scan that runs the length of the window can be interleaved with the bytes
+already found, where one that must additionally confirm the true end cannot report done until it has
+looked past everything the caller asked to see.
+Rejected: **totals on every windowed response.** It is what a viewer sizing a scrollbar wants, and
+the failure-mode row's "the viewer clamps to the end of the log" reads that way at a glance — but
+that row is the past-end case, where the scan reaching the true end costs nothing extra because there
+is nothing past it to look past. Generalising the sentence past that case is what turns every window
+into a full scan and forecloses streaming; the want is real but this is not the read that is free.
+Rejected: **leaving it unresolved and scaffolding an optional totals field either way.** Item 19
+itself says this is not a naming question, and a signature is not where the cost is decided — an
+optional field whose presence secretly depends on whether the scan happened to run to the end is the
+ambiguity carried into the wire instead of settled before it.
+Reversibility: cheap now, expensive once shipped. Nothing is built; this settles which of two
+readings of one sentence governs. A client wanting a blob's size for scrollbar-sizing without a side
+effect has no cheap query path today — that gap is left open, not solved here, and is a cost of this
+choice worth stating rather than discovering later. Loosening to "always" after operators depend on
+its absence would be the same asymmetry D251 already named for search: additive to add, not to
+withdraw.
+
 ## Open
 
 Staging only. Once an item becomes an issue it leaves this list.

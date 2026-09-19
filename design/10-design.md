@@ -2015,6 +2015,14 @@ is needed against the population the brief names — *Threat model* holds consol
 equivalent to shell access as the server's user, so an operator who wants to load this host has
 considerably cheaper ways to do it than paging a log.
 
+**The scan stops where the window does, and the blob's true totals ride along only when that
+scan reaches the true end** (D253) — the past-end row in § *Failure modes* is this rule's special
+case, not an exception carved out of a stronger one. A rule returning totals on every windowed
+response would make every scan maximal regardless of the window asked for, which is exactly the
+cost this paragraph's bound is written against, and would stop the response from streaming: a
+scan that must additionally confirm the true end cannot report done until it has looked past
+everything the caller asked to see.
+
 Genuinely simultaneous:
 
 - **Multiple sessions**, each with its own child, buffer and sequence. Independent by
