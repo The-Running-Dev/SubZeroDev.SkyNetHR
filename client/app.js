@@ -259,11 +259,22 @@ async function refreshSessions() {
     const button = document.createElement('button');
     button.className = 'session__button';
     button.type = 'button';
-    button.appendChild(text('span', 'session__cwd', session.cwd));
+    button.appendChild(text('span', 'session__cwd', session.name ?? session.cwd));
     button.appendChild(text('span', 'session__meta', `${session.vendor} · ${session.state}`));
     button.addEventListener('click', () => selectSession(session.id));
 
+    const rename = document.createElement('button');
+    rename.className = 'session__rename';
+    rename.type = 'button';
+    rename.title = 'Rename session';
+    rename.textContent = '✎';
+    rename.addEventListener('click', event => {
+      event.stopPropagation();
+      startRenameSession(session, item);
+    });
+
     item.appendChild(button);
+    item.appendChild(rename);
     list.appendChild(item);
   }
 
@@ -834,6 +845,37 @@ async function doEnd() {
   if (result.status === 401) return;
   if (result.status !== 200) return status(describe(result), 'error');
   status('session ended', 'ok');
+  await refreshSessions();
+}
+
+// Operator-set label (D249). Swaps the sidebar row's label in place for an inline
+// input rather than opening a modal — this is a sidebar-only affordance.
+function startRenameSession(session, item) {
+  clear(item);
+  const input = document.createElement('input');
+  input.className = 'session__rename-input';
+  input.type = 'text';
+  input.maxLength = 200;
+  input.value = session.name ?? '';
+  input.placeholder = session.cwd;
+  const commit = async () => {
+    input.removeEventListener('blur', commit);
+    await doRename(session.id, input.value);
+  };
+  input.addEventListener('blur', commit);
+  input.addEventListener('keydown', event => {
+    if (event.key === 'Enter') input.blur();
+    if (event.key === 'Escape') { input.removeEventListener('blur', commit); refreshSessions(); }
+  });
+  item.appendChild(input);
+  input.focus();
+  input.select();
+}
+
+async function doRename(sessionId, name) {
+  const result = await api('POST', `/api/sessions/${encodeURIComponent(sessionId)}/rename`, { name });
+  if (result.status === 401) return;
+  if (result.status !== 200) { status(describe(result), 'error'); return void refreshSessions(); }
   await refreshSessions();
 }
 

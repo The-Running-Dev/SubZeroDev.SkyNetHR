@@ -878,6 +878,7 @@ export function createSessionCore(deps: {
         createdAt: nowIso(),
         endedAt: null,
         endReason: null,
+        name: null,
       };
 
       const entry: SessionEntry = {
@@ -1282,6 +1283,13 @@ export function createSessionCore(deps: {
         for (const sub of entry.subscribers) sub.deliver(notice);
       }
 
+      return { ok: true, value: undefined };
+    },
+    async rename(sessionId, owner, name) {
+      const entry = sessions.get(sessionId);
+      if (!entry || entry.creating || entry.record.owner !== owner) return { ok: false, error: { code: 'not_found', sessionId } };
+      entry.lane.run(() => { entry.record.name = name; });
+      await store.writeMeta(entry.record);
       return { ok: true, value: undefined };
     },
     async listCheckpoints(sessionId, owner): Promise<Result<readonly Checkpoint[], SessionError>> {
@@ -1922,6 +1930,7 @@ function toSummary(record: SessionRecord): SessionSummary {
     state: record.state,
     createdAt: record.createdAt,
     endedAt: record.endedAt,
+    name: record.name,
   };
 }
 

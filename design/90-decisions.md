@@ -6062,6 +6062,29 @@ wrong on any session whose transcript was trimmed.
 Reversibility: cheap. One field on a derived view, one fold-local map, and a block of rows in the
 client's summary; nothing is persisted and no envelope changed.
 
+### 2026-09-19 — D249 `SessionRecord` gains an operator-set `name`, mutable for the life of the session
+Context: item 29 of `design/findings/runtime-redesign-classification.md`'s runtime-redesign audit
+(evidence class **S**) — the vendor CLI transcript has no notion of a human-readable session
+label, and nothing about assembling one requires reaching into the child process. Wholly
+SkyNet's to add.
+Chosen: `name: string | null` on `SessionRecord`/`SessionSummary`, alongside the immutable fields
+listed in `20-contract.md` § Session but explicitly not one of them — same mutability class as
+`cliSessionId`. `POST /api/sessions/:id/rename` takes `{ name: string | null }`, trims, maps
+empty string to `null`, refuses over 200 characters with `422 bad_request`. Normalisation is the
+route's; `SessionManager.rename`/`SessionCore.rename` take the value already normalised, and
+persist through the same `entry.lane.run` + `store.writeMeta` path `end`/`remove` use. Client:
+the sidebar session row shows `name ?? cwd`, with an inline rename affordance — no change to the
+masthead/transcript header (that's item 20, out of scope here).
+Rejected: **a client-only label kept in browser storage.** Doesn't survive a different browser or
+a second operator looking at the same session list, and the whole point of a shared console is
+that "what is this session" is answered the same way for everyone looking at it.
+Rejected: **folding the label into `cwd` or a free-form metadata bag.** `cwd` is immutable and
+load-bearing for the busy check (I7); overloading it would make a rename touch busy-check
+semantics for no reason. A metadata bag defers the type decision rather than making it, and this
+field has exactly one shape.
+Reversibility: cheap. One new field, last-write-wins, defaulted to `null` for every session
+persisted before this shipped; one new route with no side effects beyond the field it sets.
+
 ## Open
 
 Staging only. Once an item becomes an issue it leaves this list.

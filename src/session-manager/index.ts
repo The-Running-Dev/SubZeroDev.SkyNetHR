@@ -134,6 +134,7 @@ export function createSessionManager(deps: {
       if (result.ok) ticks.delete(args[0]);
       return result;
     },
+    rename: async (...args) => mapped(await runtime.rename(...args)),
     listCheckpoints: async (...args) => mapped(await runtime.listCheckpoints(...args)),
     restore: async (...args) => mapped(await runtime.restore(...args)),
     openToolOutput: async (...args) => mapped(await runtime.openToolOutput(...args)),

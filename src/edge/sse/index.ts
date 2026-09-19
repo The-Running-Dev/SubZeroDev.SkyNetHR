@@ -52,6 +52,7 @@ export function createSseEdge(deps: EdgeDeps): RequestListener {
     handleInterrupt,
     handleEnd,
     handleDelete,
+    handleRename,
     handleToolOutput,
     handleAttachment,
     handleListCheckpoints,
@@ -280,6 +281,7 @@ export function createSseEdge(deps: EdgeDeps): RequestListener {
           if (method === 'POST' && rest === '/permission') return await handlePermission(req, res, owner, sessionId);
           if (method === 'POST' && rest === '/interrupt') return await handleInterrupt(req, res, owner, sessionId);
           if (method === 'POST' && rest === '/end') return await handleEnd(req, res, owner, sessionId);
+          if (method === 'POST' && rest === '/rename') return await handleRename(req, res, owner, sessionId);
           if (method === 'POST' && rest === '/checkpoint/restore') return await handleCheckpointRestore(req, res, owner, sessionId);
           if (method === 'DELETE' && rest === '') return await handleDelete(req, res, owner, sessionId);
           if (method === 'GET' && rest === '/events') return await handleEvents(req, res, owner, sessionId);

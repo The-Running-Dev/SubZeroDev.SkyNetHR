@@ -68,6 +68,7 @@ function sessionRecord(id: string): SessionRecord {
     state: 'live',
     createdAt: new Date().toISOString() as never,
     endedAt: null,
+    name: null,
   };
 }
 

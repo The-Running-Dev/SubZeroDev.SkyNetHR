@@ -301,6 +301,9 @@ body {
 }
 
 .session {
+  display: flex;
+  align-items: stretch;
+  gap: var(--space-1);
   margin: var(--space-0) var(--space-0) var(--space-1);
 }
 
@@ -308,7 +311,8 @@ body {
   display: flex;
   flex-direction: column;
   gap: var(--space-1);
-  width: 100%;
+  flex: 1;
+  min-width: 0;
   padding: var(--space-2) var(--space-3);
   border: var(--border-width) solid var(--line);
   border-radius: var(--radius-1);
@@ -318,6 +322,28 @@ body {
   font-size: var(--text-sm);
   text-align: left;
   cursor: pointer;
+}
+
+.session__rename {
+  flex: none;
+  width: var(--space-6, 2rem);
+  border: var(--border-width) solid var(--line);
+  border-radius: var(--radius-1);
+  background: var(--surface-raised);
+  color: var(--ink-faint);
+  cursor: pointer;
+}
+
+.session__rename-input {
+  flex: 1;
+  min-width: 0;
+  padding: var(--space-2) var(--space-3);
+  border: var(--border-width) solid var(--accent);
+  border-radius: var(--radius-1);
+  background: var(--surface-raised);
+  color: var(--ink);
+  font-family: var(--font-sans);
+  font-size: var(--text-sm);
 }
 
 .session--current .session__button {

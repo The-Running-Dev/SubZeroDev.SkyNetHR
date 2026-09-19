@@ -23,7 +23,7 @@ async function root(t: TestContext) {
   return { dir, beforeRemove: (close: () => Promise<void>) => { closers.push(close); } };
 }
 const configuration = (dir: string): RuntimeOptions => ({ storageRoot: dir as never, workspaceRoots: [dir as never], caps, includeRaw: false, streamDeltas: false });
-const record: SessionRecord = { id: 'fixture-session' as SessionId, owner: 'opaque:alice', vendor: 'fixture', cwd: '/fixture' as never, model: null, policy: { mode: 'interactive', sandbox: null, banner: null }, sandbox: null, cliSessionId: null, lastSeq: 0, state: 'live', createdAt: '2020-01-01T00:00:00.000Z' as never, endedAt: null, endReason: null };
+const record: SessionRecord = { id: 'fixture-session' as SessionId, owner: 'opaque:alice', vendor: 'fixture', cwd: '/fixture' as never, model: null, policy: { mode: 'interactive', sandbox: null, banner: null }, sandbox: null, cliSessionId: null, lastSeq: 0, state: 'live', createdAt: '2020-01-01T00:00:00.000Z' as never, endedAt: null, endReason: null, name: null };
 const envelope = (seq: number): Envelope => ({ seq: seq as never, sessionId: record.id, ts: record.createdAt, kind: 'session.notice', data: { level: 'info', code: 'usage_unavailable', text: String(seq) } });
 async function bytes(stream: NodeJS.ReadableStream) { const chunks: Buffer[] = []; for await (const chunk of stream) chunks.push(Buffer.from(chunk)); return Buffer.concat(chunks); }
 
