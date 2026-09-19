@@ -17,6 +17,12 @@ issue #305).
 the expected, permanent result — not a finding to report or a gap to fix. Slice retirement in
 this repo remains a manual, no-op step.
 
+**`Test-DesignDrift.ps1` needs no override.** Issue #396 reported it misreading every landed slice
+as outstanding; the kit's `Get-SliceCriteria` has since been fixed to read criteria from any
+`## S<n>` / `### S<n>` heading directly, independent of the `## Outstanding` / `## Landed` marker
+order — so this repo's Landed-first, full-body layout is read correctly without a repo-side
+exception. Confirmed 2026-09-20: 32 slices compared, 0 findings. Run it normally.
+
 ## document-map
 
 `design/state-index.md` does not exist in this repository and never has
