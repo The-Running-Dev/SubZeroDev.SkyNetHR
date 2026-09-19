@@ -6124,6 +6124,63 @@ Reversibility: cheap. Nothing is built. An `## Unresolved` entry costs one parag
 away when `/design` answers it; the disanalogy stands on the blob's stated immutability, which is
 already a contract invariant and not a new claim.
 
+### 2026-09-19 — D251 Indexed tool-output access is a line-addressed window: no index, no server-side search, no `206`
+Context: `20-contract.md` § Unresolved 18 routed three capabilities here — search, read-range and
+read-section over the immutable tool-output blobs D22 and D162 put behind
+`GET /api/sessions/:id/tool-output/:turnId/:callId`. D250 sent them without settling any, and named
+four architectural questions a signature would otherwise decide by omission: whether a partial
+response keeps the route's `nosniff` + `attachment` control, what `ApiErrorCode` an unsatisfiable
+range carries, that a section must be a *line* range and so needs a scan or the sidecar D163
+refused, and that a server-side scan over a blob the per-session budget admits into the hundreds of
+MiB is head-of-line blocking on a single-process server.
+Chosen: **one line-addressed windowed read on the existing route, scanning from byte 0, with no
+index, no search and no `206`.** Three of D250's four questions dissolve rather than being answered:
+with lines as the unit there is no byte range, so no `Content-Range`, so no unsatisfiable range and
+no new `ApiErrorCode` member; and read-range and read-section stop being two things, because a
+section of line-structured output *is* a line range. The fourth is answered outright and is worth
+keeping visible: **a partial response does not weaken the control.** `X-Content-Type-Options` and
+`Content-Disposition` are not status-dependent, so a `206` would have preserved it too — the reason
+there is no `206` is the absent byte range, not a security property. The scan's cost is bounded by
+`Caps.sessionToolOutputBytes`, a cap that already exists, and is kept off the critical path by
+chunking with yields so concurrent reads interleave instead of stalling other sessions' fan-out.
+Chosen, and separately: **`20-contract.md` § Unresolved 18's two factual claims about the tree are
+wrong and are not corrected here.** It says the client already fetches the whole blob for its
+download affordance — `client/render.js` renders an `<a href>` the browser follows under
+`Content-Disposition: attachment` and reads no bytes, so a client-side find is new code rather than
+reuse. It also calls read-range "the cheapest of the three" because the shape exists "one layer
+down"; D241 already rules that `agent-console/protocol` is published without being adopted and that
+`runtime` imports nothing from it, so the stdio `toolOutput.read` is a parallel surface and not a
+lower layer of the HTTP edge's stack. Both corrections change what an option costs, which is why
+they are recorded rather than patched silently, and both belong to `/contract`'s next pass together
+with shrinking item 18.
+Rejected: **a byte range under `Range` and `206`.** The shape exists in the stdio runtime and looks
+free. It is not: a byte cut through a UTF-8 sequence has no answer that leaves the partial and whole
+responses agreeing about what they serve — dropping `charset` on partials makes the two paths
+disagree, and snapping to a character boundary silently returns a different range than the one
+asked for. The whole-blob response could never do this, so it is a property the partial path would
+newly owe.
+Rejected: **a line-offset sidecar built on first indexed read.** D250 had already cleared it of
+D163's objection, which priced an index against a growing, tearable append-only file and does not
+reach a blob written once and never appended — so this was declined on its merits, not blocked. It
+makes deep paging O(1) after one pass, but only where a single blob is paged deeply and repeatedly,
+which is the tail of a tail; against that it charges every blob a second file that the session
+delete path, the per-session byte budget and the `404 no_such_output` story would each have to
+account for.
+Rejected: **server-side search, substring or regex.** A scan answering "where" has no window to
+bound it the way a line window bounds itself; operator regex adds catastrophic backtracking that
+substring search does not; and it is the half that cannot be quietly withdrawn once operators
+depend on it. The decline is "not now" — open question 17 in `10-design.md` states what would
+settle it, and nothing downstream may add a search route on the strength of the decline being soft.
+Rejected: **doing all three in the browser** — no public surface added at all, regex search free in
+a Worker, zero shared-server cost. Refused for moving up to 256 MiB across the wire to answer a
+one-line question, which is seconds on the LAN the brief assumes and is not over a VPN; and the
+claim that made it look cheapest is the false one corrected above.
+Reversibility: cheap for what is chosen, expensive for what is declined — which is why the
+declines are the careful half. A line-addressed window adds one route behaviour with no persisted
+state, no new error code and no new cap, and withdrawing it removes a viewer nobody's data depends
+on. Adding search later is additive; removing search after operators have it is not, and that
+asymmetry is the whole reason it waits.
+
 ## Open
 
 Staging only. Once an item becomes an issue it leaves this list.
