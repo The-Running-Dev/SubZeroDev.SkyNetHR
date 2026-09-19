@@ -17,13 +17,24 @@ test('Phase 4 framing — UTF-8 boundaries and terminal overflow without dispatc
   assert.equal(errors.at(-1), 'invalid_utf8');
 });
 
+// Waits on the fault, not on a fixed sleep. Four hops separate the write from the assertion —
+// the 8 MiB allocation and copy, the splitter's overflow microtask, the writer's `setImmediate`
+// and the fault's own — and `node --test` runs files in parallel, so a loaded event loop pushes
+// them past any constant: the observed flake was `JSON.parse('')` on a wire nothing had reached
+// yet. The fault is the last hop, since `stop` is scheduled after the protocolError is written,
+// so waiting on it also asserts the ordering this test is named for rather than assuming it.
+// Bounded, because `node --test` applies no per-test timeout and an unbounded wait would hang
+// the suite instead of failing it.
 test('Phase 4 framing — actual 8 MiB cap emits protocolError before faulting', async () => {
-  const input = new PassThrough(), output = new PassThrough(); let wire = '', fault = '';
+  const input = new PassThrough(), output = new PassThrough(); let wire = '';
   output.on('data', chunk => { wire += String(chunk); });
-  const peer = new RpcPeer(input, output, async () => null, reason => { fault = reason; });
+  let faulted!: (reason: string) => void, gaveUp!: (error: Error) => void;
+  const fault = new Promise<string>((resolve, reject) => { faulted = resolve; gaveUp = reject; });
+  const timer = setTimeout(() => gaveUp(new Error(`timed out waiting for the link to fault; wire so far: ${JSON.stringify(wire)}`)), 10_000);
+  new RpcPeer(input, output, async () => null, reason => faulted(reason));
   input.write(Buffer.alloc(LINE_BYTES + 1, 120));
-  await delay(10);
-  assert.equal(JSON.parse(wire).method, 'runtime.protocolError'); assert.equal(fault, 'line_too_large'); peer.stop('test');
+  try { assert.equal(await fault, 'line_too_large'); } finally { clearTimeout(timer); }
+  assert.equal(JSON.parse(wire).method, 'runtime.protocolError');
 });
 
 test('Phase 4 duplex — host replies are consumed while request handler awaits, with disjoint ids', async () => {
