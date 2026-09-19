@@ -667,6 +667,15 @@ not a guarantee. The fold is O(spill) per read and that is the cost accepted.
   deployment: `tokenRates` null means the operator set no rates, and the tile is absent rather
   than zero. `currency` is a label the server stores and echoes and **never interprets** — no
   conversion, no lookup, no network call — and is null whenever cost is.
+- **`turns` is `burn` partitioned by `turnId`, not a second measurement of it** (D248). The same
+  component-wise sum the same walk already does, keyed by turn, so the rows add back up to `burn`
+  exactly and neither is re-derived from the other. The partition is **exhaustive**: a turn the
+  spill names but no `usage` envelope mentions carries a row of zeros rather than being dropped,
+  because omitting it reads as if the turn never ran. Order is the spill's, since the fold reads
+  in `seq` order — no ranking, and no client-side re-summing (I28). A turn still open reports no
+  end rather than borrowing the read clock. **The unknown-versus-zero discriminator stays
+  session-wide**: it is `session.notice / usage_unavailable` (D146) and nothing infers it from a
+  row's components being zero.
 
 **`session.notice / server_restart` is the fold's only restart marker, and `turn.ended`'s
 `server_restart` stop reason carries no fold meaning** (D130, D76). The fold walks the spill and

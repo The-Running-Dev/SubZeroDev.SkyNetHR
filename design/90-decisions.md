@@ -6030,6 +6030,38 @@ Rejected: **bounding the retry with a counter.** The structural bound is stronge
 needs no constant; a counted bound would also be the only one of the three absent rows to have one.
 Reversibility: cheap — one paragraph in § *Server lock*, two error rows, and one branch.
 
+### 2026-09-19 — D248 `PayrollView` carries the per-turn partition of `burn`, not only its total
+Context: The runtime-redesign work's acceptance criteria require token savings to be **measured**
+rather than estimated, and a session-wide `burn` cannot support that: it says what a session cost
+in total and nothing about which turn cost it. Every input needed is already in the spill — `usage`
+envelopes name their `turnId` (D75) — so the attribution is a read the fold was not yet doing, not
+new data to collect.
+Chosen: **`PayrollView` gains a per-turn breakdown, folded in the same walk as `burn`.** The same
+arithmetic, keyed by `turnId`, so summing every row reproduces `burn` exactly and neither is
+re-derived from the other. Exhaustive rather than filtered: a turn the spill names but no `usage`
+envelope mentions still gets a row reading zero — a turn that reported nothing next to one that
+reported a hundred thousand is exactly the comparison the breakdown exists to make, and dropping
+it reads as if the turn never ran. Order is the spill's own, because the fold reads in `seq` order;
+nothing sorts, ranks or re-sums, in the fold or in the client.
+**The unknown-versus-zero rule is unchanged and deliberately not duplicated per turn.**
+`session.notice / usage_unavailable` remains the sole discriminator (D146), session-wide; nothing
+infers it by testing a row's components against zero. `PayrollView` still carries no field
+separating unknown from zero, and this decision does not add one — see `## Unresolved` 12.
+Rejected: **a running per-turn counter maintained as events arrive.** It is the second source D147
+refuses: a live read and a post-restart read would walk different paths and could disagree, which
+is the whole reason payroll is a fold.
+Rejected: **omitting a turn that reported no usage.** Cheaper and shorter, and it silently
+converts "this turn cost nothing" into "this turn did not happen" — on a screen headed *payroll*,
+which is where that reading is least affordable.
+Rejected: **a separate `/api/sessions/:id/turns` route.** A new route, a second fold over the same
+spill, and two numbers a reader must reconcile by hand. The partition belongs next to the total it
+partitions.
+Rejected: **deriving the breakdown in the client from the transcript.** The client would be doing
+arithmetic on usage it read out of the event stream, which is the fold's job, and it would be
+wrong on any session whose transcript was trimmed.
+Reversibility: cheap. One field on a derived view, one fold-local map, and a block of rows in the
+client's summary; nothing is persisted and no envelope changed.
+
 ## Open
 
 Staging only. Once an item becomes an issue it leaves this list.

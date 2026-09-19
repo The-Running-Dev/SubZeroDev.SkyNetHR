@@ -1,4 +1,4 @@
-import type { Config, SessionId, SessionRecord, Result, PayrollView, SessionError, Usage, IsoTimestamp, EventPayloadMap, Store } from '../contract/index.js';
+import type { Config, SessionId, SessionRecord, Result, PayrollView, SessionError, Usage, TurnId, IsoTimestamp, EventPayloadMap, Store } from '../contract/index.js';
 export function createPayrollFold(config: Config, store: Pick<Store, 'readEventsAfter'>) {
 
 
@@ -10,6 +10,22 @@ export function createPayrollFold(config: Config, store: Pick<Store, 'readEvents
   // summing it here would double-count nothing but is also never a source to skip.
   async function foldPayroll(sessionId: SessionId, record: SessionRecord): Promise<Result<PayrollView, SessionError>> {
     const burn: { -readonly [K in keyof Usage]: Usage[K] } = { inputTokens: 0, outputTokens: 0, cacheRead: 0, cacheCreate: 0 };
+    // D248: the same sum, partitioned by `turnId`. A `Map` rather than an array scan because
+    // a session's turn count is unbounded by anything but the operator, and insertion order
+    // is the spill's own order — the fold reads in `seq` order, so first appearance is first
+    // row and no sort is needed or wanted.
+    type MutableTurnBurn = { turnId: TurnId; usage: { -readonly [U in keyof Usage]: Usage[U] }; startedAt: IsoTimestamp; endedAt: IsoTimestamp | null };
+    const turns = new Map<TurnId, MutableTurnBurn>();
+    // Get-or-create, so a turn first seen on any of the three envelope kinds that name one
+    // still gets a row. `at` seeds `startedAt` only when this is the creating envelope;
+    // a later `turn.started` for an already-created turn does not move it backwards.
+    const turnAt = (turnId: TurnId, at: IsoTimestamp): MutableTurnBurn => {
+      const existing = turns.get(turnId);
+      if (existing !== undefined) return existing;
+      const created: MutableTurnBurn = { turnId, usage: { inputTokens: 0, outputTokens: 0, cacheRead: 0, cacheCreate: 0 }, startedAt: at, endedAt: null };
+      turns.set(turnId, created);
+      return created;
+    };
     let idleMs = 0;
     let droppedIntervals = 0;
     // D130: `session.notice / server_restart` is the only restart marker this fold reads.
@@ -34,6 +50,7 @@ export function createPayrollFold(config: Config, store: Pick<Store, 'readEvents
         case 'turn.started': {
           if (cursor !== null) idleMs += new Date(envelope.ts).getTime() - new Date(cursor).getTime();
           cursor = null;
+          turnAt((envelope.data as EventPayloadMap['turn.started']).turnId, envelope.ts);
           break;
         }
         case 'turn.ended': {
@@ -42,6 +59,10 @@ export function createPayrollFold(config: Config, store: Pick<Store, 'readEvents
           // synthetic close *after* the restart notice (S7.4), and billing an interval
           // from it would start a fresh one at the boot clock on a session that is over.
           if (!restarted) cursor = envelope.ts;
+          // D248: the close is recorded whatever the stop reason and whatever `restarted`
+          // says — a turn boot closed synthetically is still a turn that ended, and the row
+          // saying so is what tells an operator the burn above it is final.
+          turnAt((envelope.data as EventPayloadMap['turn.ended']).turnId, envelope.ts).endedAt = envelope.ts;
           break;
         }
         case 'session.notice': {
@@ -67,6 +88,11 @@ export function createPayrollFold(config: Config, store: Pick<Store, 'readEvents
           burn.outputTokens += data.usage.outputTokens;
           burn.cacheRead += data.usage.cacheRead;
           burn.cacheCreate += data.usage.cacheCreate;
+          const turn = turnAt(data.turnId, envelope.ts).usage;
+          turn.inputTokens += data.usage.inputTokens;
+          turn.outputTokens += data.usage.outputTokens;
+          turn.cacheRead += data.usage.cacheRead;
+          turn.cacheCreate += data.usage.cacheCreate;
           break;
         }
         default:
@@ -107,6 +133,7 @@ export function createPayrollFold(config: Config, store: Pick<Store, 'readEvents
         droppedIntervals,
         costCurrency,
         currency: costCurrency === null ? null : config.currency,
+        turns: [...turns.values()],
       },
     };
   }

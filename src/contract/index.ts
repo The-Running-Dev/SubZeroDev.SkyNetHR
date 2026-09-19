@@ -433,6 +433,30 @@ export interface PayrollView {
   readonly costCurrency: number | null; // burn priced at Config.tokenRates (D158); null when
   // rates are unset, and null on a session whose transport reports no usage — never 0.00
   readonly currency: string | null; // Config.currency, echoed; null whenever cost is null
+  // (D248) `burn` partitioned by `turnId`, in the order the spill introduced each turn.
+  // One row per turn the session ran, including a turn that reported no usage at all —
+  // a turn that burned nothing is a fact worth seeing next to one that burned a hundred
+  // thousand, and omitting it would make the list read as if the turn never happened.
+  readonly turns: readonly TurnBurn[];
+}
+
+// (D248) One turn's share of `burn`. `usage` is the component-wise sum of that turn's
+// `usage` envelopes — the identical arithmetic `burn` does, keyed by `turnId` — so summing
+// every row's four components reproduces `burn` exactly, and nothing re-derives either from
+// the other.
+//
+// The unknown-versus-zero rule that governs `burn` governs these rows unchanged: a session
+// whose transport cannot report usage carries `session.notice / usage_unavailable` (D146),
+// and that notice is the only discriminator. **Nothing may infer it by testing a turn's
+// components against zero** — a turn genuinely reporting nothing looks identical.
+export interface TurnBurn {
+  readonly turnId: TurnId;
+  readonly usage: Usage;
+  // The `turn.started` envelope's `ts`. A turn first seen on a `usage` or `turn.ended`
+  // envelope — a spill whose opening envelope predates this fold, or one truncated by a
+  // replay gap — takes that envelope's `ts` instead, so the field is never absent.
+  readonly startedAt: IsoTimestamp;
+  readonly endedAt: IsoTimestamp | null; // null while the turn is still open
 }
 
 // (tier two, D158) One rate per `Usage` component, in `currency` units per token. Flat per
