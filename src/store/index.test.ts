@@ -1000,6 +1000,14 @@ test('S30.1d — a lock whose (instanceId, renewals) is unchanged across the win
 // observing the same stale pair unchanged both overwrite it. Only the one whose write
 // survives the confirmation window — the last to land on disk — proceeds; the other refuses
 // storage_locked instead of silently believing it holds the root (I50).
+//
+// D247: a confirming sample that finds the lock absent retries rather than raising, so
+// "exactly one winner" is a property of the rule plus a running holder, never of claimLock
+// alone — a winner whose counter never moves is, by the staleness rule, a lock the retrying
+// loser is entitled to reclaim. This test drives both sides' renewals throughout the race
+// (a no-op before a side has actually claimed, per D195's ownership check) so that if a rare
+// rename-over ever does surface an absent confirm and sends the loser back around, it finds
+// the winner's counter moving at its own next observation and refuses instead of reclaiming.
 test('D216 — two boots reclaiming the same stale lock: only the survivor of confirmation proceeds', async () => {
   const storageRoot = await mkdtemp(path.join(tmpdir(), 'skynet-store-'));
   const filePath = path.join(storageRoot, 'server.lock');
@@ -1013,7 +1021,17 @@ test('D216 — two boots reclaiming the same stale lock: only the survivor of co
 
   const selfA = lock({ pid: 1, hostname: 'a-host' });
   const selfB = lock({ pid: 2, hostname: 'b-host' });
-  const [a, b] = await Promise.all([aResult.value.claimLock(selfA), bResult.value.claimLock(selfB)]);
+
+  const renewerA = setInterval(() => { void aResult.value.renewLock(); }, LOCK_RENEWAL_INTERVAL_MS);
+  const renewerB = setInterval(() => { void bResult.value.renewLock(); }, LOCK_RENEWAL_INTERVAL_MS);
+  let a: Awaited<ReturnType<typeof aResult.value.claimLock>>;
+  let b: Awaited<ReturnType<typeof bResult.value.claimLock>>;
+  try {
+    [a, b] = await Promise.all([aResult.value.claimLock(selfA), bResult.value.claimLock(selfB)]);
+  } finally {
+    clearInterval(renewerA);
+    clearInterval(renewerB);
+  }
   const attempts = [
     { self: selfA, r: a },
     { self: selfB, r: b },
@@ -1034,6 +1052,36 @@ test('D216 — two boots reclaiming the same stale lock: only the survivor of co
 
   const raw = await readFile(filePath, 'utf8');
   assert.equal(JSON.parse(raw).instanceId, winners[0]!.self.instanceId, 'the lock file names the confirmed winner, not the loser');
+});
+
+// D247: a confirming sample finding the lock absent is not a write failing — it retries the
+// exclusive claim, matching the loop's other two absent rows, rather than raising
+// storage_unwritable. This forces the confirm-time absence deterministically (the file is
+// removed shortly after the reclaim overwrite lands and stays removed through the confirm
+// sample) instead of relying on the rename-over race the issue observed under full-suite load.
+test('D247 — a reclaim whose confirming sample finds the lock absent retries the claim instead of raising storage_unwritable', async () => {
+  const { storageRoot, store } = await newStore();
+  const filePath = path.join(storageRoot, 'server.lock');
+  const holder = lock({ pid: 555, hostname: 'holder-host' });
+  await writeFile(filePath, JSON.stringify(holder));
+
+  // Fires well after the observation window closes and the reclaim overwrite has landed,
+  // and well before the confirm sample at window + interval — simulating the transient
+  // absence a rename-over can expose to a concurrent sample (D247), left in place so the
+  // confirm sample itself observes it.
+  const vanishTimer = setTimeout(() => { void rm(filePath, { force: true }); }, LOCK_OBSERVATION_WINDOW_MS + 200);
+
+  const self = lock({ pid: process.pid, hostname: 'self-host' });
+  let claimed;
+  try {
+    claimed = await store.claimLock(self);
+  } finally {
+    clearTimeout(vanishTimer);
+  }
+
+  assert.equal(claimed.ok, true, 'the retry claims the now-absent lock rather than raising storage_unwritable');
+  const raw = await readFile(filePath, 'utf8');
+  assert.deepEqual(JSON.parse(raw), self, 'the retried exclusive claim writes self');
 });
 
 // S30.2: the criterion the slice exists for (#206) — a lock naming a different hostname,
