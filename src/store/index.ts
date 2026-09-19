@@ -222,16 +222,17 @@ export async function createStore(config: Config): Promise<Result<Store, StoreEr
         if (confirm.kind === 'corrupt') {
           return { ok: false, error: { code: 'storage_lock_corrupt', path: filePath, detail: confirm.detail } };
         }
-        if (confirm.kind === 'absent') {
-          return startupIoError(filePath, 'server.lock vanished after a reclaim overwrite it, before confirmation');
-        }
+        // D247: absent here names no holder to refuse over and is not a write failing —
+        // either the winner already confirmed, booted and released cleanly (D194's
+        // stalled-reclaimer bound), or the rename-over exposed a transient `ENOENT` to this
+        // sample. Retry the exclusive claim, same as the two earlier absent rows.
+        if (confirm.kind === 'absent') continue;
         if (confirm.holder.instanceId !== self.instanceId) {
           return { ok: false, error: { code: 'storage_locked', path: filePath, holder: confirm.holder } };
         }
 
         heldLock = self;
         return { ok: true, value: undefined };
-        // Loop back only on the "absent" rows above; a reclaim never retries.
       }
     },
 
