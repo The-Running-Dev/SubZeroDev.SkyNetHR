@@ -6084,6 +6084,45 @@ semantics for no reason. A metadata bag defers the type decision rather than mak
 field has exactly one shape.
 Reversibility: cheap. One new field, last-write-wins, defaulted to `null` for every session
 persisted before this shipped; one new route with no side effects beyond the field it sets.
+### 2026-09-19 — D250 Indexed tool-output access routes to `/design`; D163's byte-offset refusal does not reach an immutable blob
+Context: item 12 of `design/findings/runtime-redesign-classification.md` asks for *indexed* access
+to stored tool output — search, read-range, read-section — over the blobs D22 and D162 put behind
+`GET /api/sessions/:id/tool-output/:turnId/:callId`. It is the item's class-**I** half, and the
+finding recorded that the absence was established by grepping the route layer rather than by
+enumerating it. Enumeration moves the half to class **S** and corrects the finding's layer: the
+runtime protocol already declares `toolOutput.read` over an offset and a length
+(`src/agent-console/protocol/wire.ts`), implemented in `src/agent-console/runtime/server.ts`; what
+is missing is the edge, not the concept.
+Chosen: **all three go to `20-contract.md` § Unresolved 18 and route to `/design`.**
+`10-design.md` determines none of them and the runtime-redesign brief that asks for them is not in
+this repository, so `/contract`'s own rule fires — a signature the design does not determine is not
+invented here. Each of the three additionally carries an architectural question, which is why this
+is a routing decision and not a clerical one: a partial response on a route whose `nosniff` and
+`attachment` headers are a security control rather than a convenience; `ApiErrorCode` having no
+member for an unsatisfiable range, so `416`-or-`422` is a public-surface addition either way; a
+section being a *line* range, which needs a scan or the very line-index sidecar D163 refused;
+and a server-side scan over a blob the per-session budget allows into the hundreds of MiB being
+head-of-line blocking on a single-process server, with operator-supplied regex adding
+catastrophic backtracking that substring search does not have.
+Chosen, and separately: **D163's and D86's refusal of byte offsets as a quasi-public interface does
+not reach a tool-output blob**, and the contract now says so. Those refusals priced a sidecar kept
+consistent with a growing, tearable append-only file; a tool-output blob is written once, never
+appended, never evicted, and needs no sidecar, so none of that cost is present. This is recorded to
+stop the next pass relitigating it, and it deliberately settles nothing — a disanalogy removes an
+objection, it does not choose a shape.
+Rejected: **amending for read-range alone and deferring the other two.** Tempting, because the
+shape exists one layer down and the disanalogy above clears the one precedent that looked like a
+blocker. Refused because "already implemented internally" is not the same as "determined by the
+design", and the two open questions above — the security property of a partial response, and the
+missing error code — are exactly what a quietly-added route row would decide by omission. That is
+the failure mode `/contract`'s rule exists to prevent, and it does not stop applying because the
+answer looks likely.
+Rejected: **descoping item 12 to the half that shipped.** Honest about what exists, but it discards
+a real capability gap and leaves the next reader of the finding to rediscover both the layer
+correction and the D163 disanalogy from scratch.
+Reversibility: cheap. Nothing is built. An `## Unresolved` entry costs one paragraph and shrinks
+away when `/design` answers it; the disanalogy stands on the blob's stated immutability, which is
+already a contract invariant and not a new claim.
 
 ## Open
 
