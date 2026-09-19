@@ -6181,6 +6181,38 @@ state, no new error code and no new cap, and withdrawing it removes a viewer nob
 on. Adding search later is additive; removing search after operators have it is not, and that
 asymmetry is the whole reason it waits.
 
+### 2026-09-19 — D252 `StateSetAbsent` stays exit 2; a blocking finding beside it does not demote the run to exit 1
+Context: #259 asked whether the `StateSetAbsent` branch of `tools/Test-DesignState.ps1` should exit
+1 rather than 2 once it carries a blocking `ClassListDisagreement`. D197 predicted the move; D212
+then fixed the half that was actually broken — the finding being computed and dropped — and left the
+exit code where it was. `20-contract.md` § *The divergence classes* has carried the remainder as an
+open question ever since, pointing at this issue.
+Chosen: **the exit code stays 2, and the contract's deferral is closed rather than carried.**
+`SubZeroDev.AgentKit`'s I20 is active and `Enforcement: code`: findings and *could not evaluate*
+never collapse into each other, and exit 2 takes precedence over exit 1. Exiting 1 here inverts that
+precedence for one branch of one script, and nothing downstream would observe the new policy in
+exchange — the kit's own `.github/workflows/verify.yml` states the substitution it makes in a
+comment, exit 2 failing that step exactly as exit 1 does, and this repository runs the checker from
+no workflow at all. A policy neither of the two places that could hold it can distinguish is not a
+policy; it is a comment in a script.
+Chosen, and separately: **the false clean this would open is live here, not hypothetical.** A run
+against this tree today returns the `ClassListDisagreement` finding beside *two* could-not-evaluate
+reasons, `ContractListUnreadable` and `StateSetAbsent`. An exit-1 rule keyed on the presence of a
+finding renders that combination as ordinary drift — the run reporting that it read and disagreed
+when it demonstrably did not read — which is the substitution I20 exists to forbid, reached from
+inside the script rather than at a call site. The worked case is recorded because it is the one an
+exit-code argument conducted in the abstract does not produce.
+Rejected: **forcing exit 1 on this path.** It is the reading #259 arrived with and the one D197
+predicted, and it is refused on cost and on correctness both. Cost: it is not this repository's
+change to make — it lands on an active kit invariant, the kit's contract, two places in a kit-owned
+script, the kit's tests, and the CI comment documenting the present substitution, none of which this
+repository may amend unilaterally. Correctness: it regresses the protection above against this
+repository's own current state, which is the first state the change would be measured on.
+Reversibility: cheap. Nothing is built and no code moves — this settles one sentence in
+`20-contract.md` and records why. A later kit-side decision to distinguish 1 from 2 is free to
+revisit this repository's copy, and would arrive through `/kit-sync` alongside the script
+implementing it.
+
 ## Open
 
 Staging only. Once an item becomes an issue it leaves this list.

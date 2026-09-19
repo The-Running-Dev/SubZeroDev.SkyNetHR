@@ -2678,8 +2678,10 @@ needs no records, and the `StateSetAbsent` return carries its finding rather tha
 through `Invoke-DesignStateCheck`, a class the script declares with no row here reports
 `ClassListDisagreement`, blocking, beside `StateSetAbsent` — and the exit stays 2. **So this
 section's agreement with the script is enforced whenever the checker runs, and nothing in CI runs
-it**; the policy binds whoever does. Which exit code that path should carry is #259's question,
-and the script is kit-owned.
+it**; the policy binds whoever does. **That path's exit code stays 2** (D252): the kit's I20 puts
+could-not-evaluate ahead of findings, and nothing downstream in either repository distinguishes exit
+1 from exit 2, so demoting the run would announce a policy nothing can observe while collapsing a
+genuine could-not-evaluate into drift. The script is kit-owned.
 
 **§ *Artifacts of a unit kind* does not exist here, and its absence is reachable rather than
 inert.** `GlobDisagreement` runs after the `StateSetAbsent` return, so nothing reads the glob
