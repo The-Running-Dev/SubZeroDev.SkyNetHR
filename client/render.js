@@ -399,6 +399,21 @@ export function renderPayrollSummary(doc, view) {
   if (view.costCurrency !== null) {
     renderSummaryRow(doc, dl, 'Estimated cost', `${formatCost(view.costCurrency, view.currency)} — an estimate against configured rates, not a vendor bill`);
   }
+  // D248: the per-turn partition of the same burn, in the order the server sent it — the
+  // fold's order is the spill's order and this is a pure read, so nothing is sorted, ranked
+  // or re-summed here (I28). A turn that reported nothing still gets a row: `+0 tokens` next
+  // to a turn that cost a hundred thousand is the comparison this list exists to make, and
+  // that zero says "this turn reported nothing", never "this session reports nothing" — the
+  // session-wide unknown is `session.notice / usage_unavailable` in the transcript (D146).
+  if (Array.isArray(view.turns) && view.turns.length > 0) {
+    let ordinal = 0;
+    for (const turn of view.turns) {
+      ordinal += 1;
+      const total = turn.usage.inputTokens + turn.usage.outputTokens + turn.usage.cacheRead + turn.usage.cacheCreate;
+      const open = turn.endedAt === null ? ' — still running' : '';
+      renderSummaryRow(doc, dl, `Turn ${ordinal}`, `+${formatTokenCount(total)} tokens${open}`);
+    }
+  }
   return dl;
 }
 

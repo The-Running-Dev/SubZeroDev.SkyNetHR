@@ -7,6 +7,7 @@ import path from 'node:path';
 import { after, test } from 'node:test';
 import { promisify } from 'node:util';
 import { createSessionManager, match, parseStandingRule } from './index.js';
+import { createPayrollFold } from './payroll.js';
 import { createRegisteredAdapter } from '../agent-console/providers/legacy.js';
 import { createProviderRegistry } from '../agent-console/providers/registry.js';
 import { stripExtendedPrefix } from '../jail/index.js';
@@ -3851,6 +3852,71 @@ test('S16.3/S16.4 — burn is the component-wise sum of every usage event, unaff
   // D129: remainingTokens subtracts burn's full component-wise sum, cache included —
   // 240 + 120 + 15 + 25 = 400.
   assert.equal(gotBudgeted.value.remainingTokens, 600);
+});
+
+// D248: the per-turn partition of `burn`. The point of the row is attribution — which turn
+// cost what — so the test that matters is that the partition is exhaustive (every turn the
+// spill names has a row) and lossless (the rows sum back to `burn` exactly).
+test('D248 — PayrollView.turns partitions burn by turnId, in spill order, with a row for every turn including one that reported no usage', async () => {
+  const { manager, sessionId, owner } = await bootPayrollFixture({ sessionTokenBudget: null });
+  const got = await manager.payroll(sessionId, owner);
+  assert.equal(got.ok, true);
+  if (!got.ok) return;
+
+  assert.deepEqual(got.value.turns.map((t) => t.turnId), ['t1', 't2', 't3'], 'one row per turn, in the order the spill introduced them');
+  // t1's three `usage` envelopes, summed component-wise — the same arithmetic `burn` does.
+  assert.deepEqual(got.value.turns[0]?.usage, { inputTokens: 240, outputTokens: 120, cacheRead: 15, cacheCreate: 25 });
+  // t2 and t3 ran and reported nothing. The row exists and reads zero rather than being
+  // dropped: a turn that cost nothing is a fact, and omitting it reads as if it never ran.
+  assert.deepEqual(got.value.turns[1]?.usage, { inputTokens: 0, outputTokens: 0, cacheRead: 0, cacheCreate: 0 });
+  assert.deepEqual(got.value.turns[2]?.usage, { inputTokens: 0, outputTokens: 0, cacheRead: 0, cacheCreate: 0 });
+
+  // Lossless: the partition adds back up to the total it was partitioned from.
+  const summed = got.value.turns.reduce(
+    (acc, t) => ({
+      inputTokens: acc.inputTokens + t.usage.inputTokens,
+      outputTokens: acc.outputTokens + t.usage.outputTokens,
+      cacheRead: acc.cacheRead + t.usage.cacheRead,
+      cacheCreate: acc.cacheCreate + t.usage.cacheCreate,
+    }),
+    { inputTokens: 0, outputTokens: 0, cacheRead: 0, cacheCreate: 0 },
+  );
+  assert.deepEqual(summed, got.value.burn, 'every turn row sums back to burn');
+
+  // Boundaries come from the turn's own envelopes, not from the fold's clock.
+  assert.equal(got.value.turns[0]?.startedAt, isoAt(1000));
+  assert.equal(got.value.turns[0]?.endedAt, isoAt(2000));
+  assert.equal(got.value.turns[1]?.startedAt, isoAt(5000));
+  assert.equal(got.value.turns[1]?.endedAt, isoAt(5100));
+});
+
+test('D248 — a turn still open has endedAt null and still carries the usage reported so far', async () => {
+  const { config, store } = await makeManager('full');
+  // The fold directly, not through the manager: boot closes an unterminated turn on disk
+  // unconditionally (`turn.ended { stopReason: 'server_restart' }`, S7.4/D39), so an open
+  // turn is by construction unreachable from a rehydrated session and only ever exists on a
+  // live one mid-turn. The fold is what this test is about, and it is a pure read.
+  const record = bootSessionRecord('sess-d248-open', { createdAt: isoAt(0), state: 'live', endedAt: null });
+  assert.equal((await store.createSession(record)).ok, true);
+  const events: Array<[number, string, unknown]> = [
+    [1000, 'turn.started', { turnId: 't1' }],
+    [1200, 'usage', { turnId: 't1', usage: { inputTokens: 7, outputTokens: 3, cacheRead: 0, cacheCreate: 0 } }],
+    [2000, 'turn.ended', { turnId: 't1', stopReason: 'completed', usage: null }],
+    [3000, 'turn.started', { turnId: 't2' }],
+    [3400, 'usage', { turnId: 't2', usage: { inputTokens: 11, outputTokens: 2, cacheRead: 1, cacheCreate: 0 } }],
+  ];
+  let seq = 1;
+  for (const [offsetMs, kind, data] of events) {
+    assert.equal((await store.appendEvent(record.id, payrollFixtureEnvelope(record.id, seq, offsetMs, kind, data))).ok, true);
+    seq += 1;
+  }
+  const got = await createPayrollFold(config, store)(record.id, record);
+  assert.equal(got.ok, true);
+  if (!got.ok) return;
+  assert.equal(got.value.turns.length, 2);
+  assert.equal(got.value.turns[0]?.endedAt, isoAt(2000));
+  assert.equal(got.value.turns[1]?.endedAt, null, 'an open turn reports no end, rather than borrowing the read clock');
+  assert.deepEqual(got.value.turns[1]?.usage, { inputTokens: 11, outputTokens: 2, cacheRead: 1, cacheCreate: 0 });
 });
 
 test('S16.3 — no module above adapters/* reads Envelope.raw to do its own token arithmetic', async () => {
