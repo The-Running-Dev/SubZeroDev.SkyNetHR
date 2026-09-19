@@ -477,6 +477,28 @@ route. A design where the spill held the full output and the wire held the trunc
 would make replay-from-disk and replay-from-memory return different transcripts, which is
 the same failure as a gap with none of the reporting.
 
+**Reading part of a blob adds no persisted state, and that is a decision rather than an
+omission** (D251). Indexed access — an operator jumping to a line, or paging a window out of a
+200 MiB build log instead of downloading it — is served by scanning the blob on the request
+path. There is no sidecar and no line table, so a blob's on-disk footprint stays exactly what
+this section and D162 describe, and the per-session budget still bounds it alone. The sidecar
+was available rather than blocked: D250 had already cleared it of D163's consistency objection,
+which priced an index against a growing, tearable append-only file and does not reach a blob
+written once and never appended. It was declined on its own merits. It earns its keep only
+where one blob is paged deeply and repeatedly, which is the tail of a tail, and it charges
+*every* blob a second file that the delete path, the byte budget and the missing-blob `404`
+would each have to learn about.
+
+**The addressing unit is a line, not a byte** (D251). A byte range over a blob served as
+`text/plain; charset=utf-8` can cut a UTF-8 sequence in half, which the whole-blob response
+could never do, and both ways out are worse than not having the problem: dropping `charset` on
+partial responses makes the partial and whole paths disagree about what they are serving, and
+snapping to a character boundary silently returns a different range than the one asked for.
+Lines also collapse two capabilities into one, because a *section* of a line-structured output
+**is** a line range — those were two separate things only while the unit was bytes. What it
+costs is that the server cannot seek and counts newlines from byte 0 instead; that cost is
+bounded in *Concurrency and ordering*, not hidden.
+
 **The `turnId` in that path is load-bearing, not decoration.** `callId` is vendor-minted, and
 *Identity spaces* only *assumes* it is unique within a session. If a vendor mints one unique
 within a turn, a `callId`-only path lets turn 2's oversized output overwrite turn 1's at the
@@ -1693,6 +1715,14 @@ here rather than left to whoever writes it (D43):
 - The tool-output fetch route serves `Content-Type: text/plain; charset=utf-8` with
   `X-Content-Type-Options: nosniff` and `Content-Disposition: attachment`, so a tool result
   that happens to be HTML cannot render as a document in the console's own origin.
+  **A windowed read of that blob carries the same three headers and the same `200`** (D251),
+  so the control is a property of the route rather than of the response's completeness. A `206`
+  would have preserved it just as well — `nosniff` and `Content-Disposition` are not
+  status-dependent, and the partial-response security question D250 raised has that answer
+  whichever shape had won. There is no `206` here for a different reason: with no byte range
+  there is nothing for `Content-Range` to describe, which also removes the unsatisfiable-range
+  member this design would otherwise owe `ApiErrorCode`, and leaves one status on the route
+  instead of two.
 - **The four themes are CSS custom properties in a stylesheet served from `'self'`, and the
   switcher sets an attribute on the root element** (D78). No style text is generated,
   injected or interpolated at runtime, which is what keeps D58's product feature compatible
@@ -1821,6 +1851,7 @@ a client tell a silent agent from a dead connection, so this costs nothing on th
 | Slow client stalls the stream | Per-subscriber queue high-water | Drop that subscriber, report a gap to it only | That client reloads | Other clients unaffected |
 | Huge tool result | Byte cap on `tool.result` | Truncate **before the envelope is built**, set `truncated` and the real `bytes` (D22) | "Output truncated" with a fetch link | Full output at `sessions/<id>/tool-output/<turnId>/<callId>`; envelope identical in buffer and spill |
 | Tool-output blob missing or unreadable | Read error on fetch | `404` on the fetch route; the truncated envelope is unaffected | "Full output no longer available" | Transcript intact |
+| Windowed read starts past the end of the blob | Newlines exhausted before the window begins | `200` with an empty window and the blob's true line and byte totals — **not an error** (D251) | The viewer clamps to the end of the log | Nothing |
 
 ### Filesystem and storage boundary
 
@@ -1969,6 +2000,20 @@ append end the session (D41) instead of leaving the ring holding events the spil
 handlers are not, and a guard tested before an `await` is not held across it. What replaces
 holding a lock across those paths is the same check-and-claim rule — see *The single-writer
 invariant* (D32). The Phase 3b guards do not relax that rule or I64's notification ordering.
+
+**A windowed tool-output read scans, and the scan is on the request path** (D251). Counting
+newlines from byte 0 is how a line window is found without an index, so a deep window into a
+large blob reads every byte before it. It belongs in this section rather than in *Failure
+modes* because what it risks is not failure but starvation: a single-threaded server scanning
+synchronously would stall every other session's fan-out for the duration. The scan is therefore
+chunked and yields between chunks, so concurrent reads interleave and the cost lands on
+throughput rather than responsiveness — no session's `emit` waits behind another session's
+scan. **What bounds the work is a cap that already exists.** `Caps.sessionToolOutputBytes`
+bounds a session's blobs, so it also bounds the deepest scan any one request can provoke, and
+an operator who raises it has chosen that cost knowingly. No new budget is introduced and none
+is needed against the population the brief names — *Threat model* holds console access
+equivalent to shell access as the server's user, so an operator who wants to load this host has
+considerably cheaper ways to do it than paging a log.
 
 Genuinely simultaneous:
 
@@ -2593,6 +2638,29 @@ New in this pass:
   keyed on `callId` alone — a vendor-minted identifier outside `/api/sessions/:id` is
   reachable by any authenticated operator, which is a hole in the ownership check the threat
   model relies on.
+- **D251 — indexed tool-output reading is a line-addressed window, with no index and no
+  server-side search.** Chosen: one windowed read on the existing session-scoped route,
+  addressed in lines, answered `200` under D22's three headers, scanning from byte 0 and
+  bounded by the byte budget that already exists. Rejected: **a byte range under `Range` and
+  `206`**, which the stdio runtime's own `toolOutput.read` already shapes — but D241 makes that
+  a published-and-unadopted parallel surface rather than a lower layer of this stack, so it is
+  precedent and not a head start, and a byte cut through a UTF-8 sequence has no answer that
+  leaves the partial and whole responses agreeing about what they serve. Rejected: **a
+  line-offset sidecar built on first indexed read**, which D250 had already cleared of D163's
+  consistency objection and which does make deep paging O(1) after the first pass — refused
+  because it earns that only where one blob is paged deeply and repeatedly, while charging
+  every blob a second file the delete path, the byte budget and the `404 no_such_output` story
+  would each have to learn about. Rejected: **server-side search**, substring or regex. A scan
+  answering "where" rather than "what is at line N" has no window to bound it, operator regex
+  adds catastrophic backtracking that substring search does not, and it is the one half of this
+  that cannot be quietly withdrawn once operators depend on it — so it waits on evidence that
+  the window alone is insufficient, which is open question 17. Rejected: **doing all of it in
+  the browser** — the client fetching the whole blob and windowing and finding locally, which
+  adds no public surface at all and makes regex search free at no shared cost. Refused for
+  moving up to 256 MiB across the wire to answer a one-line question, and because the argument
+  that the client already fetches the blob is not true: `client/render.js` renders a download
+  link the browser follows under `Content-Disposition: attachment` and reads no bytes itself,
+  so that option is new client code, not reuse of existing code.
 - **D23 — orphan reaping reads a server-wide `pids.ndjson` with a reuse guard.** Chosen: an
   append-only record per spawn, tombstoned at exit, reaped at boot only when the recorded
   start time is after the host's last boot and the process image still matches. Rejected:
@@ -3182,3 +3250,16 @@ these are cited by number elsewhere in this document and in the slices.
     the partition residual — it puts it out of reach**, which is a different and better thing: the
     case needs a cache or a partition between writer and reader, and the supported scope has neither.
     Widening is cheap and additive, and needs the gate this answer declines to claim without.
+
+17. **Does an operator paging a large tool output actually need find, or does the window make
+    the question go away?** D251 ships the line-addressed window and declines server-side
+    search, and the decline is "not now" rather than "not ever" — the costs it names are real
+    but they are costs, not impossibilities. What settles it is information this design does not
+    have and cannot reason its way to: whether operators reaching for a 200 MiB build log are
+    looking for a place they can already describe ("the end", "where the turn started") or for a
+    string they can only search for. The first is what a window answers; the second is not.
+    **This question is answerable by shipping**, which is why it is stated rather than resolved
+    — and the answer, if it is "find", reopens a choice between a bounded substring scan on the
+    server and a client-side find over fetched windows, both of which D251 costed and neither of
+    which it foreclosed. Nothing downstream may add a search route on the strength of the
+    decline being soft.
