@@ -488,7 +488,10 @@ are not.
   ended session. The field is retained knowingly (D45).
 - The untruncated bytes behind a `tool.result` with `truncated: true` are at
   `GET /api/sessions/:id/tool-output/:turnId/:callId`. Both segments come from the same
-  envelope.
+  envelope. **That route also serves a window of the blob, and the window is addressed in
+  lines** (D251) — a renderer paging a large output asks for a line range, never a byte range.
+  The `bytes` the envelope carries is the blob's size, so a renderer can say how much was
+  withheld; it is not an address into it and a window is never derived from it.
 - **Belonging to a turn is a field, never a position in the stream.** `checkpoint.created`,
   `session.notice` and `checklist.item.completed` carry no `turnId` and do land between a
   `turn.started` and its `turn.ended`. A renderer that treats that interval as the turn's
@@ -501,6 +504,26 @@ are not.
   the review for that subject with `state === 'final'` and the greatest `updatedAt`, ties
   broken by the later line in `reviews.ndjson`. Drafts are excluded. `GET /api/reviews?subject=`
   returns exactly the finals this fold reads.
+
+### Tool-output window
+
+**No entity is added and none is stored.** A window over a tool-output blob is a read, not a
+thing: it has no persisted representation, no identifier and no lifetime, and nothing in
+*Persisted schemas* changes because one is served (I67). The bytes it reads are the same
+immutable bytes D22 and D162 put behind the route — addressed in lines, never sliced, never
+copied, never indexed (D251).
+
+**The unit is a line because a byte cut has no good answer.** A byte range over a response
+served as `text/plain; charset=utf-8` can cut a UTF-8 sequence, which the whole-blob response
+could never do; dropping `charset` on partials makes the two paths disagree about what they
+serve, and snapping to a character boundary silently returns a range other than the one asked
+for. Choosing lines also collapses two capabilities into one — a *section* of line-structured
+output **is** a line range, and those were two things only while the unit was bytes.
+
+**The wire spelling of a window is not determined by the design and is not invented here** —
+see *Unresolved* 19, which also holds the substantive half: how the blob's line and byte totals
+come back, and whether they accompany every windowed response or only one whose scan reached
+the end.
 
 ### Checkpoint
 
@@ -770,7 +793,7 @@ though it were new is silent wrong state rather than a parse error.
 |---|---|---|---|
 | `meta.json` | `sessionId` from the directory name | — | Written by temp-file-then-atomic-rename, never in place, on exactly three occasions: create, a `state` transition, a `cliSessionId` change. Never per event (I16) |
 | `events.ndjson` | `(sessionId, seq)` | `seq` ascending, contiguous from 1 | Append-only, written in `seq` order through the session's own append chain (D89). Not fsync'd per line. **Read backwards from the tail to locate `after + 1`, then emitted forward** — O(envelopes since the disconnect), not O(file). No offset index exists and none is planned (D163). **A `message.delta` is never appended**: it is a frame, not an envelope, so this file holds no line for one and a replay never produces one (D168, I51) |
-| `tool-output/<turnId>/<callId>` | `(sessionId, turnId, callId)` | — | Written once, never appended. `turnId` is in the path because `callId` is vendor-minted and only *assumed* session-unique (I22). Bounded per session by `Caps.sessionToolOutputBytes`: past the budget the blob is **not written**, and the fetch answers `404 no_such_output` exactly as S9.5 already specifies (D162). Nothing already written is ever evicted |
+| `tool-output/<turnId>/<callId>` | `(sessionId, turnId, callId)` | — | Written once, never appended. `turnId` is in the path because `callId` is vendor-minted and only *assumed* session-unique (I22). Bounded per session by `Caps.sessionToolOutputBytes`: past the budget the blob is **not written**, and the fetch answers `404 no_such_output` exactly as S9.5 already specifies (D162). Nothing already written is ever evicted. **A windowed read adds no file**: no sidecar, no line table, no index of any kind, so this row is the whole of a blob's on-disk footprint and the budget above bounds it alone (D251, I67). The sidecar was available rather than blocked — D250 cleared it of D163's consistency objection, which prices an index against a growing, tearable append-only file and does not reach a blob written once and never appended — and was declined on its merits |
 | `attachments/<turnId>/<attachmentId>` | `(sessionId, turnId, attachmentId)` | — | Written once, never appended, fsync'd before the envelope naming it exists (I49). `attachmentId` is server-minted, so the operator's `filename` never reaches a path. A sidecar `attachments/<turnId>/<attachmentId>.meta` holds the stored `mediaType` as UTF-8 text, written the same way, so the read route can echo it for an allow-listed image type without scanning the spill for the `AttachmentRef` that named this id. Removed with the session (D25, D160) |
 | `audit.ndjson` | append order | append order, read newest first | Server-wide. fsync'd before the decision it records reaches the child (I10). Never truncated, never deleted with a session (I13). Every read is a bounded window resumed by `AuditCursor` (I39) |
 | `pids.ndjson` | append order; `pid` is not unique over time | append order | Server-wide. Two line shapes: a `ProcessRecord` at spawn, a `ProcessTombstone` at exit (D95). The latest line for a `pid` decides liveness; the spawn line carries everything else |
@@ -1025,6 +1048,19 @@ What the declarations cannot say:
 - `writeAttachment` carries `mediaType` alongside the bytes so that a later `openAttachment`
   can answer the read route's allow-list check without scanning the session's spill for the
   `AttachmentRef` that named the id.
+- **A windowed tool-output read belongs to this module because this module owns the bytes.**
+  The scan sits behind the handle rather than at the edge that formats the response. It counts
+  newlines from byte 0 — there is no index to seek with, and that is D251's decision rather
+  than a gap — and it is **chunked, yielding between chunks**, so a deep window into a large
+  blob costs throughput and never responsiveness: no session's `emit` and no other session's
+  fan-out waits behind it (I68). **`Caps.sessionToolOutputBytes` is what bounds the work**,
+  since a cap on a session's blobs is also a cap on the deepest scan any one request can
+  provoke; **no separate cap on the window or on the scan exists and none is to be added**
+  (D251). An operator who raises the budget has chosen that cost knowingly, and `10-design.md`
+  § *Threat model* already holds console access equivalent to shell access as the server's user — a second
+  budget would be a control against a population this design does not hold. The method is
+  **not declared here**: the design determines the semantics above and no signature, so see
+  *Unresolved* 19.
 
 **A `Store` owns OS handles and must be closed. `close`, `ServerLock`, `Store.claimLock` and
 `Store.releaseLock` are declared in `src/contract/index.ts` (the types) and `src/store/index.ts`
@@ -1744,6 +1780,12 @@ What the declarations cannot say:
   every other method here, because D70 opens both reads to every authenticated operator
   regardless of session ownership. They sit on this interface only because it already bridges
   edges to `store`, not because either read is about a session the caller owns (D127).
+- **The ownership-checked counterpart of `store`'s windowed tool-output read lives here**, and
+  splits its failures exactly as the whole-blob read does: a session that is unknown or not the
+  caller's is `no_such_session`, and every other failure — including a blob the budget stopped
+  being written — is `no_such_output`. A window that merely begins past the last line is
+  neither (I69). Not declared here for the same reason as its `store` counterpart: see
+  *Unresolved* 19.
 - **The `records` dependency is one-directional and exists for the claim during `create` alone.**
   Nothing else in the manager may call it, and `records` may never call back.
 
@@ -2101,7 +2143,7 @@ The `404` is `no_such_session` because `ApiErrorCode` carries no route-level not
 | `GET` | `/api/sessions/:id` | — | `200 { session: SessionSummary }` | `401 unauthenticated`, `404 no_such_session` |
 | `GET` | `/api/sessions/:id/events` | `Last-Event-ID` header | `200 text/event-stream` | `404 no_such_session` |
 | `GET` | `/api/sessions/:id/checkpoints` | — | `200 { checkpoints: Checkpoint[] }` | `404 no_such_session` |
-| `GET` | `/api/sessions/:id/tool-output/:turnId/:callId` | — | `200 text/plain; charset=utf-8` | `404 no_such_session`, `404 no_such_output` |
+| `GET` | `/api/sessions/:id/tool-output/:turnId/:callId` | whole blob, or a line window whose spelling is *Unresolved* 19 | `200 text/plain; charset=utf-8`, whole or windowed | `404 no_such_session`, `404 no_such_output`, `422 bad_request` |
 | `GET` | `/api/sessions/:id/attachments/:turnId/:attachmentId` | — | `200`, media type per the allow-list below | `404 no_such_session`, `404 no_such_attachment` |
 
 **Every route that reads or mutates a session's data is under `/api/sessions/:id` and applies
@@ -2130,6 +2172,24 @@ break. `ok: true` continues to mean the restore itself succeeded; a dirty verifi
 **The tool-output route serves `Content-Type: text/plain; charset=utf-8` with
 `X-Content-Type-Options: nosniff` and `Content-Disposition: attachment`**, so a tool result that
 happens to be HTML cannot render as a document in the console's own origin.
+
+**A windowed read of that blob is the same route, the same three headers and the same `200`**
+(D251). The control is a property of the route and not of the response's completeness:
+`X-Content-Type-Options` and `Content-Disposition` are not status-dependent, so a `206` would
+have preserved it too, and the reason there is none is a different one. **There is no `206` and
+no `Content-Range`** — the window is addressed in lines, so no byte range exists for
+`Content-Range` to describe, which is also why `ApiErrorCode` gains no unsatisfiable-range
+member (see *Error semantics*) and why this route carries one status rather than two.
+
+**A window beginning past the last line of the blob is `200` with an empty window, never an
+error** (I69). Newlines exhausted before the window begins is a viewer clamping to the end of a
+log, not a failed read; the blob exists and the window is empty, and those are different
+answers. Malformed window parameters are `422 bad_request` like any other malformed input.
+**A window is not separately capped**: `Caps.sessionToolOutputBytes` already bounds the blob
+and therefore the scan behind it, and no second budget is introduced (D251, I68). The blob's
+line and byte totals accompany such a response — *how* they are carried, and whether they
+accompany every windowed response or only one whose scan reached the end, is **not determined
+by the design**, and is *Unresolved* 19 rather than a spelling chosen here.
 
 **The attachment route never echoes an upload's declared media type unguarded** (D160). It
 serves `nosniff` on every response, and sets `Content-Type` to the stored `mediaType` only when
@@ -2332,7 +2392,7 @@ removes it.
 | 409 | `session_ended` | The session is ended: it accepts no new turn, no checklist tick, and no restore |
 | 409 | `workspace_busy` | The resolved path equals, contains, or is contained by a live session's `cwd` |
 | 409 | `outside_workspace_root` | `cwd` failed the jail check |
-| 422 | `bad_request` | Malformed body, or a text field over its cap |
+| 422 | `bad_request` | Malformed body or query parameters, or a text field over its cap |
 | 500 | `checkpoint_failed` | A checkpoint operation failed; see the accompanying `error` event |
 | 503 | `agent_unavailable` | CLI missing or failed to spawn |
 | 404 | `no_such_requisition` *(tier two)* | Unknown `requisitionId` |
@@ -2344,6 +2404,15 @@ removes it.
 | 404 | `no_such_item` *(tier two)* | No such `itemId` in the configured checklist template |
 | 500 | `record_write_failed` *(tier two)* | The record-log append failed; nothing changed anywhere |
 | 500 | `payroll_unavailable` *(tier two)* | The fold could not read the spill; the session itself is unaffected |
+
+**`ApiErrorCode` gains no member for an unsatisfiable range, and that is a consequence rather
+than an omission** (D251). D250 held that an unsatisfiable range was a public-surface addition
+whichever code it landed on; choosing lines as the window's unit removed the range, so there is
+nothing left to be unsatisfiable. The two boundary answers that would have needed it are
+already covered without a new name: a window past the last line is not an error at all (I69),
+and a malformed window is `422 bad_request` alongside every other malformed input. **A future
+byte range would bring the member back with it** — it is absent because the byte range is, not
+because the case was judged unimportant.
 
 **An unknown route has no code of its own, and the two substitutes it gets are split by
 prefix.** This union carries no route-level not-found, so:
@@ -2708,6 +2777,10 @@ highest-value section in this document.
 | **I64** | Within one session, the envelopes an `AdapterNotification` directly produces take `seq` in the order the notifications reached the manager's `notify` sink: for A delivered before B, every envelope A directly produces has a lower `seq` than every envelope B directly produces. A notification directly produces an `event`'s own envelope, the `session.started` a first turn's `cli-session` produces, an `exited`'s `cancelled_process_exit` resolutions, and the `error / adapter_unknown_record` a turn-scoped fact arriving with no live turn is answered with. **Its handler reaches the `emit` of each before its first `await`** — I5's rule, applied to `seq` assignment rather than to a guard — so any work the notification also owes that yields is either started after that `emit`, or started ahead of it and not awaited: `cli-session`'s `meta.json` write is the first kind, and the `turn.ended` tree kill I59 describes as issued and not awaited is the second. **Outside it**: an envelope the manager emits on a notification's behalf *after* awaiting — a standing rule's auto-answer, an `audit_unavailable` notice — takes its position at emission, and I9 and I11 own what it owes; a `message.delta` has no `seq` (I51). **Held by review, not by code**: nothing observes an `await` inserted ahead of an `emit` until two notifications race across it (D215) | `session-manager` |
 | **I65** | `browserMethods` contains no `admin.*`, `host.*` or `runtime.*` member, and every method in it is a member of `Operations`. **That is the whole of what is enforced**, by `wire.test.ts`: no runtime code consults the table, so the rule it states — that a browser bridge routes nothing outside it and injects a principal the browser cannot select — is **held by the bridge author, not by the runtime**, which will serve a forwarded `admin.*` call without complaint. The table is declared in the wire rather than left to each bridge precisely because an obligation nothing checks must at least be written once | `agent-console/protocol` |
 | **I66** | A create attempt whose outcome is not established as `committed` or `aborted` leaves its session unreachable through every ordinary read, its durable attempt record present, and its workspace reservation unreleased — **across restarts**, since boot observes host status before publication and only those two states are terminal. `new`, `prepared`, `committing` and an unreachable host all stay quarantined. A quarantined reservation is never released to a second session, because a workspace held by two sessions is the failure I6 exists to prevent, and an unknown outcome is not evidence of an abort | `agent-console/core`, `store` |
+| **I67** | A windowed tool-output read creates no file and writes no byte. No sidecar, no line table, no index of any kind exists for a tool-output blob, so a blob's on-disk footprint is exactly its row in *Persisted schemas* and `Caps.sessionToolOutputBytes` bounds it alone (D251) | `store` |
+| **I68** | A tool-output scan is chunked and yields between chunks: no session's `emit`, and no other session's fan-out, ever waits for the whole of another session's scan. The scan is bounded by `Caps.sessionToolOutputBytes` and by no other cap — **a second budget on the window or the scan is not to be added** (D251) | `store`, `edge/sse`, `edge/ws` |
+| **I69** | A window beginning past the last line of a blob answers `200` with an empty window — never `404`, never `416`, never any other error status. The blob existing and the window being empty are different answers and are never collapsed (D251) | `edge/sse`, `edge/ws` |
+| **I70** | No route, method or parameter searches a tool-output blob. D251's decline of server-side search is soft — "not now", pending open question 17 in `10-design.md` — and **softness is not authorisation**: adding one is a design decision and never an implementation one | `edge/sse`, `edge/ws` |
 
 **I40, I41 and I42 were never allocated, and the gap is left open rather than closed.** The
 numbering jumps from I39 to I43 and nothing is missing. Ids here are cited by number in
@@ -3197,47 +3270,46 @@ belong to the `exec --json` fallback alone; neither affects a session on `app-se
     protecting. The rule is keyed on *parsing* and not on a missing field, so a lock predating the
     lease still reclaims (I61). Had 16 kept a network share in scope this would have gone the other
     way — rename's atomicity over SMB and NFS is exactly the uncertainty the item named. (#206)
-18. **Indexed access to a stored tool-output blob — search, read-range, read-section.** Nothing in
-    `10-design.md` determines any of the three, and the runtime-redesign brief that asks for them is
-    not in this repository; what exists is a finding
-    (`design/findings/runtime-redesign-classification.md`, item 12), which that document's own
-    header puts below this one. All three are therefore here, and not because a parameter list is
-    merely missing — each carries an architectural question that a signature would decide by
-    omission. The shipped half is not in doubt and is not what this item is about: the blob, its
-    per-session budget, the `truncated` and `bytes` envelope fields, and the whole-blob fetch are
-    all landed and documented above.
+18. **Resolved by D251, and two of this item's own claims about the tree were wrong.** The three
+    capabilities are now one and a decline. The unit is a line, so read-range and read-section
+    were never two things — a *section* of line-structured output **is** a line range — and
+    server-side search is declined pending open question 17 in `10-design.md`, a decline nothing
+    downstream may treat as permission (I70). Three of the four architectural questions this
+    item raised dissolved rather than being answered: with no byte range there is no
+    `Content-Range`, no unsatisfiable range, and so no new `ApiErrorCode` member. The fourth is
+    answered and kept visible in *HTTP routes* and *Error semantics* above — a partial response
+    does not weaken the route's control, because `nosniff` and `Content-Disposition` are not
+    status-dependent, so the absent `206` is about the absent range and not about security. The
+    `/design` routing this item asked for has happened, so the issue `/track` was to open for it
+    is moot and is not opened.
 
-    **What the tree already determines, and what it does not.** The runtime protocol declares
-    `toolOutput.read` over an offset and a length returning a `Chunk`
-    (`src/agent-console/protocol/wire.ts`), implemented by streaming and skipping in
-    `src/agent-console/runtime/server.ts`; the HTTP edge's blob response writes `200`
-    unconditionally and reads no `Range` header (`src/edge/http-common/index.ts`). Read-range is
-    thus already a settled shape one layer down and absent only at the edge, which makes it the
-    cheapest of the three and still not a transcription. Surfacing it is a public HTTP behaviour on
-    a route whose present headers are a control and not a convenience — `nosniff` and `attachment`
-    are there so an HTML tool result cannot render as a document in the console's origin, and
-    whether a partial response keeps that property is a question, not a detail. `ApiErrorCode`
-    also has no member for an unsatisfiable range, so that answer is a public-surface addition
-    whichever code it lands on.
+    **The two corrections, recorded because each changed what an option cost rather than merely
+    how it read.** This item said the client already fetches the whole blob for its download
+    affordance, making a client-side find look like reuse: it does not. `client/render.js`
+    renders an `<a href>` the browser follows under `Content-Disposition: attachment` and reads
+    no bytes, so that option is new client code. It also called read-range the cheapest of the
+    three because the shape existed "one layer down" in the runtime's `toolOutput.read`
+    (`src/agent-console/protocol/wire.ts`): D241 already rules that `agent-console/protocol` is
+    published without being adopted and that `runtime` imports nothing from it, so that surface
+    is parallel to the HTTP edge rather than beneath it — precedent, not a head start.
 
-    **D163's and D86's refusal of byte offsets does not reach this blob, and that is a finding
-    rather than a permission.** Both refused byte offsets as a quasi-public interface over
-    `events.ndjson` and `audit.ndjson`: append-only files that grow, tear at the tail, and would
-    need a sidecar kept consistent with them. A tool-output blob is written once, never appended,
-    and never evicted, and no sidecar is in question, so every cost D163 priced is absent here.
-    Recording that is what stops the next pass relitigating it. It settles no shape by itself.
+19. **How a line window is addressed on the wire, and how the blob's totals come back.** D251
+    settles that the window exists, that its unit is a line, that it answers `200` under the
+    route's three headers, that it adds no persisted state and no new cap, and that a window
+    past the end is empty rather than an error. It settles no spelling: not the parameter names,
+    not whether they are query parameters at all, and not the `store` or `session-manager`
+    method behind them — which is why neither is scaffolded in *Public surface* above.
 
-    **Read-section is a line range and not a byte range**, because the output it serves is
-    line-structured and a byte cut splits a line. That needs either a scan per request or a line
-    index — and a line index is the sidecar D163 refused, arriving by another door and bringing back
-    the torn-consistency story the blob's immutability had removed.
-
-    **Search has a cost bound rather than a shape problem.** The per-session budget admits blobs
-    into the hundreds of MiB, the server is single-process, and a scan on the request path is
-    head-of-line blocking for every other session's fan-out; operator-supplied regex adds a
-    catastrophic-backtracking surface that substring search does not have. Whether search belongs on
-    the server at all is open — the client already fetches the whole blob for the download
-    affordance it offers today, and a find over a fetched range is a third option with no server
-    surface at all.
-
-    All three route to `/design`. It is not yet issued: `/track`'s next run opens it.
+    **The substantive half is the totals, and it is not a naming question.** `10-design.md`
+    § *Failure modes* has a past-end read answering with "the blob's true line and byte totals",
+    and two readings of that are both defensible. Either **every** windowed response carries
+    them, in which case every read scans to the end of the blob and a window's depth stops
+    mattering to its cost; or **the scan stops where the window does**, and the totals are known
+    only when it happened to reach the end — which is precisely why the past-end case can state
+    them. The second is what the cost argument in § *Concurrency and ordering* is written
+    against, since "the **deepest** scan any one request can provoke" says nothing if every scan
+    is already maximal; the first is what a viewer sizing a scrollbar wants, and the failure-mode
+    row's "the viewer clamps to the end of the log" reads that way. It also decides whether a
+    windowed response can stream at all, the way the whole-blob path's does: totals known only
+    after the scan cannot precede the body. **This is not to be settled by picking a signature**
+    — it is a design question and belongs to `/design`.
