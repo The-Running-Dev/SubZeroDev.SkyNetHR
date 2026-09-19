@@ -3295,23 +3295,17 @@ belong to the `exec --json` fallback alone; neither affects a session on `app-se
     published without being adopted and that `runtime` imports nothing from it, so that surface
     is parallel to the HTTP edge rather than beneath it — precedent, not a head start.
 
-19. **How a line window is addressed on the wire, and how the blob's totals come back.** D251
-    settles that the window exists, that its unit is a line, that it answers `200` under the
-    route's three headers, that it adds no persisted state and no new cap, and that a window
-    past the end is empty rather than an error. It settles no spelling: not the parameter names,
-    not whether they are query parameters at all, and not the `store` or `session-manager`
-    method behind them — which is why neither is scaffolded in *Public surface* above.
-
-    **The substantive half is the totals, and it is not a naming question.** `10-design.md`
-    § *Failure modes* has a past-end read answering with "the blob's true line and byte totals",
-    and two readings of that are both defensible. Either **every** windowed response carries
-    them, in which case every read scans to the end of the blob and a window's depth stops
-    mattering to its cost; or **the scan stops where the window does**, and the totals are known
-    only when it happened to reach the end — which is precisely why the past-end case can state
-    them. The second is what the cost argument in § *Concurrency and ordering* is written
-    against, since "the **deepest** scan any one request can provoke" says nothing if every scan
-    is already maximal; the first is what a viewer sizing a scrollbar wants, and the failure-mode
-    row's "the viewer clamps to the end of the log" reads that way. It also decides whether a
-    windowed response can stream at all, the way the whole-blob path's does: totals known only
-    after the scan cannot precede the body. **This is not to be settled by picking a signature**
-    — it is a design question and belongs to `/design`.
+19. **Resolved by D253: the scan stops where the window does, and totals ride along only when
+    that scan reaches the blob's true end.** The past-end case in `10-design.md` § *Failure
+    modes* was already this rule's special case, not an exception to a stronger one — a scan
+    that starts past the end reaches the true end at no extra cost, which is why it alone could
+    state totals before D253. Generalising the failure-mode sentence to *every* windowed response
+    was the rejected reading: it would make every scan maximal regardless of the window asked
+    for, spending back the bound § *Concurrency and ordering* prices on "the **deepest** scan any
+    one request can provoke", and it would stop the response from streaming, since a scan that
+    must additionally confirm the true end cannot report done until it has looked past everything
+    the caller asked to see. A client wanting the blob's size for scrollbar-sizing without
+    triggering a full scan has no cheap path today — D253 leaves that open rather than solving it.
+    It still settles no spelling: not the parameter names, not whether they are query parameters
+    at all, and not the `store` or `session-manager` method behind them — which is why neither is
+    scaffolded in *Public surface* above, and that remains open for `/contract`'s next pass.
