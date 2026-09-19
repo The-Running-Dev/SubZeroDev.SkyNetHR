@@ -1,0 +1,301 @@
+{
+  "version": "2.1.278 (Claude Code)",
+  "platform": "linux",
+  "node": "v24.19.0",
+  "billing": "not measured",
+  "summaries": [
+    {
+      "name": "hook-allow",
+      "modelRequests": 2,
+      "permissions": 0,
+      "hooks": 1,
+      "controlResponses": 0,
+      "toolResult": {
+        "tool_use_id": "toolu_probe416",
+        "type": "tool_result",
+        "content": "1\tPROBE_ORIGINAL_RESULT\n2\t"
+      },
+      "syntheticUsage": true,
+      "hookOutputs": [
+        {
+          "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "allow"
+          }
+        }
+      ],
+      "controlWire": [],
+      "normalizedMessagesSha256": "496082fc1c4cb7abd19beadbd1c5d6c13ea74c888c411201c343bd044ab41b5e",
+      "systemHashes": [
+        "52e17f6d74b6b21e678d904f5aef209c36f6ddba9ccf4fecc96b628045e6d7b1",
+        "52e17f6d74b6b21e678d904f5aef209c36f6ddba9ccf4fecc96b628045e6d7b1"
+      ],
+      "toolDefinitionHashes": [
+        "4356eb13725045201ae0732d77161570b72a044d43be133f819d8d2a56b63c3d",
+        "4356eb13725045201ae0732d77161570b72a044d43be133f819d8d2a56b63c3d"
+      ]
+    },
+    {
+      "name": "hook-candidate",
+      "modelRequests": 2,
+      "permissions": 0,
+      "hooks": 1,
+      "controlResponses": 0,
+      "toolResult": {
+        "tool_use_id": "toolu_probe416",
+        "type": "tool_result",
+        "content": "1\tPROBE_ORIGINAL_RESULT\n2\t"
+      },
+      "syntheticUsage": true,
+      "hookOutputs": [
+        {
+          "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "allow",
+            "updatedToolOutput": "PROBE_SUBSTITUTE_RESULT"
+          }
+        }
+      ],
+      "controlWire": [],
+      "normalizedMessagesSha256": "496082fc1c4cb7abd19beadbd1c5d6c13ea74c888c411201c343bd044ab41b5e",
+      "systemHashes": [
+        "a58835ea405092be61fe655f9369a53e3fd8180e998ffe7fb62ee99b5b1ef7a2",
+        "a58835ea405092be61fe655f9369a53e3fd8180e998ffe7fb62ee99b5b1ef7a2"
+      ],
+      "toolDefinitionHashes": [
+        "4356eb13725045201ae0732d77161570b72a044d43be133f819d8d2a56b63c3d",
+        "4356eb13725045201ae0732d77161570b72a044d43be133f819d8d2a56b63c3d"
+      ]
+    },
+    {
+      "name": "hook-deny",
+      "modelRequests": 2,
+      "permissions": 0,
+      "hooks": 1,
+      "controlResponses": 0,
+      "toolResult": {
+        "type": "tool_result",
+        "content": "PROBE_DENIAL_ONLY",
+        "is_error": true,
+        "tool_use_id": "toolu_probe416"
+      },
+      "syntheticUsage": true,
+      "hookOutputs": [
+        {
+          "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "deny",
+            "permissionDecisionReason": "PROBE_DENIAL_ONLY"
+          }
+        }
+      ],
+      "controlWire": [],
+      "normalizedMessagesSha256": "f3b836825ac34b91af6766257e8f4895d93f4ea95ec548e272022e2e6aff26b7",
+      "systemHashes": [
+        "20774b49fc38aa2b77392ee0d2911849697e69273abf13944ac307e73de81d8f",
+        "20774b49fc38aa2b77392ee0d2911849697e69273abf13944ac307e73de81d8f"
+      ],
+      "toolDefinitionHashes": [
+        "4356eb13725045201ae0732d77161570b72a044d43be133f819d8d2a56b63c3d",
+        "4356eb13725045201ae0732d77161570b72a044d43be133f819d8d2a56b63c3d"
+      ]
+    },
+    {
+      "name": "hook-rewrite",
+      "modelRequests": 2,
+      "permissions": 0,
+      "hooks": 1,
+      "controlResponses": 0,
+      "toolResult": {
+        "tool_use_id": "toolu_probe416",
+        "type": "tool_result",
+        "content": "1\tPROBE_CACHED_RESULT\n2\t"
+      },
+      "syntheticUsage": true,
+      "hookOutputs": [
+        {
+          "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "allow",
+            "updatedInput": {
+              "file_path": "<probe-root>/hook-rewrite/workspace/cached.txt"
+            }
+          }
+        }
+      ],
+      "controlWire": [],
+      "normalizedMessagesSha256": "d54d2ca647b9b9160aa843004520fe33df4ff1ecd9f43b896e30615928d2b7f3",
+      "systemHashes": [
+        "b2232c0800d912759e18e9b052ffc93f9c016f4b2491384732778c1946add027",
+        "b2232c0800d912759e18e9b052ffc93f9c016f4b2491384732778c1946add027"
+      ],
+      "toolDefinitionHashes": [
+        "4356eb13725045201ae0732d77161570b72a044d43be133f819d8d2a56b63c3d",
+        "4356eb13725045201ae0732d77161570b72a044d43be133f819d8d2a56b63c3d"
+      ]
+    },
+    {
+      "name": "control-automatic",
+      "modelRequests": 2,
+      "permissions": 0,
+      "hooks": 0,
+      "controlResponses": 0,
+      "toolResult": {
+        "tool_use_id": "toolu_probe416",
+        "type": "tool_result",
+        "content": "File created successfully at: <probe-root>/control-automatic/workspace/written.txt (file state is current in your context \u2014 no need to Read it back)"
+      },
+      "syntheticUsage": true,
+      "hookOutputs": [],
+      "controlWire": [],
+      "normalizedMessagesSha256": "e3871dd1aafddb895e9c48bd610fb7ed4486b4b1489d47902789baeaa1b5e53c",
+      "systemHashes": [
+        "ed7cac5440b51f075c3b9e2e69ba377edb4e4382a46b8c282a7e7e416f16a036",
+        "ed7cac5440b51f075c3b9e2e69ba377edb4e4382a46b8c282a7e7e416f16a036"
+      ],
+      "toolDefinitionHashes": [
+        "4356eb13725045201ae0732d77161570b72a044d43be133f819d8d2a56b63c3d",
+        "4356eb13725045201ae0732d77161570b72a044d43be133f819d8d2a56b63c3d"
+      ]
+    },
+    {
+      "name": "control-interactive",
+      "modelRequests": 2,
+      "permissions": 1,
+      "hooks": 0,
+      "controlResponses": 1,
+      "toolResult": {
+        "tool_use_id": "toolu_probe416",
+        "type": "tool_result",
+        "content": "File created successfully at: <probe-root>/control-interactive/workspace/written.txt (file state is current in your context \u2014 no need to Read it back)"
+      },
+      "syntheticUsage": true,
+      "hookOutputs": [],
+      "controlWire": [
+        {
+          "direction": "stdout",
+          "record": {
+            "type": "control_request",
+            "request_id": "7c72af10-fc82-4a05-9c7d-91a1f70c50ee",
+            "request": {
+              "subtype": "can_use_tool",
+              "tool_name": "Write",
+              "display_name": "Write",
+              "input": {
+                "file_path": "<probe-root>/control-interactive/workspace/written.txt",
+                "content": "PROBE_WRITE_RESULT\n"
+              },
+              "description": "written.txt",
+              "permission_suggestions": [
+                {
+                  "type": "setMode",
+                  "mode": "acceptEdits",
+                  "destination": "session"
+                }
+              ],
+              "tool_use_id": "toolu_probe416"
+            }
+          }
+        },
+        {
+          "direction": "stdin",
+          "record": {
+            "type": "control_response",
+            "response": {
+              "subtype": "success",
+              "request_id": "7c72af10-fc82-4a05-9c7d-91a1f70c50ee",
+              "response": {
+                "behavior": "allow",
+                "updatedInput": {},
+                "toolUseID": "toolu_probe416"
+              }
+            }
+          }
+        }
+      ],
+      "normalizedMessagesSha256": "e3871dd1aafddb895e9c48bd610fb7ed4486b4b1489d47902789baeaa1b5e53c",
+      "systemHashes": [
+        "731e895ecc6b820205a2c0efeebaffc84e5531c033fa6ff2efbefe7fdb01fd1e",
+        "731e895ecc6b820205a2c0efeebaffc84e5531c033fa6ff2efbefe7fdb01fd1e"
+      ],
+      "toolDefinitionHashes": [
+        "4356eb13725045201ae0732d77161570b72a044d43be133f819d8d2a56b63c3d",
+        "4356eb13725045201ae0732d77161570b72a044d43be133f819d8d2a56b63c3d"
+      ]
+    },
+    {
+      "name": "control-denied-resume",
+      "modelRequests": 2,
+      "permissions": 1,
+      "hooks": 0,
+      "controlResponses": 1,
+      "toolResult": {
+        "type": "tool_result",
+        "content": "The user doesn't want to proceed with this tool use. The tool use was rejected (eg. if it was a file edit, the new_string was NOT written to the file). STOP what you are doing and wait for the user to tell you how to proceed.",
+        "is_error": true,
+        "tool_use_id": "toolu_probe416"
+      },
+      "syntheticUsage": true,
+      "hookOutputs": [],
+      "controlWire": [
+        {
+          "direction": "stdout",
+          "record": {
+            "type": "control_request",
+            "request_id": "8c9e4564-0bd6-4d79-9e27-7044d3ef06b4",
+            "request": {
+              "subtype": "can_use_tool",
+              "tool_name": "Write",
+              "display_name": "Write",
+              "input": {
+                "file_path": "<probe-root>/control-denied-resume/workspace/written.txt",
+                "content": "PROBE_WRITE_RESULT\n"
+              },
+              "description": "written.txt",
+              "permission_suggestions": [
+                {
+                  "type": "setMode",
+                  "mode": "acceptEdits",
+                  "destination": "session"
+                }
+              ],
+              "tool_use_id": "toolu_probe416"
+            }
+          }
+        },
+        {
+          "direction": "stdin",
+          "record": {
+            "type": "control_response",
+            "response": {
+              "subtype": "success",
+              "request_id": "8c9e4564-0bd6-4d79-9e27-7044d3ef06b4",
+              "response": {
+                "behavior": "deny",
+                "message": "Denied by operator",
+                "interrupt": true,
+                "toolUseID": "toolu_probe416"
+              }
+            }
+          }
+        }
+      ],
+      "normalizedMessagesSha256": "4f6c6277b161e678ccbab80668c5b5359d24f8c68fdce6d29e9103cf31d720a1",
+      "systemHashes": [
+        "29eb1137fac05431e4f2b54856519e3736282ada3f61d0704c0cacd1287147c9",
+        "29eb1137fac05431e4f2b54856519e3736282ada3f61d0704c0cacd1287147c9"
+      ],
+      "toolDefinitionHashes": [
+        "4356eb13725045201ae0732d77161570b72a044d43be133f819d8d2a56b63c3d",
+        "4356eb13725045201ae0732d77161570b72a044d43be133f819d8d2a56b63c3d"
+      ]
+    }
+  ],
+  "approvalMessagesIdentical": true,
+  "conclusion": "PreToolUse candidate ignored; deny is an error; input rewrite executes Read; allow control envelopes absent from model requests; operator denial becomes model-visible on resume.",
+  "sourceCommit": "6b0534bc5e4dfa5159c0265a58e1a301f1916bdb",
+  "harnessSha256": {
+    "harness/run-416-probes.mjs": "a5501384a581774928358ffdad0f6a98f9d40d276f61dd4b25e2a184622e96dd",
+    "harness/probe-416-cli.mjs": "97bbbef4869591540c3aaf4de2641f7e5b20e23a5f35964e271077c5f096df25"
+  }
+}
