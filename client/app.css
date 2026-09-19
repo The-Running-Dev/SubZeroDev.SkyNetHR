@@ -907,3 +907,105 @@ body {
   color: var(--ink-dim);
   margin: var(--space-0) var(--space-0) var(--space-1);
 }
+
+/* ------------------------------------------------------- D246: panels overflow menu */
+
+.masthead__panels {
+  position: relative;
+}
+
+/* Suppresses the native disclosure triangle so the summary reads as a plain
+   `.button--quiet`, matching the other masthead openers it sits beside — unlike `.fold`
+   below, where the triangle is the point. */
+.masthead__panels > summary {
+  list-style: none;
+}
+
+.masthead__panels > summary::-webkit-details-marker {
+  display: none;
+}
+
+.masthead__panels-menu {
+  position: absolute;
+  top: 100%;
+  right: var(--space-0);
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  margin-top: var(--space-1);
+  padding: var(--space-2);
+  border: var(--border-width) solid var(--line);
+  border-radius: var(--radius-1);
+  background: var(--surface-raised);
+  box-shadow: var(--shadow-1);
+}
+
+/* --------------------------------------------------------- D246: verbosity folds */
+
+.fold {
+  margin: var(--space-1) var(--space-0) var(--space-0);
+}
+
+.fold__summary {
+  cursor: pointer;
+  color: var(--ink-faint);
+  font-size: var(--text-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+/* ------------------------------------------------------------ D246: attachments */
+
+.attachments {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.attachment-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+}
+
+.attachment-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding: var(--space-1) var(--space-2);
+  border: var(--border-width) solid var(--line);
+  border-radius: var(--radius-1);
+  background: var(--surface-sunken);
+  font-size: var(--text-xs);
+}
+
+.attachment-chip__name {
+  max-width: 10rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.attachment-chip__remove {
+  padding: var(--space-0);
+  border: none;
+  background: none;
+  color: var(--ink-faint);
+  font-size: var(--text-sm);
+  line-height: 1;
+  cursor: pointer;
+}
+
+/* D246: the compose box's `<textarea>` replaces the old single-line `<input>` — sized to
+   grow with a paste or a Shift+Enter newline, capped so it cannot push the transcript and
+   sidebar out of the viewport the way an unbounded textarea would. */
+textarea.field__input {
+  resize: vertical;
+  min-height: 2.5rem;
+}
+
+.compose textarea.field__input {
+  max-height: 10rem;
+}

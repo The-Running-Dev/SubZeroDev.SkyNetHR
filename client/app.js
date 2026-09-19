@@ -59,6 +59,22 @@ const state = {
   // — a reconnect never replays a delta (I51), so no entry survives one, and a stale entry
   // left behind would suppress a `message` that has no bubble to match it against.
   streamedMessages: new Map(),
+  // D246: callId -> { body, fold, inputPre } for the `tool.call` node it was rendered
+  // from, so a `permission.request` sharing that callId can merge into it rather than
+  // drawing a second block. Reset on every `openStream`, same as `streamedMessages`.
+  toolCallsByCallId: new Map(),
+  // D246: verbosity level for `thinking`/`tool.call`/`tool.result` folding — persisted
+  // alongside the theme (D60), never sent to the server.
+  verbosity: 'normal',
+  // D246: files chosen for the next message, kept here rather than read from the native
+  // `<input type=file>` directly — a `FileList` cannot drop a single entry, which the
+  // chip-removal control needs to do.
+  pendingAttachments: [],
+  // D246: whether the operator explicitly opened the checklist/payroll overlay this
+  // session — `refreshChecklist`/`refreshPayroll` also run from background events
+  // (a tick from another operator, a `usage` envelope) and must not pop either panel
+  // open over the whole screen just because that unrelated refresh ran.
+  panelsOpen: { checklist: false, payroll: false },
 };
 
 function currentSession() {
@@ -253,6 +269,7 @@ async function refreshSessions() {
   applyStatusBadge();
   applyTurnControls();
   $('terminate-open').hidden = state.sessionId === null;
+  $('masthead-panels').hidden = state.sessionId === null;
 }
 
 function selectSession(sessionId) {
@@ -260,8 +277,15 @@ function selectSession(sessionId) {
   state.refetched = false;
   applySessionAvailability();
   applyPolicyBanner();
-  $('checkpoints').hidden = false;
-  $('reviews').hidden = false;
+  // D246: the four working-surface panels are operator-opened overlays now, not
+  // always-visible sections — a session switch closes whatever was left open rather
+  // than forcing any of them back up.
+  $('checkpoints').hidden = true;
+  $('checklist').hidden = true;
+  $('payroll').hidden = true;
+  $('reviews').hidden = true;
+  state.panelsOpen.checklist = false;
+  state.panelsOpen.payroll = false;
   $('terminate-open').hidden = false;
   $('restore-report').hidden = true;
   clear($('restore-report'));
@@ -351,12 +375,18 @@ async function refreshChecklist() {
     // handlers, bound to that session's item ids) on screen under the session now
     // selected — hide the stale panel rather than trust it.
     $('checklist').hidden = true;
+    state.panelsOpen.checklist = false;
     clear($('checklist-list'));
     return;
   }
 
   const items = fetched.payload.items;
-  $('checklist').hidden = items.length === 0;
+  // S14.8 still holds — an empty list hides the panel outright — but a non-empty list no
+  // longer force-opens it: this is a full-viewport overlay now (D246), and this function
+  // also runs from a background `checklist.item.completed` envelope that the operator
+  // never asked to see.
+  if (items.length === 0) state.panelsOpen.checklist = false;
+  $('checklist').hidden = !state.panelsOpen.checklist || items.length === 0;
   const list = $('checklist-list');
   clear(list);
   for (const item of items) {
@@ -397,10 +427,15 @@ async function refreshPayroll() {
   const container = $('payroll-summary');
   if (!fetched.ok) {
     panel.hidden = true;
+    state.panelsOpen.payroll = false;
     clear(container);
     return;
   }
-  panel.hidden = false;
+  // S16.8 still hides the panel on `payroll_unavailable` (the branch above); a successful
+  // fetch no longer force-opens it, since this also runs from background `usage`/
+  // `turn.ended`/`session.ended` envelopes and the panel is a full-viewport overlay now
+  // (D246) — showing it is left to `openPayroll`.
+  panel.hidden = !state.panelsOpen.payroll;
   clear(container);
   container.appendChild(renderPayrollSummary(document, fetched.payload));
 }
@@ -439,6 +474,16 @@ function handleEnvelope(sessionId, envelope) {
     // vocabulary any event carries, so it comes from this stream's own session rather
     // than the envelope.
     sessionId,
+    // D246: governs `thinking`/`tool.call`/`tool.result` folding.
+    verbosity: state.verbosity,
+    // D246: joins a `tool.call` and a later `permission.request` sharing the same
+    // `callId` into one rendered block. Guarded the same way `onRequestRendered` above
+    // is — a stream torn down by a session switch can still have an event in flight.
+    onToolCallRendered: (callId, refs) => {
+      if (envelope.sessionId !== state.sessionId) return;
+      state.toolCallsByCallId.set(callId, refs);
+    },
+    getToolCallByCallId: (callId) => state.toolCallsByCallId.get(callId) ?? null,
   };
 
   if (envelope.kind === 'error' && envelope.data?.kind === 'replay_gap') {
@@ -690,6 +735,7 @@ function openStream(sessionId) {
   state.currentTurnId = null;
   state.lastEnvelopeAt = null;
   state.streamedMessages = new Map();
+  state.toolCallsByCallId = new Map();
   clear($('transcript'));
   applyStatusBadge();
   applyTurnControls();
@@ -787,13 +833,44 @@ async function fileToBase64(file) {
   return btoa(binary);
 }
 
+// D246: attachments live in `state.pendingAttachments` rather than being read from the
+// native `<input type=file>` at send time — a `FileList` has no way to drop a single
+// entry, which the chip-removal control needs.
+function renderAttachmentChips() {
+  const container = $('attachment-chips');
+  clear(container);
+  state.pendingAttachments.forEach((file, index) => {
+    const chip = document.createElement('span');
+    chip.className = 'attachment-chip';
+    chip.appendChild(text('span', 'attachment-chip__name', file.name));
+    const remove = document.createElement('button');
+    remove.className = 'attachment-chip__remove';
+    remove.type = 'button';
+    remove.textContent = '×';
+    remove.setAttribute('aria-label', `remove ${file.name}`);
+    remove.addEventListener('click', () => {
+      state.pendingAttachments.splice(index, 1);
+      renderAttachmentChips();
+    });
+    chip.appendChild(remove);
+    container.appendChild(chip);
+  });
+}
+
+function onAttachmentsChosen() {
+  const input = $('attachments');
+  state.pendingAttachments.push(...Array.from(input.files || []));
+  // Reset so choosing the same file again still fires `change`.
+  input.value = '';
+  renderAttachmentChips();
+}
+
 async function sendMessage(event) {
   event.preventDefault();
   const field = $('text');
   const value = field.value.trim();
   if (value === '' || state.sessionId === null) return;
-  const attachmentsField = $('attachments');
-  const files = attachmentsField ? Array.from(attachmentsField.files || []) : [];
+  const files = state.pendingAttachments;
   // Each file's conversion is independent CPU + I/O work — run them concurrently rather
   // than blocking the main thread for the sum of every file's encode time in turn.
   const attachments = await Promise.all(
@@ -810,8 +887,18 @@ async function sendMessage(event) {
     field.value = value;
     return status(describe(result), 'error');
   }
-  if (attachmentsField) attachmentsField.value = '';
+  state.pendingAttachments = [];
+  renderAttachmentChips();
   status('working…', 'info');
+}
+
+// D246: Enter sends, Shift+Enter inserts a newline — `<textarea>` replaced the old
+// single-line `<input>`, whose Enter key submitted the form on its own.
+function onComposeKeydown(event) {
+  if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
+    event.preventDefault();
+    $('compose').requestSubmit();
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1106,6 +1193,39 @@ function initTheme() {
 }
 
 // ---------------------------------------------------------------------------
+// D246 — verbosity (Compact/Normal/Full), persisted the same way and for the same
+// reason as the theme above: a client-side presentation choice that never reaches the
+// server and never changes markup shape.
+// ---------------------------------------------------------------------------
+
+const VERBOSITY_STORAGE_KEY = 'skynet-hr-verbosity';
+const VERBOSITY_LEVELS = ['compact', 'normal', 'full'];
+
+function applyVerbosity(level) {
+  state.verbosity = level;
+  try {
+    localStorage.setItem(VERBOSITY_STORAGE_KEY, level);
+  } catch {
+    // A storage failure still lets the switch take effect for the rest of this load;
+    // it just will not survive a reload.
+  }
+}
+
+function initVerbosity() {
+  const select = $('verbosity-select');
+  let stored = null;
+  try {
+    stored = localStorage.getItem(VERBOSITY_STORAGE_KEY);
+  } catch {
+    // No persisted preference to read back — fall through to the default below.
+  }
+  const level = VERBOSITY_LEVELS.includes(stored) ? stored : 'normal';
+  select.value = level;
+  applyVerbosity(level);
+  select.addEventListener('change', () => applyVerbosity(select.value));
+}
+
+// ---------------------------------------------------------------------------
 // S18.9/D56 — the termination screen: presentation over `DELETE /api/sessions/:id` and the
 // session state `GET /api/sessions` already returns. No field, route or stored value is
 // introduced. Severance, a context purge, session duplication and a transcript of the
@@ -1161,9 +1281,65 @@ async function confirmTerminate() {
   $('checklist').hidden = true;
   $('payroll').hidden = true;
   $('reviews').hidden = true;
+  state.panelsOpen.checklist = false;
+  state.panelsOpen.payroll = false;
   applyTurnControls();
   updateElapsedIndicator();
   await refreshSessions();
+}
+
+// ---------------------------------------------------------------------------
+// D246 — the four working-surface panels, opened from the masthead's "Panels" overflow
+// rather than always shown inline. Checkpoints and reviews toggle `.hidden` directly, the
+// same as `openAudit`/`openRequisitions` above; checklist and payroll also flip
+// `state.panelsOpen` so their own refresh functions (background-triggered or not) know
+// whether the operator actually asked to see them (S14.8/S16.8).
+// ---------------------------------------------------------------------------
+
+function closePanelsMenu() {
+  $('masthead-panels').open = false;
+}
+
+function openCheckpoints() {
+  closePanelsMenu();
+  $('checkpoints').hidden = false;
+  void refreshCheckpoints();
+}
+
+function closeCheckpoints() {
+  $('checkpoints').hidden = true;
+}
+
+function openChecklist() {
+  closePanelsMenu();
+  state.panelsOpen.checklist = true;
+  void refreshChecklist();
+}
+
+function closeChecklist() {
+  $('checklist').hidden = true;
+  state.panelsOpen.checklist = false;
+}
+
+function openPayroll() {
+  closePanelsMenu();
+  state.panelsOpen.payroll = true;
+  void refreshPayroll();
+}
+
+function closePayroll() {
+  $('payroll').hidden = true;
+  state.panelsOpen.payroll = false;
+}
+
+function openReviews() {
+  closePanelsMenu();
+  $('reviews').hidden = false;
+  void refreshReviews();
+}
+
+function closeReviews() {
+  $('reviews').hidden = true;
 }
 
 // ---------------------------------------------------------------------------
@@ -1174,10 +1350,17 @@ async function confirmTerminate() {
 function showLogin() {
   $('login').hidden = false;
   $('console').hidden = true;
-  // The audit panel is a fixed full-viewport overlay independent of `#console` (S12.7) —
-  // left open, it paints above `#login` and hides the very form this function exists to show.
+  // Every `.panel--audit` overlay is independent of `#console` (S12.7) — left open, any
+  // one of them paints above `#login` and hides the very form this function exists to
+  // show. D246 turned checkpoints/checklist/payroll/reviews into overlays too.
   $('audit').hidden = true;
   $('terminate').hidden = true;
+  $('checkpoints').hidden = true;
+  $('checklist').hidden = true;
+  $('payroll').hidden = true;
+  $('reviews').hidden = true;
+  state.panelsOpen.checklist = false;
+  state.panelsOpen.payroll = false;
 }
 
 async function submitLogin(event) {
@@ -1193,6 +1376,9 @@ async function submitLogin(event) {
 function start() {
   $('new-session').addEventListener('submit', createSession);
   $('compose').addEventListener('submit', sendMessage);
+  $('text').addEventListener('keydown', onComposeKeydown);
+  $('attachments-button').addEventListener('click', () => $('attachments').click());
+  $('attachments').addEventListener('change', onAttachmentsChosen);
   $('login-form').addEventListener('submit', submitLogin);
   $('refresh').addEventListener('click', () => void refreshSessions());
   $('audit-open').addEventListener('click', openAudit);
@@ -1202,6 +1388,14 @@ function start() {
   $('requisitions-open').addEventListener('click', openRequisitions);
   $('requisitions-close').addEventListener('click', closeRequisitions);
   $('raise-requisition').addEventListener('submit', raiseRequisition);
+  $('checkpoints-open').addEventListener('click', openCheckpoints);
+  $('checkpoints-close').addEventListener('click', closeCheckpoints);
+  $('checklist-open').addEventListener('click', openChecklist);
+  $('checklist-close').addEventListener('click', closeChecklist);
+  $('payroll-open').addEventListener('click', openPayroll);
+  $('payroll-close').addEventListener('click', closePayroll);
+  $('reviews-open').addEventListener('click', openReviews);
+  $('reviews-close').addEventListener('click', closeReviews);
   $('review-form').addEventListener('submit', saveReviewDraft);
   $('review-publish').addEventListener('click', () => void publishReview());
   $('terminate-open').addEventListener('click', openTerminate);
@@ -1217,6 +1411,7 @@ function start() {
   const elapsedTicker = setInterval(updateElapsedIndicator, 15000);
   if (typeof elapsedTicker.unref === 'function') elapsedTicker.unref();
   initTheme();
+  initVerbosity();
   void refreshSessions();
   void refreshRequisitionOptions();
 }
