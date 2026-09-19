@@ -5932,6 +5932,71 @@ ordinary dependency decision; the CDP driver is deleted when it is. Going the ot
 committed baselines and wanting rid of them — means unpicking a per-platform artifact set and
 whatever grew to maintain it, which is the asymmetry that decided this.
 
+### 2026-09-19 — D246 The transcript pane holds only the transcript and the composer; working surfaces move behind the masthead
+Context: `client/index.html`'s `.transcript-pane` stacks six siblings in one flex column —
+`#transcript`, then `#checkpoints`, `#checklist`, `#payroll`, `#reviews`, then `#compose`. Only
+`#transcript` carries `flex: 1`; the four working-surface panels size to their content, so every
+one that unhides steals height from the transcript and drives the composer toward the fold. A
+session with a checkpoint, a payroll summary and a review form open puts the composer off-screen
+entirely, and the operator scrolls past a review form to reach the message box. That is not a
+predicted failure: an operator typed a turn's message into `#review-body` because it was the only
+text field visible, which is the whole defect in one action. The pane already contains the
+remedy — `#requisitions`, `#audit` and `#terminate` are `.panel--audit` overlays toggled from
+masthead buttons, outside the pane and already built four ways per D58, so the four stragglers are
+an inconsistency rather than a missing pattern.
+
+Two further defects share the root cause, which is that the client has no disclosure layer at all.
+`toolCallNode` emits `JSON.stringify(input, null, 2)` unconditionally; `permissionRequestNode` then
+emits the same bytes a second time for the same `callId` and, unlike the tool block, renders no
+summary line — so the approval gate is simultaneously the noisiest block on screen and the least
+scannable, and the operator reads the payload twice to learn one thing. Separately `#attachments`
+is a bare `<input type="file" multiple>` flexed against the submit button, rendering
+"Browse… No files selected." hard up against Send.
+
+Chosen: the pane holds three children — the policy banner, `#transcript` as the sole grower, and
+`#compose` pinned beneath it. `#checkpoints`, `#checklist`, `#payroll` and `#reviews` become
+`.panel--audit` overlays on the existing pattern. A verbosity control (Compact / Normal / Full)
+governs `tool.call` input, `thinking`, and `tool.result` truncation, persisted browser-side
+alongside the theme per D60. A `permission.request` sharing a `callId` with an already-rendered
+`tool.call` merges into one block carrying that call's `ToolCall.summary` as a heading **above** the
+exact input, never in place of it. Attachments become a button plus removable chips over a hidden
+native input, and `#text` becomes a `<textarea>` — Enter sends, Shift+Enter newlines.
+
+Four constraints bound this and none of them were negotiable. The permission prompt shows what will
+actually run and not a summary of it (`10-design.md` § Threat model, `20-contract.md` § I12, S4.11),
+so the merged block's raw input is exempt from every verbosity level including Compact — verbosity
+is a fold over tool calls, which S18.5 already admits as a themeable surface, and never over the
+gate. S3.9/D57 requires the transcript, the session list and the compose box to render at 390 px
+with no horizontal scrolling, and S4.14 requires the exact tool input to stay legible there, which
+is why the masthead's new entries group behind one overflow rather than adding five more buttons to
+the ten already there. S2.14/D78/S18.1 keep every value a custom property in the one stylesheet
+with no runtime-generated style. And I48 keeps `ToolCall.summary` a text node, which is how it is
+injected into the merged block.
+
+Two costs, stated rather than buried. Moving four panels changes the surface set S18.5 ranges over;
+that pass is designed to fail on a surface it did not cover, so the cost is paid as a failing gate
+that must be answered rather than as silent drift. And every relocated panel is rebuilt four ways
+per D58, which is the price of reusing the overlay pattern instead of inventing a second one.
+
+Rejected: **a right-hand tabbed dock** holding the four surfaces beside the transcript. It shows
+more at once and is what a reader expects from the phrase "separate tab", and it was rejected on
+three counts — it narrows the transcript on the one axis the brief says layout effort goes to, it
+is a genuinely new layout concept owed four theme implementations with no existing precedent to
+copy, and at 390 px it must collapse into something, which means building the overlay pattern
+anyway and maintaining both. Rejected **collapsing the four sections in place**, the smallest
+possible diff and the smallest S18.5 churn: it leaves the composer below four collapsed headers, so
+the originating defect — the message box is not where the operator looks — survives in reduced
+form, and a reduced form of that defect is still the operator typing into the wrong field.
+Rejected **one masthead button per panel**, which is the obvious extension of the existing pattern
+and breaks S3.9 at 390 px by arithmetic. Rejected **showing the summary instead of the input in the
+permission block**, which is the cleanest-looking prompt available and is forbidden outright by
+I12 — it is recorded here because it is the first thing anyone reaching for "make the gate
+readable" will try, and the reason it is wrong is not visible from the markup.
+
+Reversibility: cheap. Every change is client presentation — `client/index.html`, `app.css`,
+`app.js`, `render.js` — and touches no contract type, no event envelope and no server behaviour;
+the permission merge joins on a `callId` the contract already carries. Reverting is a revert.
+
 ## Open
 
 Staging only. Once an item becomes an issue it leaves this list.
