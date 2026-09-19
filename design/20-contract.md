@@ -3197,3 +3197,47 @@ belong to the `exec --json` fallback alone; neither affects a session on `app-se
     protecting. The rule is keyed on *parsing* and not on a missing field, so a lock predating the
     lease still reclaims (I61). Had 16 kept a network share in scope this would have gone the other
     way — rename's atomicity over SMB and NFS is exactly the uncertainty the item named. (#206)
+18. **Indexed access to a stored tool-output blob — search, read-range, read-section.** Nothing in
+    `10-design.md` determines any of the three, and the runtime-redesign brief that asks for them is
+    not in this repository; what exists is a finding
+    (`design/findings/runtime-redesign-classification.md`, item 12), which that document's own
+    header puts below this one. All three are therefore here, and not because a parameter list is
+    merely missing — each carries an architectural question that a signature would decide by
+    omission. The shipped half is not in doubt and is not what this item is about: the blob, its
+    per-session budget, the `truncated` and `bytes` envelope fields, and the whole-blob fetch are
+    all landed and documented above.
+
+    **What the tree already determines, and what it does not.** The runtime protocol declares
+    `toolOutput.read` over an offset and a length returning a `Chunk`
+    (`src/agent-console/protocol/wire.ts`), implemented by streaming and skipping in
+    `src/agent-console/runtime/server.ts`; the HTTP edge's blob response writes `200`
+    unconditionally and reads no `Range` header (`src/edge/http-common/index.ts`). Read-range is
+    thus already a settled shape one layer down and absent only at the edge, which makes it the
+    cheapest of the three and still not a transcription. Surfacing it is a public HTTP behaviour on
+    a route whose present headers are a control and not a convenience — `nosniff` and `attachment`
+    are there so an HTML tool result cannot render as a document in the console's origin, and
+    whether a partial response keeps that property is a question, not a detail. `ApiErrorCode`
+    also has no member for an unsatisfiable range, so that answer is a public-surface addition
+    whichever code it lands on.
+
+    **D163's and D86's refusal of byte offsets does not reach this blob, and that is a finding
+    rather than a permission.** Both refused byte offsets as a quasi-public interface over
+    `events.ndjson` and `audit.ndjson`: append-only files that grow, tear at the tail, and would
+    need a sidecar kept consistent with them. A tool-output blob is written once, never appended,
+    and never evicted, and no sidecar is in question, so every cost D163 priced is absent here.
+    Recording that is what stops the next pass relitigating it. It settles no shape by itself.
+
+    **Read-section is a line range and not a byte range**, because the output it serves is
+    line-structured and a byte cut splits a line. That needs either a scan per request or a line
+    index — and a line index is the sidecar D163 refused, arriving by another door and bringing back
+    the torn-consistency story the blob's immutability had removed.
+
+    **Search has a cost bound rather than a shape problem.** The per-session budget admits blobs
+    into the hundreds of MiB, the server is single-process, and a scan on the request path is
+    head-of-line blocking for every other session's fan-out; operator-supplied regex adds a
+    catastrophic-backtracking surface that substring search does not have. Whether search belongs on
+    the server at all is open — the client already fetches the whole blob for the download
+    affordance it offers today, and a find over a fetched range is a third option with no server
+    surface at all.
+
+    All three route to `/design`. It is not yet issued: `/track`'s next run opens it.
