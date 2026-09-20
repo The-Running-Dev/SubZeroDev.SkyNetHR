@@ -226,6 +226,26 @@ export interface LoadedMeta {
     readonly result: Result<SessionRecord, StoreError>;
 }
 
+// Mirrors `ToolOutputWindow` in the top-level contract (`fromLine` 1-based, `lineCount: null`
+// runs to the end of the blob, D251/D254) — this module's own vocabulary carries no `Store`
+// shapes, so the internal `SessionStore`/`SessionCore` interfaces below declare these locally.
+export interface ToolOutputWindow {
+    readonly fromLine: number;
+    readonly lineCount: number | null;
+}
+
+// Mirrors `ToolOutputTotals` in the top-level contract: populated only when the counting
+// scan reached the blob's true end, never as a stand-in for an empty blob (D253, I71).
+export interface ToolOutputTotals {
+    readonly lines: number;
+    readonly bytes: number;
+}
+
+// Mirrors `ToolOutputStat` in the top-level contract: the whole of what one `stat` answers (D255).
+export interface ToolOutputStat {
+    readonly bytes: number;
+}
+
 export interface SessionStore {
     readonly createAttempts: CreateAttemptStore;
     readonly lease: RuntimeLease;
@@ -241,6 +261,11 @@ export interface SessionStore {
     dropRing(sessionId: SessionId): void;
     writeToolOutput(sessionId: SessionId, turnId: TurnId, callId: CallId, bytes: Buffer): Promise<Result<void, StoreError>>;
     openToolOutput(sessionId: SessionId, turnId: TurnId, callId: CallId): Promise<Result<NodeJS.ReadableStream, StoreError>>;
+    openToolOutputWindow(sessionId: SessionId, turnId: TurnId, callId: CallId, window: ToolOutputWindow): Promise<Result<{
+        readonly stream: NodeJS.ReadableStream;
+        readonly totals: ToolOutputTotals | null;
+    }, StoreError>>;
+    statToolOutput(sessionId: SessionId, turnId: TurnId, callId: CallId): Promise<Result<ToolOutputStat, StoreError>>;
     writeAttachment(sessionId: SessionId, turnId: TurnId, attachmentId: AttachmentId, bytes: Buffer, mediaType: string): Promise<Result<void, StoreError>>;
     openAttachment(sessionId: SessionId, turnId: TurnId, attachmentId: AttachmentId): Promise<Result<{
         readonly stream: NodeJS.ReadableStream;
@@ -384,6 +409,11 @@ export interface SessionCore {
     listCheckpoints(sessionId: SessionId, owner: PrincipalId): Promise<Result<readonly Checkpoint[], SessionError>>;
     restore(sessionId: SessionId, owner: PrincipalId, sha: GitSha): Promise<Result<RestoreResult, SessionError>>;
     openToolOutput(sessionId: SessionId, owner: PrincipalId, turnId: TurnId, callId: CallId): Promise<Result<NodeJS.ReadableStream, SessionError>>;
+    openToolOutputWindow(sessionId: SessionId, owner: PrincipalId, turnId: TurnId, callId: CallId, window: ToolOutputWindow): Promise<Result<{
+        readonly stream: NodeJS.ReadableStream;
+        readonly totals: ToolOutputTotals | null;
+    }, SessionError>>;
+    statToolOutput(sessionId: SessionId, owner: PrincipalId, turnId: TurnId, callId: CallId): Promise<Result<ToolOutputStat, SessionError>>;
     openAttachment(sessionId: SessionId, owner: PrincipalId, turnId: TurnId, attachmentId: AttachmentId): Promise<Result<{
         readonly stream: NodeJS.ReadableStream;
         readonly mediaType: string;

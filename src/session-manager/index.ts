@@ -138,6 +138,8 @@ export function createSessionManager(deps: {
     listCheckpoints: async (...args) => mapped(await runtime.listCheckpoints(...args)),
     restore: async (...args) => mapped(await runtime.restore(...args)),
     openToolOutput: async (...args) => mapped(await runtime.openToolOutput(...args)),
+    openToolOutputWindow: async (...args) => mapped(await runtime.openToolOutputWindow(...args)),
+    statToolOutput: async (...args) => mapped(await runtime.statToolOutput(...args)),
     openAttachment: async (...args) => mapped(await runtime.openAttachment(...args)),
     subscribe: async (id, owner, after, sink) => mapped(await runtime.subscribe(id, owner, after, sink as Parameters<SessionCore['subscribe']>[3])),
     readAudit: query => runtime.admin.readAudit(query) as ReturnType<SessionManager['readAudit']>,

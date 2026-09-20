@@ -47,6 +47,48 @@ for (const backend of ['fs', 'memory'] as const) {
     assert.ok((await store.removeAttachments(record.id, turn)).ok); assert.equal((await store.openAttachment(record.id, turn, attachment)).ok, false);
     assert.ok((await store.writeToolOutput(record.id, turn, call, Buffer.from('tool'))).ok);
     const tool = await store.openToolOutput(record.id, turn, call); assert.ok(tool.ok); assert.equal((await bytes(tool.value)).toString(), 'tool');
+
+    // Two-pass correctness (D254): a windowed read's bytes must match a manual slice of the
+    // whole blob, and totals (D253) must equal a manual line/byte count of the whole blob.
+    const lines = ['first', 'second', 'third', 'fourth', 'fifth'];
+    const blob = Buffer.from(lines.map(l => l + '\n').join(''));
+    const windowTurn = 'window-turn' as never, windowCall = 'window-call' as never;
+    assert.ok((await store.writeToolOutput(record.id, windowTurn, windowCall, blob)).ok);
+    const wholeManual = blob.toString();
+    const manualLineStarts = [0, ...[...blob].reduce<number[]>((acc, byte, i) => { if (byte === 0x0a) acc.push(i + 1); return acc; }, [])].slice(0, -1);
+    const manualSlice = (fromLine: number, lineCount: number | null) => {
+      const start = manualLineStarts[fromLine - 1]!;
+      const end = lineCount === null ? blob.length : (manualLineStarts[fromLine - 1 + lineCount] ?? blob.length);
+      return blob.subarray(start, end).toString();
+    };
+    const midWindow = await store.openToolOutputWindow(record.id, windowTurn, windowCall, { fromLine: 2, lineCount: 2 });
+    assert.ok(midWindow.ok);
+    assert.equal((await bytes(midWindow.value.stream)).toString(), manualSlice(2, 2));
+    assert.equal(midWindow.value.totals, null); // scan stopped short of the true end (D253)
+
+    const tailWindow = await store.openToolOutputWindow(record.id, windowTurn, windowCall, { fromLine: 4, lineCount: null });
+    assert.ok(tailWindow.ok);
+    assert.equal((await bytes(tailWindow.value.stream)).toString(), manualSlice(4, null));
+    assert.deepEqual(tailWindow.value.totals, { lines: lines.length, bytes: blob.length }); // reached true end
+
+    const fullWindow = await store.openToolOutputWindow(record.id, windowTurn, windowCall, { fromLine: 1, lineCount: null });
+    assert.ok(fullWindow.ok);
+    assert.equal((await bytes(fullWindow.value.stream)).toString(), wholeManual);
+    assert.deepEqual(fullWindow.value.totals, { lines: lines.length, bytes: blob.length });
+
+    // I69 \u2014 a window starting past the last line is a success (empty body), not an error.
+    const pastEnd = await store.openToolOutputWindow(record.id, windowTurn, windowCall, { fromLine: lines.length + 10, lineCount: 3 });
+    assert.ok(pastEnd.ok);
+    assert.equal((await bytes(pastEnd.value.stream)).toString(), '');
+    assert.deepEqual(pastEnd.value.totals, { lines: lines.length, bytes: blob.length });
+
+    // statToolOutput (D255): one stat, no scan, no line count.
+    const stat = await store.statToolOutput(record.id, windowTurn, windowCall);
+    assert.ok(stat.ok);
+    assert.deepEqual(stat.value, { bytes: blob.length });
+    assert.equal((await store.statToolOutput(record.id, windowTurn, 'missing' as never)).ok, false);
+    assert.equal((await store.openToolOutputWindow(record.id, windowTurn, 'missing' as never, { fromLine: 1, lineCount: null })).ok, false);
+
     for (const bad of ['../escape', 'CON', 'a:b', 'trailing.', 'e\u0301']) {
       assert.equal((await store.writeAttachment(record.id, turn, bad as never, Buffer.from('x'), 'text/plain')).ok, false);
       assert.equal((await store.openToolOutput(record.id, turn, bad as never)).ok, false);
