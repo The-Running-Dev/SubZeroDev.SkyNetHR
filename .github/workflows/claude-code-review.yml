@@ -6,6 +6,11 @@ on:
 
 jobs:
   claude-review:
+    # The action exchanges the workflow's OIDC token for a GitHub App token, and that
+    # exchange 401s unless `github.actor` itself has write access. A push by the Copilot
+    # coding agent sets the actor to a bot that does not, so the review job fails on the
+    # token exchange rather than on anything in the diff. Skip those revisions instead.
+    if: ${{ github.actor != 'Copilot' && !endsWith(github.actor, '[bot]') }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
