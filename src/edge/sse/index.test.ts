@@ -1379,9 +1379,15 @@ function findOwnFrame(frames: string[], kind: string, turnId: string): string {
  * enough to intermittently exceed even a widened deadline (#299). Reusing the one connection
  * removes the redundant replay rather than just giving it more time to finish.
  */
-async function runTruncatedTurn(h: Harness, id: string, bigBytes: number): Promise<{ turnId: string; callId: string; bytes: number }> {
+async function runTruncatedTurn(
+  h: Harness,
+  id: string,
+  bigBytes: number,
+  options: { after?: number } = {},
+): Promise<{ turnId: string; callId: string; bytes: number; lastSeq: number }> {
   process.env['SKYNET_BIG_TOOL_RESULT_BYTES'] = String(bigBytes);
-  const events = await get(h, `/api/sessions/${id}/events`);
+  const headers = options.after === undefined ? {} : { 'last-event-id': String(options.after) };
+  const events = await get(h, `/api/sessions/${id}/events`, 'ben', headers);
   const sent = await post(h, `/api/sessions/${id}/message`, { text: 'go' });
   const { turnId } = (await sent.json()) as { turnId: string };
 
@@ -1399,7 +1405,7 @@ async function runTruncatedTurn(h: Harness, id: string, bigBytes: number): Promi
           permissionPost = post(h, `/api/sessions/${id}/permission`, { requestId, decision: 'allow', scope: 'once', rule: null, reason: null });
         }
       }
-      return findOwnFrame(f, 'tool.result', turnId) !== undefined;
+      return findOwnFrame(f, 'tool.result', turnId) !== undefined && findOwnFrame(f, 'turn.ended', turnId) !== undefined;
     },
     15000,
   );
@@ -1409,7 +1415,8 @@ async function runTruncatedTurn(h: Harness, id: string, bigBytes: number): Promi
   const dataLine = frame.split('\n').find((l) => l.startsWith('data: '))!;
   const envelope = JSON.parse(dataLine.slice('data: '.length)) as { data: { turnId: string; callId: string; truncated: boolean; bytes: number } };
   assert.equal(envelope.data.truncated, true, 'the fixture emitted enough bytes to cross the cap');
-  return { turnId: envelope.data.turnId, callId: envelope.data.callId, bytes: envelope.data.bytes };
+  const lastSeq = frames.reduce((max, entry) => Math.max(max, frameId(entry) ?? max), 0);
+  return { turnId: envelope.data.turnId, callId: envelope.data.callId, bytes: envelope.data.bytes, lastSeq };
 }
 
 /**
@@ -1432,6 +1439,13 @@ async function getBlobWhenReady(h: Harness, url: string, operator = 'ben'): Prom
     if (body.error?.code !== 'no_such_output' || Date.now() >= deadline) return res;
     await new Promise((resolve) => setTimeout(resolve, 25));
   }
+}
+
+function frameId(frame: string): number | null {
+  const line = frame.split('\n').find((entry) => entry.startsWith('id: '));
+  if (!line) return null;
+  const parsed = Number.parseInt(line.slice('id: '.length), 10);
+  return Number.isFinite(parsed) ? parsed : null;
 }
 
 describe('S9.2/S9.3/S9.5 — GET .../tool-output/:turnId/:callId', () => {
@@ -1477,7 +1491,7 @@ describe('S9.2/S9.3/S9.5 — GET .../tool-output/:turnId/:callId', () => {
     const h = await makeEdge(undefined, { caps: S9_CAPS }, 'big-tool-result');
     const id = await newSession(h, 't4');
     const first = await runTruncatedTurn(h, id, 5000);
-    const second = await runTruncatedTurn(h, id, 6000);
+    const second = await runTruncatedTurn(h, id, 6000, { after: first.lastSeq });
     assert.equal(first.callId, second.callId, 'the fixture reuses call-1 on every turn (test setup)');
     assert.notEqual(first.turnId, second.turnId);
 
