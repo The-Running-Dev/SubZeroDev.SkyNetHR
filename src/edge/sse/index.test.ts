@@ -491,21 +491,37 @@ async function readFrames(
   const reader = res.body!.getReader();
   const decoder = new TextDecoder();
   let raw = '';
-  const deadline = Date.now() + timeoutMs;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => reject(new Error(`timed out; saw:\n${raw}`)), timeoutMs);
+  });
   try {
     for (;;) {
-      if (Date.now() > deadline) throw new Error(`timed out; saw:\n${raw}`);
-      const { value, done } = await reader.read();
+      const { value, done } = await Promise.race([reader.read(), timeout]);
       if (done) break;
       raw += decoder.decode(value, { stream: true });
       const frames = raw.split('\n\n').filter((f) => f.trim().length > 0);
       if (stop(frames, raw)) return { frames, raw };
     }
   } finally {
+    clearTimeout(timer);
     await reader.cancel().catch(() => {});
   }
   return { frames: raw.split('\n\n').filter((f) => f.trim().length > 0), raw };
 }
+
+it('readFrames enforces its own timeout while an open SSE stream is idle', { timeout: 1000 }, async () => {
+  const stream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(new TextEncoder().encode('event: session.started\n\n'));
+    },
+  });
+
+  await assert.rejects(
+    readFrames(new Response(stream), () => false, 25),
+    (error: Error) => error.message.includes('timed out; saw:') && error.message.includes('event: session.started'),
+  );
+});
 
 describe('S2.3 — GET /api/sessions/:id/events', () => {
   it('is text/event-stream with id: set to seq and event: set to kind, one envelope per message', async () => {
