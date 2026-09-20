@@ -2042,7 +2042,255 @@ platform is S19's.
 Slices below have no closed issue, or an issue reopened because it was closed with unticked
 `Done when` boxes. `/track` syncs these normally.
 
-None at present — S30, S31 and S32 landed and moved above.
+**S33 to S37 are the runtime-redesign stream's first slices** (D256). They are tier two by their
+home in the brief — item 8, what a session has cost — except S34 and S37, which serve tier-one
+item 3, watching output stream in. All five are **client-only folds over surfaces that already
+exist**: none introduces a signature, none touches the server, and none depends on another of the
+five, so they may be taken in any order. **S34 is the one to take first** — it is the only one of
+the five whose premise is unchecked, and it opens with an enumeration that stops the slice if the
+premise fails. The rest are class-S against `SessionSummary`, `PayrollView` and the envelope
+stream as this document's *What no slice covers* enumerates them.
+
+## S33 — Where this session's tokens went
+
+**Tier two, under brief item 8.** Runtime-redesign items 22 (its measured half), 23 and 25 (its
+measured half). D248 landed the per-turn partition and nothing renders it; this builds the surface
+over it, and its hardest requirement is what it must refuse to display.
+
+Delivers: An operator looking at what a session cost can see which kinds of token it burned —
+fresh input, output, cache reads, cache writes — and which turns drove the growth, instead of one
+running total. Where the console cannot say what a cost was spent on, it says so in words rather
+than offering a guess that looks like an answer.
+
+Touches: `client` (one working-surface panel over the payroll route's existing response). No
+server change, no contract change.
+
+Depends on: S16 (the payroll view and its route), S20 (priced burn).
+
+Acceptance:
+  - S33.1 The four components of `burn` are each shown as their own figure and as a share of the
+    total, against a session whose `usage` events carry a different value in each of the four. The
+    four figures sum to the total exactly, and nothing is re-derived from a rounded share.
+  - S33.2 Cache-hit versus cache-miss is derived from those four components and from nothing else:
+    a session with cache reads and no cache writes reads as all-hit, one with writes and no reads
+    as all-miss, and both are asserted.
+  - S33.3 **No category the adapters do not measure ever appears.** The panel names no figure for
+    system instructions, conversation history, project documents, file reads, or subagents, and a
+    test asserts those five subjects appear nowhere in the rendered panel. D75 and I28 are why: one
+    usage figure arrives per call carrying no attribution, so a plausible split would be a
+    fabricated one.
+  - S33.4 The panel states that limit rather than leaving it to be inferred from an absence: with a
+    session carrying real burn, it renders a sentence saying the console measures what the
+    transport reports and cannot attribute it to what was in the model's context. Asserted on text.
+  - S33.5 Per-turn input growth is shown from `PayrollView.turns` in the order given: a session
+    whose turns carry 10 000, 12 000 and 54 000 input tokens renders three rows with deltas of
+    +10 000, +2 000 and +42 000. The row carrying the session's largest delta carries a marker the
+    other rows do not, asserted both on that row and on its absence from the others.
+  - S33.6 A turn that reported no usage renders as a row of zeroes and never as an absent row —
+    D248's rule, re-asserted against a `turns` array holding one all-zero entry between two
+    non-zero ones.
+  - S33.7 A session carrying `session.notice / usage_unavailable` renders the whole panel as
+    unavailable and not as zero, and nothing infers unavailability by testing components against
+    zero. The notice is the only discriminator (D146).
+  - S33.8 Every figure and label reaches the page as a text node (I26), asserted with a session id
+    and a model string each carrying angle brackets and a quote.
+  - S33.9 The panel is read-only: instrumented, opening it issues exactly one `GET` against the
+    payroll route and no other request, and no `POST`, `PUT` or `DELETE` at all.
+
+Out of scope: attributing burn to the contents of the model's context, which D75 and I28 make
+impossible and which S33.3 forbids by name; per-*model-call* budgets, which the CLI makes and
+SkyNet never sees; budget thresholds and a budget-crossing event, which need a surface the contract
+does not carry (`20-contract.md § Unresolved` 21); changing what `PayrollView` carries, which is
+`/contract`'s; and pricing, which S20 already built and this only displays. Running this slice's
+suite on the second platform is S19's.
+
+## S34 — Read the change the agent made, as a diff
+
+**Tier one, under brief item 3.** Runtime-redesign item 16. The brief's `An editor` non-goal
+explicitly admits this one — "Diffs are rendered read-only because the agent emits them" — and
+nothing renders them today. **This slice opens with an enumeration and can stop there**, because
+whether an edit-class tool result carries a recoverable change has never been checked.
+
+Delivers: An operator watching an agent edit a file sees the change as a diff — lines removed and
+lines added, marked apart — instead of a wall of tool-result text. Nothing on the page lets them
+edit it, apply it, or put it back; it is a record of what already happened.
+
+Touches: `client` (the tool-result renderer and its stylesheet). No server change.
+
+Depends on: S2d (the page), S9 (tool output and its truncation flag).
+
+Acceptance:
+  - S34.1 **The slice opens with an enumeration and stops if it fails.** Against a captured fixture
+    of a real edit-class tool result from each supported vendor, this records in a finding which
+    field carries the change and in what form — unified-diff text, a before/after pair, or neither.
+    If neither vendor's result carries a recoverable change, **the slice stops and reports**: a
+    renderer that reconstructs a diff by reading the file off disk is a different slice and a
+    different argument.
+  - S34.2 A unified-diff hunk renders as elements: one element per line carrying its own
+    added/removed/context marking, with the hunk header as its own row. Asserted against a two-hunk
+    diff, on element structure rather than on a text snapshot.
+  - S34.3 **Every line reaches the page as a text node and never as markup** (I26), asserted
+    against a diff whose added line is a script tag and whose file path carries a quote. The sole
+    `innerHTML` occurrence in `client/render.js` is the comment asserting there is none, and a diff
+    view is the most likely place for that to stop being true.
+  - S34.4 A result whose output was truncated renders the diff it has and states that it is
+    partial, decided from the `truncated` flag already on the envelope rather than by inspecting
+    the text for a cut hunk.
+  - S34.5 A result carrying no recoverable change renders exactly as it does today, asserted by
+    comparing the produced DOM for a `Read` result and a `Bash` result before and after this slice.
+  - S34.6 **The diff is inert.** No control that applies, reverts, stages, copies to disk or opens
+    an editor appears inside a rendered hunk, asserted by the absence of any button, form or
+    contenteditable element within it. The brief's `An editor` non-goal is why this is a criterion
+    rather than a review note.
+  - S34.7 The diff obeys the three verbosity levels D246 shipped — folded closed at `compact`, open
+    at `normal` and `full` — asserted at all three.
+  - S34.8 A diff longer than the renderer's line bound renders the first N lines and states the
+    remainder as a count, with N declared in exactly one place and asserted at N−1, N and N+1 lines.
+
+Out of scope: authoring, applying, reverting or staging a change, which the `An editor` non-goal
+forbids and S34.6 asserts against; syntax highlighting within a diff line, which needs a language
+grammar and therefore a dependency no decision authorises; a side-by-side view, which is a second
+renderer rather than the one the brief names; and fetching the full tool-output blob to rebuild a
+diff the result truncated, which S34.4 answers with a statement instead. Running this slice's suite
+on the second platform is S19's.
+
+## S35 — Say what this session is, without scrolling for it
+
+**Tier one, under brief item 3, with a tier-two figure on it.** Runtime-redesign items 20 and 30.
+D249 built the name and said in terms that the masthead was item 20's and out of its scope; this is
+that.
+
+Delivers: An operator with a session open can always see which session it is and how it is doing —
+its name, its folder, its model, whether it is running, and what it has cost — without scrolling
+back to the top. The session list says the same things about every session, so choosing between two
+of them no longer means opening both.
+
+Touches: `client` (the masthead header and the sidebar rows, over `SessionSummary` and the payroll
+route as they already stand). No server change, no contract change.
+
+Depends on: S2d (the page), S16 (the payroll view), and D249's `name`.
+
+Acceptance:
+  - S35.1 The header stays visible while the transcript scrolls: with a transcript longer than the
+    viewport scrolled to its end, the header's fields are still within the visible region. Asserted
+    on layout, not on the name of a CSS property.
+  - S35.2 The header shows, from `SessionSummary` alone: the name where one is set and the working
+    folder where it is not (D249's rule, unchanged), the vendor, the model or an explicit default
+    where `model` is null, and the session state.
+  - S35.3 The header shows burn and, where rates are set, the priced figure — taken from the
+    payroll route and never recomputed. A session whose cost is null renders as unpriced and never
+    as a zero amount (D158's rule, re-asserted because a second renderer is a second chance to
+    break it).
+  - S35.4 Every sidebar row carries the same `SessionSummary` fields as the header with the same
+    null handling, asserted by driving one session through both surfaces and comparing the rendered
+    values field by field.
+  - S35.5 An ended session reads as ended in both surfaces, and says nothing about *why*.
+    `SessionSummary` does not carry `endReason`; a row that needs one is a contract question and
+    this slice records it as such rather than inferring a reason from `endedAt`.
+  - S35.6 The header's state field updates from the envelope stream with no reload and no extra
+    session fetch; its burn figure is refreshed by one payroll fetch per turn end, not one per
+    envelope. Both asserted by instrumenting the request count across a three-turn session.
+  - S35.7 **A fifty-session list issues no payroll fetch at all**, asserted by instrumenting the
+    count. Burn is a header figure, not a row figure, and that is a cost decision rather than an
+    oversight — see `Out of scope`.
+  - S35.8 Every value reaches the page as a text node (I26), asserted with a session name and a
+    folder path each carrying angle brackets and a quote.
+
+Out of scope: a burn or cost figure per row in the session list, which S35.7 rules out — fifty rows
+would mean fifty fetches or an aggregate route, and the route is a contract question nobody has
+asked; adding a field to `SessionSummary`, which is `/contract`'s and which S35.5 names rather than
+performs; sorting, filtering or grouping the session list; and renaming, which D249 already built.
+Running this slice's suite on the second platform is S19's.
+
+## S36 — Say when the agent is going in circles
+
+**Tier one, under brief item 3.** Runtime-redesign items 3 and 39, both of them only the observable
+half. The hard part of this slice is that it must be visibly unable to do the thing its brief item
+is named after.
+
+Delivers: An operator watching a long session is told when the agent has run the same command over
+and over, or worked the same short sequence of steps repeatedly, so a loop is visible while it is
+happening rather than after the cost is counted. The console reports it and never interferes —
+every call still runs, exactly as it would have.
+
+Touches: `client` (a fold over the `tool.call` envelopes the page already holds, and a panel for
+its result). No server change.
+
+Depends on: S2c (the envelope stream), S9.
+
+Acceptance:
+  - S36.1 Two `tool.call` envelopes with the same tool and the same input count as one repeat and a
+    differing input does not, asserted against three calls where two match exactly and the third
+    differs in a single argument.
+  - S36.2 Repeats are counted across the whole session rather than only when adjacent: the count
+    survives an unrelated call between two identical ones. This is what distinguishes it from the
+    adjacency coalescing PR #407 shipped for notices, which this slice leaves untouched.
+  - S36.3 A repeated *sequence* is reported: the same ordered run of two or more distinct calls
+    occurring three times in a session is named once with its occurrence count, and a sequence
+    occurring twice is not reported. The threshold is declared in one place and asserted at two
+    occurrences and at three.
+  - S36.4 **The diagnostic never suppresses, delays, denies or alters a call.** Instrumented with
+    the fold forced to report a repeat on every call, the envelopes emitted, the approvals
+    requested and the transcript rendered are identical to the same session with the fold disabled.
+    Tool execution is inside the CLI, and per #416 a `PreToolUse` deny yields an error result rather
+    than a substituted one — so suppression is not available at this boundary even in principle,
+    and this criterion asserts the console does not behave as though it were.
+  - S36.5 The panel says what it is: it renders text stating that the count is a diagnostic and
+    that no call was prevented. Asserted on text.
+  - S36.6 The fold is bounded: over 20 000 `tool.call` envelopes it completes within a bound
+    declared in one place, asserted against that bound.
+  - S36.7 Every tool name and argument reaching the panel is a text node (I26), asserted with an
+    argument carrying angle brackets and a quote.
+
+Out of scope: suppressing a duplicate call, which is not reachable here — the read-only calls the
+brief's own examples name (`cat`, `grep`, `git status`) never reach SkyNet's approval hook at all,
+and #416 found no supported way for a hook to substitute a result; enforcement of any kind, which
+needs the model-context ownership the brief's non-goal declines; a content-addressed file-read
+cache, which is the same refusal; persisting the diagnostic as an event, which would be a contract
+surface; and standing rules, which S10 built for a different purpose and which reduce ceremony
+rather than calls. Running this slice's suite on the second platform is S19's.
+
+## S37 — Keep the agent's throat-clearing out of the record
+
+**Tier one, under brief item 3.** Runtime-redesign item 31, whose observable half is a render
+decision and whose other half is not reachable — and the slice has to say which is which on the
+screen, not only in this document.
+
+Delivers: An operator reading a transcript sees the agent's work rather than its running commentary
+about what it is about to do. The narration is still there for anyone who wants it, one setting
+away — it is demoted, never deleted.
+
+Touches: `client` (the transcript renderer and the verbosity levels D246 shipped). No server
+change.
+
+Depends on: S2c, and D246's three levels.
+
+Acceptance:
+  - S37.1 The rule that marks a text block ephemeral is declared in one place and stated as data
+    rather than scattered through the renderer, asserted by driving the classifier directly over a
+    fixture of labelled blocks.
+  - S37.2 An ephemeral block is hidden at `compact` and shown at `normal` and `full`, asserted at
+    all three levels against one fixture.
+  - S37.3 **Nothing is discarded.** A block hidden at `compact` is present again at `normal`
+    without a refetch, and twenty switches back and forth are lossless. Hiding is a render
+    decision, never a filter applied to stored events.
+  - S37.4 No envelope is dropped, rewritten or withheld: the spill and a full replay are identical
+    with the classifier enabled and disabled, asserted over a recorded session.
+  - S37.5 A turn whose assistant output is entirely ephemeral does not render as an empty turn at
+    `compact` — it renders a placeholder naming how many blocks are hidden, so that a silent turn
+    and a hidden one are not the same thing on screen.
+  - S37.6 The console states the limit: the level control or the panel carries text saying that
+    hiding narration changes what is displayed and not what the agent was given. Asserted on text.
+    SkyNet cannot keep narration out of the model's context — the CLI produced it and already holds
+    it — and a console that hid it silently would read as though it had.
+  - S37.7 Text reaches the page as a text node (I26), unchanged by this slice and asserted against
+    an ephemeral block carrying angle brackets.
+
+Out of scope: removing narration from what the model sees, which is not reachable at this boundary
+and which S37.6 states rather than implies; a fourth verbosity level, which D246 settled at three;
+reclassifying tool results or thinking blocks, which D246 already folds by their own rule; and
+persisting the classification, which would make a render decision permanent and is the opposite of
+what S37.3 requires. Running this slice's suite on the second platform is S19's.
 
 ---
 
@@ -2097,37 +2345,68 @@ worse of the two irregularities. See S19 for why the verticality rule's purpose 
   aggregation. S16 covers the part with a source — burn and idle over a session's own event log.
   Whether the rest is in scope, and from what data, is unanswered.
 
-**A whole work stream, and it is the largest thing this section has ever listed:**
+**The runtime-redesign stream, settled by D256.** It was listed here as a whole work stream this
+document reached nowhere, on the grounds that the brief names no runtime-redesign item and the
+brief that asks for them is not in this repository. **That is about provenance, not authority, and
+it is no longer a reason to reach none of them.** Every reachable item already falls under an
+existing definition-of-done item — tier-one item 3 (watch the output stream in, including tool
+calls) or item 4 (approve or deny), or tier-two item 8 (see what a session has cost) — so no brief
+amendment is needed to schedule one, and D256 rejects making one. All 40 items now take exactly one
+of six dispositions, and the six are exhaustive and disjoint:
 
-- **The runtime-redesign items.** `design/findings/runtime-redesign-classification.md` classifies
-  40 of them, and this document reaches none — no slice cites it, and it cites no slice. That is
-  not an oversight to correct by writing slices, because **`design/00-brief.md` names no runtime-
-  redesign item and the brief that asks for them is not in this repository**
-  (`20-contract.md § Unresolved` 18 says so in those words). The stream is nonetheless shipping:
-  item 21 landed as D248, item 29 as D249, and the classification records items 10, 17, 18 and 19
-  as already shipped before those. Each carried a decision, a contract amendment and a pull
-  request, and none carried a slice, acceptance criteria with stable ids, or an `Out of scope`
-  line. **Whether that is the intended route or a gap is the owner's to settle**, and it is a
-  question about where this stream is specified rather than about any one item.
-- **Item 12's remaining half — indexed access to a tool-output blob.** Routed to `/design` by
-  D250 and answered there by D251, which is an open pull request at the time of this pass.
-  `20-contract.md § Unresolved` 18 is still open, so there is no surface to slice against: a
-  slice may introduce no signature the contract does not carry. `/contract` comes before any
-  slice here, and the design's own handoff says so.
-- **Most of the classification's other rows are not sliceable even in principle**, and its own
-  rule is why: a class-I or class-A row "is not a finding" and may not be built on without being
-  promoted to class S first. Sixteen of the 40 are Category 3 — structurally unreachable while a
-  vendor CLI owns the conversation — and are not work this repository can schedule at all.
+- **Shipped, without a slice — 7 items.** 10 (PR #406), 12 (D22/D162/S23, then D250, D251, D253 to
+  D255 and PR #433 for the indexed half), 17 and 18 (D246), 19 (PR #407), 21 (D248), 29 (D249).
+  Each carried a decision, a contract amendment and a pull request, and none carried a slice,
+  criteria with stable ids, or an `Out of scope` line. **They are recorded here rather than
+  retro-sliced**: ids are never reused, an issue opened now would open already-satisfied, and the
+  doneness signal is in the merged pull requests.
+- **Satisfied by work already done, with nothing to build — 2 items.** Item 9's session-scoped
+  permission policies are S10's standing rules, which reduce operator ceremony rather than tokens
+  and only on Claude. Item 8 — permission mechanics in model context — is answered by the #416
+  probe: control record types, permission request ids and the operator's audit reason are all
+  excluded from the captured model-bound requests, and an allow round trip adds no model call. The
+  residual is a *denial*, whose rejection text is CLI-generated and reaches the model on resume;
+  that text is the CLI's own and is not SkyNet's to remove.
+- **Sliced by this pass — 9 items.** 16 as S34; 20 and 30 as S35; 22, 23 and 25 (each their
+  measured half) as S33; 3 and 39 as S36; 31 as S37.
+- **Routed to `/contract` before any slice — 4 items**, because each needs a signature the contract
+  does not carry and *no slice may introduce one*. Item 13's token estimate alongside the byte
+  limit, item 24's warn/soft-stop/hard-stop thresholds and a budget crossing as an event, item 28's
+  first-class `blocked` turn state, and item 15's remaining quarter — a Raw view has no source,
+  because nothing persists the vendor's own lines and the spill holds normalised envelopes. They
+  are `20-contract.md § Unresolved` 20 to 23.
+- **Refused by a binding non-goal — 15 items.** Thirteen by **Replacing the agent's own context
+  management**: 1, 2, 4, 5, 6, 7, 11, 14, 26, 27, 32, 33 and 40. Two by **An editor**: 34 and 35's
+  self-index half. Item 2 is no longer refused on an assumption — the #416 probe found no supported
+  `PreToolUse` result substitution, and the one lever that did work, rewriting a tool's *input*, is
+  host-configured hook territory SkyNet does not own and is Claude-only.
+- **Not this repository — 3 items.** 36, 37 and 38 belong to AgentKit, two in its `tools/` and one
+  in its command prose. They are listed only so the accounting is exhaustive.
 
-Next: run `/track` in a fresh session to open the issues for any slice above that still has none,
-and to sync the existing ones. **This pass wrote no slice and appended no criterion**, which is
-the finding rather than a short run, and it has two halves. Against `10-design.md` and
-`20-contract.md` as they stand there is nothing uncovered: `## Outstanding` is empty, S1 to S32
-are landed, and what remains in `20-contract.md § Unresolved` — 12, 13 and 18 — is undetermined
-input rather than buildable surface. Against the work actually in flight there is a great deal
-uncovered, and all of it is the runtime-redesign stream listed immediately above, which no
-document in `design/` specifies. The decisions since the last pass, D205 to D251, are otherwise
-fixes and reconciliations carrying their own issues, which `/fix` owns and this document does not.
-**#206 is not reopened**: D199 asked for it, D204 settled that it stays closed.
+**The Category-1 half of a Category-3 item is not built merely because it is reachable**, and D256
+records that as the decision it is. Items 5, 6, 7, 32 and 35 each split into a half SkyNet can
+build and a half it cannot, and in each the value sits in the half it cannot: a result ledger no
+model consults, a state object no model is fed, a section index no model retrieves. The
+classification's own warning is the reason — an observable half is worth shipping but "must not be
+reported as having delivered the token guarantee" — and a consumer-less artifact is the most direct
+way to report exactly that. **Item 28's blocked state is the one exception and is taken**, because
+an operator is its consumer; it is contract-first, above.
+
+Next: run `/track` in a fresh session to open the issues for S33 to S37 and to sync the existing
+ones. **This pass wrote five slices and 39 criteria**, all of them the runtime-redesign stream's,
+and the previous pass's finding — that the stream was shipping with no slice, no stable criterion
+id and no `Out of scope` line — is what D256 closes. The routing is the point rather than the five
+slices: a stream recorded only as prose in this section is invisible to `/next`, which reads the
+tracker, so it has had to be started by hand one item at a time. Five slices in `## Outstanding`
+become five issues, and each issue becomes a `/slice` the decision table can route to without being
+asked.
+
+Against `10-design.md` and `20-contract.md` as they stand, what remains uncovered is the four
+items D256 routes to `/contract` — `20-contract.md § Unresolved` 20 to 23 — which are undetermined
+input rather than buildable surface, alongside 12 and 13, which are Codex `exec --json` questions
+of long standing. **`/contract` is the next authoring command after `/track`, not `/slices` again.**
+S1 to S32 are landed; 18 and 19 are resolved and are not reopened. The decisions since the last
+pass, D252 to D255, are contract item 19's semantics and spelling and the surface that implements
+them, all merged. **#206 is not reopened**: D199 asked for it, D204 settled that it stays closed.
 `design/90-decisions.md § Open` is empty, so nothing needs clearing from it this pass.
 `/slices` does not write to GitHub.
