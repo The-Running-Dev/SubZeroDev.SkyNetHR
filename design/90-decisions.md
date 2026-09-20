@@ -6246,6 +6246,90 @@ choice worth stating rather than discovering later. Loosening to "always" after 
 its absence would be the same asymmetry D251 already named for search: additive to add, not to
 withdraw.
 
+### 2026-09-20 — D254 The tool-output window is two query parameters, and the read serving it is two passes
+Context: D251 fixed the windowed read as a line-addressed `200 text/plain` on the existing route and
+D253 fixed when its totals are available, but `20-contract.md` § Unresolved 19 still carried no
+spelling — no parameter names, no decision on whether they are query parameters at all, and no
+`store` or `session-manager` method. A slice may introduce no signature the contract does not carry,
+so the item blocked its own implementation. Interrogating it surfaced a constraint neither D251 nor
+D253 priced: the edge writes its response head before the first body byte
+(`src/edge/http-common/index.ts`, `pipeBlobResponse`), and D253 makes totals known only at the end of
+a scan, so a single interleaved pass — the shape D253's own rationale describes — cannot carry totals
+in a response header at all. The spelling could not be chosen without resolving that first.
+Chosen: **a counting pass, then a seeked stream.** The count stops exactly where the window stops and
+reports whether it reached the blob's true end; the stream then seeks to the window's first byte and
+sends only the window. Totals are therefore known before the head is written, the body still streams
+with bounded memory, and an exact `Content-Length` falls out of the first pass. The bound
+§ *Concurrency and ordering* prices is unchanged — the counting pass is the scan D251 already
+described, and nothing reads further than the window asked for — but the window's own bytes are read
+twice and the first byte now follows the count rather than accompanying it. **This is sound only
+because the bytes are immutable** (D22, D162); over an appended file the two passes could disagree,
+which is why the shape is available here and nowhere else in the storage root.
+Chosen, and separately: **`?fromLine=` and `?lineCount=`, both optional, independently defaulted,
+camelCase like `AuditQuery`'s.** Absent `fromLine` is the first line; absent `lineCount` runs to the
+end; neither present is the whole-blob path unchanged. `fromLine` is 1-based, and a `0`, a negative
+or non-integer value, or a `lineCount` below 1 is `422 bad_request` naming the field, matching
+`GET /api/audit`'s existing refusal shape. `lineCount` is deliberately not `limit`: `AuditQuery.limit`
+is clamped to a cap and this is not, so the name would advertise a ceiling that does not exist.
+Chosen, and separately: **totals ride on `X-Tool-Output-Lines` and `X-Tool-Output-Bytes`, together or
+not at all**, their presence meaning the counting pass reached the true end and their absence meaning
+not measured — never zero (I71). They sit beside `Content-Length` rather than replacing it because on
+a windowed response `Content-Length` describes the window. The console is same-origin, so `fetch`
+reads them without `Access-Control-Expose-Headers`.
+Chosen, and separately: **a new method rather than an option on the old one** —
+`openToolOutputWindow` and, on `session-manager`, its ownership-checked counterpart, both scaffolded
+in `20-contract.md` § *Public surface*.
+Rejected: **HTTP trailers.** They preserve D253's single interleaved pass exactly, cost no extra I/O,
+and are the textually correct HTTP answer to "a value known only after the body". Browser `fetch`
+exposes no trailers, so the one client this design has cannot read them — a correct answer the
+consumer cannot consume.
+Rejected: **a JSON envelope carrying bytes and totals together.** Streamable with totals last, and it
+would have made the totals unconditional. Refused because it reverses what D251 settled one decision
+earlier: same route, same three headers, `text/plain; charset=utf-8`. The viewer wants text, and
+re-encoding a blob into a JSON string to attach two integers is the tail wagging the dog.
+Rejected: **folding the window into `openToolOutput`.** Fewer methods, and the window is plainly
+optional. Refused because one method would then mean two things: the whole-blob path performs no
+counting pass today, so it would either begin counting lines no caller asked for, or return a
+`totals` that is structurally always null. A field whose meaning depends on which argument was passed
+is how a caller stops noticing which cost class it is in, which is what I68's bound must stay legible
+against.
+Rejected: **a distinct sub-route for the windowed read.** It separates the cost classes at the URL,
+which is the honest version of the objection above. Refused because D251 settled "the same route" on
+its own merits, and a second path duplicates the ownership check, the three headers and both `404`s
+for a difference two query parameters already express.
+Reversibility: cheap. Nothing is built. Parameter and header names are the cheapest part to change
+before a client exists; the two-pass shape is the expensive part, and it is forced by D253 plus the
+edge's write-head-first behaviour rather than chosen freely among equals.
+
+### 2026-09-20 — D255 `HEAD` answers a tool-output blob's byte size; its line count stays unavailable
+Context: D253 recorded, as a stated cost of its own choice, that a client wanting a blob's size for
+scrollbar-sizing without triggering a full scan has no cheap path. Settling item 19's spelling is the
+moment that gap is either closed or deferred a second time, and interrogation narrowed it: the gap is
+half as wide as D253 states. The **byte** size is one `stat` on a file the store already owns; only
+the **line** count needs a scan. Those two were bundled because `ToolOutputTotals` carries both.
+Chosen: **`HEAD` on the existing tool-output path, answering `Content-Length` from one `stat`.** It
+opens no blob and counts no line, carries the same three headers, never carries
+`X-Tool-Output-Lines`, and refuses `fromLine` or `lineCount` with `422 bad_request` rather than
+answering them (I72). Refusing is not pedantry: answering a window honestly needs the scan `HEAD`
+exists to avoid, and answering it with the whole blob's length would make `HEAD` disagree with a
+`GET` of the same URL. A refusal carries its status and no body, so a `HEAD` caller cannot tell the
+two `404`s apart — acceptable, because the caller that needs the distinction is issuing the `GET`.
+Chosen, and separately: **the line half stays unavailable, and that is a decision rather than an
+omission.** The only cheap line count is the sidecar index D251 declined on its merits, and nothing
+since has changed that argument, so the residual is D251's standing decision and reopening it is
+`/design`'s work.
+Rejected: **deferring the size gap a second time.** The tidier scope, and item 19 is narrow. Refused
+because the byte half costs one `stat`, a gap left open twice starts reading as a settled no, and the
+alternative — a client issuing a windowed `GET` purely to learn a size — is the maximal scan D253 was
+written to prevent, arrived at by the back door.
+Rejected: **`GET` with a totals-only parameter** instead of a new verb. It avoids a second verb on the
+route. Refused because a `GET` that returns no body is what `HEAD` is, and the parameter would then
+have to interact with `fromLine` and `lineCount`, which is the combination `HEAD`'s flat refusal
+removes.
+Reversibility: cheap, with one asymmetry worth stating: a route verb is additive to add and not to
+withdraw, the same shape D251 named for search. Withdrawing `HEAD` after a viewer sizes its scrollbar
+from it breaks that viewer; adding a line count to it later does not.
+
 ## Open
 
 Staging only. Once an item becomes an issue it leaves this list.

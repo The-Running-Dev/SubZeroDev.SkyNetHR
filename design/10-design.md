@@ -1715,7 +1715,8 @@ here rather than left to whoever writes it (D43):
 - The tool-output fetch route serves `Content-Type: text/plain; charset=utf-8` with
   `X-Content-Type-Options: nosniff` and `Content-Disposition: attachment`, so a tool result
   that happens to be HTML cannot render as a document in the console's own origin.
-  **A windowed read of that blob carries the same three headers and the same `200`** (D251),
+  **A windowed read of that blob carries the same three headers and the same `200`** (D251), as
+  does the `HEAD` that answers its byte size (D255),
   so the control is a property of the route rather than of the response's completeness. A `206`
   would have preserved it just as well — `nosniff` and `Content-Disposition` are not
   status-dependent, and the partial-response security question D250 raised has that answer
@@ -2022,6 +2023,18 @@ response would make every scan maximal regardless of the window asked for, which
 cost this paragraph's bound is written against, and would stop the response from streaming: a
 scan that must additionally confirm the true end cannot report done until it has looked past
 everything the caller asked to see.
+
+**That rule costs the read a second pass, and the cost is paid deliberately** (D254). The
+response head is written before the first body byte, so totals D253 makes known only at the end
+of a scan cannot travel in a header of a single interleaved pass. The read therefore counts
+first — stopping exactly where the window stops, chunked and yielding as above — and then seeks
+to the window's first byte and streams it. The body still streams with bounded memory and the
+bound this section prices is unchanged: the counting pass is the scan already described, and
+nothing reads further than the window asked for. What changes is that the first byte follows the
+count rather than accompanying it, and that the window's own bytes are read twice. **The
+soundness comes entirely from the bytes being immutable** (D22, D162) — two passes over a file
+still being appended to would stream a window that disagrees with the totals measured beside it,
+which is why this shape is available here and over nothing else in the storage root.
 
 Genuinely simultaneous:
 
@@ -2669,6 +2682,24 @@ New in this pass:
   that the client already fetches the blob is not true: `client/render.js` renders a download
   link the browser follows under `Content-Disposition: attachment` and reads no bytes itself,
   so that option is new client code, not reuse of existing code.
+- **D254 — the window is two query parameters, and the read that serves it is two passes.**
+  Chosen: `?fromLine=` and `?lineCount=`, each optional and independently defaulted; totals on
+  `X-Tool-Output-Lines` and `X-Tool-Output-Bytes`, present only when the scan reached the true
+  end; a counting pass followed by a seeked stream, which is what makes those headers writable
+  at all. Rejected: **HTTP trailers**, which preserve D253's single interleaved pass exactly and
+  cost no extra I/O — refused because browser `fetch` exposes no trailers, so the one client this
+  design has could not read them. Rejected: **a JSON envelope carrying the bytes and the totals
+  together**, streamable with totals last — refused because it reverses D251's settled
+  `text/plain` response on the same route, for a console whose viewer wants the text. Rejected:
+  **folding the window into `openToolOutput`** — one method would then mean two things, since the
+  whole-blob path counts nothing today and would either start counting lines nobody asked for or
+  return a permanently null `totals`.
+- **D255 — `HEAD` answers the blob's byte size, and the line count stays unavailable.** Chosen:
+  one `stat`, no scan, no line total, and `422` rather than an answer if a window is passed.
+  Rejected: **deferring the size gap again**, which D253 had already left open — refused because
+  the byte half is free from a `stat` the storage layer already makes, and a gap left open twice
+  starts being read as a decision. Rejected: **answering a line count too**, which is the sidecar
+  index D251 declined on its merits.
 - **D23 — orphan reaping reads a server-wide `pids.ndjson` with a reuse guard.** Chosen: an
   append-only record per spawn, tombstoned at exit, reaped at boot only when the recorded
   start time is after the host's last boot and the process image still matches. Rejected:

@@ -520,10 +520,34 @@ serve, and snapping to a character boundary silently returns a range other than 
 for. Choosing lines also collapses two capabilities into one — a *section* of line-structured
 output **is** a line range, and those were two things only while the unit was bytes.
 
-**The wire spelling of a window is not determined by the design and is not invented here** —
-see *Unresolved* 19, which also holds the substantive half: how the blob's line and byte totals
-come back, and whether they accompany every windowed response or only one whose scan reached
-the end.
+**The window and its totals are parameter and result shapes, not entities** (D254). They are
+named because they cross a module boundary and a slice needs a signature to implement against;
+nothing in *Persisted schemas* gains a field because one exists (I67). To be declared in
+`src/contract/index.ts`:
+
+```ts
+interface ToolOutputWindow {
+  readonly fromLine: number;
+  readonly lineCount: number | null;
+}
+
+interface ToolOutputTotals {
+  readonly lines: number;
+  readonly bytes: number;
+}
+
+interface ToolOutputStat {
+  readonly bytes: number;
+}
+```
+
+**`fromLine` is 1-based, and the two fields default independently**: a window that names no
+start begins at the first line, and one that names no count runs to the end of the blob.
+**`ToolOutputTotals` is nullable wherever it is carried**, because D253 makes it available only
+when the scan reached the blob's true end — a null reads as *this scan stopped early*, never as
+an empty blob (I71). **`ToolOutputStat` is not `ToolOutputTotals` with a field missing**: it is
+the whole of what one `stat` can answer, and a line count is not in that set at any price short
+of the index D251 declined (D255, I72).
 
 ### Checkpoint
 
@@ -1058,9 +1082,43 @@ What the declarations cannot say:
   provoke; **no separate cap on the window or on the scan exists and none is to be added**
   (D251). An operator who raises the budget has chosen that cost knowingly, and `10-design.md`
   § *Threat model* already holds console access equivalent to shell access as the server's user — a second
-  budget would be a control against a population this design does not hold. The method is
-  **not declared here**: the design determines the semantics above and no signature, so see
-  *Unresolved* 19.
+  budget would be a control against a population this design does not hold. The surface is two
+  methods (D254):
+
+  ```ts
+  openToolOutputWindow(
+    sessionId: SessionId,
+    turnId: TurnId,
+    callId: CallId,
+    window: ToolOutputWindow,
+  ): Promise<Result<{ readonly stream: NodeJS.ReadableStream; readonly totals: ToolOutputTotals | null }, StoreError>>;
+
+  statToolOutput(
+    sessionId: SessionId,
+    turnId: TurnId,
+    callId: CallId,
+  ): Promise<Result<ToolOutputStat, StoreError>>;
+  ```
+
+- **`totals` resolving *beside* the stream rather than after it is what makes the read two
+  passes, and that is the decision rather than a consequence of it** (D254). The edge writes its
+  response head before the first body byte, and D253 makes totals known only at the end of a
+  scan, so one interleaved pass cannot carry them in a header at all. The counting pass runs
+  first and stops exactly where the window stops; the second seeks to the window's first byte
+  and streams it. The cost is the window's own bytes read twice — the prefix before it is read
+  once either way — and an exact `Content-Length` falls out of the first pass rather than being
+  estimated. **It is sound here only because these bytes are immutable** (D22, D162): two passes
+  over a file that is still being appended to would stream a window that disagrees with the
+  totals measured beside it, which is why this shape is unavailable over `events.ndjson` and is
+  not a pattern to copy.
+- **`openToolOutput` is left exactly as it stands, and that is not an oversight.** Folding the
+  window into it would make one method mean two things, because the whole-blob path performs no
+  counting pass at all today: it would either begin counting lines no caller asked for, or
+  return a `totals` that is structurally always null. A field whose meaning is decided by which
+  argument was passed is how a caller stops noticing which cost class it is in, and that is the
+  thing I68's bound has to stay legible against.
+- **`statToolOutput` opens no blob, counts no line, and is one `stat`** (I72). It answers the
+  byte half of the size question D253 left open, and may never grow a line count (D255).
 
 **A `Store` owns OS handles and must be closed. `close`, `ServerLock`, `Store.claimLock` and
 `Store.releaseLock` are declared in `src/contract/index.ts` (the types) and `src/store/index.ts`
@@ -1784,8 +1842,30 @@ What the declarations cannot say:
   splits its failures exactly as the whole-blob read does: a session that is unknown or not the
   caller's is `no_such_session`, and every other failure — including a blob the budget stopped
   being written — is `no_such_output`. A window that merely begins past the last line is
-  neither (I69). Not declared here for the same reason as its `store` counterpart: see
-  *Unresolved* 19.
+  neither (I69). Both `store` methods have a counterpart here, differing only in the owner
+  argument and the error union:
+
+  ```ts
+  openToolOutputWindow(
+    sessionId: SessionId,
+    owner: OperatorId,
+    turnId: TurnId,
+    callId: CallId,
+    window: ToolOutputWindow,
+  ): Promise<Result<{ readonly stream: NodeJS.ReadableStream; readonly totals: ToolOutputTotals | null }, SessionError>>;
+
+  statToolOutput(
+    sessionId: SessionId,
+    owner: OperatorId,
+    turnId: TurnId,
+    callId: CallId,
+  ): Promise<Result<ToolOutputStat, SessionError>>;
+  ```
+
+- **`statToolOutput` is ownership-checked like everything else under `/api/sessions/:id`, despite
+  answering only a byte count** (I23). A size is still an observation about a session the caller
+  may not own — it discloses that the blob exists and how much the agent produced — and the
+  cheapness of the answer is not a reason to skip the check.
 - **The `records` dependency is one-directional and exists for the claim during `create` alone.**
   Nothing else in the manager may call it, and `records` may never call back.
 
@@ -2143,7 +2223,8 @@ The `404` is `no_such_session` because `ApiErrorCode` carries no route-level not
 | `GET` | `/api/sessions/:id` | — | `200 { session: SessionSummary }` | `401 unauthenticated`, `404 no_such_session` |
 | `GET` | `/api/sessions/:id/events` | `Last-Event-ID` header | `200 text/event-stream` | `404 no_such_session` |
 | `GET` | `/api/sessions/:id/checkpoints` | — | `200 { checkpoints: Checkpoint[] }` | `404 no_such_session` |
-| `GET` | `/api/sessions/:id/tool-output/:turnId/:callId` | whole blob, or a line window whose spelling is *Unresolved* 19 | `200 text/plain; charset=utf-8`, whole or windowed | `404 no_such_session`, `404 no_such_output`, `422 bad_request` |
+| `GET` | `/api/sessions/:id/tool-output/:turnId/:callId` | optional `?fromLine=` and `?lineCount=` | `200 text/plain; charset=utf-8`, whole or windowed | `404 no_such_session`, `404 no_such_output`, `422 bad_request` |
+| `HEAD` | `/api/sessions/:id/tool-output/:turnId/:callId` | — | `200` with `Content-Length`, no body | `404 no_such_session`, `404 no_such_output`, `422 bad_request` |
 | `GET` | `/api/sessions/:id/attachments/:turnId/:attachmentId` | — | `200`, media type per the allow-list below | `404 no_such_session`, `404 no_such_attachment` |
 
 **Every route that reads or mutates a session's data is under `/api/sessions/:id` and applies
@@ -2186,10 +2267,37 @@ error** (I69). Newlines exhausted before the window begins is a viewer clamping 
 log, not a failed read; the blob exists and the window is empty, and those are different
 answers. Malformed window parameters are `422 bad_request` like any other malformed input.
 **A window is not separately capped**: `Caps.sessionToolOutputBytes` already bounds the blob
-and therefore the scan behind it, and no second budget is introduced (D251, I68). The blob's
-line and byte totals accompany such a response — *how* they are carried, and whether they
-accompany every windowed response or only one whose scan reached the end, is **not determined
-by the design**, and is *Unresolved* 19 rather than a spelling chosen here.
+and therefore the scan behind it, and no second budget is introduced (D251, I68).
+
+**The window is two optional query parameters, `fromLine` and `lineCount`** (D254), camelCase
+like `AuditQuery`'s. Each defaults on its own — an absent `fromLine` is the first line, an absent
+`lineCount` runs to the end of the blob — and neither present is the whole-blob path, unchanged
+byte for byte. `fromLine` is 1-based; a `0`, a negative or non-integer value, or a `lineCount`
+below 1 is `422 bad_request` naming the offending field, the same refusal shape `GET /api/audit`
+already uses. **`lineCount` is deliberately not called `limit`**: `AuditQuery.limit` is clamped
+to a cap and this is not, so reusing the name would advertise a ceiling that does not exist.
+A `fromLine` with no `lineCount` scans to the end and therefore always carries totals; that is
+not a new cost class, because the whole-blob path it costs the same as is already this route's
+maximum.
+
+**Totals ride as `X-Tool-Output-Lines` and `X-Tool-Output-Bytes`, and their presence is itself
+the signal** (D253, I71): both appear when the counting pass reached the blob's true end, and
+neither appears when it stopped at the window, so absence reads as *not measured* and never as
+zero. They are carried beside `Content-Length` rather than instead of it because on a windowed
+response `Content-Length` describes the window, not the blob. The console is same-origin, so
+`fetch` reads both without `Access-Control-Expose-Headers`; a cross-origin deployment would have
+to add it, and there is none — D29 holds the origin check as the control.
+
+**`HEAD` on the same path answers the blob's byte size from one `stat`, and refuses a window**
+(D255, I72). It opens no blob and counts no line: it carries `Content-Length` and the same three
+headers and never `X-Tool-Output-Lines`, and a `fromLine` or `lineCount` on a `HEAD` is
+`422 bad_request` rather than an answer. Answering one honestly would require the very scan
+`HEAD` exists to avoid, and answering it with the whole blob's length would make `HEAD` disagree
+with a `GET` of the same URL. A refusal carries its status and no body, so the two `404`s are
+indistinguishable to a `HEAD` caller — the client that needs to tell them apart is the one
+issuing the `GET`, and it still can. This closes the byte half of the size gap D253 named and
+leaves the line half open: a cheap line count still requires the sidecar index D251 declined on
+its merits.
 
 **The attachment route never echoes an upload's declared media type unguarded** (D160). It
 serves `nosniff` on every response, and sets `Content-Type` to the stored `mediaType` only when
@@ -2783,6 +2891,8 @@ highest-value section in this document.
 | **I68** | A tool-output scan is chunked and yields between chunks: no session's `emit`, and no other session's fan-out, ever waits for the whole of another session's scan. The scan is bounded by `Caps.sessionToolOutputBytes` and by no other cap — **a second budget on the window or the scan is not to be added** (D251) | `store`, `edge/sse`, `edge/ws` |
 | **I69** | A window beginning past the last line of a blob answers `200` with an empty window — never `404`, never `416`, never any other error status. The blob existing and the window being empty are different answers and are never collapsed (D251) | `edge/sse`, `edge/ws` |
 | **I70** | No route, method or parameter searches a tool-output blob. D251's decline of server-side search is soft — "not now", pending open question 17 in `10-design.md` — and **softness is not authorisation**: adding one is a design decision and never an implementation one | `edge/sse`, `edge/ws` |
+| **I71** | `X-Tool-Output-Lines` and `X-Tool-Output-Bytes` appear on a tool-output response together or not at all, and their presence means exactly one thing: the counting pass behind that response reached the blob's true end (D253). Their absence is not zero, not a failure, and not licence to infer a size from anything else on the response | `store`, `edge/sse`, `edge/ws` |
+| **I72** | `HEAD` on the tool-output route opens no blob and counts no line — one `stat`, no scan. It carries no line total, and it refuses `fromLine` or `lineCount` with `422 bad_request` rather than answering them (D255) | `store`, `edge/sse`, `edge/ws` |
 
 **I40, I41 and I42 were never allocated, and the gap is left open rather than closed.** The
 numbering jumps from I39 to I43 and nothing is missing. Ids here are cited by number in
@@ -3295,8 +3405,9 @@ belong to the `exec --json` fallback alone; neither affects a session on `app-se
     published without being adopted and that `runtime` imports nothing from it, so that surface
     is parallel to the HTTP edge rather than beneath it — precedent, not a head start.
 
-19. **Resolved by D253: the scan stops where the window does, and totals ride along only when
-    that scan reaches the blob's true end.** The past-end case in `10-design.md` § *Failure
+19. **Resolved by D253 for the semantics, and by D254 and D255 for the spelling. The scan stops
+    where the window does, and totals ride along only when that scan reaches the blob's true
+    end.** The past-end case in `10-design.md` § *Failure
     modes* was already this rule's special case, not an exception to a stronger one — a scan
     that starts past the end reaches the true end at no extra cost, which is why it alone could
     state totals before D253. Generalising the failure-mode sentence to *every* windowed response
@@ -3305,7 +3416,19 @@ belong to the `exec --json` fallback alone; neither affects a session on `app-se
     one request can provoke", and it would stop the response from streaming, since a scan that
     must additionally confirm the true end cannot report done until it has looked past everything
     the caller asked to see. A client wanting the blob's size for scrollbar-sizing without
-    triggering a full scan has no cheap path today — D253 leaves that open rather than solving it.
-    It still settles no spelling: not the parameter names, not whether they are query parameters
-    at all, and not the `store` or `session-manager` method behind them — which is why neither is
-    scaffolded in *Public surface* above, and that remains open for `/contract`'s next pass.
+    triggering a full scan had no cheap path under D253 alone, which left that open rather than
+    solving it.
+
+    **D254 settles the spelling D253 left open.** The window is `?fromLine=` and `?lineCount=`
+    on the existing route; the totals are `X-Tool-Output-Lines` and `X-Tool-Output-Bytes`, present
+    only on a scan that reached the end (I71); and `store` and `session-manager` each carry
+    `openToolOutputWindow` and `statToolOutput`, scaffolded in *Public surface* above. The read is
+    two passes rather than one because the response head is written before the first body byte and
+    D253 makes totals known only at the end of a scan — a constraint neither D251 nor D253 priced,
+    and the reason this item could not have been closed by naming parameters alone.
+
+    **The size gap D253 named is half closed, deliberately.** `HEAD` gives a client the blob's byte
+    size for one `stat` (D255, I72), which is what scrollbar sizing actually needs. A cheap *line*
+    count still has no path, because the only cheap answer is the sidecar index D251 declined on
+    its merits and nothing since has changed that argument. That residual is not an open item
+    here — it is D251's standing decision, and reopening it would be `/design`'s. (#431)
