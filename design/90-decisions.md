@@ -6329,6 +6329,64 @@ removes.
 Reversibility: cheap, with one asymmetry worth stating: a route verb is additive to add and not to
 withdraw, the same shape D251 named for search. Withdrawing `HEAD` after a viewer sizes its scrollbar
 from it breaks that viewer; adding a line count to it later does not.
+### 2026-09-20 — D256 The runtime-redesign stream enters the pipeline: six dispositions over all 40 items, and no brief amendment
+Context: `design/findings/runtime-redesign-classification.md` classifies 40 items and
+`30-slices.md` reached none of them. The stated reason was that `00-brief.md` names no
+runtime-redesign item and the brief asking for them is not in this repository, and the route was
+left to the owner. The consequence was operational rather than clerical. The stream is the largest
+body of work in flight — items 10, 12, 17, 18, 19, 21 and 29 have all shipped — and it was recorded
+only as prose in `30-slices.md § What no slice covers`. `/next` reads the tracker, `/track` reads
+`## Outstanding`, and prose is in neither, so the pipeline reported nothing owed while the work was
+in fact the bulk of what remained, and every item had to be started by hand, one instruction at a
+time. **That is the defect this settles, and the routing is the decision; the five slices are its
+consequence.**
+Chosen: **the stream is routed through the ordinary pipeline and the brief is not amended.** Every
+reachable item already falls under an existing definition-of-done item — tier-one item 3 (watch the
+agent's output stream in, including tool calls) or item 4 (approve or deny), or tier-two item 8
+(see what a session has cost) — so no brief entry is needed to authorise one. The classification's
+"the brief that asks for them is not in this repository" is about provenance, not authority, and
+reading it as authority is what kept the stream out of the pipeline.
+Chosen: **all 40 items take exactly one of six dispositions, exhaustive and disjoint.** Shipped
+without a slice, recorded rather than retro-sliced (7: 10, 12, 17, 18, 19, 21, 29). Satisfied with
+nothing to build (2: item 9 by S10's standing rules; item 8 by the #416 probe, which found the
+permission protocol excluded from captured model-bound requests). Sliced now (9: 16, 20, 22, 23,
+25, 3, 39, 30, 31, as S33 to S37). Routed to `/contract` as an unresolved signature (4: 13, 15, 24,
+28, as `20-contract.md § Unresolved` 20 to 23). Refused by a binding non-goal (15: thirteen by
+*Replacing the agent's own context management*, two by *An editor*). Not this repository (3: 36, 37,
+38, all AgentKit's). The counts are stated because the classification's own first version
+miscounted its categories, and a disposition list that does not sum to 40 is the same failure.
+Chosen, and separately: **the Category-1 half of a Category-3 item is not built merely because it
+is reachable.** Items 5, 6, 7, 32 and 35 each split into a half SkyNet can build and a half it
+cannot, and in each the value sits in the half it cannot — a result ledger no model consults, a
+state object no model is fed, a section index no model retrieves. The classification's own warning
+is the reason: an observable half is worth shipping but "must not be reported as having delivered
+the token guarantee", and a consumer-less artifact is the most direct way to report exactly that.
+**Item 28's blocked state is the one exception and is taken**, because an operator is its consumer
+rather than the model; it is contract-first because the state is a public surface.
+Rejected: **amending `00-brief.md` to name the 40 items.** It would make the brief a restatement of
+a document in `findings/`, which *Single ownership* forbids outright, and it would put 16
+structurally unreachable items inside a definition of done — a tier that can never be finished is
+worse than a tier that does not mention the work.
+Rejected: **writing a slice per item, including the unreachable ones, so the accounting lives in
+one place.** *Every slice ends runnable* makes this impossible for Category 3. A slice whose
+acceptance criteria can never be met is not a record of refused work; it is a permanently failing
+checkbox that `/track` will resync forever and `/next` will route to forever.
+Rejected: **leaving the stream in `§ What no slice covers` until a brief arrives.** This is the
+status quo, and it is precisely what produced the defect. A stream that is shipping needs rows in
+the tracker, not a paragraph; and the brief it is waiting for has been absent through seven shipped
+items, which is enough evidence that waiting is not a plan.
+Rejected: **routing the four contract questions through `/design` first, as D250 routed item 12.**
+D250 went to `/design` because each of its three carried an architectural question — a security
+property of a partial response, a missing `ApiErrorCode` member, head-of-line blocking on a
+single-process server. These four do not: a token estimate, a threshold set, a state-machine member
+and whether a vendor's raw lines are persisted are shapes the design already determines.
+`/contract` is the right first stop, and `/design` stays available if one of them turns out
+otherwise — item 21's "what does a stop actually stop" is the likeliest.
+Reversibility: cheap for the routing. A slice not yet started is deleted from `## Outstanding` and
+its issue closed, and an unresolved item is resolved by refusing it. Expensive only for the
+refusals, and only in appearance: they are refusals by non-goals the brief already binds, not new
+ones, so reversing one means amending the brief — which is where that argument belongs and is not
+made cheaper by having been pre-empted here.
 
 ## Open
 

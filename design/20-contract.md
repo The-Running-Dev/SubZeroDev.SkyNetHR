@@ -3432,3 +3432,45 @@ belong to the `exec --json` fallback alone; neither affects a session on `app-se
     count still has no path, because the only cheap answer is the sidecar index D251 declined on
     its merits and nothing since has changed that argument. That residual is not an open item
     here — it is D251's standing decision, and reopening it would be `/design`'s. (#431)
+
+20. **A token estimate alongside the byte limit on stored tool output.** Runtime-redesign item 13,
+    routed here by D256. A byte limit and an explicit `truncated` flag both exist (D162, S23); no
+    token figure does. The question is not whether to estimate but what an estimate *is* here:
+    SkyNet holds no tokenizer, the vendor's own count arrives per model call rather than per tool
+    result and carries no attribution (D75, I28), and a character-count heuristic presented beside
+    a measured byte count would read as the same kind of fact while being a different kind. Either
+    it is declared as an estimate in its own type and named as one wherever it renders, or the item
+    is refused for the same reason S33.3 refuses category attribution. Nothing downstream may pick.
+    (no issue yet — `/track`)
+
+21. **Budget thresholds, and a budget crossing as an event.** Runtime-redesign item 24, routed here
+    by D256. `Config.sessionTokenBudget` and `PayrollView.remainingTokens` already exist (D129), so
+    the *figure* is determined and only the behaviour around it is not. Three things are undecided
+    and each is a public surface: where warn, soft-stop and hard-stop thresholds live — one
+    fraction each on `Config`, or absolute token counts, or a policy object; whether a crossing is
+    a `session.notice` code, a new envelope kind, or only a derived state a client computes from
+    `remainingTokens`; and what a *stop* actually stops, given that SkyNet can refuse to begin a
+    turn and cannot interrupt the model mid-turn without the `interrupt` path D5 governs. A soft
+    stop that silently becomes a hard one at the next turn boundary is the failure mode to name
+    before anything is built. (no issue yet — `/track`)
+
+22. **A first-class `blocked` turn state.** Runtime-redesign item 28, routed here by D256. A turn
+    state machine (`TurnStopReason`) and a permission-pending path (`PermissionRequest`) both
+    exist; whether `blocked` is a member of the existing machine, a separate flag over it, or a
+    stop reason is a public-interface choice the design does not determine. The substantive
+    question underneath is what blocks: a turn awaiting an operator's approval is already
+    representable, so a new state earns its place only if it also covers a turn awaiting an answer
+    the *model* asked for — and the classification's item 6 is explicit that SkyNet cannot stop the
+    model inventing that answer and continuing. A state that claims to block something it does not
+    is worse than no state. (no issue yet — `/track`)
+
+23. **What a Raw view would read from.** Runtime-redesign item 15's remaining quarter, routed here
+    by D256. D246 shipped three verbosity levels over one transcript, which covers the Operator,
+    Tools and Debug views the item names. **Raw has no source.** The spill holds normalised
+    envelopes and nothing persists the vendor's own stdout lines — there is no `raw` field anywhere
+    in `src/contract/index.ts`. Answering this means deciding whether to persist vendor lines at
+    all, and that is not a rendering question: it doubles what a session writes, it puts
+    unnormalised vendor text under the same per-session budget D162 set for tool output, and the
+    lines carry whatever the vendor chose to put in them, which `20-contract.md` currently never
+    promises to have inspected. Refusing Raw and declaring the item satisfied at three views is the
+    other legitimate answer. (no issue yet — `/track`)

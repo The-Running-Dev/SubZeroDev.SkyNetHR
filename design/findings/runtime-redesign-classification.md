@@ -4,6 +4,12 @@ Written against the tree at `32132a5`, audited against `6c38f93`. Not authoritat
 `design/20-contract.md` and `design/30-slices.md` outrank this. It exists to record **which layer
 owns each behaviour**, because that, not effort, is what decides whether an item is reachable.
 
+**This document classifies; it does not schedule.** What happens to each of the 40 items is D256's,
+and `30-slices.md § What no slice covers` carries the disposition list — shipped, satisfied, sliced,
+routed to `/contract`, refused by a binding non-goal, or not this repository. A row here saying an
+item is implementable is a statement about the layer boundary, never a decision that it will be
+built.
+
 ## How to read a verdict
 
 Every row carries an evidence class, because the first version of this document stated
@@ -81,20 +87,20 @@ first version of this document reported "17 items" for this category, counting r
 | # | Item | Class | Notes |
 |---|---|---|---|
 | 10 | Subagent lifecycle events | **S** | **Shipped** (PR #406). Five `task_*` codes on `SessionNoticeCode` (`agent-console/contract/index.ts`). |
-| 12 | Tool-output virtualization | **S** both halves | Full output persisted per `turnId`/`callId` with a per-session byte budget (`store/fs.ts`, D162/S23); `truncated` and pre-truncation `bytes` on the envelope (`agent-console/contract/index.ts`); a fetch route answering `no_such_output` (`edge/http-common/index.ts`). Missing: *indexed* access — search, read-range, read-section. Enumerated since, which promotes the missing half to **S** and corrects its layer: read-range already exists as `toolOutput.read` in `agent-console/protocol/wire.ts`, implemented in `agent-console/runtime/server.ts`; only the edge lacks it. All three now route to `/design` — `20-contract.md § Unresolved` 18, D250. |
+| 12 | Tool-output virtualization | **S** both halves | Full output persisted per `turnId`/`callId` with a per-session byte budget (`store/fs.ts`, D162/S23); `truncated` and pre-truncation `bytes` on the envelope (`agent-console/contract/index.ts`); a fetch route answering `no_such_output` (`edge/http-common/index.ts`). Missing: *indexed* access — search, read-range, read-section. Enumerated since, which promotes the missing half to **S** and corrects its layer: read-range already exists as `toolOutput.read` in `agent-console/protocol/wire.ts`, implemented in `agent-console/runtime/server.ts`; only the edge lacks it. All three routed to `/design` (D250), were answered there by D251 — a line-addressed window, no index, no server-side search — spelled by D254 and D255, and **shipped** (PR #433). `20-contract.md § Unresolved` 18 and 19 are both resolved; the item is complete. |
 | 13 | Runtime-enforced output limits | **S** / **I** | A byte limit and an explicit `truncated` flag exist. No *token* estimate was found; that absence is **I**, not separately grepped. |
-| 15 | Operator / Tools / Debug / Raw views | **S** / **I** | D246 shipped three verbosity levels over one transcript (`client/render.js`). That a view *selector* is the same mechanism is a judgement. |
+| 15 | Operator / Tools / Debug / Raw views | **S** | D246 shipped three verbosity levels over one transcript, with a persisted `verbosity-select` control (`client/app.js`, `client/index.html`). Enumerated since: those three answer Operator, Tools and Debug, and **Raw has no source** — `src/contract/index.ts` declares no raw or stdout field, so nothing persists the vendor's own lines. Three quarters shipped; the fourth is `20-contract.md § Unresolved` 23 (D256). |
 | 16 | Diff rendering | **S** | Pure client. The `textContent`-only invariant holds — the sole `innerHTML` occurrence in `client/render.js` is the comment asserting there is none. A diff view must be built from elements. |
 | 17 | Hide command JSON | **S** | **Shipped** (D246: the `input` body is folded by verbosity). |
 | 18 | Auto-collapse successful read-only operations | **S** / **I** | **Shipped in substance** (D246 defaults `input`/`output` folds closed at `compact`). Per-tool policy refinement is a judgement. |
 | 19 | Aggregate repetitive errors | **S** | **Shipped** (PR #407): adjacency coalescing with a count badge; every instance retained. |
-| 20 | Sticky session header | **I** | Candidate fields exist across `SessionRecord` and `PayrollView`, but the brief's field list was not checked one by one against them. |
+| 20 | Sticky session header | **S** | Enumerated since (D256). Everything the header needs already crosses to the client: `SessionSummary` carries id, owner, vendor, cwd, model, policy, sandbox, lastSeq, state, createdAt, endedAt and `name`; `PayrollView` carries burn, budget, remaining, idle and priced cost. No new field. Sliced as S35. |
 | 21 | **Per-turn token deltas** | **S** | **Shipped** (D248, PR #412): `PayrollView` gains the per-turn partition of `burn`. |
 | 23 | Token attribution visualization | **S** | Buildable **only over categories SkyNet can measure** — see item 22, which is the honest limit. |
 | 24 | Session/workflow budgets | **S** / **I** | `Config.sessionTokenBudget` and `PayrollView.remainingTokens` exist (`src/contract/index.ts`, D129). Warn / soft-stop / hard-stop thresholds, and a budget crossing as an explicit event, are SkyNet's to add (**I**). Per-*model-call* budgets are not — the CLI makes those calls. |
 | 28 | First-class blocked state | **S** / **I** | A turn state machine (`TurnStopReason`) and a permission-pending path (`PermissionRequest`) both exist. That a `blocked` state is the same machinery is a judgement. |
-| 29 | Human-readable session names | **S** | `SessionRecord` carries no name field today (`src/contract/index.ts`). Adding one plus a rename route is wholly SkyNet's. |
-| 30 | Rich session-list metadata | **I** | Same shape as 29; the specific field list was not checked. |
+| 29 | Human-readable session names | **S** | **Shipped** (D249): `SessionRecord.name`, mutable for the session's life, with `POST /api/sessions/:id/rename` and the sidebar row showing `name ?? cwd`. |
+| 30 | Rich session-list metadata | **S** | Enumerated with item 20, over the same `SessionSummary`. One field it does **not** carry is `endReason`, which is on `SessionRecord` only — so a row saying *why* a session ended is a contract question, and S35.5 records it as one rather than inferring it. Sliced as S35. |
 | 34 | Repository index | **I** | A workspace-root jail exists (`src/jail/`). That a deterministic index inside it is useful to SkyNet's own UI without model involvement is a judgement. |
 | 36, 37 | Machine-classify install state / machine-check inventory | **I** | **Not runtime work at all** — this belongs in AgentKit's `tools/`, not in SkyNetHR. Listed only so the classification is exhaustive. |
 
@@ -120,12 +126,12 @@ question below, which two of these rows depend on.
 | # | Item | Why it cannot be reached here | Class |
 |---|---|---|---|
 | 1 | Separate audit from model transcript | The model transcript is the CLI's, held in the CLI's own session store and replayed by `--resume`. SkyNet does not write it, and doing so would mean editing another process's private store. **Corrected**: the first version said SkyNet "has no write access", which was never checked and is probably false on disk — the objection is that it is not a supported interface, not that the bytes are unreachable. | **I** |
-| 2 | Content-addressed file-read cache | SkyNet would have to intercept the model's `Read` and substitute a reference. `Read` does not reach the approval hook (fact 2, **S**), and `control_response` is allow-or-deny (**S**). Whether a `PreToolUse` hook can substitute a *result* is **unverified** and is the whole question. | **S** premise / **A** the lever |
+| 2 | Content-addressed file-read cache | SkyNet would have to intercept the model's `Read` and substitute a reference. `Read` does not reach the approval hook (fact 2, **S**), and `control_response` is allow-or-deny (**S**). Whether a `PreToolUse` hook can substitute a *result* was the whole question and **is now answered: no supported interface does it** (#416, `416-runtime-premise-probes.md`). The lever that did work — rewriting a tool's `input` to point at a cached file — is host-configured hook territory SkyNet does not own and is Claude-only. | **S** |
 | 4 | Cached full-read contracts | The same mechanism as 2, plus it requires the model to understand a reference in place of content, which means owning the prompt. | **I** |
 | 5 | Structured session state *as model input* | The *state object* is Category 1 — SkyNet can build and display it. Feeding it to the model **instead of** conversational history is Category 3. **This split is the single easiest one to blur and must not be.** | **S** split |
 | 6 | Blocking questions that actually block | Split. SkyNet **can** hold a turn blocked and refuse to advance its own workflow (item 28). It **cannot** stop the model, mid-turn, from inventing an answer and continuing — that loop is inside the CLI. | **I** |
 | 7 | Collapse tool/permission/tool/result *in model context* | The **rendering** half is shipped (D246: permission request merged into the `tool.call` row by `callId`). The model-context half is the CLI's. | **S** / **I** |
-| 8 | Remove permission mechanics from model context | **Never measured.** Whether SkyNet's `control_response` round trip contributes any model tokens at all is unknown; if it does not, this item is already satisfied and needs no work. One probe settles it. | **A** |
+| 8 | Remove permission mechanics from model context | **Measured, and largely satisfied already** (#416, `416-runtime-premise-probes.md`). Control record types, permission request ids and the operator's audit reason are all absent from the captured model-bound requests, and an allow round trip adds no model call and no model-input tokens. The residual is a *denial*, whose rejection text is CLI-generated and reaches the model on resume — the CLI's own output, not SkyNet's to remove. This row is therefore **not** Category 3 in the sense the rest of this table means; it is here because the residual is. | **S** |
 | 11 | No giant instructions duplicated in subagent prompts | Subagents are spawned by the CLI. PR #406 surfaces their *lifecycle*, not their prompts, so SkyNet neither composes nor sees them. | **S** / **I** |
 | 14 | Turn token guidance into enforcement | Enforcement means gating what reaches the model. | **I** |
 | 26 | Automatic checkpoint compaction (of context) | SkyNet's checkpoints are **git checkpoints of the workspace** (`extensions/checkpoints/index.ts`, `ckpt.git`), not context checkpoints. Compacting model context is the CLI's own compaction, which SkyNet only observes (`session.notice / compaction`). | **S** |
@@ -150,13 +156,19 @@ Two consequences, and neither is a recommendation:
   does not own, does not audit, and surfaces only as `hook_started` / `hook_response` records it
   currently parses but does not persist as first-class events. Whether that matters is a security
   question this document does not answer.
-- **A lever whose key capability is unverified.** A `PreToolUse` hook that can *substitute* a result,
-  rather than only deny a call, would move items 2, 3 and 12's suppression half. Whether it can is
-  **class A** — unchecked against the installed CLI. It is also Claude-only, so it trades
-  provider-neutrality for a capability nobody has confirmed exists.
+- **A lever whose key capability was unverified, and now is not.** A `PreToolUse` hook that can
+  *substitute* a result, rather than only deny a call, would have moved items 2, 3 and 12's
+  suppression half. **It cannot** — #416 ran the probe against Claude Code 2.1.278 and found no
+  supported result-substitution interface: an allow carrying the candidate field returned the
+  original content, and a deny returned the marker with `is_error: true`, which is a failure rather
+  than a substitute. What *did* work was rewriting the tool's `input` to point at a cached file,
+  which is a redirection rather than a substitution, is configured on the host rather than by
+  SkyNet, and is Claude-only. The suppression half of items 2, 3 and 12 stays where it was, now on
+  class-S evidence rather than an assumption.
 
-**The next step here is a probe, not a slice**, and the S26 harness is the pattern for it. Nothing in
-this document acts on either consequence.
+**The probe ran** — `416-runtime-premise-probes.md`, issue #416, covering this question and item 8's.
+It settled what is possible and settled nothing about what to build; the routing of every item in
+this document is D256's, in `design/90-decisions.md`.
 
 ## Corrections to the first version
 
@@ -166,12 +178,14 @@ took the first version at face value should be able to see exactly what they inh
 1. **"SkyNet spawns `claude` with no hook configuration at all."** False as stated. SkyNet injects none;
    the child inherits `HOME`/`USERPROFILE` and runs the host's hooks, which SkyNet's own fixtures show
    firing. See boundary fact 3.
-2. **"A `PreToolUse` hook can deny *or substitute*."** Never verified. It was the load-bearing premise of
-   the entire "one lever" section and is now marked class A.
+2. **"A `PreToolUse` hook can deny *or substitute*."** Never verified when written, and it was the
+   load-bearing premise of the entire "one lever" section. It was marked class A, then probed by
+   #416 and **found false**: no supported substitution interface exists.
 3. **"SkyNet has no write access to the CLI's session store" (item 1).** Never checked, and probably
    false at the filesystem level. The real objection is narrower and is now stated as such.
 4. **Item 8's premise** — that `control_response` costs model tokens — was presented as a reason for a
-   Category 3 verdict. It is unmeasured, and the verdict now says so.
+   Category 3 verdict. It was unmeasured, and #416 has since measured it: the premise is **false**
+   for an allow, and true only for the CLI-generated rejection text a denial produces on resume.
 5. **The headline count.** Category 1 was reported as "17 items". It is 18 items in 17 rows, because
    items 36 and 37 share a row. The category totals now sum to 40 explicitly.
 
