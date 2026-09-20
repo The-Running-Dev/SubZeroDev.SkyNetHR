@@ -676,6 +676,24 @@ export interface SessionManager {
     attachmentId: AttachmentId,
   ): Promise<Result<{ readonly stream: NodeJS.ReadableStream; readonly mediaType: string }, SessionError>>;
 
+  // Ownership-checked counterparts of `Store.openToolOutputWindow`/`statToolOutput`
+  // (D254, D255). `statToolOutput` is ownership-checked like every other route under
+  // `/api/sessions/:id` despite opening no blob (I72) — the check is what makes a
+  // window past the last line indistinguishable from a session another operator owns.
+  openToolOutputWindow(
+    sessionId: SessionId,
+    owner: OperatorId,
+    turnId: TurnId,
+    callId: CallId,
+    window: ToolOutputWindow,
+  ): Promise<Result<{ readonly stream: NodeJS.ReadableStream; readonly totals: ToolOutputTotals | null }, SessionError>>;
+  statToolOutput(
+    sessionId: SessionId,
+    owner: OperatorId,
+    turnId: TurnId,
+    callId: CallId,
+  ): Promise<Result<ToolOutputStat, SessionError>>;
+
   subscribe(
     sessionId: SessionId,
     owner: OperatorId,
@@ -722,6 +740,25 @@ export interface LoadedMeta {
   readonly result: Result<SessionRecord, StoreError>; // a per-session failure never aborts boot
 }
 
+// `fromLine` is 1-based; `lineCount: null` runs to the end of the blob (D251, D254).
+export interface ToolOutputWindow {
+  readonly fromLine: number;
+  readonly lineCount: number | null;
+}
+
+// Nullable wherever it is carried: populated only when the counting scan reached the
+// blob's true end, never as a stand-in for an empty blob (D253, I71).
+export interface ToolOutputTotals {
+  readonly lines: number;
+  readonly bytes: number;
+}
+
+// The whole of what one `stat` can answer — not `ToolOutputTotals` with a field missing.
+// A line count is not in this set at any price short of the index D251 declined (D255).
+export interface ToolOutputStat {
+  readonly bytes: number;
+}
+
 export interface Store {
   createSession(record: SessionRecord): Promise<Result<void, StoreError>>;
   writeMeta(record: SessionRecord): Promise<Result<void, StoreError>>;
@@ -747,6 +784,25 @@ export interface Store {
     turnId: TurnId,
     callId: CallId,
   ): Promise<Result<NodeJS.ReadableStream, StoreError>>;
+
+  // Two-pass windowed read (D254): the counting pass stops exactly where the window
+  // stops and `totals` is populated only when that stop coincides with the blob's true
+  // end (D253); the returned stream is then seeked to the window's first byte. Sound
+  // only because tool-output blobs are immutable (D22, D162) — never a pattern to copy
+  // onto an appended file. Bounded solely by `Caps.sessionToolOutputBytes` (I68, D251).
+  openToolOutputWindow(
+    sessionId: SessionId,
+    turnId: TurnId,
+    callId: CallId,
+    window: ToolOutputWindow,
+  ): Promise<Result<{ readonly stream: NodeJS.ReadableStream; readonly totals: ToolOutputTotals | null }, StoreError>>;
+
+  // Opens no blob, counts no line: one `stat` (D255, I72).
+  statToolOutput(
+    sessionId: SessionId,
+    turnId: TurnId,
+    callId: CallId,
+  ): Promise<Result<ToolOutputStat, StoreError>>;
 
   // (D160) Written and fsync'd before the envelope naming it is constructed (I49).
   // `attachmentId` is server-minted, so the operator's `filename` never reaches this path.

@@ -6,6 +6,7 @@ import { randomBytes } from 'node:crypto';
 import { createReadStream } from 'node:fs';
 import { mkdir, open, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { createInterface } from 'node:readline';
+import { Readable } from 'node:stream';
 import path from 'node:path';
 import type {
   AttachmentId,
@@ -23,6 +24,9 @@ import type {
   SessionRecord,
   SessionStore,
   StoreError,
+  ToolOutputStat,
+  ToolOutputTotals,
+  ToolOutputWindow,
   TurnId,
   Result,
 } from '../core/types.js';
@@ -92,6 +96,89 @@ async function toolOutputBytesUsed(storageRoot: string, sessionId: SessionId): P
   return total;
 }
 
+
+const TOOL_OUTPUT_SCAN_CHUNK_BYTES = 64 * 1024;
+
+// Chunked, yielding line-count scan from byte 0 (D251, I68) — there is no index to seek
+// with, and yielding between chunks (rather than resolving the blob into memory) is what
+// keeps a deep window into a large blob a throughput cost, never a responsiveness one: no
+// session's `emit` and no other session's fan-out waits behind it. Bounded solely by
+// `Caps.sessionToolOutputBytes`, enforced upstream by `writeToolOutput`'s own cap — no
+// second cap on the scan exists here (D251).
+//
+// The scan stops exactly where the window stops (D254): `startByte`/`endByte` mark the
+// window's byte range, and `linesAtEnd` is the blob's total line count *only* when
+// `endByte` lands on the file's true end — known for free from the `stat` taken up
+// front, with no need to keep scanning past the window to confirm it (D253, I71).
+async function scanToolOutputWindow(
+  filePath: string,
+  window: ToolOutputWindow,
+): Promise<Result<{ readonly startByte: number; readonly endByte: number; readonly fileSize: number; readonly linesAtEnd: number | null }, StoreError>> {
+  let handle;
+  let fileSize: number;
+  try {
+    handle = await open(filePath, 'r');
+    fileSize = (await handle.stat()).size;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return { ok: false, error: { code: 'not_found', path: filePath } };
+    return ioError(filePath, (err as Error).message);
+  }
+
+  try {
+    const targetEndLine = window.lineCount === null ? null : window.fromLine + window.lineCount - 1;
+    let startByte: number | null = window.fromLine <= 1 ? 0 : null;
+    let endByte: number | null = null;
+    let linesSeen = 0;
+    let leftover = Buffer.alloc(0);
+    let leftoverAbsStart = 0;
+    let readPos = 0;
+    const chunkBuf = Buffer.alloc(TOOL_OUTPUT_SCAN_CHUNK_BYTES);
+
+    while (readPos < fileSize && (startByte === null || endByte === null)) {
+      const { bytesRead } = await handle.read(chunkBuf, 0, TOOL_OUTPUT_SCAN_CHUNK_BYTES, readPos);
+      if (bytesRead === 0) break;
+      const newData = chunkBuf.subarray(0, bytesRead);
+      const combined = leftover.length > 0 ? Buffer.concat([leftover, newData]) : Buffer.from(newData);
+      const combinedAbsStart = leftoverAbsStart;
+      readPos += bytesRead;
+
+      let lineStartIdx = 0;
+      for (;;) {
+        const nlIdx = combined.indexOf(0x0a, lineStartIdx);
+        if (nlIdx === -1) break;
+        linesSeen += 1;
+        const nextLineStart = combinedAbsStart + nlIdx + 1;
+        if (startByte === null && linesSeen === window.fromLine - 1) startByte = nextLineStart;
+        if (targetEndLine !== null && endByte === null && linesSeen === targetEndLine) endByte = nextLineStart;
+        lineStartIdx = nlIdx + 1;
+        if (startByte !== null && endByte !== null) break;
+      }
+
+      leftover = combined.subarray(lineStartIdx);
+      leftoverAbsStart = combinedAbsStart + lineStartIdx;
+      if (startByte !== null && endByte !== null) break;
+
+      // Yield to the event loop between chunks (I68) rather than run this scan to
+      // completion in one tick.
+      await new Promise<void>(resolve => setImmediate(resolve));
+    }
+
+    // True EOF: trailing bytes with no terminating newline still count as one line.
+    if (leftover.length > 0) {
+      linesSeen += 1;
+      if (startByte === null && linesSeen === window.fromLine - 1) startByte = fileSize;
+    }
+    if (startByte === null) startByte = fileSize; // fromLine beyond the blob's content
+    if (endByte === null) endByte = fileSize; // unbounded window, or bounded past the true end
+
+    return {
+      ok: true,
+      value: { startByte, endByte, fileSize, linesAtEnd: endByte === fileSize ? linesSeen : null },
+    };
+  } finally {
+    await handle.close();
+  }
+}
 
 async function appendLine(filePath: string, line: string, fsync: boolean): Promise<Result<void, StoreError>> {
   try {
@@ -576,6 +663,44 @@ export async function createFsSessionStore(config: RuntimeOptions): Promise<Resu
       try {
         const handle = await open(filePath, 'r');
         return { ok: true, value: handle.createReadStream() };
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code === 'ENOENT') return { ok: false, error: { code: 'not_found', path: filePath } };
+        return ioError(filePath, (err as Error).message);
+      }
+    },
+
+
+    async openToolOutputWindow(sessionId: SessionId, turnId: TurnId, callId: CallId, window: ToolOutputWindow) {
+      if (!isSafePathSegment(sessionId)) return { ok: false, error: { code: 'not_found', path: storageRoot } };
+      const filePath = path.join(sessionDir(storageRoot, sessionId), 'tool-output', turnId, callId);
+      if (!isSafePathSegment(turnId) || !isSafePathSegment(callId)) {
+        return { ok: false, error: { code: 'not_found', path: filePath } };
+      }
+      const scanned = await scanToolOutputWindow(filePath, window);
+      if (!scanned.ok) return scanned;
+      const { startByte, endByte, fileSize, linesAtEnd } = scanned.value;
+      const totals: ToolOutputTotals | null = linesAtEnd === null ? null : { lines: linesAtEnd, bytes: fileSize };
+      if (startByte >= endByte) return { ok: true, value: { stream: Readable.from(Buffer.alloc(0)), totals } };
+      try {
+        const stream = createReadStream(filePath, { start: startByte, end: endByte - 1 });
+        return { ok: true, value: { stream, totals } };
+      } catch (err) {
+        return ioError(filePath, (err as Error).message);
+      }
+    },
+
+
+    // Opens no blob, counts no line: the byte half of the size question D253 left open,
+    // answered by one `stat` (D255, I72).
+    async statToolOutput(sessionId: SessionId, turnId: TurnId, callId: CallId): Promise<Result<ToolOutputStat, StoreError>> {
+      if (!isSafePathSegment(sessionId)) return { ok: false, error: { code: 'not_found', path: storageRoot } };
+      const filePath = path.join(sessionDir(storageRoot, sessionId), 'tool-output', turnId, callId);
+      if (!isSafePathSegment(turnId) || !isSafePathSegment(callId)) {
+        return { ok: false, error: { code: 'not_found', path: filePath } };
+      }
+      try {
+        const info = await stat(filePath);
+        return { ok: true, value: { bytes: info.size } };
       } catch (err) {
         if ((err as NodeJS.ErrnoException).code === 'ENOENT') return { ok: false, error: { code: 'not_found', path: filePath } };
         return ioError(filePath, (err as Error).message);

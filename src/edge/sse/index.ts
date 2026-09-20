@@ -54,6 +54,7 @@ export function createSseEdge(deps: EdgeDeps): RequestListener {
     handleDelete,
     handleRename,
     handleToolOutput,
+    handleToolOutputStat,
     handleAttachment,
     handleListCheckpoints,
     handleCheckpointRestore,
@@ -301,6 +302,13 @@ export function createSseEdge(deps: EdgeDeps): RequestListener {
             const decodedCallId = decodeSegment(res, toolOutputMatch[2]!, 'callId', 'callId');
             if (decodedCallId === null) return;
             return await handleToolOutput(req, res, owner, sessionId, decodedTurnId as TurnId, decodedCallId as CallId);
+          }
+          if (method === 'HEAD' && toolOutputMatch) {
+            const decodedTurnId = decodeSegment(res, toolOutputMatch[1]!, 'turnId', 'turnId');
+            if (decodedTurnId === null) return;
+            const decodedCallId = decodeSegment(res, toolOutputMatch[2]!, 'callId', 'callId');
+            if (decodedCallId === null) return;
+            return await handleToolOutputStat(req, res, owner, sessionId, decodedTurnId as TurnId, decodedCallId as CallId);
           }
           const attachmentMatch = /^\/attachments\/([^/]+)\/([^/]+)$/.exec(rest);
           if (method === 'GET' && attachmentMatch) {

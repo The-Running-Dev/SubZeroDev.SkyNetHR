@@ -3,7 +3,36 @@ import { Readable } from 'node:stream';
 import { auditRecordMatches, decodeAuditCursor, encodeAuditCursor } from './audit.js';
 import { isSafePathSegment } from './paths.js';
 import { createMemoryAttemptStore } from './create-attempts.js';
-import type { AuditRecord, Envelope, ProcessRecord, RuntimeOptions, SessionId, SessionRecord, SessionStore, StoreError, Result } from '../core/types.js';
+import type { AuditRecord, Envelope, ProcessRecord, RuntimeOptions, SessionId, SessionRecord, SessionStore, StoreError, Result, ToolOutputWindow } from '../core/types.js';
+
+// Ported from `store/fs.ts`'s chunked `scanToolOutputWindow` (D254): same two-boundary
+// scan, without the chunking — the in-memory store already holds the whole blob, so there
+// is no event loop to yield back to. A single unbroken pass over the whole buffer means
+// `linesSeen` is always accurate when `endByte` lands on the true end (D253).
+function scanToolOutputWindow(bytes: Buffer, window: ToolOutputWindow): { startByte: number; endByte: number; linesAtEnd: number | null } {
+  const fileSize = bytes.length;
+  const targetEndLine = window.lineCount === null ? null : window.fromLine + window.lineCount - 1;
+  let startByte: number | null = window.fromLine <= 1 ? 0 : null;
+  let endByte: number | null = null;
+  let linesSeen = 0;
+  let idx = 0;
+  while (idx < fileSize) {
+    const nl = bytes.indexOf(0x0a, idx);
+    if (nl === -1) break;
+    linesSeen += 1;
+    const nextLineStart = nl + 1;
+    if (startByte === null && linesSeen === window.fromLine - 1) startByte = nextLineStart;
+    if (targetEndLine !== null && endByte === null && linesSeen === targetEndLine) endByte = nextLineStart;
+    idx = nextLineStart;
+  }
+  if (idx < fileSize) {
+    linesSeen += 1;
+    if (startByte === null && linesSeen === window.fromLine - 1) startByte = fileSize;
+  }
+  if (startByte === null) startByte = fileSize;
+  if (endByte === null) endByte = fileSize;
+  return { startByte, endByte, linesAtEnd: endByte === fileSize ? linesSeen : null };
+}
 
 // Copies at every storage boundary keep callers from changing persisted history
 // through object references. The maps belong to one backend instance.
@@ -52,6 +81,19 @@ export function createMemorySessionStore(config: Pick<RuntimeOptions, 'caps'>): 
     async openToolOutput(id, turn, call) {
       const k = key(id, turn, call), bytes = output.get(k);
       return ![id, turn, call].every(isSafePathSegment) || !bytes ? missing(k) : ok(Readable.from([Buffer.from(bytes)]));
+    },
+    async openToolOutputWindow(id, turn, call, window) {
+      const k = key(id, turn, call);
+      if (![id, turn, call].every(isSafePathSegment)) return invalid(k);
+      const bytes = output.get(k);
+      if (!bytes) return missing(k);
+      const { startByte, endByte, linesAtEnd } = scanToolOutputWindow(bytes, window);
+      const totals = linesAtEnd === null ? null : { lines: linesAtEnd, bytes: bytes.length };
+      return ok({ stream: Readable.from([Buffer.from(bytes.subarray(startByte, endByte))]), totals });
+    },
+    async statToolOutput(id, turn, call) {
+      const k = key(id, turn, call), bytes = output.get(k);
+      return ![id, turn, call].every(isSafePathSegment) || !bytes ? missing(k) : ok({ bytes: bytes.length });
     },
     async writeAttachment(id, turn, attachment, bytes, mediaType) {
       const k = key(id, turn, attachment);

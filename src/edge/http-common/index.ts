@@ -280,6 +280,18 @@ export function parseIsoTimestamp(value: string): string | null {
   return Number.isNaN(Date.parse(value)) ? null : value;
 }
 
+// `fromLine`/`lineCount` are 1-based line counts (D254), not `handleAudit`'s `limit` —
+// `Number.parseInt('3.5', 10)` accepting a fractional string is fine for a page size but
+// not for a line number, so this checks the whole string is digits rather than trusting
+// `parseInt` to reject what it silently truncates.
+const POSITIVE_INT_PATTERN = /^[1-9]\d*$/;
+
+function parsePositiveInt(raw: string): number | null {
+  if (!POSITIVE_INT_PATTERN.test(raw)) return null;
+  const parsed = Number(raw);
+  return Number.isSafeInteger(parsed) ? parsed : null;
+}
+
 // Kept identical to `store`'s `macEquals` by hand — the two modules cannot share a runtime
 // helper (`store` depends only on `config`/`contract`; `contract` is types-only) but both
 // compare a caller-supplied secret in constant time, so the technique must not drift between
@@ -559,11 +571,20 @@ export function createHttpHandlers(deps: EdgeDeps) {
     stream.pipe(res);
   }
 
+  const TOOL_OUTPUT_HEADERS = {
+    'content-type': 'text/plain; charset=utf-8',
+    'x-content-type-options': 'nosniff',
+    'content-disposition': 'attachment',
+  };
+
   // S9.3: the ownership check is `openToolOutput`'s (`no_such_session`, indistinguishable
   // from a session that never existed); every other failure — a missing or unreadable
   // blob — is `no_such_output` (S9.5), which the generic `storage` mapping in
   // `apiErrorFor` does not produce, so this route maps it itself rather than routing
-  // through `failWith`.
+  // through `failWith`. Absent `fromLine`/`lineCount`, this is the whole-blob route D254
+  // left untouched; either query param present switches to the two-pass windowed read,
+  // whose `totals` (D253) surface as `X-Tool-Output-Lines`/`X-Tool-Output-Bytes` only when
+  // non-null, together or not at all (I71).
   async function handleToolOutput(
     req: IncomingMessage,
     res: ServerResponse,
@@ -572,16 +593,68 @@ export function createHttpHandlers(deps: EdgeDeps) {
     turnId: TurnId,
     callId: CallId,
   ): Promise<void> {
-    const opened = await manager.openToolOutput(sessionId, owner, turnId, callId);
+    const url = new URL(req.url ?? '/', 'http://placeholder');
+    const fromLineRaw = url.searchParams.get('fromLine');
+    const lineCountRaw = url.searchParams.get('lineCount');
+
+    if (fromLineRaw === null && lineCountRaw === null) {
+      const opened = await manager.openToolOutput(sessionId, owner, turnId, callId);
+      if (!opened.ok) {
+        if (opened.error.code === 'no_such_session') return failWith(res, opened.error);
+        return sendError(res, 'no_such_output', 'the tool-output blob is missing or unreadable');
+      }
+      return pipeBlobResponse(req, res, opened.value, TOOL_OUTPUT_HEADERS);
+    }
+
+    let fromLine = 1;
+    if (fromLineRaw !== null) {
+      const parsed = parsePositiveInt(fromLineRaw);
+      if (parsed === null) return sendError(res, 'bad_request', 'fromLine must be a positive integer', { field: 'fromLine' });
+      fromLine = parsed;
+    }
+    let lineCount: number | null = null;
+    if (lineCountRaw !== null) {
+      const parsed = parsePositiveInt(lineCountRaw);
+      if (parsed === null) return sendError(res, 'bad_request', 'lineCount must be a positive integer', { field: 'lineCount' });
+      lineCount = parsed;
+    }
+
+    const opened = await manager.openToolOutputWindow(sessionId, owner, turnId, callId, { fromLine, lineCount });
     if (!opened.ok) {
       if (opened.error.code === 'no_such_session') return failWith(res, opened.error);
       return sendError(res, 'no_such_output', 'the tool-output blob is missing or unreadable');
     }
-    pipeBlobResponse(req, res, opened.value, {
-      'content-type': 'text/plain; charset=utf-8',
-      'x-content-type-options': 'nosniff',
-      'content-disposition': 'attachment',
-    });
+    const { stream, totals } = opened.value;
+    const headers = { ...TOOL_OUTPUT_HEADERS } as Record<string, string>;
+    if (totals !== null) {
+      headers['x-tool-output-lines'] = String(totals.lines);
+      headers['x-tool-output-bytes'] = String(totals.bytes);
+    }
+    pipeBlobResponse(req, res, stream, headers);
+  }
+
+  // D255: `HEAD` answers the byte half of the scrollbar-sizing gap from one `stat`, never a
+  // scan — it refuses `fromLine`/`lineCount` outright rather than silently ignoring them,
+  // and never sets `X-Tool-Output-Lines` (the line half stays a standing decline, D251).
+  async function handleToolOutputStat(
+    req: IncomingMessage,
+    res: ServerResponse,
+    owner: OperatorId,
+    sessionId: SessionId,
+    turnId: TurnId,
+    callId: CallId,
+  ): Promise<void> {
+    const url = new URL(req.url ?? '/', 'http://placeholder');
+    if (url.searchParams.has('fromLine')) return sendError(res, 'bad_request', 'HEAD does not accept a window', { field: 'fromLine' });
+    if (url.searchParams.has('lineCount')) return sendError(res, 'bad_request', 'HEAD does not accept a window', { field: 'lineCount' });
+
+    const stated = await manager.statToolOutput(sessionId, owner, turnId, callId);
+    if (!stated.ok) {
+      if (stated.error.code === 'no_such_session') return failWith(res, stated.error);
+      return sendError(res, 'no_such_output', 'the tool-output blob is missing or unreadable');
+    }
+    res.writeHead(200, { ...TOOL_OUTPUT_HEADERS, 'content-length': String(stated.value.bytes) });
+    res.end();
   }
 
   // (D160) An allow-list of image types the response may echo as `Content-Type` — every
@@ -947,6 +1020,7 @@ export function createHttpHandlers(deps: EdgeDeps) {
     handleDelete,
     handleRename,
     handleToolOutput,
+    handleToolOutputStat,
     handleAttachment,
     handleListCheckpoints,
     handleCheckpointRestore,

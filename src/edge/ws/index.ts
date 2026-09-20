@@ -185,6 +185,7 @@ export function createWsEdge(deps: EdgeDeps): WsRequestListener {
     handleDelete,
     handleRename,
     handleToolOutput,
+    handleToolOutputStat,
     handleAttachment,
     handleListCheckpoints,
     handleCheckpointRestore,
@@ -566,6 +567,21 @@ export function createWsEdge(deps: EdgeDeps): WsRequestListener {
               return sendError(res, 'bad_request', 'callId is not a valid path segment', { field: 'callId' });
             }
             return await handleToolOutput(req, res, owner, sessionId, decodedTurnId as TurnId, decodedCallId as CallId);
+          }
+          if (method === 'HEAD' && toolOutputMatch) {
+            let decodedTurnId: string;
+            try {
+              decodedTurnId = decodeURIComponent(toolOutputMatch[1]!);
+            } catch {
+              return sendError(res, 'bad_request', 'turnId is not a valid path segment', { field: 'turnId' });
+            }
+            let decodedCallId: string;
+            try {
+              decodedCallId = decodeURIComponent(toolOutputMatch[2]!);
+            } catch {
+              return sendError(res, 'bad_request', 'callId is not a valid path segment', { field: 'callId' });
+            }
+            return await handleToolOutputStat(req, res, owner, sessionId, decodedTurnId as TurnId, decodedCallId as CallId);
           }
           const attachmentMatch = /^\/attachments\/([^/]+)\/([^/]+)$/.exec(rest);
           if (method === 'GET' && attachmentMatch) {

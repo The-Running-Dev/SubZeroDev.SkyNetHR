@@ -1343,82 +1343,82 @@ const S9_CAPS: Config['caps'] = {
   standingRuleBytes: 1024, attachmentBytes: 10485760, attachmentCount: 5, sessionToolOutputBytes: 10485760,
 };
 
-describe('S9.2/S9.3/S9.5 — GET .../tool-output/:turnId/:callId', () => {
-  // A fresh GET /events replays the whole spill (D40), so a second call on the same
-  // session sees the first turn's history too — filtering every frame by this turn's own
-  // `turnId` (from the POST /message response, not the stream) is what keeps a second
-  // truncated turn on the same session from picking up the first one's frames instead.
-  function findOwnFrame(frames: string[], kind: string, turnId: string): string {
-    return frames.find((f) => f.includes(`event: ${kind}`) && f.includes(`"turnId":"${turnId}"`))!;
-  }
+// A fresh GET /events replays the whole spill (D40), so a second call on the same
+// session sees the first turn's history too — filtering every frame by this turn's own
+// `turnId` (from the POST /message response, not the stream) is what keeps a second
+// truncated turn on the same session from picking up the first one's frames instead.
+function findOwnFrame(frames: string[], kind: string, turnId: string): string {
+  return frames.find((f) => f.includes(`event: ${kind}`) && f.includes(`"turnId":"${turnId}"`))!;
+}
 
-  /**
-   * Runs one turn whose tool.result is over the cap, and returns its (turnId, callId, bytes).
-   *
-   * Watches a single connection for both `permission.request` and `tool.result`, sending the
-   * permission decision as a side effect the first time the request frame appears, rather than
-   * closing the reader and reopening a second connection to wait for `tool.result` — a second
-   * connection replays the whole spill (D40), so on the test running two turns it retransmits
-   * the first turn's history before the second's own frames arrive, and under a loaded or
-   * slow-spawn runner (windows-latest under the full matrix) that extra round trip was wide
-   * enough to intermittently exceed even a widened deadline (#299). Reusing the one connection
-   * removes the redundant replay rather than just giving it more time to finish.
-   */
-  async function runTruncatedTurn(h: Harness, id: string, bigBytes: number): Promise<{ turnId: string; callId: string; bytes: number }> {
-    process.env['SKYNET_BIG_TOOL_RESULT_BYTES'] = String(bigBytes);
-    const events = await get(h, `/api/sessions/${id}/events`);
-    const sent = await post(h, `/api/sessions/${id}/message`, { text: 'go' });
-    const { turnId } = (await sent.json()) as { turnId: string };
+/**
+ * Runs one turn whose tool.result is over the cap, and returns its (turnId, callId, bytes).
+ *
+ * Watches a single connection for both `permission.request` and `tool.result`, sending the
+ * permission decision as a side effect the first time the request frame appears, rather than
+ * closing the reader and reopening a second connection to wait for `tool.result` — a second
+ * connection replays the whole spill (D40), so on the test running two turns it retransmits
+ * the first turn's history before the second's own frames arrive, and under a loaded or
+ * slow-spawn runner (windows-latest under the full matrix) that extra round trip was wide
+ * enough to intermittently exceed even a widened deadline (#299). Reusing the one connection
+ * removes the redundant replay rather than just giving it more time to finish.
+ */
+async function runTruncatedTurn(h: Harness, id: string, bigBytes: number): Promise<{ turnId: string; callId: string; bytes: number }> {
+  process.env['SKYNET_BIG_TOOL_RESULT_BYTES'] = String(bigBytes);
+  const events = await get(h, `/api/sessions/${id}/events`);
+  const sent = await post(h, `/api/sessions/${id}/message`, { text: 'go' });
+  const { turnId } = (await sent.json()) as { turnId: string };
 
-    let permissionSent = false;
-    let permissionPost: Promise<Response> | undefined;
-    const { frames } = await readFrames(
-      events,
-      (f) => {
-        if (!permissionSent) {
-          const reqFrame = findOwnFrame(f, 'permission.request', turnId);
-          if (reqFrame) {
-            permissionSent = true;
-            const requestId = (JSON.parse(reqFrame.split('\n').find((l) => l.startsWith('data: '))!.slice(6)) as { data: { requestId: string } })
-              .data.requestId;
-            permissionPost = post(h, `/api/sessions/${id}/permission`, { requestId, decision: 'allow', scope: 'once', rule: null, reason: null });
-          }
+  let permissionSent = false;
+  let permissionPost: Promise<Response> | undefined;
+  const { frames } = await readFrames(
+    events,
+    (f) => {
+      if (!permissionSent) {
+        const reqFrame = findOwnFrame(f, 'permission.request', turnId);
+        if (reqFrame) {
+          permissionSent = true;
+          const requestId = (JSON.parse(reqFrame.split('\n').find((l) => l.startsWith('data: '))!.slice(6)) as { data: { requestId: string } })
+            .data.requestId;
+          permissionPost = post(h, `/api/sessions/${id}/permission`, { requestId, decision: 'allow', scope: 'once', rule: null, reason: null });
         }
-        return findOwnFrame(f, 'tool.result', turnId) !== undefined;
-      },
-      15000,
-    );
-    await permissionPost;
+      }
+      return findOwnFrame(f, 'tool.result', turnId) !== undefined;
+    },
+    15000,
+  );
+  await permissionPost;
 
-    const frame = findOwnFrame(frames, 'tool.result', turnId);
-    const dataLine = frame.split('\n').find((l) => l.startsWith('data: '))!;
-    const envelope = JSON.parse(dataLine.slice('data: '.length)) as { data: { turnId: string; callId: string; truncated: boolean; bytes: number } };
-    assert.equal(envelope.data.truncated, true, 'the fixture emitted enough bytes to cross the cap');
-    return { turnId: envelope.data.turnId, callId: envelope.data.callId, bytes: envelope.data.bytes };
+  const frame = findOwnFrame(frames, 'tool.result', turnId);
+  const dataLine = frame.split('\n').find((l) => l.startsWith('data: '))!;
+  const envelope = JSON.parse(dataLine.slice('data: '.length)) as { data: { turnId: string; callId: string; truncated: boolean; bytes: number } };
+  assert.equal(envelope.data.truncated, true, 'the fixture emitted enough bytes to cross the cap');
+  return { turnId: envelope.data.turnId, callId: envelope.data.callId, bytes: envelope.data.bytes };
+}
+
+/**
+ * The blob write behind a truncated envelope is fire-and-forget by design
+ * (session-manager's comment at the `writeToolOutput` call site, I1/I27: awaiting disk
+ * I/O before `emit` would let a later notification claim a lower `seq`). So a GET issued
+ * the instant the truncated envelope is observed can legitimately still see `404
+ * no_such_output` while the write is in flight — S9.5 names that outcome, not a bug — and
+ * on a loaded or slow-disk runner (windows-latest under the full matrix) the gap is wide
+ * enough to hit routinely. This is a test synchronization gap, the same category #110
+ * was (src/session-manager/index.test.ts): poll until the write has actually landed
+ * rather than asserting against a single, unsynchronized read.
+ */
+async function getBlobWhenReady(h: Harness, url: string, operator = 'ben'): Promise<Response> {
+  const deadline = Date.now() + 5000;
+  for (;;) {
+    const res = await get(h, url, operator);
+    if (res.status !== 404) return res;
+    const body = (await res.json()) as { error?: { code?: string } };
+    if (body.error?.code !== 'no_such_output' || Date.now() >= deadline) return res;
+    await new Promise((resolve) => setTimeout(resolve, 25));
   }
+}
 
-  /**
-   * The blob write behind a truncated envelope is fire-and-forget by design
-   * (session-manager's comment at the `writeToolOutput` call site, I1/I27: awaiting disk
-   * I/O before `emit` would let a later notification claim a lower `seq`). So a GET issued
-   * the instant the truncated envelope is observed can legitimately still see `404
-   * no_such_output` while the write is in flight — S9.5 names that outcome, not a bug — and
-   * on a loaded or slow-disk runner (windows-latest under the full matrix) the gap is wide
-   * enough to hit routinely. This is a test synchronization gap, the same category #110
-   * was (src/session-manager/index.test.ts): poll until the write has actually landed
-   * rather than asserting against a single, unsynchronized read.
-   */
-  async function getBlobWhenReady(h: Harness, url: string, operator = 'ben'): Promise<Response> {
-    const deadline = Date.now() + 5000;
-    for (;;) {
-      const res = await get(h, url, operator);
-      if (res.status !== 404) return res;
-      const body = (await res.json()) as { error?: { code?: string } };
-      if (body.error?.code !== 'no_such_output' || Date.now() >= deadline) return res;
-      await new Promise((resolve) => setTimeout(resolve, 25));
-    }
-  }
-
+describe('S9.2/S9.3/S9.5 — GET .../tool-output/:turnId/:callId', () => {
   it('serves 200 text/plain with nosniff and attachment, and the full pre-truncation byte count', async () => {
     const h = await makeEdge(undefined, { caps: S9_CAPS }, 'big-tool-result');
     const id = await newSession(h, 't1');
@@ -1469,6 +1469,92 @@ describe('S9.2/S9.3/S9.5 — GET .../tool-output/:turnId/:callId', () => {
     const secondBody = await (await getBlobWhenReady(h, `/api/sessions/${id}/tool-output/${second.turnId}/${second.callId}`)).text();
     assert.equal(firstBody.length, 5000);
     assert.equal(secondBody.length, 6000);
+  });
+});
+
+describe('contract item 19 — windowed GET and HEAD on .../tool-output/:turnId/:callId (D254/D255)', () => {
+  it('I69 — a window starting past the last line is 200 with an empty body, not an error', async () => {
+    const h = await makeEdge(undefined, { caps: S9_CAPS }, 'big-tool-result');
+    const id = await newSession(h, 'w1');
+    const { turnId, callId, bytes } = await runTruncatedTurn(h, id, 5000);
+
+    const res = await getBlobWhenReady(h, `/api/sessions/${id}/tool-output/${turnId}/${callId}?fromLine=1&lineCount=1`);
+    assert.equal(res.status, 200);
+    // The fixture writes one long unterminated line, so any window at all reaches true end.
+    assert.equal(res.headers.get('x-tool-output-lines'), '1');
+    assert.equal(res.headers.get('x-tool-output-bytes'), String(bytes));
+
+    const past = await get(h, `/api/sessions/${id}/tool-output/${turnId}/${callId}?fromLine=999999&lineCount=1`);
+    assert.equal(past.status, 200);
+    assert.equal(await past.text(), '');
+    assert.equal(past.headers.get('x-tool-output-lines'), '1');
+    assert.equal(past.headers.get('x-tool-output-bytes'), String(bytes));
+  });
+
+  it('I71 — totals headers are present together, and absent together, never one without the other', async () => {
+    const h = await makeEdge(undefined, { caps: S9_CAPS }, 'big-tool-result');
+    const id = await newSession(h, 'w2');
+    const { turnId, callId } = await runTruncatedTurn(h, id, 5000);
+
+    // A window reaching true end: both headers present.
+    const toEnd = await getBlobWhenReady(h, `/api/sessions/${id}/tool-output/${turnId}/${callId}?fromLine=1`);
+    assert.equal(toEnd.status, 200);
+    assert.notEqual(toEnd.headers.get('x-tool-output-lines'), null);
+    assert.notEqual(toEnd.headers.get('x-tool-output-bytes'), null);
+
+    // The unwindowed whole-blob route (no query params at all) never sets either header.
+    const whole = await get(h, `/api/sessions/${id}/tool-output/${turnId}/${callId}`);
+    assert.equal(whole.status, 200);
+    assert.equal(whole.headers.get('x-tool-output-lines'), null);
+    assert.equal(whole.headers.get('x-tool-output-bytes'), null);
+  });
+
+  it('422 bad_request naming the field for a non-integer, zero, or negative fromLine/lineCount', async () => {
+    const h = await makeEdge(undefined, { caps: S9_CAPS }, 'big-tool-result');
+    const id = await newSession(h, 'w3');
+    const { turnId, callId } = await runTruncatedTurn(h, id, 5000);
+    await getBlobWhenReady(h, `/api/sessions/${id}/tool-output/${turnId}/${callId}`); // ensure blob exists first
+
+    const cases: Array<[string, string]> = [
+      ['fromLine=0', 'fromLine'],
+      ['fromLine=-1', 'fromLine'],
+      ['fromLine=1.5', 'fromLine'],
+      ['fromLine=abc', 'fromLine'],
+      ['lineCount=0', 'lineCount'],
+      ['lineCount=-1', 'lineCount'],
+      ['lineCount=2.5', 'lineCount'],
+    ];
+    for (const [query, field] of cases) {
+      const res = await get(h, `/api/sessions/${id}/tool-output/${turnId}/${callId}?${query}`);
+      assert.equal(res.status, 422, query);
+      const err = ((await res.json()) as { error: { code: string; detail?: { field?: string } } }).error;
+      assert.equal(err.code, 'bad_request', query);
+      assert.equal(err.detail?.field, field, query);
+    }
+  });
+
+  it('I72 — HEAD answers Content-Length from a single stat, never scans, and refuses a window', async () => {
+    const h = await makeEdge(undefined, { caps: S9_CAPS }, 'big-tool-result');
+    const id = await newSession(h, 'w4');
+    const { turnId, callId, bytes } = await runTruncatedTurn(h, id, 5000);
+    await getBlobWhenReady(h, `/api/sessions/${id}/tool-output/${turnId}/${callId}`); // ensure blob exists first
+
+    const head = await fetch(`${h.base}/api/sessions/${id}/tool-output/${turnId}/${callId}`, {
+      method: 'HEAD',
+      headers: { 'x-forwarded-user': 'ben' },
+    });
+    assert.equal(head.status, 200);
+    assert.equal(head.headers.get('content-length'), String(bytes));
+    assert.equal(head.headers.get('x-tool-output-lines'), null, 'HEAD never scans, so it never learns a line count');
+    assert.equal(await head.text(), '');
+
+    for (const query of ['fromLine=1', 'lineCount=1']) {
+      const refused = await fetch(`${h.base}/api/sessions/${id}/tool-output/${turnId}/${callId}?${query}`, {
+        method: 'HEAD',
+        headers: { 'x-forwarded-user': 'ben' },
+      });
+      assert.equal(refused.status, 422, query);
+    }
   });
 });
 

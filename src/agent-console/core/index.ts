@@ -1360,6 +1360,28 @@ export function createSessionCore(deps: {
       return { ok: true, value: opened.value };
     },
 
+    async openToolOutputWindow(sessionId, owner, turnId, callId, window) {
+      // Same ownership check as `openToolOutput` (D254) — a window past the last line
+      // is a success, not a distinguishable failure, but another operator's session
+      // still answers `not_found` exactly as the whole-blob read does.
+      const entry = sessions.get(sessionId);
+      if (!entry || entry.creating || entry.record.owner !== owner) return { ok: false, error: { code: 'not_found', sessionId } };
+      const opened = await store.openToolOutputWindow(sessionId, turnId, callId, window);
+      if (!opened.ok) return { ok: false, error: { code: 'storage', cause: opened.error } };
+      return { ok: true, value: opened.value };
+    },
+
+    async statToolOutput(sessionId, owner, turnId, callId) {
+      // Ownership-checked like every other route under `/api/sessions/:id`, despite
+      // opening no blob (I72, D255) — the check is what keeps a `HEAD` on another
+      // operator's session indistinguishable from one that never existed.
+      const entry = sessions.get(sessionId);
+      if (!entry || entry.creating || entry.record.owner !== owner) return { ok: false, error: { code: 'not_found', sessionId } };
+      const stated = await store.statToolOutput(sessionId, turnId, callId);
+      if (!stated.ok) return { ok: false, error: { code: 'storage', cause: stated.error } };
+      return { ok: true, value: stated.value };
+    },
+
     async openAttachment(sessionId, owner, turnId, attachmentId) {
       // (D160) Same ownership check as `openToolOutput` (S21.7).
       const entry = sessions.get(sessionId);
