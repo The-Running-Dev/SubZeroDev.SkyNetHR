@@ -31,6 +31,58 @@ function pretty(value) {
   }
 }
 
+// S37: compact may demote short assistant narration, but the classification is a display
+// annotation only. The complete rule set is data here — no renderer branch carries its own
+// phrase test. Conservative length/paragraph bounds keep a substantive answer from becoming
+// ephemeral merely because its first sentence announces an action.
+export const EPHEMERAL_ASSISTANT_TEXT_RULES = Object.freeze([
+  {
+    id: 'short-progress',
+    maxChars: 80,
+    maxParagraphs: 1,
+    pattern: /^(?:working on (?:it|this)|on it|checking now|looking into it|one moment)(?:[.!…]*)$/i,
+  },
+  {
+    id: 'about-to-action',
+    maxChars: 280,
+    maxParagraphs: 1,
+    pattern: /^(?:(?:i|we)(?:['’](?:m|re)| am| are)\s+)?about to\s+(?:check|inspect|review|investigate|trace|look|run|test|verify|implement|update|change|fix|add|remove|read|open|fetch|compare|start|continue)\b/i,
+  },
+  {
+    id: 'present-action',
+    maxChars: 280,
+    maxParagraphs: 1,
+    pattern: /^(?:i|we)(?:['’](?:m|re)| am| are)\s+(?:checking|inspecting|reviewing|investigating|tracing|looking|running|testing|verifying|implementing|updating|changing|fixing|adding|removing|reading|opening|fetching|comparing|starting|continuing|working)\b/i,
+  },
+  {
+    id: 'going-to-action',
+    maxChars: 280,
+    maxParagraphs: 1,
+    pattern: /^(?:i|we)(?:['’](?:m|re)| am| are)\s+going to\s+(?:check|inspect|review|investigate|trace|look|run|test|verify|implement|update|change|fix|add|remove|read|open|fetch|compare|start|continue)\b/i,
+  },
+  {
+    id: 'let-me-action',
+    maxChars: 280,
+    maxParagraphs: 1,
+    pattern: /^let me\s+(?:check|inspect|review|investigate|trace|look|run|test|verify|implement|update|change|fix|add|remove|read|open|fetch|compare|start|continue)\b/i,
+  },
+  {
+    id: 'next-action',
+    maxChars: 280,
+    maxParagraphs: 1,
+    pattern: /^(?:i|we)(?:['’]ll| will)\s+(?:check|inspect|review|investigate|trace|look|run|test|verify|implement|update|change|fix|add|remove|read|open|fetch|compare|start|continue)\b/i,
+  },
+]);
+
+export function classifyAssistantText(text) {
+  const value = String(text ?? '').trim();
+  const paragraphs = value === '' ? 0 : value.split(/\n\s*\n/).length;
+  for (const rule of EPHEMERAL_ASSISTANT_TEXT_RULES) {
+    if (value.length <= rule.maxChars && paragraphs <= rule.maxParagraphs && rule.pattern.test(value)) return rule.id;
+  }
+  return null;
+}
+
 // (D160/S21.10) The same allow-list the read route serves `Content-Type` under — an image
 // renders inline under the document's existing `img-src 'self'`; everything else is a
 // download naming the file and its size. `filename` reaches the DOM only as a text node
@@ -76,6 +128,10 @@ function messageNode(doc, data, handlers) {
   // supported by the test stub's proxy the same way any other assignment is.
   wrapper.__messageTextNode = textNode;
   wrapper.__messageText = data.text;
+  if (data.role !== 'user') {
+    wrapper.__assistantTurnId = data.turnId;
+    wrapper.__ephemeralRule = classifyAssistantText(data.text);
+  }
   return wrapper;
 }
 
@@ -91,6 +147,29 @@ export function appendMessageDeltaText(node, text) {
   // point instead of to the delta itself.
   node.__messageText = (node.__messageText ?? '') + text;
   textNode.textContent = node.__messageText;
+  if (node.__assistantTurnId !== undefined) node.__ephemeralRule = classifyAssistantText(node.__messageText);
+}
+
+// Returns whether this call hid the node. The node stays attached to the transcript and
+// retains its text either way; normal/full therefore reveal the same node immediately.
+export function applyAssistantMessageVerbosity(node, level) {
+  const hidden = level === 'compact' && node.__ephemeralRule !== null && node.__ephemeralRule !== undefined;
+  node.hidden = hidden;
+  return hidden;
+}
+
+export function renderHiddenAssistantBlocks(doc, count) {
+  const body = el(doc, 'div', 'message__hidden');
+  const node = row(doc, 'assistant-hidden', 'agent', body);
+  node.__hiddenCountNode = body;
+  node.hidden = true;
+  updateHiddenAssistantBlocks(node, count);
+  return node;
+}
+
+export function updateHiddenAssistantBlocks(node, count) {
+  const noun = count === 1 ? 'block' : 'blocks';
+  node.__hiddenCountNode.textContent = `${count} narration ${noun} hidden`;
 }
 
 // D246: verbosity governs `thinking` text and `tool.call`/`tool.result` bodies via a

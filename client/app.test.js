@@ -23,11 +23,21 @@ function fakeElement() {
     disabled: false,
     children: [],
     appendChild(node) {
+      if (node.parentNode) node.parentNode.removeChild(node);
       this.children.push(node);
+      node.parentNode = this;
+      return node;
+    },
+    insertBefore(node, reference) {
+      if (node.parentNode) node.parentNode.removeChild(node);
+      const index = this.children.indexOf(reference);
+      this.children.splice(index === -1 ? this.children.length : index, 0, node);
+      node.parentNode = this;
       return node;
     },
     removeChild(node) {
       this.children = this.children.filter((c) => c !== node);
+      node.parentNode = null;
       return node;
     },
     get firstChild() {
@@ -147,6 +157,7 @@ async function setUpApp() {
   const doc = makeFakeDocument();
   const sseInstances = [];
   const wsInstances = [];
+  const fetchCalls = [];
   globalThis.document = doc;
   globalThis.window = { location: { protocol: 'http:', host: 'skynet-hr.test' } };
   globalThis.localStorage = {
@@ -171,12 +182,16 @@ async function setUpApp() {
   // I20/S1.10: the vendor string is arbitrary and unchecked by anything this test exercises
   // — deliberately not a real vendor name, matching the client's own no-vendor-literal rule
   // (`src/client/index.test.ts`'s "carries no vendor string anywhere in the client sources").
-  globalThis.fetch = fakeFetch([
+  const routeFetch = fakeFetch([
     ['/api/sessions', () => ({ status: 200, payload: { sessions: [
       { id: 'sess-a', cwd: '/work/a', vendor: 'acme-agent', state: 'live' },
       { id: 'sess-b', cwd: '/work/b', vendor: 'acme-agent', state: 'live' },
     ] } })],
   ]);
+  globalThis.fetch = async (...args) => {
+    fetchCalls.push(args[0]);
+    return routeFetch(...args);
+  };
 
   // `app.js` self-executes `start()` on import (no exports) — dynamic import with a
   // cache-busting query string so a second `setUpApp()` in a later test gets a fresh module
@@ -190,7 +205,7 @@ async function setUpApp() {
   const selectA = () => sessionsList.children[0].children[0].dispatch('click', {});
   const selectB = () => sessionsList.children[1].children[0].dispatch('click', {});
 
-  return { doc, sseInstances, wsInstances, selectA, selectB };
+  return { doc, fetchCalls, sseInstances, wsInstances, selectA, selectB };
 }
 
 test('#204 SSE — a delayed event from a session switched away from does not render or move lastSeq, and the new session still renders normally', async () => {
@@ -287,4 +302,58 @@ test('item 19 — a run of identical notices renders as one counted row, and an 
 
   progress(5);
   assert.equal(transcript.children.length, 3, 'the same notice after an intervening event starts a new row rather than folding into the earlier run');
+});
+
+test('S37.3/S37.5 — compact hides narration losslessly and shows a counted placeholder without refetching', async () => {
+  const { doc, fetchCalls, sseInstances, selectA } = await setUpApp();
+  doc.__setEdge('sse');
+  selectA();
+  await flush();
+
+  const stream = sseInstances[0];
+  const transcript = doc.getElementById('transcript');
+  stream.emit('message', {
+    seq: 1,
+    sessionId: 'sess-a',
+    ts: '2026-09-20T00:00:00.000Z',
+    kind: 'message',
+    data: { turnId: 'turn-1', role: 'assistant', text: 'Working on it.', attachments: [] },
+  });
+  stream.emit('message', {
+    seq: 2,
+    sessionId: 'sess-a',
+    ts: '2026-09-20T00:00:01.000Z',
+    kind: 'message',
+    data: { turnId: 'turn-1', role: 'assistant', text: "I'll run the focused tests next.", attachments: [] },
+  });
+
+  const assistants = transcript.children.filter((node) => node.className === 'event event--assistant');
+  const assistant = assistants[0];
+  const placeholder = transcript.children.find((node) => node.className === 'event event--assistant-hidden');
+  assert.ok(assistant, 'the original assistant node is retained');
+  assert.ok(placeholder, 'an entirely hidden assistant turn has a placeholder');
+  assert.equal(assistant.hidden, false, 'normal starts with narration visible');
+  assert.equal(placeholder.hidden, true, 'normal does not show the compact placeholder');
+
+  const callsBeforeSwitches = fetchCalls.length;
+  const select = doc.getElementById('verbosity-select');
+  for (let i = 0; i < 20; i++) {
+    select.value = i % 2 === 0 ? 'compact' : 'normal';
+    select.dispatch('change', {});
+  }
+
+  assert.strictEqual(
+    transcript.children.find((node) => node.className === 'event event--assistant'),
+    assistant,
+    'twenty switches preserve the exact stored render node',
+  );
+  assert.equal(assistant.hidden, false, 'the final normal switch restores narration immediately');
+  assert.equal(placeholder.hidden, true);
+  assert.equal(fetchCalls.length, callsBeforeSwitches, 'verbosity switches issue no refetch');
+
+  select.value = 'compact';
+  select.dispatch('change', {});
+  assert.deepEqual(assistants.map((node) => node.hidden), [true, true]);
+  assert.equal(placeholder.hidden, false);
+  assert.equal(placeholder.children[1].textContent, '2 narration blocks hidden');
 });

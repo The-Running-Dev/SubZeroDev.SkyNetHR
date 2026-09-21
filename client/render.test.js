@@ -1,7 +1,15 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 
-import { coalesceKey, createCoalesceGroup, renderEvent, renderPayrollSummary } from './render.js';
+import {
+  applyAssistantMessageVerbosity,
+  classifyAssistantText,
+  coalesceKey,
+  createCoalesceGroup,
+  renderEvent,
+  renderPayrollSummary,
+} from './render.js';
 
 // Brief item 19 — a burst of identical notices or errors is one transcript row carrying a
 // repeat count, with every instance still listed and every instance still in the event log.
@@ -99,6 +107,82 @@ test('seventeen identical notices fold into one row reading ×17, listing all se
   assert.equal(list.children[16].textContent, '2026-09-19T00:00:16.000Z');
   // The original row's own text is untouched — the collapse hides repetition, not content.
   assert.equal(find(node, 'notice__text').textContent, 'scanning');
+});
+
+// S37 — narration is classified and hidden only as a display decision. The fixture labels
+// both sides of the boundary explicitly so widening a regex cannot silently convert an answer
+// into status text.
+const NARRATION_FIXTURE = [
+  { label: 'ephemeral', text: 'Working on it.' },
+  { label: 'ephemeral', text: 'I am checking the renderer now.' },
+  { label: 'ephemeral', text: "I'm going to inspect the event order." },
+  { label: 'ephemeral', text: 'Let me verify that quickly.' },
+  { label: 'ephemeral', text: "I'll run the focused tests next." },
+  { label: 'ephemeral', text: 'about to inspect <img src=x onerror=alert(1)>' },
+  { label: 'substantive', text: 'The renderer keeps every stored envelope.' },
+  { label: 'substantive', text: 'I will be available tomorrow.' },
+  { label: 'substantive', text: 'Working agreements belong in the contract.' },
+];
+
+test('S37.1 — one data-driven classifier labels the narration fixture directly', () => {
+  assert.deepEqual(
+    NARRATION_FIXTURE.map(({ text }) => classifyAssistantText(text) === null ? 'substantive' : 'ephemeral'),
+    NARRATION_FIXTURE.map(({ label }) => label),
+  );
+});
+
+test('S37.2 — an ephemeral assistant block is hidden only at compact', () => {
+  const doc = fakeDocument();
+  const node = renderEvent(doc, {
+    kind: 'message',
+    data: { turnId: 'turn-1', role: 'assistant', text: 'Working on it.', attachments: [] },
+  });
+
+  assert.equal(applyAssistantMessageVerbosity(node, 'compact'), true);
+  assert.equal(node.hidden, true);
+  assert.equal(applyAssistantMessageVerbosity(node, 'normal'), false);
+  assert.equal(node.hidden, false);
+  assert.equal(applyAssistantMessageVerbosity(node, 'full'), false);
+  assert.equal(node.hidden, false);
+});
+
+test('S37.4 — classifying a recorded session leaves its spill and full replay byte-for-byte unchanged', () => {
+  const recorded = [
+    { seq: 1, sessionId: 's', ts: '2026-09-20T00:00:00.000Z', kind: 'turn.started', data: { turnId: 'turn-1' } },
+    { seq: 2, sessionId: 's', ts: '2026-09-20T00:00:01.000Z', kind: 'message', data: { turnId: 'turn-1', role: 'assistant', text: 'Working on it.', attachments: [] } },
+    { seq: 3, sessionId: 's', ts: '2026-09-20T00:00:02.000Z', kind: 'message', data: { turnId: 'turn-1', role: 'assistant', text: 'Done.', attachments: [] } },
+    { seq: 4, sessionId: 's', ts: '2026-09-20T00:00:03.000Z', kind: 'turn.ended', data: { turnId: 'turn-1', stopReason: 'completed', usage: null } },
+  ];
+  const spill = recorded.map((envelope) => JSON.stringify(envelope)).join('\n') + '\n';
+  const replay = () => spill.trimEnd().split('\n').map((line) => JSON.parse(line));
+  const withoutClassifier = replay();
+  const withClassifier = replay();
+
+  for (const envelope of withClassifier) {
+    if (envelope.kind === 'message' && envelope.data.role === 'assistant') classifyAssistantText(envelope.data.text);
+  }
+
+  assert.equal(recorded.map((envelope) => JSON.stringify(envelope)).join('\n') + '\n', spill);
+  assert.deepEqual(withClassifier, withoutClassifier);
+});
+
+test('S37.6 — the verbosity control says hiding changes display, not model context', () => {
+  const html = readFileSync(new URL('./index.html', import.meta.url), 'utf8');
+  assert.match(html, /changes only what is displayed/i);
+  assert.match(html, /does not change what the agent was given/i);
+});
+
+test('S37.7 — an ephemeral block carrying angle brackets remains literal text', () => {
+  const doc = fakeDocument();
+  const value = 'about to inspect <img src=x onerror=alert(1)>';
+  const node = renderEvent(doc, {
+    kind: 'message',
+    data: { turnId: 'turn-hostile', role: 'assistant', text: value, attachments: [] },
+  });
+
+  assert.notEqual(classifyAssistantText(value), null);
+  assert.equal(find(node, 'message__text').textContent, value);
+  assert.equal(find(node, 'message__text').children.length, 0);
 });
 
 // Brief item 21 — a session's burn broken down per turn, so a turn that cost thirty times
