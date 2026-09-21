@@ -1,4 +1,4 @@
-import { appendMessageDeltaText, applyAssistantMessageVerbosity, coalesceKey, createCoalesceGroup, createIncidentGroupsBuilder, renderAuditRow, renderEvent, renderHiddenAssistantBlocks, renderPayrollSummary, renderRequisitionRow, renderReviewRow, renderSummaryRow, renderUnreachedReport, updateHiddenAssistantBlocks } from './render.js';
+import { appendMessageDeltaText, applyAssistantMessageVerbosity, coalesceKey, createCoalesceGroup, createIncidentGroupsBuilder, renderAuditRow, renderEvent, renderHiddenAssistantBlocks, renderPayrollSummary, renderRequisitionRow, renderReviewRow, renderSummaryRow, renderTokenBreakdown, renderUnreachedReport, updateHiddenAssistantBlocks } from './render.js';
 
 const $ = (id) => document.getElementById(id);
 
@@ -85,6 +85,10 @@ const state = {
   // every `openStream` for the same reason as `streamedMessages` — it names a node in a
   // transcript that has just been cleared.
   lastGroup: null,
+  // S33.7: whether the selected session has emitted `session.notice / usage_unavailable`
+  // (D146) — the one and only discriminator between "cannot report usage" and "reported
+  // zero". Reset on every `openStream`, same as the rest of this stream-scoped state.
+  usageUnavailable: false,
 };
 
 function currentSession() {
@@ -484,10 +488,12 @@ async function refreshPayroll() {
   if (!fetched) return;
   const panel = $('payroll');
   const container = $('payroll-summary');
+  const breakdown = $('payroll-breakdown');
   if (!fetched.ok) {
     panel.hidden = true;
     state.panelsOpen.payroll = false;
     clear(container);
+    clear(breakdown);
     return;
   }
   // S16.8 still hides the panel on `payroll_unavailable` (the branch above); a successful
@@ -497,6 +503,8 @@ async function refreshPayroll() {
   panel.hidden = !state.panelsOpen.payroll;
   clear(container);
   container.appendChild(renderPayrollSummary(document, fetched.payload));
+  clear(breakdown);
+  breakdown.appendChild(renderTokenBreakdown(document, fetched.payload, currentSession(), state.usageUnavailable));
 }
 
 // A `replay_gap` says the server could not serve the history this connection asked for, so
@@ -592,6 +600,13 @@ function handleEnvelope(sessionId, envelope) {
     // Shows up for anyone else watching the same session (S14, brief item 10) — not just
     // the operator who ticked it.
     void refreshChecklist();
+  }
+  if (envelope.kind === 'session.notice' && envelope.sessionId === state.sessionId && envelope.data?.code === 'usage_unavailable') {
+    // D146: sticky for the session's life — this transport never reports usage, so every
+    // later `usage`/`turn.ended`/`session.ended` refresh below must keep rendering
+    // "unavailable" rather than the zero those envelopes would otherwise look like (S33.7).
+    state.usageUnavailable = true;
+    void refreshPayroll();
   }
   if ((envelope.kind === 'usage' || envelope.kind === 'turn.ended' || envelope.kind === 'session.ended') && envelope.sessionId === state.sessionId) {
     // `usage` moves burn; `turn.ended` closes an idle boundary and, on a restart-closed
@@ -812,6 +827,7 @@ function openStream(sessionId) {
   state.toolCallsByCallId = new Map();
   state.assistantBlocksByTurnId = new Map();
   state.lastGroup = null;
+  state.usageUnavailable = false;
   clear($('transcript'));
   applyStatusBadge();
   applyTurnControls();
@@ -1384,6 +1400,7 @@ async function confirmTerminate() {
   state.streamedMessages = new Map();
   state.assistantBlocksByTurnId = new Map();
   state.lastGroup = null;
+  state.usageUnavailable = false;
   clear($('transcript'));
   resetReviewForm();
   $('compose').hidden = true;
