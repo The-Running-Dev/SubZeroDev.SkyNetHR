@@ -743,6 +743,17 @@ body {
   font-size: var(--text-sm);
 }
 
+/* S33: the token-breakdown panel reuses `.payroll-summary`'s row layout; the only thing it
+ * adds is the marker on whichever turn carried the session's largest input-growth delta. */
+.payroll-breakdown__peak {
+  margin-left: var(--space-2);
+  padding: var(--space-1) var(--space-2);
+  border-radius: var(--radius-1);
+  background: var(--accent);
+  color: var(--accent-ink);
+  font-size: var(--text-xs);
+}
+
 /* -------------------------------------------------------------- reviews (S15) */
 
 .reviews {

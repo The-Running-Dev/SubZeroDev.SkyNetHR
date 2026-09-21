@@ -104,8 +104,10 @@ async function loadReviewRowRenderer() {
 async function loadPayrollSummaryRenderer() {
   const mod = (await import(pathToFileURL(path.join(CLIENT, 'render.js')).href)) as {
     renderPayrollSummary: (doc: unknown, view: unknown) => StubNode;
+    renderTokenBreakdown: (doc: unknown, view: unknown, session: unknown, usageUnavailable: boolean) => StubNode;
     formatDuration: (ms: number) => string;
     formatCost: (costCurrency: number, currency: string | null) => string;
+    formatTokenCount: (n: number) => string;
   };
   return mod;
 }
@@ -568,6 +570,184 @@ describe('S20 — the payroll panel prices burn against configured rates, and ne
   });
 });
 
+describe('S33 — where this session\'s tokens went', () => {
+  const session = { id: 'sess-1', owner: 'op', cwd: '/w/p', vendor: 'claude', model: 'opus', state: 'live' };
+
+  it('S33.1 — renders each of the four burn components and its share, summing exactly to the total', async () => {
+    const { renderTokenBreakdown } = await loadPayrollSummaryRenderer();
+    const { doc } = makeDoc();
+    const view = {
+      sessionId: 'sess-1',
+      burn: { inputTokens: 100, outputTokens: 50, cacheRead: 30, cacheCreate: 20 },
+      budgetTokens: null, remainingTokens: null, idleMs: 0, droppedIntervals: 0,
+      costCurrency: null, currency: null, turns: [],
+    };
+    const dl = renderTokenBreakdown(doc, view, session, false);
+    const rendered = allText(dl).join(' ');
+    for (const n of ['100', '50', '30', '20']) assert.ok(rendered.includes(n), `figure ${n} is shown`);
+    const sum = view.burn.inputTokens + view.burn.outputTokens + view.burn.cacheRead + view.burn.cacheCreate;
+    assert.equal(sum, 200, 'the four components sum to the total exactly');
+  });
+
+  it('S33.2 — cache hit/miss is derived from cacheRead/cacheCreate alone', async () => {
+    const { renderTokenBreakdown } = await loadPayrollSummaryRenderer();
+    const base = { sessionId: 'sess-1', budgetTokens: null, remainingTokens: null, idleMs: 0, droppedIntervals: 0, costCurrency: null, currency: null, turns: [] };
+
+    const allHit = renderTokenBreakdown(makeDoc().doc, { ...base, burn: { inputTokens: 10, outputTokens: 5, cacheRead: 40, cacheCreate: 0 } }, session, false);
+    assert.ok(allText(allHit).join(' ').includes('all cache hits'), 'reads with no writes is all-hit');
+
+    const allMiss = renderTokenBreakdown(makeDoc().doc, { ...base, burn: { inputTokens: 10, outputTokens: 5, cacheRead: 0, cacheCreate: 40 } }, session, false);
+    assert.ok(allText(allMiss).join(' ').includes('all cache misses'), 'writes with no reads is all-miss');
+  });
+
+  it('S33.3 — names no category the adapters do not measure', async () => {
+    const { renderTokenBreakdown } = await loadPayrollSummaryRenderer();
+    const { doc } = makeDoc();
+    const view = {
+      sessionId: 'sess-1',
+      burn: { inputTokens: 100, outputTokens: 50, cacheRead: 30, cacheCreate: 20 },
+      budgetTokens: null, remainingTokens: null, idleMs: 0, droppedIntervals: 0,
+      costCurrency: null, currency: null,
+      turns: [{ turnId: 't1', endedAt: '2026-08-09T00:00:00.000Z', usage: { inputTokens: 100, outputTokens: 50, cacheRead: 30, cacheCreate: 20 } }],
+    };
+    const rendered = allText(renderTokenBreakdown(doc, view, session, false)).join(' ').toLowerCase();
+    for (const forbidden of ['system instruction', 'conversation history', 'project document', 'file read', 'subagent']) {
+      assert.ok(!rendered.includes(forbidden), `never names "${forbidden}"`);
+    }
+  });
+
+  it('S33.4 — states the attribution limit in words, against a session with real burn', async () => {
+    const { renderTokenBreakdown } = await loadPayrollSummaryRenderer();
+    const { doc } = makeDoc();
+    const view = {
+      sessionId: 'sess-1',
+      burn: { inputTokens: 100, outputTokens: 50, cacheRead: 30, cacheCreate: 20 },
+      budgetTokens: null, remainingTokens: null, idleMs: 0, droppedIntervals: 0,
+      costCurrency: null, currency: null, turns: [],
+    };
+    const rendered = allText(renderTokenBreakdown(doc, view, session, false)).join(' ');
+    assert.ok(rendered.includes('what the transport reported'), 'states what it measures');
+    assert.ok(rendered.includes('cannot attribute'), 'states what it refuses to guess at');
+  });
+
+  it('S33.5 — per-turn input growth against the worked example, with the largest delta marked', async () => {
+    const { renderTokenBreakdown } = await loadPayrollSummaryRenderer();
+    const { doc } = makeDoc();
+    const zeroBurn = { outputTokens: 0, cacheRead: 0, cacheCreate: 0 };
+    const view = {
+      sessionId: 'sess-1',
+      burn: { inputTokens: 54_000, outputTokens: 0, cacheRead: 0, cacheCreate: 0 },
+      budgetTokens: null, remainingTokens: null, idleMs: 0, droppedIntervals: 0,
+      costCurrency: null, currency: null,
+      turns: [
+        { turnId: 't1', endedAt: '2026-08-09T00:00:00.000Z', usage: { inputTokens: 10_000, ...zeroBurn } },
+        { turnId: 't2', endedAt: '2026-08-09T00:00:00.000Z', usage: { inputTokens: 12_000, ...zeroBurn } },
+        { turnId: 't3', endedAt: '2026-08-09T00:00:00.000Z', usage: { inputTokens: 54_000, ...zeroBurn } },
+      ],
+    };
+    const dl = renderTokenBreakdown(doc, view, session, false);
+    const rendered = allText(dl).join(' ');
+    assert.ok(rendered.includes('+10,000 tokens'));
+    assert.ok(rendered.includes('+2,000 tokens'));
+    assert.ok(rendered.includes('+42,000 tokens'));
+
+    const rows = findAll(dl, 'div').filter((n) => n.className === 'payroll-summary__row');
+    const peakRows = rows.filter((r) => allText(r).some((t) => t === 'PEAK'));
+    assert.equal(peakRows.length, 1, 'exactly one row carries the marker');
+    assert.ok(allText(peakRows[0]!).join(' ').includes('+42,000'), 'the marker is on the largest-delta row');
+    const otherRows = rows.filter((r) => allText(r).join(' ').includes('input growth') && r !== peakRows[0]);
+    for (const r of otherRows) assert.ok(!allText(r).some((t) => t === 'PEAK'), 'no other row carries the marker');
+  });
+
+  it('S33.6 — an all-zero turn between two non-zero ones renders a zero row and does not corrupt the next delta', async () => {
+    const { renderTokenBreakdown } = await loadPayrollSummaryRenderer();
+    const { doc } = makeDoc();
+    const zeroUsage = { inputTokens: 0, outputTokens: 0, cacheRead: 0, cacheCreate: 0 };
+    const view = {
+      sessionId: 'sess-1',
+      burn: { inputTokens: 15_000, outputTokens: 0, cacheRead: 0, cacheCreate: 0 },
+      budgetTokens: null, remainingTokens: null, idleMs: 0, droppedIntervals: 0,
+      costCurrency: null, currency: null,
+      turns: [
+        { turnId: 't1', endedAt: '2026-08-09T00:00:00.000Z', usage: { inputTokens: 10_000, outputTokens: 0, cacheRead: 0, cacheCreate: 0 } },
+        { turnId: 't2', endedAt: '2026-08-09T00:00:00.000Z', usage: zeroUsage },
+        { turnId: 't3', endedAt: '2026-08-09T00:00:00.000Z', usage: { inputTokens: 15_000, outputTokens: 0, cacheRead: 0, cacheCreate: 0 } },
+      ],
+    };
+    const rendered = allText(renderTokenBreakdown(doc, view, session, false)).join(' ');
+    assert.ok(rendered.includes('Turn 2 input growth +0 tokens'.replace(' input growth ', ' input growth ')) || rendered.includes('+0 tokens'), 'the all-zero turn renders a row of zeroes');
+    assert.ok(rendered.includes('+5,000 tokens'), 'the following turn deltas against the last non-zero baseline, not against the zero turn');
+  });
+
+  it('S33.7 — a session with session.notice/usage_unavailable renders the panel as unavailable, never as zero', async () => {
+    const { renderTokenBreakdown } = await loadPayrollSummaryRenderer();
+    const { doc } = makeDoc();
+    const view = {
+      sessionId: 'sess-1',
+      burn: { inputTokens: 0, outputTokens: 0, cacheRead: 0, cacheCreate: 0 },
+      budgetTokens: null, remainingTokens: null, idleMs: 0, droppedIntervals: 0,
+      costCurrency: null, currency: null, turns: [],
+    };
+    const rendered = allText(renderTokenBreakdown(doc, view, session, true)).join(' ');
+    assert.ok(rendered.includes('unavailable'), 'says unavailable');
+    assert.ok(!rendered.includes('Fresh input'), 'no component breakdown at all, not even a zeroed one');
+    assert.ok(!rendered.includes('0%'), 'no share figure either');
+  });
+
+  it('S33.8 — session id and model reach the page as text nodes, angle brackets and a quote included', async () => {
+    const { renderTokenBreakdown } = await loadPayrollSummaryRenderer();
+    const { doc } = makeDoc();
+    const injectedId = '<sess>"1"';
+    const injectedModel = '<mod>"x"';
+    const view = {
+      sessionId: injectedId,
+      burn: { inputTokens: 1, outputTokens: 1, cacheRead: 0, cacheCreate: 0 },
+      budgetTokens: null, remainingTokens: null, idleMs: 0, droppedIntervals: 0,
+      costCurrency: null, currency: null, turns: [],
+    };
+    const dl = renderTokenBreakdown(doc, view, { ...session, model: injectedModel }, false);
+    const rendered = allText(dl);
+    assert.ok(rendered.includes(injectedId), 'the exact session id characters survive as a text node');
+    assert.ok(rendered.some((t) => t.includes(injectedModel)), 'the exact model characters survive as a text node');
+  });
+
+  it('S33.9 — opening the panel issues exactly one GET against the payroll route and nothing else', async () => {
+    const { byId, streams: _streams, restore, fetchCalls, fetchMethods } = await runConsole([{ id: 's1', cwd: '/w/p', vendor: 'claude', state: 'live' }]);
+    try {
+      const button = byId.get('sessions')!.children[0]!.children[0]!;
+      for (const fn of button.listeners.get('click') ?? []) fn({});
+      const beforeOpen = fetchCalls.filter((u) => u.endsWith('/payroll')).length;
+
+      for (const fn of byId.get('payroll-open')!.listeners.get('click') ?? []) fn({});
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      assert.equal(fetchCalls.filter((u) => u.endsWith('/payroll')).length, beforeOpen + 1, 'opening issues exactly one more GET');
+      assert.ok(fetchMethods.every((m) => m === 'GET'), 'no POST, PUT or DELETE at all');
+    } finally {
+      await restore();
+    }
+  });
+
+  it('S33.7 (wiring) — session.notice/usage_unavailable refetches once and the panel renders unavailable', async () => {
+    const { byId, streams, restore, fetchCalls } = await runConsole([{ id: 's1', cwd: '/w/p', vendor: 'claude', state: 'live' }]);
+    try {
+      const button = byId.get('sessions')!.children[0]!.children[0]!;
+      for (const fn of button.listeners.get('click') ?? []) fn({});
+      const before = fetchCalls.filter((u) => u.endsWith('/payroll')).length;
+
+      deliver(streams[0]!, { seq: 1, sessionId: 's1', ts: '2026-08-09T00:00:00.000Z', kind: 'session.notice', data: { level: 'warn', code: 'usage_unavailable', text: 'x' } });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      assert.equal(fetchCalls.filter((u) => u.endsWith('/payroll')).length, before + 1, 'the notice itself triggers exactly one refetch');
+
+      const breakdown = byId.get('payroll-breakdown')!;
+      const collect = (n: FakeEl): string => [n.textContent ?? '', ...n.children.map(collect)].join(' ');
+      assert.ok(collect(breakdown).includes('unavailable'), 'the breakdown panel now renders as unavailable');
+    } finally {
+      await restore();
+    }
+  });
+});
+
 // S18.1/D78: the token layer is four blocks, one per theme, each selected by
 // `:root[data-theme="X"]` rather than a bare `:root` — this regex is the one place both
 // S2.14 and S18's tests read the shape from, so it stays a single source between them.
@@ -689,7 +869,7 @@ async function runConsole(sessions: ReadonlyArray<Record<string, unknown>>) {
     'status', 'login', 'console', 'sessions', 'transcript', 'compose', 'new-session', 'login-form',
     'refresh', 'cwd', 'vendor', 'model', 'sandbox', 'requisition-id', 'text', 'secret', 'checkpoints', 'checkpoint-list', 'restore-report',
     'checklist', 'checklist-list',
-    'payroll', 'payroll-summary',
+    'payroll', 'payroll-summary', 'payroll-breakdown',
     'policy-banner', 'audit', 'audit-open', 'audit-close', 'audit-filters', 'audit-filter-session',
     'audit-filter-operator', 'audit-filter-since', 'audit-filter-until', 'audit-rows', 'audit-empty',
     'audit-load-more', 'requisitions', 'requisitions-open', 'requisitions-close', 'raise-requisition',

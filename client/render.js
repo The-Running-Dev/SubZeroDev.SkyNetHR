@@ -450,14 +450,18 @@ export function formatCost(costCurrency, currency) {
   return currency === null ? amount : `${currency} ${amount}`;
 }
 
-// Shared by `renderPayrollSummary` below and `openTerminate` in app.js — both are a `<dl>` of
-// label/value rows over the same `payroll-summary__*` classes, so both build a row here rather
-// than each hand-rolling its own copy of the same three-element wrapper.
+// Shared by `renderPayrollSummary`/`renderTokenBreakdown` below and `openTerminate` in
+// app.js — all are a `<dl>` of label/value rows over the same `payroll-summary__*` classes,
+// so all build a row here rather than each hand-rolling its own copy of the same
+// three-element wrapper. Returns the `dd` node so a caller (S33.5's peak marker) can append
+// to it; every existing caller ignores the return value.
 export function renderSummaryRow(doc, dl, label, value) {
   const wrapper = el(doc, 'div', 'payroll-summary__row');
+  const dd = el(doc, 'dd', 'payroll-summary__value', value);
   wrapper.appendChild(el(doc, 'dt', 'payroll-summary__label', label));
-  wrapper.appendChild(el(doc, 'dd', 'payroll-summary__value', value));
+  wrapper.appendChild(dd);
   dl.appendChild(wrapper);
+  return dd;
 }
 
 // S16.4/S16.7: a pure read — `burn`'s four fields are summed here for display only, never
@@ -492,6 +496,70 @@ export function renderPayrollSummary(doc, view) {
       const open = turn.endedAt === null ? ' — still running' : '';
       renderSummaryRow(doc, dl, `Turn ${ordinal}`, `+${formatTokenCount(total)} tokens${open}`);
     }
+  }
+  return dl;
+}
+
+// S33.2: cache-hit versus cache-miss, derived from `cacheRead`/`cacheCreate` and nothing
+// else — never from a third field, never inferred from the total.
+function cacheHitMissLabel(burn) {
+  if (burn.cacheRead === 0 && burn.cacheCreate === 0) return 'no cache activity';
+  if (burn.cacheCreate === 0) return 'all cache hits';
+  if (burn.cacheRead === 0) return 'all cache misses';
+  return 'mixed cache hits and misses';
+}
+
+// S33: the fresh/output/cache-read/cache-write split of the same `burn` `renderPayrollSummary`
+// above already totals, plus the per-turn input growth that drove it. `usageUnavailable` is
+// this session's `session.notice / usage_unavailable` flag (D146) — the one thing this panel
+// must refuse to guess at when it is set, so that branch renders nothing else at all rather
+// than a set of components next to a truthful-looking zero (S33.7).
+export function renderTokenBreakdown(doc, view, session, usageUnavailable) {
+  const dl = el(doc, 'dl', 'payroll-summary payroll-breakdown');
+  renderSummaryRow(doc, dl, 'Session', view.sessionId);
+  if (session !== null) {
+    renderSummaryRow(doc, dl, 'Agent', session.model ? `${session.vendor} · ${session.model}` : session.vendor);
+  }
+  if (usageUnavailable) {
+    renderSummaryRow(doc, dl, 'Token usage', 'unavailable — this session’s transport does not report token usage');
+    return dl;
+  }
+  // S33.4: stated outright rather than left to be inferred from the absence of a category
+  // (S33.3) — one usage figure arrives per call with no attribution to what was in context
+  // (D75, I28).
+  renderSummaryRow(doc, dl, 'What this counts', 'these figures are what the transport reported as usage; the console cannot attribute them to what was in the model’s context');
+  const { burn } = view;
+  const total = burn.inputTokens + burn.outputTokens + burn.cacheRead + burn.cacheCreate;
+  const share = (n) => (total === 0 ? 0 : Math.round((n / total) * 100));
+  // S33.1: each figure is `burn`'s own field, formatted for display — the four sum to the
+  // total exactly because nothing here is a rounded share fed back in as a count.
+  renderSummaryRow(doc, dl, 'Fresh input', `${formatTokenCount(burn.inputTokens)} tokens (${share(burn.inputTokens)}%)`);
+  renderSummaryRow(doc, dl, 'Output', `${formatTokenCount(burn.outputTokens)} tokens (${share(burn.outputTokens)}%)`);
+  renderSummaryRow(doc, dl, 'Cache reads', `${formatTokenCount(burn.cacheRead)} tokens (${share(burn.cacheRead)}%)`);
+  renderSummaryRow(doc, dl, 'Cache writes', `${formatTokenCount(burn.cacheCreate)} tokens (${share(burn.cacheCreate)}%)`);
+  renderSummaryRow(doc, dl, 'Cache hit rate', cacheHitMissLabel(burn));
+  // S33.5/S33.6: per-turn growth in `inputTokens`, in server order. A turn reporting no
+  // usage at all (every component zero) renders a `+0` row and leaves the running baseline
+  // where the last non-zero turn left it, rather than either vanishing or resetting growth
+  // to look like it started over.
+  if (Array.isArray(view.turns) && view.turns.length > 0) {
+    let baseline = 0;
+    const deltas = [];
+    for (const turn of view.turns) {
+      const u = turn.usage;
+      const isZero = u.inputTokens === 0 && u.outputTokens === 0 && u.cacheRead === 0 && u.cacheCreate === 0;
+      if (isZero) {
+        deltas.push(0);
+      } else {
+        deltas.push(u.inputTokens - baseline);
+        baseline = u.inputTokens;
+      }
+    }
+    const peakIndex = deltas.reduce((best, d, i) => (d > deltas[best] ? i : best), 0);
+    deltas.forEach((delta, i) => {
+      const dd = renderSummaryRow(doc, dl, `Turn ${i + 1} input growth`, `+${formatTokenCount(delta)} tokens`);
+      if (i === peakIndex) dd.appendChild(el(doc, 'span', 'payroll-breakdown__peak', 'PEAK'));
+    });
   }
   return dl;
 }
