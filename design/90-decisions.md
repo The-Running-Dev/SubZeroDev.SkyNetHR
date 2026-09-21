@@ -6388,6 +6388,19 @@ refusals, and only in appearance: they are refusals by non-goals the brief alrea
 ones, so reversing one means amending the brief — which is where that argument belongs and is not
 made cheaper by having been pre-empted here.
 
+### 2026-09-21 — D257 `/sync` kit upgrade to v2026.09.20: `codex/PROFILES.md` replaced wholesale
+Context: `/sync` reconciled the machine-wide kit (last synced 2026-09-07 at `703eeb8`, 427 commits
+behind) into this repository. Classification found `codex/PROFILES.md` divergent — an unmodified
+copy of an older kit template (single-profile `architect` at `xhigh`, no `author` profile split, no
+output/context-budget guidance, no `project_doc_max_bytes` note) — and everything else either
+identical, already satisfied, or blocked by an existing target artifact (`.github/ISSUE_TEMPLATE/`).
+Chosen: overwrite `codex/PROFILES.md` with the current kit copy verbatim, and install the missing
+`.git/hooks/commit-msg` (absent locally; `core.hooksPath` unset).
+Rejected: leaving `codex/PROFILES.md` on the stale template — the diff carried no target-specific
+customization, only kit-authored corrections (e.g. `architect` effort `xhigh`→`high`, matching
+`AGENTS.shared.md`'s own "`xhigh` is for one question, not one pipeline").
+Reversibility: cheap — both are kit-owned artifacts with no local content lost.
+
 ## Open
 
 Staging only. Once an item becomes an issue it leaves this list.
