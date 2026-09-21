@@ -3441,7 +3441,7 @@ belong to the `exec --json` fallback alone; neither affects a session on `app-se
     a measured byte count would read as the same kind of fact while being a different kind. Either
     it is declared as an estimate in its own type and named as one wherever it renders, or the item
     is refused for the same reason S33.3 refuses category attribution. Nothing downstream may pick.
-    (no issue yet — `/track`)
+    (no issue — resolved by `/contract`, not tracked)
 
 21. **Budget thresholds, and a budget crossing as an event.** Runtime-redesign item 24, routed here
     by D256. `Config.sessionTokenBudget` and `PayrollView.remainingTokens` already exist (D129), so
@@ -3452,7 +3452,7 @@ belong to the `exec --json` fallback alone; neither affects a session on `app-se
     `remainingTokens`; and what a *stop* actually stops, given that SkyNet can refuse to begin a
     turn and cannot interrupt the model mid-turn without the `interrupt` path D5 governs. A soft
     stop that silently becomes a hard one at the next turn boundary is the failure mode to name
-    before anything is built. (no issue yet — `/track`)
+    before anything is built. (no issue — resolved by `/contract`, not tracked)
 
 22. **A first-class `blocked` turn state.** Runtime-redesign item 28, routed here by D256. A turn
     state machine (`TurnStopReason`) and a permission-pending path (`PermissionRequest`) both
@@ -3462,7 +3462,7 @@ belong to the `exec --json` fallback alone; neither affects a session on `app-se
     representable, so a new state earns its place only if it also covers a turn awaiting an answer
     the *model* asked for — and the classification's item 6 is explicit that SkyNet cannot stop the
     model inventing that answer and continuing. A state that claims to block something it does not
-    is worse than no state. (no issue yet — `/track`)
+    is worse than no state. (no issue — resolved by `/contract`, not tracked)
 
 23. **What a Raw view would read from.** Runtime-redesign item 15's remaining quarter, routed here
     by D256. D246 shipped three verbosity levels over one transcript, which covers the Operator,
@@ -3473,4 +3473,4 @@ belong to the `exec --json` fallback alone; neither affects a session on `app-se
     unnormalised vendor text under the same per-session budget D162 set for tool output, and the
     lines carry whatever the vendor chose to put in them, which `20-contract.md` currently never
     promises to have inspected. Refusing Raw and declaring the item satisfied at three views is the
-    other legitimate answer. (no issue yet — `/track`)
+    other legitimate answer. (no issue — resolved by `/contract`, not tracked)
