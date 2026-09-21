@@ -1,4 +1,4 @@
-import { appendMessageDeltaText, coalesceKey, createCoalesceGroup, createIncidentGroupsBuilder, renderAuditRow, renderEvent, renderPayrollSummary, renderRequisitionRow, renderReviewRow, renderSummaryRow, renderUnreachedReport } from './render.js';
+import { appendMessageDeltaText, applyAssistantMessageVerbosity, coalesceKey, createCoalesceGroup, createIncidentGroupsBuilder, renderAuditRow, renderEvent, renderHiddenAssistantBlocks, renderPayrollSummary, renderRequisitionRow, renderReviewRow, renderSummaryRow, renderUnreachedReport, updateHiddenAssistantBlocks } from './render.js';
 
 const $ = (id) => document.getElementById(id);
 
@@ -66,6 +66,10 @@ const state = {
   // D246: verbosity level for `thinking`/`tool.call`/`tool.result` folding — persisted
   // alongside the theme (D60), never sent to the server.
   verbosity: 'normal',
+  // S37: assistant text nodes grouped by the turn id already carried on every message.
+  // The nodes remain attached while compact hides them; classification is never written
+  // into an envelope, browser storage or the server-side spill.
+  assistantBlocksByTurnId: new Map(),
   // D246: files chosen for the next message, kept here rather than read from the native
   // `<input type=file>` directly — a `FileList` cannot drop a single entry, which the
   // chip-removal control needs to do.
@@ -200,6 +204,44 @@ function text(tag, className, value) {
 
 function clear(node) {
   while (node.firstChild) node.removeChild(node.firstChild);
+}
+
+function applyAssistantTurnVerbosity(turnId) {
+  const group = state.assistantBlocksByTurnId.get(turnId);
+  if (!group) return;
+
+  let hiddenCount = 0;
+  let substantiveCount = 0;
+  for (const node of group.blocks) {
+    if (node.__ephemeralRule === null || node.__ephemeralRule === undefined) substantiveCount += 1;
+    else hiddenCount += 1;
+    applyAssistantMessageVerbosity(node, state.verbosity);
+  }
+
+  if (hiddenCount > 0 && group.placeholder === null) {
+    group.placeholder = renderHiddenAssistantBlocks(document, hiddenCount);
+    $('transcript').insertBefore(group.placeholder, group.blocks[0]);
+  }
+  if (group.placeholder !== null) {
+    updateHiddenAssistantBlocks(group.placeholder, hiddenCount);
+    group.placeholder.hidden = !(state.verbosity === 'compact' && hiddenCount > 0 && substantiveCount === 0);
+  }
+}
+
+function trackAssistantBlock(node) {
+  const turnId = node && node.__assistantTurnId;
+  if (turnId === undefined || turnId === null) return;
+  let group = state.assistantBlocksByTurnId.get(turnId);
+  if (!group) {
+    group = { blocks: [], placeholder: null };
+    state.assistantBlocksByTurnId.set(turnId, group);
+  }
+  if (!group.blocks.includes(node)) group.blocks.push(node);
+  applyAssistantTurnVerbosity(turnId);
+}
+
+function applyTranscriptVerbosity() {
+  for (const turnId of state.assistantBlocksByTurnId.keys()) applyAssistantTurnVerbosity(turnId);
 }
 
 function status(message, tone) {
@@ -588,12 +630,14 @@ function handleEnvelope(sessionId, envelope) {
       const transcript = $('transcript');
       if (existing) {
         appendMessageDeltaText(existing, envelope.data.text);
+        applyAssistantTurnVerbosity(turnId);
         transcript.scrollTop = transcript.scrollHeight;
       } else {
         const node = renderEvent(document, envelope, handlers);
         if (node !== null) {
           state.streamedMessages.set(turnId, node);
           transcript.appendChild(node);
+          trackAssistantBlock(node);
           // A new bubble is now the last row, so any open coalesce group is no longer adjacent.
           state.lastGroup = null;
           transcript.scrollTop = transcript.scrollHeight;
@@ -625,6 +669,7 @@ function handleEnvelope(sessionId, envelope) {
   const node = renderEvent(document, envelope, handlers);
   if (node === null) return;
   transcript.appendChild(node);
+  trackAssistantBlock(node);
   state.lastGroup = key === null ? null : { key, group: createCoalesceGroup(document, node, envelope.ts) };
   transcript.scrollTop = transcript.scrollHeight;
 }
@@ -765,6 +810,7 @@ function openStream(sessionId) {
   state.lastEnvelopeAt = null;
   state.streamedMessages = new Map();
   state.toolCallsByCallId = new Map();
+  state.assistantBlocksByTurnId = new Map();
   state.lastGroup = null;
   clear($('transcript'));
   applyStatusBadge();
@@ -1264,6 +1310,7 @@ const VERBOSITY_LEVELS = ['compact', 'normal', 'full'];
 
 function applyVerbosity(level) {
   state.verbosity = level;
+  applyTranscriptVerbosity();
   try {
     localStorage.setItem(VERBOSITY_STORAGE_KEY, level);
   } catch {
@@ -1335,6 +1382,7 @@ async function confirmTerminate() {
   state.currentTurnId = null;
   state.lastEnvelopeAt = null;
   state.streamedMessages = new Map();
+  state.assistantBlocksByTurnId = new Map();
   state.lastGroup = null;
   clear($('transcript'));
   resetReviewForm();
