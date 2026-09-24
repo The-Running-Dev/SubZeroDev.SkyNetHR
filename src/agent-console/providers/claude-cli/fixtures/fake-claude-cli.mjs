@@ -74,6 +74,11 @@ import { spawn } from 'node:child_process';
 //   slow-close    — a normal `result`, but the process does not actually exit until
 //                   SKYNET_SLOW_CLOSE_MS (default 300) after its stdin is closed — long
 //                   enough for the caller to start its next turn's own child first (#360).
+//   tool-result-diff — three `user`/`tool_result` records, each with a `tool_use_result`
+//                   sibling field, one per extractToolResultDiff's productive shape (D258):
+//                   an Edit-style structuredPatch, a Write-style empty-patch-with-content
+//                   create, and a malformed hunk that must fall back to a null diff rather
+//                   than a schema-mismatch fatal.
 
 const scenario = process.env.SKYNET_TEST_SCENARIO ?? 'full';
 // (S25.6) The real CLI only emits stream_event records when this flag is present
@@ -335,6 +340,29 @@ function runScenario() {
       assistantText('finishing up', 'msg-slow-1');
       line({ type: 'result', subtype: 'success' });
       return;
+    case 'tool-result-diff': {
+      line({
+        type: 'user',
+        message: { content: [{ type: 'tool_result', tool_use_id: 'call-edit', content: 'ok', is_error: false }] },
+        tool_use_result: {
+          structuredPatch: [
+            { oldStart: 1, oldLines: 1, newStart: 1, newLines: 2, lines: [' context', '-old line', '+new line', '+second new line'] },
+          ],
+        },
+      });
+      line({
+        type: 'user',
+        message: { content: [{ type: 'tool_result', tool_use_id: 'call-write', content: 'ok', is_error: false }] },
+        tool_use_result: { structuredPatch: [], content: 'first line\nsecond line' },
+      });
+      line({
+        type: 'user',
+        message: { content: [{ type: 'tool_result', tool_use_id: 'call-malformed', content: 'ok', is_error: false }] },
+        tool_use_result: { structuredPatch: [{ oldStart: 'bad', oldLines: 1, newStart: 1, newLines: 1, lines: [] }] },
+      });
+      line({ type: 'result', subtype: 'success' });
+      return;
+    }
     case 'many': {
       for (let i = 0; i < 200; i++) assistantText('message ' + i, 'msg-many-' + i);
       line({ type: 'result', subtype: 'success' });

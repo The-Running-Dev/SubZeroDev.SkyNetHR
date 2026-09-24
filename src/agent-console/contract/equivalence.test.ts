@@ -273,13 +273,35 @@ type HistoricalError = { readonly kind: Exclude<Host.ErrorEventKind, 'adapter_ou
 // frozen `Before.SessionNotice` declaration.
 type HistoricalSessionNoticeCode = Exclude<Host.SessionNoticeCode, 'task_started' | 'task_progress' | 'task_completed' | 'task_failed' | 'task_cancelled'>;
 type HistoricalSessionNotice = { readonly level: Host.SessionNotice['level']; readonly code: HistoricalSessionNoticeCode; readonly text: Host.SessionNotice['text'] };
-type HistoricalPayloadMap = { [K in Before.EventKind]: K extends 'error' ? HistoricalError : K extends 'session.notice' ? HistoricalSessionNotice : Host.EventPayloadMap[K] };
+// Same pinning treatment for D258's `diff` addition to ToolResult: the historical
+// subset and the delta are pinned independently rather than widening the frozen
+// `Before.ToolResult` declaration.
+type HistoricalToolResult = {
+  readonly turnId: Host.ToolResult['turnId'];
+  readonly callId: Host.ToolResult['callId'];
+  readonly ok: Host.ToolResult['ok'];
+  readonly output: Host.ToolResult['output'];
+  readonly truncated: Host.ToolResult['truncated'];
+  readonly bytes: Host.ToolResult['bytes'];
+};
+type HistoricalPayloadMap = {
+  [K in Before.EventKind]: K extends 'error'
+    ? HistoricalError
+    : K extends 'session.notice'
+      ? HistoricalSessionNotice
+      : K extends 'tool.result'
+        ? HistoricalToolResult
+        : Host.EventPayloadMap[K];
+};
 type HistoricalEnvelope<E> = E extends { readonly kind: 'error' }
   ? { [P in keyof E]: P extends 'data' ? HistoricalError : E[P] }
   : E extends { readonly kind: 'session.notice' }
     ? { [P in keyof E]: P extends 'data' ? HistoricalSessionNotice : E[P] }
-    : E;
+    : E extends { readonly kind: 'tool.result' }
+      ? { [P in keyof E]: P extends 'data' ? HistoricalToolResult : E[P] }
+      : E;
 type OutputOverflowAddition = Assert<Equals<Exclude<Host.ErrorEventKind, Before.ErrorEventKind>, 'adapter_output_overflow'>>;
+type ToolResultDiffAddition = Assert<Equals<Exclude<keyof Host.ToolResult, keyof Before.ToolResult>, 'diff'>>;
 type EventPayloadMapBefore = Assert<Equals<HistoricalPayloadMap, Before.EventPayloadMap>>;
 type EventPayloadMapReexport = Assert<Equals<Host.EventPayloadMap, Extracted.EventPayloadMap>>;
 type EventKindBefore = Assert<Equals<Exclude<Host.EventKind, 'x-skynet.checklist.item.completed'>, Before.EventKind>>;
@@ -314,7 +336,7 @@ type ThinkingBefore = Assert<Equals<Host.Thinking, Before.Thinking>>;
 type ThinkingReexport = Assert<Equals<Host.Thinking, Extracted.Thinking>>;
 type ToolCallBefore = Assert<Equals<Host.ToolCall, Before.ToolCall>>;
 type ToolCallReexport = Assert<Equals<Host.ToolCall, Extracted.ToolCall>>;
-type ToolResultBefore = Assert<Equals<Host.ToolResult, Before.ToolResult>>;
+type ToolResultBefore = Assert<Equals<HistoricalToolResult, Before.ToolResult>>;
 type ToolResultReexport = Assert<Equals<Host.ToolResult, Extracted.ToolResult>>;
 type PermissionRequestBefore = Assert<Equals<Host.PermissionRequest, Before.PermissionRequest>>;
 type PermissionRequestReexport = Assert<Equals<Host.PermissionRequest, Extracted.PermissionRequest>>;

@@ -26,6 +26,16 @@
         },
         "bytes": {
           "$ref": "https://schemas.agent-console.invalid/common.schema.json#/$defs/number"
+        },
+        "diff": {
+          "anyOf": [
+            {
+              "$ref": "https://schemas.agent-console.invalid/common.schema.json#/$defs/toolResultDiff"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "required": [
@@ -34,7 +44,8 @@
         "ok",
         "output",
         "truncated",
-        "bytes"
+        "bytes",
+        "diff"
       ]
     }
   },

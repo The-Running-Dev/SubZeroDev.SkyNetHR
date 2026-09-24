@@ -417,6 +417,16 @@ re-delivered, so there is no second arrival for that order to disagree with.
 same bytes; a design where the spill held the full output and the wire the truncated one would
 make replay-from-disk and replay-from-memory return different transcripts.
 
+**`ToolResult.diff` is `null` wherever the adapter has no recoverable before/after for this
+result** (D258) — a vendor whose transport never carries one, or a result the adapter cannot
+express as a hunk. `null` is not a degraded case: a renderer treats it exactly as it treated a
+`ToolResult` before the field existed, never as an error or a missing value to report. Its
+`hunks` mirror the unified-diff shape an adapter already computes on the wire rather than
+inventing one, `lines` prefixed `" "`/`"-"`/`"+"` by convention; the field carries no apply,
+revert, stage or edit affordance, because nothing above `adapters/*` may act on an agent's
+change through it (I26 applies to it the same as to `output` — every line reaches the client as
+a text node, never assembled markup).
+
 **`ToolCall.summary` is display-only** (I48, D159). Above `adapters/*` it is rendered as a text
 node and nothing else: no module parses it, matches against it, or derives anything persisted
 or security-relevant from it, and **its shape is not contractual**, so an adapter may change
@@ -496,6 +506,10 @@ are not.
   `session.notice` and `checklist.item.completed` carry no `turnId` and do land between a
   `turn.started` and its `turn.ended`. A renderer that treats that interval as the turn's
   contents will attribute an operator's click to the agent.
+- **A `tool.result` carrying a `diff` is inert on the client** (D258, S34.6): the renderer draws
+  it as read-only lines, with no apply, revert, stage, copy or edit control anywhere in the
+  hunk. An operator acts on the agent's change by telling the agent, never by manipulating the
+  diff view.
 - **There is no employment-status field on the wire** (D79). `CLOCKED OUT` is
   `state === 'ended'`; `BLOCKED` is a live session with an unresolved `permission.request`;
   `ON SHIFT` is a live turn; `IDLE` is the remainder. `ON PIP` is orthogonal and comes from

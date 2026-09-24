@@ -9,6 +9,7 @@
     "ok": true,
     "output": "Ready.",
     "truncated": false,
-    "bytes": 6
+    "bytes": 6,
+    "diff": null
   }
 }

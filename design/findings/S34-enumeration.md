@@ -73,11 +73,19 @@ rg --files
 ```
 
 Every command executed is a read (home AgentKit config, git/rg onboarding, and one read-back of
-`sample2.txt`). No write of any kind appears in `command`. There is also no `fileChange` thread-item
-type and no `item/fileChange/patchUpdated`-shaped notification anywhere in the capture — the file
-was edited through a channel invisible to the JSON-RPC client entirely. **What this means for this
-slice**: Codex's real captured turn is the "neither" case for itself — it carries nothing
-recoverable. It is not, on its own, grounds to stop S34; see the verdict below.
+`sample2.txt`). No write of any kind appears in `command`, and no `item/fileChange/patchUpdated`
+notification appeared in this capture — the file was edited through a channel invisible to this
+JSON-RPC client. **This is a claim about the capture, not the protocol**: the app-server schema
+(`schema/v2/FileChangePatchUpdatedNotification.json`) defines exactly this notification as carrying
+`changes: [{diff: <unified-diff string>, kind, path}]` per changed file — a real, recoverable,
+Codex-native diff — and the adapter's own `IGNORED_APP_SERVER_METHODS` already lists the method name
+as previously observed and deliberately ignored. That method simply never fired in this probe's
+edit turn, for a reason not yet root-caused (sandbox mode, approval policy, or model-chosen edit
+path are the leading candidates). **What this means for this slice**: Codex's real captured turn is
+the "neither" case for itself — it carries nothing recoverable *in this capture*. It is not, on its
+own, grounds to stop S34; see the verdict below. Wiring `item/fileChange/patchUpdated` into the
+Codex adapter is out of this slice's authorized scope (mapping Claude's `tool_use_result` only) and
+is logged as an open item in `design/90-decisions.md` rather than pursued here.
 
 ## Verdict
 
@@ -87,7 +95,10 @@ real captured turn does not (finding 2). One vendor clears the bar, so **the sto
 met — S34 proceeds**, rendering from Claude's shape and falling back to S34.5's "renders exactly as
 it does today" path for any result — Codex's, or Claude's own `Read`/`Bash` — that carries none.
 
-Whether Codex exposes recoverable change data through some other surface (a different
-`app-server` mode, a different prompting pattern, a later protocol version) is unresolved and is
-not this slice's question to chase further — S34.5 already gives the renderer a defined behaviour
-for that case, so leaving it unresolved does not block S34.2–S34.8.
+Whether Codex exposes recoverable change data through some other surface is no longer fully open:
+the protocol schema confirms `item/fileChange/patchUpdated` carries a real per-file unified diff,
+already known to (and currently ignored by) the adapter — this probe simply never observed it fire.
+Mapping it is not this slice's question to chase further, though, since S34's authorized scope is
+the Claude `tool_use_result` mapping. S34.5 already gives the renderer a defined behaviour for a
+`diff: null` result, so the Codex adapter emits that explicitly and unconditionally for now; wiring
+`item/fileChange/patchUpdated` is logged as a follow-up in `design/90-decisions.md`.

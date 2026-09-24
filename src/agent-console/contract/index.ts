@@ -192,6 +192,24 @@ export interface ToolResult {
   readonly output: string; // truncated before this envelope was constructed
   readonly truncated: boolean;
   readonly bytes: number; // pre-truncation size
+  // (D258) The adapter's own recoverable before/after, when this result carries one. `null`
+  // for a result with no recoverable change, or an adapter that does not populate this field —
+  // S34.5 then renders exactly as it does with no diff field at all.
+  readonly diff: ToolResultDiff | null;
+}
+
+// (D258) Mirrors the hunk shape an adapter already computes on the wire rather than inventing
+// one: each hunk's `lines` entries are prefixed `" "`/`"-"`/`"+"`, matching unified-diff convention.
+export interface ToolResultDiff {
+  readonly hunks: readonly ToolResultDiffHunk[];
+}
+
+export interface ToolResultDiffHunk {
+  readonly oldStart: number;
+  readonly oldLines: number;
+  readonly newStart: number;
+  readonly newLines: number;
+  readonly lines: readonly string[];
 }
 
 export interface PermissionRequest {

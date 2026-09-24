@@ -318,7 +318,9 @@ function buildCodexAdapter(opts: AdapterOptions, executable: string, transport: 
           const output = String(item['aggregatedOutput'] ?? '');
           emitEvent(
             'tool.result',
-            { callId: item['id'], ok: item['status'] === 'completed', output, truncated: false, bytes: Buffer.byteLength(output, 'utf8') },
+            // (D258) `null`: this adapter does not map `item/fileChange/patchUpdated` yet —
+            // logged as a follow-up in design/90-decisions.md § Open.
+            { callId: item['id'], ok: item['status'] === 'completed', output, truncated: false, bytes: Buffer.byteLength(output, 'utf8'), diff: null },
             rec,
           );
           return;

@@ -137,6 +137,9 @@ test('S8.3, S8.4 — app-server: the mapped table, and zero permission.request e
   assert.equal(toolResults.length, 1);
   assert.equal((toolResults[0]!.event.data as { ok: boolean; output: string }).ok, true);
   assert.equal((toolResults[0]!.event.data as { ok: boolean; output: string }).output, 'hi\n');
+  // D258: this adapter has no recoverable-diff transport, so the field is always null —
+  // not merely unpopulated, so S34.5 renders exactly as it did before the field existed.
+  assert.equal((toolResults[0]!.event.data as { diff: unknown }).diff, null);
 
   const usage = eventsOf(notifications, 'usage');
   assert.equal(usage.length, 1);
