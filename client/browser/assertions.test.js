@@ -12,6 +12,7 @@ import {
   assertHitArea,
   assertHiddenIsNone,
   assertNoHorizontalScroll,
+  assertWithinViewport,
 } from './assertions.js';
 
 test('assertFontSizeToken passes on each declared token and fails off it', () => {
@@ -50,4 +51,10 @@ test('assertNoHorizontalScroll passes when scrollWidth fits and fails when it ov
   assert.doesNotThrow(() => assertNoHorizontalScroll(390, 390));
   assert.doesNotThrow(() => assertNoHorizontalScroll(380, 390));
   assert.throws(() => assertNoHorizontalScroll(420, 390), /scrolls horizontally/);
+});
+
+test('assertWithinViewport passes when the masthead is fully inside the viewport and fails when it is not', () => {
+  assert.doesNotThrow(() => assertWithinViewport({ top: 0, bottom: 64 }, 800));
+  assert.throws(() => assertWithinViewport({ top: -20, bottom: 44 }, 800), /left the viewport/);
+  assert.throws(() => assertWithinViewport({ top: 780, bottom: 844 }, 800), /left the viewport/);
 });

@@ -7,8 +7,11 @@ import {
   classifyAssistantText,
   coalesceKey,
   createCoalesceGroup,
+  DEFAULT_MODEL_LABEL,
+  formatHeaderBurn,
   renderEvent,
   renderPayrollSummary,
+  sessionIdentityFields,
 } from './render.js';
 
 // Brief item 19 — a burst of identical notices or errors is one transcript row carrying a
@@ -365,4 +368,60 @@ test('S34.8 — a diff past the renderer line bound shows the first N lines and 
   const over = renderEvent(doc, toolResultEnvelope(diffOf(N + 1)), { verbosity: 'full' });
   assert.equal(findAll(over, 'tool__diff-line tool__diff-line--added').length, N);
   assert.equal(find(over, 'tool__diff-more').textContent, '+1 more lines');
+});
+
+// S35 — the header and every sidebar row over the same `SessionSummary` fields.
+
+function session(overrides = {}) {
+  return {
+    id: 'sess-1',
+    owner: 'op',
+    vendor: 'acme-cli',
+    cwd: '/work/project',
+    model: null,
+    policy: null,
+    sandbox: null,
+    lastSeq: 0,
+    state: 'live',
+    createdAt: '2026-09-19T00:00:00.000Z',
+    endedAt: null,
+    name: null,
+    ...overrides,
+  };
+}
+
+test('S35.2 — sessionIdentityFields falls back from name to cwd (D249) and states an explicit default model', () => {
+  const noName = sessionIdentityFields(session());
+  assert.equal(noName.name, '/work/project');
+  assert.equal(noName.model, DEFAULT_MODEL_LABEL);
+
+  const named = sessionIdentityFields(session({ name: 'triage bot', model: 'opus' }));
+  assert.equal(named.name, 'triage bot');
+  assert.equal(named.model, 'opus');
+});
+
+test('S35.5 — an ended session carries state "ended" and nothing else — SessionSummary has no endReason to show', () => {
+  const fields = sessionIdentityFields(session({ state: 'ended' }));
+  assert.equal(fields.state, 'ended');
+  assert.equal('endReason' in fields, false);
+});
+
+test('S35.8 — a name and a folder carrying markup-looking characters come back as the literal fields, not markup', () => {
+  const fields = sessionIdentityFields(session({ name: '<b>ops</b> & "prod"', cwd: '/work/<script>' }));
+  assert.equal(fields.name, '<b>ops</b> & "prod"');
+});
+
+test('S35.3 — formatHeaderBurn sums the four burn fields and states "unpriced" rather than a zero cost', () => {
+  const unpriced = formatHeaderBurn(payrollView([]));
+  assert.match(unpriced, /unpriced/);
+  assert.equal(/\$?0\.00/.test(unpriced), false);
+
+  const priced = formatHeaderBurn({ ...payrollView([]), costCurrency: 12.5, currency: 'USD' });
+  assert.match(priced, /USD 12\.50/);
+});
+
+test('S35.3 — formatHeaderBurn never recomputes the total from turns, only from burn (I28)', () => {
+  const view = payrollView([turnBurn('t1', 999999)]);
+  const label = formatHeaderBurn(view);
+  assert.match(label, /39,674 tokens/);
 });

@@ -86,3 +86,15 @@ export function assertNoHorizontalScroll(scrollWidth, clientWidth) {
     throw new Error(`document scrolls horizontally: scrollWidth ${scrollWidth}px > clientWidth ${clientWidth}px`);
   }
 }
+
+/**
+ * S35.1: the masthead's bounding box, read after the transcript is scrolled to its end, must
+ * still be fully inside the viewport. Geometry only — never the name of the CSS property
+ * (`position`, `flex`, …) that produced it, which is the whole point of reading it back from a
+ * really-rendered page rather than parsing the stylesheet.
+ */
+export function assertWithinViewport(rect, viewportHeight) {
+  if (rect.top < 0 || rect.bottom > viewportHeight) {
+    throw new Error(`masthead left the viewport: top ${rect.top}px, bottom ${rect.bottom}px, viewport height ${viewportHeight}px`);
+  }
+}

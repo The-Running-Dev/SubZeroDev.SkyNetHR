@@ -1,4 +1,4 @@
-import { appendMessageDeltaText, applyAssistantMessageVerbosity, coalesceKey, createCoalesceGroup, createIncidentGroupsBuilder, renderAuditRow, renderEvent, renderHiddenAssistantBlocks, renderPayrollSummary, renderRequisitionRow, renderReviewRow, renderSummaryRow, renderTokenBreakdown, renderUnreachedReport, updateHiddenAssistantBlocks } from './render.js';
+import { appendMessageDeltaText, applyAssistantMessageVerbosity, coalesceKey, createCoalesceGroup, createIncidentGroupsBuilder, formatHeaderBurn, renderAuditRow, renderEvent, renderHiddenAssistantBlocks, renderPayrollSummary, renderRequisitionRow, renderReviewRow, renderSummaryRow, renderTokenBreakdown, renderUnreachedReport, sessionIdentityFields, updateHiddenAssistantBlocks } from './render.js';
 
 const $ = (id) => document.getElementById(id);
 
@@ -302,11 +302,12 @@ async function refreshSessions() {
     item.className = 'session';
     if (session.id === state.sessionId) item.className = 'session session--current';
 
+    const fields = sessionIdentityFields(session);
     const button = document.createElement('button');
     button.className = 'session__button';
     button.type = 'button';
-    button.appendChild(text('span', 'session__cwd', session.name ?? session.cwd));
-    button.appendChild(text('span', 'session__meta', `${session.vendor} · ${session.state}`));
+    button.appendChild(text('span', 'session__cwd', fields.name));
+    button.appendChild(text('span', 'session__meta', `${fields.vendor} · ${fields.model} · ${fields.state}`));
     button.addEventListener('click', () => selectSession(session.id));
 
     const rename = document.createElement('button');
@@ -331,8 +332,42 @@ async function refreshSessions() {
   applyPolicyBanner();
   applyStatusBadge();
   applyTurnControls();
+  applySessionIdentity();
   $('terminate-open').hidden = state.sessionId === null;
   $('masthead-panels').hidden = state.sessionId === null;
+}
+
+// S35.2/S35.4: the header's own copy of the same `SessionSummary` fields the sidebar rows show,
+// over `currentSession()` alone — no fetch of its own, since `refreshSessions()` and the
+// envelope handlers below already keep `state.sessionsById` current.
+function applySessionIdentity() {
+  const identity = $('session-identity');
+  const session = currentSession();
+  if (session === null) {
+    identity.hidden = true;
+    return;
+  }
+  const fields = sessionIdentityFields(session);
+  identity.hidden = false;
+  $('session-name').textContent = fields.name;
+  $('session-vendor').textContent = fields.vendor;
+  $('session-model').textContent = fields.model;
+  $('session-state').textContent = fields.state;
+}
+
+// S35.3/S35.6: the header's burn/cost line, fetched from the payroll route (I28: never
+// recomputed here) on turn end and session end only — never per envelope, and never per
+// `usage` event, which is what `refreshPayroll()` above already answers to for the payroll
+// panel. Two consumers of the same route on different triggers is the accepted duplicate-fetch
+// cost of a header figure that must not wait for the panel to be open.
+async function refreshHeaderBurn() {
+  const fetched = await fetchForCurrentSession('/payroll');
+  const burnEl = $('session-burn');
+  if (!fetched || !fetched.ok) {
+    burnEl.textContent = '';
+    return;
+  }
+  burnEl.textContent = formatHeaderBurn(fetched.payload);
 }
 
 function selectSession(sessionId) {
@@ -340,6 +375,7 @@ function selectSession(sessionId) {
   state.refetched = false;
   applySessionAvailability();
   applyPolicyBanner();
+  applySessionIdentity();
   // D246: the four working-surface panels are operator-opened overlays now, not
   // always-visible sections — a session switch closes whatever was left open rather
   // than forcing any of them back up.
@@ -359,6 +395,7 @@ function selectSession(sessionId) {
   void refreshChecklist();
   void refreshReviews();
   void refreshPayroll();
+  void refreshHeaderBurn();
 }
 
 // Fetches `/api/sessions/:id<suffix>` for the session selected when the call was made.
@@ -576,6 +613,8 @@ function handleEnvelope(sessionId, envelope) {
     applySessionAvailability();
     applyStatusBadge();
     applyTurnControls();
+    applySessionIdentity();
+    void refreshHeaderBurn();
   }
   if (envelope.kind === 'turn.started' && envelope.sessionId === state.sessionId) {
     state.turnLive = true;
@@ -590,6 +629,7 @@ function handleEnvelope(sessionId, envelope) {
     applyStatusBadge();
     applyTurnControls();
     updateElapsedIndicator();
+    void refreshHeaderBurn();
   }
   if (envelope.kind === 'checkpoint.created') {
     // A new checkpoint invalidates the list this session already fetched, whether it

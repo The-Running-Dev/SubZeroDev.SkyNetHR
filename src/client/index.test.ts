@@ -492,17 +492,22 @@ describe('S16 — the payroll panel renders burn, remaining budget, idle time, a
     try {
       const button = byId.get('sessions')!.children[0]!.children[0]!;
       for (const fn of button.listeners.get('click') ?? []) fn({});
+      // S35 adds a second, independent consumer of the same route (the header burn
+      // figure), fetched once at selection and again on turn.ended/session.ended — not
+      // on usage, which the payroll panel alone answers to (client/app.js, refreshHeaderBurn's
+      // own comment). So selection now fetches twice, turn.ended/session.ended fetch twice
+      // each, and usage still fetches once.
       const countAfterSelect = fetchCalls.filter((u) => u.endsWith('/payroll')).length;
-      assert.equal(countAfterSelect, 1, 'selecting a session fetches the panel once');
+      assert.equal(countAfterSelect, 2, 'selecting a session fetches the panel and the header burn once each');
 
       deliver(streams[0]!, { seq: 1, sessionId: 's1', ts: '2026-08-09T00:00:00.000Z', kind: 'usage', data: { turnId: 't1', usage: { inputTokens: 1, outputTokens: 1, cacheRead: 0, cacheCreate: 0 } } });
       assert.equal(fetchCalls.filter((u) => u.endsWith('/payroll')).length, countAfterSelect + 1, 'a usage event refetches burn — a live session must not show a stale count');
 
       deliver(streams[0]!, { seq: 2, sessionId: 's1', ts: '2026-08-09T00:00:00.000Z', kind: 'turn.ended', data: { turnId: 't1', stopReason: 'completed', usage: null } });
-      assert.equal(fetchCalls.filter((u) => u.endsWith('/payroll')).length, countAfterSelect + 2, 'turn.ended closes an idle boundary and refetches too');
+      assert.equal(fetchCalls.filter((u) => u.endsWith('/payroll')).length, countAfterSelect + 3, 'turn.ended closes an idle boundary and refetches the panel and the header burn');
 
       deliver(streams[0]!, { seq: 3, sessionId: 's1', ts: '2026-08-09T00:00:00.000Z', kind: 'session.ended', data: { reason: 'operator', endedAt: '2026-08-09T00:00:00.000Z' } });
-      assert.equal(fetchCalls.filter((u) => u.endsWith('/payroll')).length, countAfterSelect + 3, 'session.ended finalises the trailing idle gap and refetches once more');
+      assert.equal(fetchCalls.filter((u) => u.endsWith('/payroll')).length, countAfterSelect + 5, 'session.ended finalises the trailing idle gap and refetches the panel and the header burn');
     } finally {
       await restore();
     }
@@ -880,6 +885,8 @@ async function runConsole(sessions: ReadonlyArray<Record<string, unknown>>) {
     'status-badge', 'theme-select', 'terminate-open', 'terminate', 'terminate-close',
     'terminate-summary', 'terminate-ended', 'terminate-confirm',
     'interrupt', 'end-session', 'turn-elapsed',
+    // S35: masthead session identity (name/vendor/model/state) and burn figure
+    'session-identity', 'session-name', 'session-vendor', 'session-model', 'session-state', 'session-burn',
     // D246: masthead verbosity control, panels overflow menu, and compose attachments
     'verbosity-select', 'masthead-panels',
     'checkpoints-open', 'checkpoints-close', 'checklist-open', 'checklist-close',

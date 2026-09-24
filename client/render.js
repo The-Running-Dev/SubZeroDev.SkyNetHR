@@ -608,6 +608,32 @@ export function renderTokenBreakdown(doc, view, session, usageUnavailable) {
   return dl;
 }
 
+// S35.2/S35.4: the header and every sidebar row show the same four `SessionSummary` fields
+// with the same null handling — computed once so the two surfaces cannot drift from each
+// other's rule for `name` (D249, unchanged) or `model`. `SessionSummary` carries no
+// `endReason` (S35.5): `state` alone is shown, and a row that needs to say *why* a session
+// ended is a contract question this slice records rather than answers.
+export const DEFAULT_MODEL_LABEL = 'default model';
+
+export function sessionIdentityFields(session) {
+  return {
+    name: session.name ?? session.cwd,
+    vendor: session.vendor,
+    model: session.model ?? DEFAULT_MODEL_LABEL,
+    state: session.state,
+  };
+}
+
+// S35.3: the header's own burn/cost line — the same sum-and-format rule `renderPayrollSummary`
+// above uses (I28: the server's sum is authoritative, never re-derived), as one line rather
+// than a `<dl>`. D158: a session whose cost is null reads as "unpriced", never a fabricated
+// zero.
+export function formatHeaderBurn(view) {
+  const totalBurn = view.burn.inputTokens + view.burn.outputTokens + view.burn.cacheRead + view.burn.cacheCreate;
+  const cost = view.costCurrency === null ? 'unpriced' : formatCost(view.costCurrency, view.currency);
+  return `${formatTokenCount(totalBurn)} tokens — ${cost}`;
+}
+
 const RENDERERS = {
   'session.started': sessionStartedNode,
   'session.ended': sessionEndedNode,
