@@ -13,6 +13,7 @@ import {
   assertHitArea,
   assertHiddenIsNone,
   assertNoHorizontalScroll,
+  assertWithinViewport,
 } from './assertions.js';
 
 // Runs inside the page over CDP. Reveals `surfaceId` (if it toggles via `hidden`), reads the
@@ -57,6 +58,38 @@ const SCROLL_PROBE = `(() => ({
   clientWidth: document.documentElement.clientWidth,
 }))()`;
 
+// S35.1: reveals the console (bypassing the login gate, which the masthead sits outside of
+// anyway), fills the transcript with enough synthetic rows to force its own scrollbar, scrolls
+// it to the end, then reads the masthead's real bounding box back out of the rendered page.
+const MASTHEAD_SCROLL_PROBE = `(() => {
+  const consoleEl = document.getElementById('console');
+  consoleEl.hidden = false;
+
+  const transcript = document.getElementById('transcript');
+  for (let i = 0; i < 200; i += 1) {
+    const row = document.createElement('p');
+    row.textContent = 'synthetic transcript row ' + i + ' — enough text to occupy a real line.';
+    transcript.appendChild(row);
+  }
+  transcript.scrollTop = transcript.scrollHeight;
+
+  const masthead = document.querySelector('.masthead');
+  const rect = masthead.getBoundingClientRect();
+  return { top: rect.top, bottom: rect.bottom, viewportHeight: window.innerHeight };
+})()`;
+
+async function checkMastheadStaysVisible(page, failures) {
+  await page.goto(`${page.origin}/index.html`);
+  const { top, bottom, viewportHeight } = await page.evaluate(MASTHEAD_SCROLL_PROBE);
+  try {
+    assertWithinViewport({ top, bottom }, viewportHeight);
+    return 1;
+  } catch (err) {
+    failures.push(`masthead visibility (S35.1): ${err.message}`);
+    return 0;
+  }
+}
+
 async function checkTheme(page, theme, failures) {
   await page.goto(`${page.origin}/index.html`);
   await page.evaluate(`document.documentElement.setAttribute('data-theme', ${JSON.stringify(theme)})`);
@@ -97,6 +130,8 @@ async function main() {
   const failures = [];
   let covered = 0;
 
+  let mastheadCovered = 0;
+
   try {
     for (const theme of THEMES) {
       const page = await browser.newPage();
@@ -107,6 +142,14 @@ async function main() {
         await page.close();
       }
     }
+
+    const mastheadPage = await browser.newPage();
+    mastheadPage.origin = server.origin;
+    try {
+      mastheadCovered = await checkMastheadStaysVisible(mastheadPage, failures);
+    } finally {
+      await mastheadPage.close();
+    }
   } finally {
     await browser.close();
     await server.close();
@@ -114,6 +157,7 @@ async function main() {
 
   const total = THEMES.length * SURFACES.length;
   console.log(`S18.5 browser pass: ${covered}/${total} surface x theme checks covered across ${THEMES.length} themes.`);
+  console.log(`S35.1 masthead-visibility check: ${mastheadCovered}/1 covered.`);
 
   if (failures.length > 0) {
     console.error(`${failures.length} failure(s):`);

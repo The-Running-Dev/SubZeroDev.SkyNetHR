@@ -6434,3 +6434,9 @@ Staging only. Once an item becomes an issue it leaves this list.
   comment is contradicted by the schema. S34 ships `diff: null` for every Codex result (D258) rather
   than wiring this, because it is new scope beyond S34's authorized "map Claude's `tool_use_result`"
   — a future slice should map it into the same `ToolResult.diff` field.
+
+- **`SessionSummary` carries no `endReason` — S35.5 names this rather than inferring one.** The
+  header and every sidebar row (S35) show an ended session as `state: 'ended'` and nothing more.
+  Inferring a reason from `endedAt` or any other already-present field would be guessing at a fact
+  the contract does not carry; if an operator needs to see *why* a session ended, that is a
+  `SessionSummary` field addition — a contract question, not a rendering one.

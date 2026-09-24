@@ -153,7 +153,19 @@ async function flush(n = 6) {
   for (let i = 0; i < n; i++) await Promise.resolve();
 }
 
-async function setUpApp() {
+function defaultPayrollView() {
+  return {
+    burn: { inputTokens: 100, outputTokens: 50, cacheRead: 0, cacheCreate: 0 },
+    remainingTokens: null,
+    idleMs: 0,
+    droppedIntervals: 0,
+    costCurrency: null,
+    currency: null,
+    turns: [],
+  };
+}
+
+async function setUpApp({ sessions, extraRoutes = [], payrollCounter = null } = {}) {
   const doc = makeFakeDocument();
   const sseInstances = [];
   const wsInstances = [];
@@ -182,11 +194,17 @@ async function setUpApp() {
   // I20/S1.10: the vendor string is arbitrary and unchecked by anything this test exercises
   // — deliberately not a real vendor name, matching the client's own no-vendor-literal rule
   // (`src/client/index.test.ts`'s "carries no vendor string anywhere in the client sources").
+  const fixtureSessions = sessions ?? [
+    { id: 'sess-a', cwd: '/work/a', vendor: 'acme-agent', state: 'live' },
+    { id: 'sess-b', cwd: '/work/b', vendor: 'acme-agent', state: 'live' },
+  ];
   const routeFetch = fakeFetch([
-    ['/api/sessions', () => ({ status: 200, payload: { sessions: [
-      { id: 'sess-a', cwd: '/work/a', vendor: 'acme-agent', state: 'live' },
-      { id: 'sess-b', cwd: '/work/b', vendor: 'acme-agent', state: 'live' },
-    ] } })],
+    ['/api/sessions', () => ({ status: 200, payload: { sessions: fixtureSessions } })],
+    [/^\/api\/sessions\/[^/]+\/payroll$/, () => {
+      if (payrollCounter) payrollCounter.count += 1;
+      return { status: 200, payload: defaultPayrollView() };
+    }],
+    ...extraRoutes,
   ]);
   globalThis.fetch = async (...args) => {
     fetchCalls.push(args[0]);
@@ -201,7 +219,7 @@ async function setUpApp() {
   await flush();
 
   const sessionsList = doc.getElementById('sessions');
-  assert.equal(sessionsList.children.length, 2, 'setup: both fixture sessions rendered');
+  assert.equal(sessionsList.children.length, fixtureSessions.length, 'setup: all fixture sessions rendered');
   const selectA = () => sessionsList.children[0].children[0].dispatch('click', {});
   const selectB = () => sessionsList.children[1].children[0].dispatch('click', {});
 
@@ -356,4 +374,137 @@ test('S37.3/S37.5 — compact hides narration losslessly and shows a counted pla
   assert.deepEqual(assistants.map((node) => node.hidden), [true, true]);
   assert.equal(placeholder.hidden, false);
   assert.equal(placeholder.children[1].textContent, '2 narration blocks hidden');
+});
+
+// S35 — the header always shows this session's identity and burn, and every sidebar row
+// carries the same fields with the same null handling.
+
+test('S35.2/S35.4 — the header and the sidebar row for the same session show identical name/vendor/model/state fields', async () => {
+  const sessions = [
+    { id: 'sess-a', cwd: '/work/a', vendor: 'acme-agent', state: 'live', name: 'triage bot', model: 'opus' },
+    { id: 'sess-b', cwd: '/work/b', vendor: 'acme-agent', state: 'live', name: null, model: null },
+  ];
+  const { doc, selectA } = await setUpApp({ sessions });
+  selectA();
+  await flush();
+
+  assert.equal(doc.getElementById('session-identity').hidden, false);
+  assert.equal(doc.getElementById('session-name').textContent, 'triage bot');
+  assert.equal(doc.getElementById('session-vendor').textContent, 'acme-agent');
+  assert.equal(doc.getElementById('session-model').textContent, 'opus');
+  assert.equal(doc.getElementById('session-state').textContent, 'live');
+
+  const row = doc.getElementById('sessions').children[0];
+  assert.equal(row.children[0].children[0].textContent, 'triage bot', 'sidebar row name matches the header');
+  assert.equal(row.children[0].children[1].textContent, 'acme-agent · opus · live', 'sidebar row meta matches the header fields');
+});
+
+test('S35.2/S35.4 — a session with no name and no model falls back to cwd and an explicit default, in both surfaces', async () => {
+  const sessions = [
+    { id: 'sess-a', cwd: '/work/a', vendor: 'acme-agent', state: 'live', name: null, model: null },
+    { id: 'sess-b', cwd: '/work/b', vendor: 'acme-agent', state: 'live', name: null, model: null },
+  ];
+  const { doc, selectA } = await setUpApp({ sessions });
+  selectA();
+  await flush();
+
+  assert.equal(doc.getElementById('session-name').textContent, '/work/a', 'D249: falls back to cwd');
+  assert.equal(doc.getElementById('session-model').textContent, 'default model', 'S35.2: an explicit default, not a blank');
+
+  const row = doc.getElementById('sessions').children[0];
+  assert.equal(row.children[0].children[0].textContent, '/work/a');
+  assert.match(row.children[0].children[1].textContent, /default model/);
+});
+
+test('S35.5 — an ended session reads as "ended" in both surfaces and states nothing about why', async () => {
+  const sessions = [
+    { id: 'sess-a', cwd: '/work/a', vendor: 'acme-agent', state: 'ended', name: null, model: null },
+    { id: 'sess-b', cwd: '/work/b', vendor: 'acme-agent', state: 'live', name: null, model: null },
+  ];
+  const { doc, selectA } = await setUpApp({ sessions });
+  selectA();
+  await flush();
+
+  assert.equal(doc.getElementById('session-state').textContent, 'ended');
+  const row = doc.getElementById('sessions').children[0];
+  assert.match(row.children[0].children[1].textContent, /· ended$/);
+  // SessionSummary carries no endReason field, so nothing rendered can name one.
+  assert.equal(/reason/i.test(row.children[0].children[1].textContent), false);
+});
+
+test('S35.8 — a session name and folder carrying angle brackets and a quote render as literal text, not markup', async () => {
+  const sessions = [
+    { id: 'sess-a', cwd: '/work/<script>a', vendor: 'acme-agent', state: 'live', name: '<b>ops</b> & "prod"', model: null },
+    { id: 'sess-b', cwd: '/work/b', vendor: 'acme-agent', state: 'live', name: null, model: null },
+  ];
+  const { doc, selectA } = await setUpApp({ sessions });
+  selectA();
+  await flush();
+
+  assert.equal(doc.getElementById('session-name').textContent, '<b>ops</b> & "prod"');
+  assert.equal(doc.getElementById('session-name').children.length, 0, 'a text node carries no child elements');
+  const row = doc.getElementById('sessions').children[0];
+  assert.equal(row.children[0].children[0].textContent, '<b>ops</b> & "prod"');
+  assert.equal(row.children[0].children[0].children.length, 0);
+});
+
+test('S35.3 — the header states "unpriced" rather than a zero cost when costCurrency is null', async () => {
+  const { doc, selectA } = await setUpApp();
+  selectA();
+  await flush();
+
+  const burn = doc.getElementById('session-burn').textContent;
+  assert.match(burn, /unpriced/);
+  assert.equal(/\$?0\.00/.test(burn), false);
+});
+
+test('S35.7 — a fifty-session list issues no payroll fetch at all', async () => {
+  const sessions = Array.from({ length: 50 }, (_, i) => ({
+    id: `sess-${i}`, cwd: `/work/${i}`, vendor: 'acme-agent', state: 'live', name: null, model: null,
+  }));
+  const payrollCounter = { count: 0 };
+  const { doc } = await setUpApp({ sessions, payrollCounter });
+
+  assert.equal(doc.getElementById('sessions').children.length, 50);
+  assert.equal(payrollCounter.count, 0, 'refreshSessions/the initial list render must not fetch payroll');
+});
+
+test('S35.6 — the header burn figure is refetched once per turn end, not once per envelope', async () => {
+  const sessions = [
+    { id: 'sess-a', cwd: '/work/a', vendor: 'acme-agent', state: 'live', name: null, model: null },
+    { id: 'sess-b', cwd: '/work/b', vendor: 'acme-agent', state: 'live', name: null, model: null },
+  ];
+  const { doc, sseInstances, selectA } = await setUpApp({ sessions });
+  doc.__setEdge('sse');
+
+  // `refreshPayroll` (the panel) and `refreshHeaderBurn` (the header) hit the same route, so a
+  // raw fetch count cannot tell them apart — instrumenting the one DOM write only
+  // `refreshHeaderBurn` ever makes is what actually isolates "the header's own" fetch count,
+  // which is the thing S35.6 constrains.
+  const burnEl = doc.getElementById('session-burn');
+  let burnWrites = 0;
+  let burnValue = burnEl.textContent;
+  Object.defineProperty(burnEl, 'textContent', {
+    get() { return burnValue; },
+    set(v) { burnValue = v; burnWrites += 1; },
+  });
+
+  selectA();
+  await flush();
+  const stream = sseInstances[0];
+  const writesAfterSelect = burnWrites;
+
+  // Three turns: started/ended pairs, plus a `usage` envelope per turn that must not, on its
+  // own, trigger a second header refresh — the panel still answers to `usage` via
+  // `refreshPayroll`, but the header's own fetch is narrower.
+  for (let turn = 1; turn <= 3; turn += 1) {
+    stream.emit('turn.started', { seq: turn * 10, sessionId: 'sess-a', kind: 'turn.started', data: { turnId: `turn-${turn}` } });
+    await flush();
+    stream.emit('usage', { seq: turn * 10 + 1, sessionId: 'sess-a', kind: 'usage', data: {} });
+    await flush();
+    stream.emit('turn.ended', { seq: turn * 10 + 2, sessionId: 'sess-a', kind: 'turn.ended', data: { turnId: `turn-${turn}` } });
+    await flush();
+  }
+
+  assert.equal(burnWrites - writesAfterSelect, 3, 'exactly one header burn update per turn end across three turns, none from turn.started or usage alone');
 });
