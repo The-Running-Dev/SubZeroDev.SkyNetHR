@@ -14,6 +14,7 @@ import type {
   Result,
   TurnId,
 } from '../types.js';
+import type { ToolResultDiff, ToolResultDiffHunk } from '../../contract/index.js';
 import { NdjsonSplitter } from '../ndjson.js';
 import { BASH_COMMAND_FIELD, summariseToolCall } from './summarise.js';
 
@@ -158,6 +159,42 @@ export function createClaudeAdapter(opts: AdapterOptions & { readonly executable
     return typeof value === 'object' && value !== null && !Array.isArray(value);
   }
 
+  // (D258) Maps the wire's `tool_use_result` sibling field into the contract's diff shape.
+  // `structuredPatch` is Claude's own unified-diff-shaped hunk array (Edit); an empty
+  // `structuredPatch` with string `content` is Write's fresh-file create, synthesised as a
+  // single all-added hunk. Anything else — Read, Bash, a malformed hunk — is `null`, which
+  // S34.5 renders exactly as today.
+  function extractToolResultDiff(toolUseResult: unknown): ToolResultDiff | null {
+    if (!isPlainObject(toolUseResult)) return null;
+    const rawPatch = toolUseResult['structuredPatch'];
+    if (Array.isArray(rawPatch) && rawPatch.length > 0) {
+      const hunks: ToolResultDiffHunk[] = [];
+      for (const rawHunk of rawPatch) {
+        if (!isPlainObject(rawHunk)) return null;
+        const { oldStart, oldLines, newStart, newLines, lines } = rawHunk;
+        if (
+          typeof oldStart !== 'number' ||
+          typeof oldLines !== 'number' ||
+          typeof newStart !== 'number' ||
+          typeof newLines !== 'number' ||
+          !Array.isArray(lines) ||
+          !lines.every((line) => typeof line === 'string')
+        ) {
+          return null;
+        }
+        hunks.push({ oldStart, oldLines, newStart, newLines, lines });
+      }
+      return { hunks };
+    }
+    if (Array.isArray(rawPatch) && rawPatch.length === 0 && typeof toolUseResult['content'] === 'string') {
+      const content = toolUseResult['content'];
+      if (content.length === 0) return null;
+      const lines = content.split('\n').map((line) => `+${line}`);
+      return { hunks: [{ oldStart: 0, oldLines: 0, newStart: 1, newLines: lines.length, lines }] };
+    }
+    return null;
+  }
+
   function handleRecord(rec: Record<string, unknown>): void {
     const type = rec['type'];
 
@@ -286,6 +323,8 @@ export function createClaudeAdapter(opts: AdapterOptions & { readonly executable
           }
           const raw = block['content'];
           const text = typeof raw === 'string' ? raw : Array.isArray(raw) ? raw.map((p) => (p as { text?: string }).text ?? '').join('') : '';
+          // (D258) `tool_use_result` is a sibling of `message` on the record, not nested in
+          // this block — it applies to the record's tool_result rather than to `block` itself.
           emitEvent(
             'tool.result',
             {
@@ -294,6 +333,7 @@ export function createClaudeAdapter(opts: AdapterOptions & { readonly executable
               output: text,
               truncated: false, // S9 does the capping; out of scope here
               bytes: Buffer.byteLength(text, 'utf8'),
+              diff: extractToolResultDiff(rec['tool_use_result']),
             },
             rec,
           );

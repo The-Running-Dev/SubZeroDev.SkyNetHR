@@ -207,18 +207,62 @@ function toolCallNode(doc, data, handlers) {
   return row(doc, 'tool-call', 'tool', body);
 }
 
+// S34.8: the renderer's own cap on diff lines shown inline, declared here and nowhere
+// else — a diff past this length still states its full extent as a trailing count.
+const DIFF_LINE_BOUND = 200;
+
+function diffLineKind(line) {
+  if (line.startsWith('+')) return 'added';
+  if (line.startsWith('-')) return 'removed';
+  return 'context';
+}
+
+// S34.2/S34.3/S34.6/S34.8: one element per hunk header, one per line — each line's own
+// added/removed/context class carries the marking, and every line reaches the page
+// through `el`'s `textContent` (never markup). No button, form or contenteditable
+// appears anywhere in here; there is nothing here for an operator to act on (S34.6).
+function toolResultDiffNode(doc, diff) {
+  const container = el(doc, 'div', 'tool__diff');
+  const totalLines = diff.hunks.reduce((sum, hunk) => sum + hunk.lines.length, 0);
+  let shown = 0;
+  for (const hunk of diff.hunks) {
+    if (shown >= DIFF_LINE_BOUND) break;
+    const hunkNode = el(doc, 'div', 'tool__diff-hunk');
+    hunkNode.appendChild(
+      el(doc, 'div', 'tool__diff-hunk-header', `@@ -${hunk.oldStart},${hunk.oldLines} +${hunk.newStart},${hunk.newLines} @@`),
+    );
+    for (const line of hunk.lines) {
+      if (shown >= DIFF_LINE_BOUND) break;
+      hunkNode.appendChild(el(doc, 'div', `tool__diff-line tool__diff-line--${diffLineKind(line)}`, line));
+      shown++;
+    }
+    container.appendChild(hunkNode);
+  }
+  if (totalLines > shown) container.appendChild(el(doc, 'div', 'tool__diff-more', `+${totalLines - shown} more lines`));
+  return container;
+}
+
 // S9.2/Delivers: a truncated result's full bytes are one click away at the tool-output
 // route. `sessionId` comes from `handlers` rather than `data` — it is not part of the
 // wire vocabulary any event carries (I20) — so this is the one renderer that reads it.
+//
+// S34.5: a `diff: null` result renders exactly as it always has — the diff branch below
+// is additive, never a replacement of this function's existing output path.
 function toolResultNode(doc, data, handlers) {
   const body = el(doc, 'div', 'tool');
   const status = el(doc, 'div', 'tool__status', data.ok ? 'ok' : 'failed');
   body.appendChild(status);
-  const outputPre = el(doc, 'pre', 'tool__output', data.output);
   const verbosity = (handlers && handlers.verbosity) || 'normal';
-  body.appendChild(foldable(doc, 'output', outputPre, verbosity !== 'compact'));
+  if (data.diff) {
+    body.appendChild(foldable(doc, 'diff', toolResultDiffNode(doc, data.diff), verbosity !== 'compact'));
+  } else {
+    const outputPre = el(doc, 'pre', 'tool__output', data.output);
+    body.appendChild(foldable(doc, 'output', outputPre, verbosity !== 'compact'));
+  }
   if (data.truncated) {
-    body.appendChild(el(doc, 'div', 'tool__truncated', `truncated — ${data.bytes} bytes in full`));
+    // S34.4: partiality comes from this same flag, not from inspecting the diff for a cut hunk.
+    const truncatedText = data.diff ? `diff partial — ${data.bytes} bytes in full` : `truncated — ${data.bytes} bytes in full`;
+    body.appendChild(el(doc, 'div', 'tool__truncated', truncatedText));
     if (handlers && handlers.sessionId) {
       const link = el(doc, 'a', 'tool__truncated-link', 'download full output');
       link.setAttribute(

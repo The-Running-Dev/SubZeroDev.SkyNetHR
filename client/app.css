@@ -581,6 +581,37 @@ body {
   font-size: var(--text-xs);
 }
 
+/* S34.2 — one row per hunk header, one row per line; the added/removed/context class is
+ * the only marking, matching `.tool__output`'s box so a diff and a plain result read as
+ * the same kind of thing. */
+.tool__diff {
+  margin: var(--space-1) var(--space-0) var(--space-0);
+  padding: var(--space-2);
+  border-radius: var(--radius-2);
+  background: var(--surface-sunken);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  overflow-x: auto;
+}
+
+.tool__diff-hunk + .tool__diff-hunk { margin-top: var(--space-2); }
+
+.tool__diff-hunk-header { color: var(--ink-faint); }
+
+.tool__diff-line {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.tool__diff-line--added { color: var(--ok); }
+.tool__diff-line--removed { color: var(--danger); }
+
+.tool__diff-more {
+  margin-top: var(--space-1);
+  color: var(--ink-faint);
+  font-size: var(--text-xs);
+}
+
 /* S4.14/S4.16 — the approve-and-deny screen. Wrapping keeps both actions reachable
  * without horizontal scroll at a 375 px viewport; `.permission__input` above already
  * wraps and scrolls its own overflow rather than the row. */

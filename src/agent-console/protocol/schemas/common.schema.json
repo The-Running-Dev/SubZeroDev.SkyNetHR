@@ -42,6 +42,50 @@
         "cacheCreate"
       ]
     },
+    "toolResultDiffHunk": {
+      "type": "object",
+      "properties": {
+        "oldStart": {
+          "$ref": "https://schemas.agent-console.invalid/common.schema.json#/$defs/number"
+        },
+        "oldLines": {
+          "$ref": "https://schemas.agent-console.invalid/common.schema.json#/$defs/number"
+        },
+        "newStart": {
+          "$ref": "https://schemas.agent-console.invalid/common.schema.json#/$defs/number"
+        },
+        "newLines": {
+          "$ref": "https://schemas.agent-console.invalid/common.schema.json#/$defs/number"
+        },
+        "lines": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "oldStart",
+        "oldLines",
+        "newStart",
+        "newLines",
+        "lines"
+      ]
+    },
+    "toolResultDiff": {
+      "type": "object",
+      "properties": {
+        "hunks": {
+          "type": "array",
+          "items": {
+            "$ref": "https://schemas.agent-console.invalid/common.schema.json#/$defs/toolResultDiffHunk"
+          }
+        }
+      },
+      "required": [
+        "hunks"
+      ]
+    },
     "attachment": {
       "type": "object",
       "properties": {

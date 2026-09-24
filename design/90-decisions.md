@@ -6401,6 +6401,36 @@ customization, only kit-authored corrections (e.g. `architect` effort `xhigh`→
 `AGENTS.shared.md`'s own "`xhigh` is for one question, not one pipeline").
 Reversibility: cheap — both are kit-owned artifacts with no local content lost.
 
+### 2026-09-22 — D258 `ToolResult` gains a `diff` field for S34
+Context: S34 (design/30-slices.md § S34, issue #437) requires rendering an edit-class tool result
+as a unified diff with real hunk headers (S34.2). `design/findings/S34-enumeration.md` established
+that Claude's `tool_use_result.structuredPatch`/`originalFile` carries this data on the wire, but
+`ToolResult` (contract/index.ts:188) has no field for it and the Claude adapter never reads
+`tool_use_result` — satisfying S34.2 as worded requires a server-side contract change, contradicting
+S34's stated "Touches: client only" scope. Escalated per AGENTS.md's "no new public interfaces
+without a contract amendment"; user authorized amending the contract and implementing inline in the
+same `/slice` session rather than routing to a separate `/contract` session.
+Chosen: add `readonly diff: ToolResultDiff | null` to `ToolResult`, with `ToolResultDiff { hunks:
+readonly ToolResultDiffHunk[] }` and `ToolResultDiffHunk { oldStart, oldLines, newStart, newLines,
+lines: readonly string[] }`, mirroring Claude's `structuredPatch` shape directly. Populated by the
+Claude adapter from `tool_use_result` for `Edit`/`Write`; `null` for every other Claude tool result
+and for every Codex result (see the Open item below).
+Rejected: **client-only rendering from `ToolCall.input`'s `old_string`/`new_string`.** No contract
+change, but the hunk-header positions (`oldStart`/`newStart`) would have to be invented rather than
+read, and `Write` results have no `old_string` at all to render from.
+Reversibility: cheap. A new optional-shaped field with no consumers yet; removing it drops one
+contract member and the two sites that populate it.
+
 ## Open
 
 Staging only. Once an item becomes an issue it leaves this list.
+
+- **Codex `item/fileChange/patchUpdated` carries a recoverable diff, unmapped.** The app-server
+  protocol schema (`schema/v2/FileChangePatchUpdatedNotification.json`, captured during the S34
+  probe) defines this notification as `changes: [{diff: <unified-diff string>, kind, path}]` per
+  changed file — a real, Codex-native diff, structurally distinct from Claude's `structuredPatch`.
+  `src/agent-console/providers/codex-cli/index.ts`'s `IGNORED_APP_SERVER_METHODS` already lists the
+  method name as previously observed and ignored, but the "carries no content the operator needs"
+  comment is contradicted by the schema. S34 ships `diff: null` for every Codex result (D258) rather
+  than wiring this, because it is new scope beyond S34's authorized "map Claude's `tool_use_result`"
+  — a future slice should map it into the same `ToolResult.diff` field.

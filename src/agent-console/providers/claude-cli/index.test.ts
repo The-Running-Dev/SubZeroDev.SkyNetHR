@@ -98,9 +98,38 @@ test('S1.1, S1.3, S1.9 — the twelve-row vendor mapping, and stdin stays writab
   // Row 8: user/tool_result -> tool.result (sent by the fixture after control_response).
   await waitUntil(() => eventsOf(notifications, 'tool.result').length > 0);
   assert.equal(eventsOf(notifications, 'tool.result').length, 1);
+  // D258: the fixture sends no `tool_use_result` sibling here, so diff stays null —
+  // S34.5 renders exactly as it did before the field existed.
+  assert.equal((eventsOf(notifications, 'tool.result')[0]!.event.data as { diff: unknown }).diff, null);
 
   // Row 9's pair: permission.resolved is emitted by session-manager in the real system
   // (S4), not the adapter — not asserted here.
+});
+
+// D258 — extractToolResultDiff's three productive shapes, exercised through the adapter's
+// real stdio mapping rather than as a standalone unit (the function is non-exported and
+// closed over createClaudeAdapter's own isPlainObject).
+test('D258 — the wire tool_use_result maps to ToolResult.diff across its three productive shapes', async () => {
+  process.env['SKYNET_TEST_SCENARIO'] = 'tool-result-diff';
+  const { adapter, notifications } = makeAdapter('tool-result-diff');
+  await adapter.send('hello', [], null, 'turn-diff' as never);
+  await waitUntil(() => eventsOf(notifications, 'turn.ended').length > 0);
+
+  const results = eventsOf(notifications, 'tool.result');
+  assert.equal(results.length, 3);
+
+  // Edit: structuredPatch hunks map through verbatim.
+  assert.deepEqual((results[0]!.event.data as { diff: unknown }).diff, {
+    hunks: [{ oldStart: 1, oldLines: 1, newStart: 1, newLines: 2, lines: [' context', '-old line', '+new line', '+second new line'] }],
+  });
+
+  // Write: an empty structuredPatch with string content synthesises a single all-added hunk.
+  assert.deepEqual((results[1]!.event.data as { diff: unknown }).diff, {
+    hunks: [{ oldStart: 0, oldLines: 0, newStart: 1, newLines: 2, lines: ['+first line', '+second line'] }],
+  });
+
+  // A malformed hunk (non-numeric oldStart) falls back to null rather than a schema-mismatch fatal.
+  assert.equal((results[2]!.event.data as { diff: unknown }).diff, null);
 });
 
 // Row 11: result, any subtype other than success -> turn.ended, stopReason 'error'.

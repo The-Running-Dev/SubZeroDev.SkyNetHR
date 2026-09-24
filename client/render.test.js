@@ -49,6 +49,12 @@ function find(node, className) {
   return null;
 }
 
+function findAll(node, className, out = []) {
+  if (node.className === className) out.push(node);
+  for (const child of node.children) findAll(child, className, out);
+  return out;
+}
+
 function notice(text, level = 'info', code = 'task_progress') {
   return { seq: 1, sessionId: 's', ts: '2026-09-19T00:00:00.000Z', kind: 'session.notice', data: { level, code, text } };
 }
@@ -240,4 +246,123 @@ test('D248 — a session with no turns renders exactly the summary it rendered b
   const withNone = rowsOf(renderPayrollSummary(doc, payrollView([])));
   assert.equal(withNone.some(([label]) => label.startsWith('Turn ')), false);
   assert.deepEqual(withNone.map(([label]) => label), ['Burn', 'Budget remaining', 'Idle time']);
+});
+
+// S34 — read the change the agent made, as a diff.
+
+function toolResultEnvelope(diff, overrides = {}) {
+  return {
+    kind: 'tool.result',
+    data: { turnId: 't', callId: 'c', ok: true, output: 'plain output', truncated: false, bytes: 12, diff, ...overrides },
+  };
+}
+
+function twoHunkDiff() {
+  return {
+    hunks: [
+      { oldStart: 1, oldLines: 2, newStart: 1, newLines: 2, lines: [' context one', '-removed one', '+added one'] },
+      { oldStart: 10, oldLines: 1, newStart: 10, newLines: 2, lines: ['+added two', ' context two'] },
+    ],
+  };
+}
+
+function tagNames(node, out = []) {
+  out.push(node.tagName);
+  for (const child of node.children) tagNames(child, out);
+  return out;
+}
+
+test('S34.2 — a two-hunk diff renders one row per hunk header and one row per line, marked apart', () => {
+  const doc = fakeDocument();
+  const node = renderEvent(doc, toolResultEnvelope(twoHunkDiff()), { verbosity: 'full' });
+  const headers = findAll(node, 'tool__diff-hunk-header');
+  assert.deepEqual(headers.map((h) => h.textContent), ['@@ -1,2 +1,2 @@', '@@ -10,1 +10,2 @@']);
+  const marked = [
+    ...findAll(node, 'tool__diff-line tool__diff-line--context'),
+    ...findAll(node, 'tool__diff-line tool__diff-line--removed'),
+    ...findAll(node, 'tool__diff-line tool__diff-line--added'),
+  ];
+  assert.equal(marked.length, 5);
+  assert.deepEqual(
+    findAll(node, 'tool__diff-line tool__diff-line--added').map((l) => l.textContent),
+    ['+added one', '+added two'],
+  );
+  assert.deepEqual(findAll(node, 'tool__diff-line tool__diff-line--removed').map((l) => l.textContent), ['-removed one']);
+  assert.deepEqual(findAll(node, 'tool__diff-line tool__diff-line--context').map((l) => l.textContent), [' context one', ' context two']);
+});
+
+test('S34.3 — a hostile added line and a quote-carrying context line reach the page as text, never markup', () => {
+  const doc = fakeDocument();
+  const hostile = {
+    hunks: [
+      {
+        oldStart: 1,
+        oldLines: 1,
+        newStart: 1,
+        newLines: 2,
+        lines: [' path "quoted/here".txt', '+<script>alert(1)</script>'],
+      },
+    ],
+  };
+  const node = renderEvent(doc, toolResultEnvelope(hostile), { verbosity: 'full' });
+  const rendered = findAll(node, 'tool__diff-line tool__diff-line--added');
+  assert.equal(rendered[0].textContent, '+<script>alert(1)</script>');
+  assert.equal(rendered[0].children.length, 0);
+  const context = findAll(node, 'tool__diff-line tool__diff-line--context');
+  assert.equal(context[0].textContent, ' path "quoted/here".txt');
+});
+
+test('S34.4 — a truncated result with a diff renders the diff it has and states it is partial', () => {
+  const doc = fakeDocument();
+  const node = renderEvent(doc, toolResultEnvelope(twoHunkDiff(), { truncated: true, bytes: 9001 }), { verbosity: 'full' });
+  assert.notEqual(find(node, 'tool__diff'), null);
+  assert.equal(find(node, 'tool__truncated').textContent, 'diff partial — 9001 bytes in full');
+});
+
+test('S34.5 — a result with no recoverable change (Read/Bash) renders exactly as it did before diffs existed', () => {
+  const doc = fakeDocument();
+  const node = renderEvent(doc, toolResultEnvelope(null, { output: 'file contents' }), { verbosity: 'full' });
+  assert.equal(find(node, 'tool__diff'), null);
+  assert.equal(find(node, 'tool__output').textContent, 'file contents');
+});
+
+test('S34.6 — the diff is inert: no button, form or contenteditable element appears within a hunk', () => {
+  const doc = fakeDocument();
+  const node = renderEvent(doc, toolResultEnvelope(twoHunkDiff()), { verbosity: 'full' });
+  const diffNode = find(node, 'tool__diff');
+  const tags = tagNames(diffNode);
+  assert.equal(tags.some((tag) => tag === 'button' || tag === 'form'), false);
+  assert.equal(diffNode.contentEditable, undefined);
+});
+
+test('S34.7 — the diff fold obeys the three verbosity levels: closed at compact, open at normal and full', () => {
+  const doc = fakeDocument();
+  const closed = renderEvent(doc, toolResultEnvelope(twoHunkDiff()), { verbosity: 'compact' });
+  assert.equal(find(closed, 'fold').open, false);
+  const normal = renderEvent(doc, toolResultEnvelope(twoHunkDiff()), { verbosity: 'normal' });
+  assert.equal(find(normal, 'fold').open, true);
+  const full = renderEvent(doc, toolResultEnvelope(twoHunkDiff()), { verbosity: 'full' });
+  assert.equal(find(full, 'fold').open, true);
+});
+
+function linesOfLength(n) {
+  return Array.from({ length: n }, (_, i) => `+line ${i}`);
+}
+
+test('S34.8 — a diff past the renderer line bound shows the first N lines and states the remainder as a count', () => {
+  const doc = fakeDocument();
+  const N = 200;
+  const diffOf = (count) => ({ hunks: [{ oldStart: 1, oldLines: count, newStart: 1, newLines: count, lines: linesOfLength(count) }] });
+
+  const under = renderEvent(doc, toolResultEnvelope(diffOf(N - 1)), { verbosity: 'full' });
+  assert.equal(findAll(under, 'tool__diff-line tool__diff-line--added').length, N - 1);
+  assert.equal(find(under, 'tool__diff-more'), null);
+
+  const exact = renderEvent(doc, toolResultEnvelope(diffOf(N)), { verbosity: 'full' });
+  assert.equal(findAll(exact, 'tool__diff-line tool__diff-line--added').length, N);
+  assert.equal(find(exact, 'tool__diff-more'), null);
+
+  const over = renderEvent(doc, toolResultEnvelope(diffOf(N + 1)), { verbosity: 'full' });
+  assert.equal(findAll(over, 'tool__diff-line tool__diff-line--added').length, N);
+  assert.equal(find(over, 'tool__diff-more').textContent, '+1 more lines');
 });
