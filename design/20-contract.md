@@ -149,7 +149,24 @@ turn, buffer and subscribers (D49). What the declaration cannot say:
 **`SessionSummary` is what crosses to the client**: the persisted record minus
 `cliSessionId`, which is vendor-opaque and has no client use. It is the authoritative
 statement of a session's current `state`; a `state` read off a replayed `session.started` is
-not (see *Rules the renderer may rely on*).
+not (see *Rules the renderer may rely on*). It is declared twice — the host's copy in
+`src/contract/index.ts` and `agent-console/core`'s in `src/agent-console/core/types.ts`, which
+`toSummary` builds and the host passes through — and a field added to one is added to both.
+
+**`pendingPermissions` — scaffold, owed to both declarations** (D261):
+
+```ts
+readonly pendingPermissions: number;
+```
+
+It is the size of the live turn's `pending` map: `0` when `turn === null`, and therefore always
+`0` once `state === 'ended'`. **Derived at read time and never persisted** — `meta.json` does not
+carry it and `SessionRecord` does not gain it, because a count written to disk would outlive the
+in-memory map it counts and a rehydrated session holds no turn. It counts permission requests only.
+**It does not count a question the model asked in its own text**, which is not a pending request
+and which nothing here can detect or hold the turn for; a field claiming to would be the state
+that claims to block what it does not. It is exactly as fresh as the summary carrying it: a list
+read is a snapshot, and nothing pushes a change to it.
 
 **`LiveSession` declares only what the invariants are stated over** — the persisted record
 plus the one piece of state that is never written. `turn === null` means idle, and it is
@@ -169,6 +186,8 @@ resolves. Nothing re-resolves it, and no read of a review resolves its `subject`
 
 **There is no employment-status field and none may be added.** D79 makes the badge a
 client-side projection over `state`, the live turn and outstanding permission requests.
+`pendingPermissions` is one of those inputs, not a status: nothing on the server names what the
+count *means*, and the projection over it stays the client's.
 
 ### Turn
 
@@ -360,11 +379,14 @@ by emitting one at boot**. What boot does append is `session.notice / server_res
 which shares the spelling and is a different thing: a notice is not an end reason, and it marks
 where an outage fell without claiming to say why the session ended.
 
-**`SessionNoticeCode` members, and the two with no producer:**
+**`SessionNoticeCode` members, and the one with no producer:**
 
 | Member | Fires when |
 |---|---|
 | `compaction` | the CLI is compacting, or reported a compact boundary |
+| `task_started`, `task_progress`, `task_completed` | the Claude CLI reported a background task's `system` subtype of the same name; level `info` (#406) |
+| `task_failed` | as above; level `error` |
+| `task_cancelled` | as above; level `warn` |
 | `resume_unavailable` | spawning with no `--resume`; conversation context is not carried forward |
 | `checkpoints_unavailable` | `ckpt.git` could not be initialised; the session proceeds without checkpoints |
 | `checkpoint_skipped` | the pre-turn checkpoint failed; the turn proceeds with no restore point (D42) |
@@ -373,6 +395,39 @@ where an outage fell without claiming to say why the session ended.
 | `storage_failure` | a spill write failed; the session is ending |
 | `server_restart` | boot found this session live at shutdown (D130) |
 | `usage_unavailable` | this session's transport reports no token usage, so its burn is unknown rather than zero (D146) |
+| `budget_warning` | **scaffold — owed to the declaration** (D260). A `usage` envelope carried the session's burn to at least `sessionTokenBudgetWarnFraction × sessionTokenBudget`; level `warn` |
+| `budget_exhausted` | **scaffold — owed to the declaration** (D260). A `usage` envelope carried the session's burn to at least `sessionTokenBudget`; level `warn` |
+
+**A `task_*` notice's `text` is best-effort.** The adapter maps the subtype, which is observed; the
+payload fields it reads the text from are not verified against a published schema, so a client
+branches on `code` and `level` and never on `text`.
+
+**The two budget notices announce a crossing and stop nothing** (D260). No turn is refused,
+interrupted or delayed by either; what a stop would stop is `/design`'s question and is not
+answered here (see `## Unresolved` 21). What the declaration cannot say:
+
+- **Burn is the same full component-wise sum `PayrollView.remainingTokens` subtracts** — input,
+  output, cache reads and cache creation — so a notice and the tile never disagree about whether
+  the line was crossed.
+- **Each code appears at most once per session, and whether it already has is read from the
+  spill, never from memory.** A restart therefore neither repeats one nor needs state to avoid
+  repeating it. Raising the budget afterwards does not re-arm a code already present, and a
+  `budget_warning` is never emitted once `budget_exhausted` is in the spill — a warning after the
+  line it warns of is noise, whatever configuration change made it newly reachable.
+- **The notice follows the `usage` envelope that crossed the line**, at a higher `seq`; other
+  envelopes may fall between. One envelope crossing both lines produces `budget_warning` before
+  `budget_exhausted`. A crash between the two appends loses nothing permanently: the next `usage`
+  envelope finds the line crossed and no notice present, and emits it then — late rather than
+  never, and never where no further `usage` arrives.
+- **`warn`, not `error`, for both.** `error` on this vocabulary means something failed. An exhausted
+  budget is not a failure and the turn keeps running, so `error` would claim a consequence that does
+  not happen.
+- **None is ever emitted on a session with no `usage` envelopes**, which covers every
+  `usage_unavailable` session: its burn is unknown, and an unknown burn crosses nothing.
+- **`session-manager` emits both**, through the host append path the checklist already uses, over
+  the `usage` envelopes it observes being durably appended. Neither is an adapter's, since no
+  adapter holds the budget, and neither needs a new `agent-console/core` surface — **a slice that
+  finds it does stops and escalates** rather than adding one.
 
 **`usage_unavailable` is emitted once, at session start, before the first `turn.started`** —
 not per turn, which would say the same thing repeatedly and bury it. It is emitted by whichever
@@ -757,6 +812,10 @@ time, a wrong number on a screen headed *payroll*.
 **`PayrollView` carries no field separating unknown from zero**, and giving it one is a second
 public-surface change that is not made here; see `## Unresolved` 12.
 
+**A budget crossing is announced by notice, not by a field here** (D260): `budget_warning` and
+`budget_exhausted` under *Event payloads*. `remainingTokens` reaching zero or below is the same
+fact read at a different moment, and nothing may treat the two as separate sources to reconcile.
+
 ### Operator
 
 Declared in `src/contract/index.ts`: `Operator`.
@@ -798,7 +857,20 @@ constructs `createSseEdge` or `createWsEdge` accordingly; exactly one binds.
 
 `TokenRates` is one rate per `Usage` component, in `currency` units per token, flat per
 deployment (D158). `null` disables the cost tile. `checklist` empty disables the checklist.
-`sessionTokenBudget` null disables the view's budget.
+`sessionTokenBudget` null disables the view's budget, and both budget notices with it.
+
+**`sessionTokenBudgetWarnFraction` — scaffold, owed to the declaration** (D260), read from
+`SESSION_TOKEN_BUDGET_WARN_FRACTION`:
+
+```ts
+readonly sessionTokenBudgetWarnFraction: number | null;
+```
+
+A number strictly between `0` and `1`; anything else is `ConfigError.invalid_field`. **It is a
+fraction of the budget rather than a token count** so that changing the budget does not silently
+move the warning past it. Null disables `budget_warning` and leaves `budget_exhausted` armed. Set
+while `SESSION_TOKEN_BUDGET` is unset, it is `invalid_field` rather than ignored: a warning the
+operator configured and never receives is the failure a refusal at boot exists to prevent.
 
 `Caps.sessionToolOutputBytes` is declared in `src/contract/index.ts` (D162, S23): total blob
 bytes one session may store, enforced at the `writeToolOutput` call site.
@@ -1043,7 +1115,7 @@ persisted-data migration or change to I27, process identity selection or CLI cre
   returns on Windows. It is exported for `config`'s use, above.
 
 **The roots arrive as a parameter**, which is what keeps `jail → config` undrawn. `jail`
-depends on `contract` alone.
+depends on `agent-console/core` alone.
 
 **What this module does not do is stated because the misreading is the likely one** (D28): the
 jail decides where a session may *start* and pins `cwd` so it cannot drift between turns. It
@@ -2577,7 +2649,7 @@ control rather than concealment (D50, D70).
 | Variant | Raised when | Retryable | Caller does |
 |---|---|---|---|
 | `ConfigError.insecure_bind` | A routable bind that no `trustProxy` allow-list covers, **under `proxy-header` or `open-webui` only** (D154) — those are the modes that trust a header the client could otherwise set. Under `shared-secret` the same bind is legitimate and this is never raised: a credential the caller must present is not a claim about who the peer is. **Not** a missing auth mode either: D93 makes one mandatory in every configuration, so that case is `missing_field` at parse time and never reaches here | No | Refuse to start, naming the fix |
-| `ConfigError.missing_field` / `invalid_field` | Validation of the environment. `invalid_field` additionally covers **`STORAGE_ROOT` overlapping any `WORKSPACE_ROOTS` entry** under `pathsOverlap`, once both are jail-normalised (D185, I60) — `detail` names the root it collides with. No variant is added for it: the field is genuinely invalid relative to another field | No | Refuse to start. On the overlap, naming both paths and which to move; nothing is written and the storage tree is untouched |
+| `ConfigError.missing_field` / `invalid_field` | Validation of the environment. `invalid_field` additionally covers **`STORAGE_ROOT` overlapping any `WORKSPACE_ROOTS` entry** under `pathsOverlap`, once both are jail-normalised (D185, I60) — `detail` names the root it collides with. No variant is added for it: the field is genuinely invalid relative to another field. The same holds for **`SESSION_TOKEN_BUDGET_WARN_FRACTION` set without `SESSION_TOKEN_BUDGET`** (D260) | No | Refuse to start. On the overlap, naming both paths and which to move; nothing is written and the storage tree is untouched |
 | `StartupError.storage_unwritable` | The storage root cannot be written at boot. **A lock observation that found `server.lock` absent is never this** (D247): `ENOENT` from a sample is a meaningful observation and not a failed write, and every `absent` row in `claimLock` — the confirming sample's included — retries the claim rather than raising | No | Refuse to start |
 | `StartupError.storage_lock_corrupt` | `<storage>/server.lock` is present and will not parse (D196). **Not a renewal caught in flight** — every write publishes the file whole (I61), so a reader sees complete contents or none — and **not a lock predating the lease**, which parses and reaches the reclaim path on its absent counter (I61) | No | Refuse to start with a non-zero exit, naming the path. Nothing server-wide has been written. The operator's action is to remove the file, having satisfied themselves no server is running |
 | `StartupError.storage_locked` | Another server process holds this storage root: the lock's `renewals` moved across one observation window measured on this process's own monotonic clock (D180), **or a reclaim's confirming sample, one renewal interval after its overwrite, found another `instanceId`** (D216). A confirming sample finding the lock **absent** is not this row and raises nothing, there being no holder to name (D247). **Never raised on a host comparison**, which no longer happens | No | Refuse to start with a non-zero exit, naming the holding `pid`, `hostname` and `startedAt`. **Nothing server-wide has been written**, because the claim precedes the reap step |
@@ -2907,6 +2979,8 @@ highest-value section in this document.
 | **I70** | No route, method or parameter searches a tool-output blob. D251's decline of server-side search is soft — "not now", pending open question 17 in `10-design.md` — and **softness is not authorisation**: adding one is a design decision and never an implementation one | `edge/sse`, `edge/ws` |
 | **I71** | `X-Tool-Output-Lines` and `X-Tool-Output-Bytes` appear on a tool-output response together or not at all, and their presence means exactly one thing: the counting pass behind that response reached the blob's true end (D253). Their absence is not zero, not a failure, and not licence to infer a size from anything else on the response | `store`, `edge/sse`, `edge/ws` |
 | **I72** | `HEAD` on the tool-output route opens no blob and counts no line — one `stat`, no scan. It carries no line total, and it refuses `fromLine` or `lineCount` with `422 bad_request` rather than answering them (D255) | `store`, `edge/sse`, `edge/ws` |
+| **I73** | A session's spill holds at most one `session.notice / budget_warning` and at most one `budget_exhausted`, each at a higher `seq` than a `usage` envelope that brought the full component-wise burn to its line, and never where `sessionTokenBudget` is null. `budget_warning` never follows `budget_exhausted` in the same session, and neither notice refuses, interrupts or delays a turn. Nothing emits either on a session whose spill holds no `usage` envelope (D260) | `session-manager` |
+| **I74** | `SessionSummary.pendingPermissions` equals the live turn's `pending.size`, is `0` whenever `turn === null` — and so whenever `state === 'ended'` — and is never written to disk. It counts permission requests and nothing else (D261) | `agent-console/core` |
 
 **I40, I41 and I42 were never allocated, and the gap is left open rather than closed.** The
 numbering jumps from I39 to I43 and nothing is missing. Ids here are cited by number in
@@ -3455,7 +3529,10 @@ belong to the `exec --json` fallback alone; neither affects a session on `app-se
     a measured byte count would read as the same kind of fact while being a different kind. Either
     it is declared as an estimate in its own type and named as one wherever it renders, or the item
     is refused for the same reason S33.3 refuses category attribution. Nothing downstream may pick.
-    (no issue — resolved by `/contract`, not tracked)
+
+    **Routed to `/design` by D259.** Both answers change what the operator is told a number
+    means, which is a design question rather than a signature one; the contract holds no view
+    until `/design` has chosen. Staged in `90-decisions.md § Open` for `/track`.
 
 21. **Budget thresholds, and a budget crossing as an event.** Runtime-redesign item 24, routed here
     by D256. `Config.sessionTokenBudget` and `PayrollView.remainingTokens` already exist (D129), so
@@ -3466,7 +3543,16 @@ belong to the `exec --json` fallback alone; neither affects a session on `app-se
     `remainingTokens`; and what a *stop* actually stops, given that SkyNet can refuse to begin a
     turn and cannot interrupt the model mid-turn without the `interrupt` path D5 governs. A soft
     stop that silently becomes a hard one at the next turn boundary is the failure mode to name
-    before anything is built. (no issue — resolved by `/contract`, not tracked)
+    before anything is built.
+
+    **Resolved by D260 for thresholds and crossings; the stop is routed to `/design`.** One
+    warning threshold, a fraction on `Config` (`sessionTokenBudgetWarnFraction`), and the budget
+    itself as the second line. A crossing is a `session.notice` code — `budget_warning`,
+    `budget_exhausted` — not a new envelope kind and not a client derivation, scaffolded under
+    *Event payloads* and held by I73. **Nothing is stopped**: no soft-stop threshold exists, and
+    the failure mode above cannot occur because no stop does. What a stop stops, and whether a
+    soft one exists at all, is `/design`'s, staged in `90-decisions.md § Open` for `/track`; this
+    entry stays until it is answered.
 
 22. **A first-class `blocked` turn state.** Runtime-redesign item 28, routed here by D256. A turn
     state machine (`TurnStopReason`) and a permission-pending path (`PermissionRequest`) both
@@ -3476,15 +3562,26 @@ belong to the `exec --json` fallback alone; neither affects a session on `app-se
     representable, so a new state earns its place only if it also covers a turn awaiting an answer
     the *model* asked for — and the classification's item 6 is explicit that SkyNet cannot stop the
     model inventing that answer and continuing. A state that claims to block something it does not
-    is worse than no state. (no issue — resolved by `/contract`, not tracked)
+    is worse than no state.
+
+    **Resolved by D261: no state, a derived count.** Neither a `TurnStopReason` member, a turn
+    phase, nor a flag: `SessionSummary.pendingPermissions`, scaffolded under *Types § Session* and
+    held by I74. It covers the operator's-approval case, which was already representable and only
+    not surfaced, and **declines the model-asked-a-question case by name**, because nothing here
+    can detect that question or hold a turn for its answer. (no issue — resolved by `/contract`)
 
 23. **What a Raw view would read from.** Runtime-redesign item 15's remaining quarter, routed here
     by D256. D246 shipped three verbosity levels over one transcript, which covers the Operator,
-    Tools and Debug views the item names. **Raw has no source.** The spill holds normalised
-    envelopes and nothing persists the vendor's own stdout lines — there is no `raw` field anywhere
-    in `src/contract/index.ts`. Answering this means deciding whether to persist vendor lines at
-    all, and that is not a rendering question: it doubles what a session writes, it puts
-    unnormalised vendor text under the same per-session budget D162 set for tool output, and the
-    lines carry whatever the vendor chose to put in them, which `20-contract.md` currently never
-    promises to have inspected. Refusing Raw and declaring the item satisfied at three views is the
-    other legitimate answer. (no issue — resolved by `/contract`, not tracked)
+    Tools and Debug views the item names. **Raw has a source only by deployment flag, and a rule
+    against using it.** `Envelope.raw` (`src/agent-console/contract/index.ts`) carries the vendor
+    record an envelope was mapped from, attached only when `Config.includeRaw` is on
+    (`INCLUDE_RAW`), and the envelope is spilled whole — so a deployment with the flag on already
+    persists it, and one with it off has nothing to show. *Types § Event envelope* says `raw`
+    **must never be rendered**. Answering this therefore means deciding whether to lift that rule,
+    and whether Raw is a view that exists only on deployments that pay for it: persisting vendor
+    records by default doubles what a session writes, and the records carry whatever the vendor
+    chose to put in them, which this document never promises to have inspected. Refusing Raw and
+    declaring the item satisfied at three views is the other legitimate answer.
+
+    **Routed to `/design` by D259**, since both answers turn on the never-rendered rule, which is a
+    design decision and not a signature. Staged in `90-decisions.md § Open` for `/track`.
