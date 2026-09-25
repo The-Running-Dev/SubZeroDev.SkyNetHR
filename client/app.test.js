@@ -508,3 +508,58 @@ test('S35.6 — the header burn figure is refetched once per turn end, not once 
 
   assert.equal(burnWrites - writesAfterSelect, 3, 'exactly one header burn update per turn end across three turns, none from turn.started or usage alone');
 });
+
+// S36 — the circles panel is a read of already-rendered history; nothing about opening it
+// may change what a `tool.call` does or how it renders (S36.4). Driving the identical
+// envelope sequence with the panel open and with it never opened, and comparing the full
+// rendered transcript tree, is what actually rules that out rather than asserting it.
+function serializeNode(node) {
+  if (!node) return null;
+  return {
+    tagName: node.tagName,
+    className: node.className,
+    textContent: node.textContent,
+    hidden: node.hidden,
+    disabled: node.disabled,
+    children: node.children.map(serializeNode),
+  };
+}
+
+test('S36.4 — the circles panel never affects whether or how a call runs: an identical envelope sequence renders an identical transcript whether the panel is open or never opened', async () => {
+  // A repeating call — same tool, same input, twice — is deliberately the fixture: this is
+  // exactly what the panel would report on, so if reading it changed anything, this is where
+  // it would show.
+  function buildEnvelopes() {
+    const envelopes = [];
+    for (let i = 0; i < 2; i += 1) {
+      envelopes.push({ seq: i * 3 + 1, sessionId: 'sess-a', kind: 'tool.call', data: { turnId: 't1', callId: `call-${i}`, name: 'Bash', input: { command: 'git status' } } });
+      // No `callId` here: sharing it with the `tool.call` above would take the D246 merge
+      // path, which this fake DOM's `fakeElement` does not implement (`replaceChild`) —
+      // irrelevant to what S36.4 checks, so the standalone rendering path is used instead.
+      envelopes.push({ seq: i * 3 + 2, sessionId: 'sess-a', kind: 'permission.request', data: { turnId: 't1', requestId: `req-${i}`, tool: 'Bash', input: { command: 'git status' } } });
+      envelopes.push({ seq: i * 3 + 3, sessionId: 'sess-a', kind: 'tool.result', data: { turnId: 't1', callId: `call-${i}`, ok: true, output: 'clean', truncated: false, bytes: 5 } });
+    }
+    return envelopes;
+  }
+
+  async function run(openPanel) {
+    const { doc, sseInstances, selectA } = await setUpApp();
+    doc.__setEdge('sse');
+    selectA();
+    await flush();
+    if (openPanel) {
+      doc.getElementById('circles-open').dispatch('click', {});
+      await flush();
+    }
+    const stream = sseInstances[0];
+    for (const envelope of buildEnvelopes()) {
+      stream.emit(envelope.kind, envelope);
+      await flush();
+    }
+    return serializeNode(doc.getElementById('transcript'));
+  }
+
+  const closed = await run(false);
+  const open = await run(true);
+  assert.deepEqual(open, closed, 'the rendered transcript — including the two Allow/Deny permission rows this repeating call produces — is byte-identical whether or not the circles panel is open');
+});

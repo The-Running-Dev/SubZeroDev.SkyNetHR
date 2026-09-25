@@ -8,9 +8,12 @@ import {
   coalesceKey,
   createCoalesceGroup,
   DEFAULT_MODEL_LABEL,
+  foldToolCallRepeats,
   formatHeaderBurn,
   renderEvent,
   renderPayrollSummary,
+  renderRepeatFold,
+  REPEAT_FOLD_TIME_BOUND_MS,
   sessionIdentityFields,
 } from './render.js';
 
@@ -424,4 +427,69 @@ test('S35.3 — formatHeaderBurn never recomputes the total from turns, only fro
   const view = payrollView([turnBurn('t1', 999999)]);
   const label = formatHeaderBurn(view);
   assert.match(label, /39,674 tokens/);
+});
+
+// S36 — a pure fold over the `tool.call` envelopes the client already holds, never a second
+// call path and never adjacency-only like `coalesceKey` above.
+
+test('S36.1 — an exact repeat needs both the same tool and the same input; a differing argument does not count', () => {
+  const calls = [
+    { name: 'Bash', input: { command: 'git status' } },
+    { name: 'Bash', input: { command: 'git status' } },
+    { name: 'Bash', input: { command: 'git log' } },
+  ];
+  const fold = foldToolCallRepeats(calls);
+  assert.equal(fold.repeats.length, 1);
+  assert.equal(fold.repeats[0].name, 'Bash');
+  assert.equal(fold.repeats[0].count, 2);
+});
+
+test('S36.2 — a repeat is counted across the whole session, not only when adjacent', () => {
+  const calls = [
+    { name: 'Bash', input: { command: 'git status' } },
+    { name: 'Read', input: { path: 'a.js' } },
+    { name: 'Bash', input: { command: 'git status' } },
+  ];
+  const fold = foldToolCallRepeats(calls);
+  assert.equal(fold.repeats.length, 1);
+  assert.equal(fold.repeats[0].count, 2);
+});
+
+test('S36.3 — a repeated sequence is reported at three occurrences, and not at two', () => {
+  const pair = () => [{ name: 'A', input: {} }, { name: 'B', input: {} }];
+  const twoOccurrences = [...pair(), ...pair()];
+  const threeOccurrences = [...pair(), ...pair(), ...pair()];
+
+  assert.equal(foldToolCallRepeats(twoOccurrences).sequences.length, 0);
+
+  const fold = foldToolCallRepeats(threeOccurrences);
+  assert.equal(fold.sequences.length, 1);
+  assert.equal(fold.sequences[0].count, 3);
+  assert.deepEqual(fold.sequences[0].calls.map((c) => c.name), ['A', 'B']);
+});
+
+test('S36.5 — the panel states it is diagnostic and that nothing above was prevented', () => {
+  const doc = fakeDocument();
+  const node = renderRepeatFold(doc, foldToolCallRepeats([]));
+  const text = find(node, 'circles__disclaimer').textContent;
+  assert.match(text, /diagnostic/i);
+  assert.match(text, /prevent|delay|alter/i);
+});
+
+test('S36.6 — a 20,000-call fold completes within the declared bound', () => {
+  const calls = Array.from({ length: 20000 }, (_, i) => ({ name: 'Bash', input: { command: `cmd ${i % 50}` } }));
+  const start = Date.now();
+  foldToolCallRepeats(calls);
+  const elapsed = Date.now() - start;
+  assert.ok(elapsed < REPEAT_FOLD_TIME_BOUND_MS, `fold took ${elapsed}ms, bound is ${REPEAT_FOLD_TIME_BOUND_MS}ms`);
+});
+
+test('S36.7 — a tool name and argument carrying markup reach the panel only as a text node', () => {
+  const doc = fakeDocument();
+  const hostile = { name: 'Bash', input: { command: '<script>"quoted"</script>' } };
+  const fold = foldToolCallRepeats([hostile, hostile]);
+  const node = renderRepeatFold(doc, fold);
+  const pre = find(node, 'circles__repeat-input');
+  assert.equal(pre.children.length, 0);
+  assert.match(pre.textContent, /<script>/);
 });

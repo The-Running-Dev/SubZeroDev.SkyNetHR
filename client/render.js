@@ -608,6 +608,132 @@ export function renderTokenBreakdown(doc, view, session, usageUnavailable) {
   return dl;
 }
 
+// S36: a pure fold over the `tool.call` envelopes this client already holds — never a second
+// call path and never persisted (out of scope: an event of its own would be a contract
+// surface). It only reads history after the fact; nothing here can suppress, delay, deny or
+// alter a call (S36.4), because nothing here sits between a call and its execution.
+//
+// Both bounds are declared here and nowhere else, the same convention `DIFF_LINE_BOUND`
+// above uses: `REPEAT_MIN_OCCURRENCES` is the sequence-repeat threshold (S36.3, asserted at
+// two occurrences and at three), `REPEAT_SEQUENCE_MAX_LENGTH` caps how long a candidate
+// sequence is searched for, and `REPEAT_FOLD_TIME_BOUND_MS` is the bound S36.6 asserts a
+// 20,000-call fold against.
+const REPEAT_MIN_OCCURRENCES = 3;
+const REPEAT_SEQUENCE_MAX_LENGTH = 8;
+export const REPEAT_FOLD_TIME_BOUND_MS = 2000;
+
+// Two calls are the same repeat only if both the tool name and the input match exactly
+// (S36.1) — `JSON.stringify` gives a stable, order-preserving key for the object shapes the
+// wire vocabulary carries, without pretty-printing it for display.
+export function toolCallKey(call) {
+  let inputKey;
+  try {
+    inputKey = JSON.stringify(call.input ?? null);
+  } catch {
+    inputKey = String(call.input);
+  }
+  return `${call.name}\0${inputKey}`;
+}
+
+// Exact repeats are counted across the whole list, not only when adjacent (S36.2) — that is
+// the entire difference from `coalesceKey`'s adjacency-only fold above, which this slice
+// leaves untouched. A repeated *sequence* (S36.3) is searched for longest-candidate-first so
+// a longer repeating cycle is reported once at its own length rather than again at each
+// shorter length it contains — the claimed-index set below is what enforces that.
+export function foldToolCallRepeats(calls) {
+  const keys = calls.map(toolCallKey);
+  const n = keys.length;
+
+  const counts = new Map();
+  for (const key of keys) counts.set(key, (counts.get(key) ?? 0) + 1);
+  const repeats = [];
+  const seenRepeatKeys = new Set();
+  keys.forEach((key, i) => {
+    const count = counts.get(key);
+    if (count >= 2 && !seenRepeatKeys.has(key)) {
+      seenRepeatKeys.add(key);
+      repeats.push({ name: calls[i].name, input: calls[i].input, count });
+    }
+  });
+
+  const claimed = new Array(n).fill(false);
+  const sequences = [];
+  const maxLen = Math.min(REPEAT_SEQUENCE_MAX_LENGTH, Math.floor(n / REPEAT_MIN_OCCURRENCES));
+  for (let len = maxLen; len >= 2; len--) {
+    const startsByKey = new Map();
+    for (let start = 0; start + len <= n; start++) {
+      let overlapsClaimed = false;
+      for (let i = start; i < start + len; i++) {
+        if (claimed[i]) { overlapsClaimed = true; break; }
+      }
+      if (overlapsClaimed) continue;
+      const windowKeys = keys.slice(start, start + len);
+      if (windowKeys.every((k) => k === windowKeys[0])) continue; // S36.1 already covers this.
+      const seqKey = windowKeys.join('\u0001');
+      if (!startsByKey.has(seqKey)) startsByKey.set(seqKey, []);
+      startsByKey.get(seqKey).push(start);
+    }
+    for (const [, starts] of startsByKey) {
+      const nonOverlapping = [];
+      let lastEnd = -1;
+      for (const start of starts) {
+        if (start >= lastEnd) {
+          nonOverlapping.push(start);
+          lastEnd = start + len;
+        }
+      }
+      if (nonOverlapping.length < REPEAT_MIN_OCCURRENCES) continue;
+      for (const start of nonOverlapping) {
+        for (let i = start; i < start + len; i++) claimed[i] = true;
+      }
+      const first = nonOverlapping[0];
+      sequences.push({
+        calls: calls.slice(first, first + len).map((c) => ({ name: c.name, input: c.input })),
+        count: nonOverlapping.length,
+      });
+    }
+  }
+
+  return { repeats, sequences };
+}
+
+const REPEAT_PANEL_DISCLAIMER = 'Diagnostic only — every call above ran exactly as it would have; nothing here prevented, delayed or altered one.';
+
+// S36.5: the panel's own disclaimer text, asserted on directly. S36.7: every tool name and
+// argument reaches this panel through `el`'s `textContent`, the same rule the rest of this
+// file follows — `pretty(call.input)` is never assembled into markup, only ever assigned as
+// one element's text.
+export function renderRepeatFold(doc, fold) {
+  const container = el(doc, 'div', 'circles');
+  container.appendChild(el(doc, 'p', 'circles__disclaimer', REPEAT_PANEL_DISCLAIMER));
+  if (fold.repeats.length === 0 && fold.sequences.length === 0) {
+    container.appendChild(el(doc, 'p', 'circles__empty', 'no repeats seen yet'));
+    return container;
+  }
+  if (fold.repeats.length > 0) {
+    const list = el(doc, 'ul', 'circles__repeats');
+    for (const r of fold.repeats) {
+      const item = el(doc, 'li', 'circles__repeat');
+      item.appendChild(el(doc, 'span', 'circles__repeat-name', r.name));
+      item.appendChild(el(doc, 'span', 'circles__repeat-count', ` ×${r.count}`));
+      item.appendChild(el(doc, 'pre', 'circles__repeat-input', pretty(r.input)));
+      list.appendChild(item);
+    }
+    container.appendChild(list);
+  }
+  if (fold.sequences.length > 0) {
+    const list = el(doc, 'ul', 'circles__sequences');
+    for (const s of fold.sequences) {
+      const item = el(doc, 'li', 'circles__sequence');
+      item.appendChild(el(doc, 'span', 'circles__sequence-count', `×${s.count} `));
+      item.appendChild(el(doc, 'span', 'circles__sequence-names', s.calls.map((c) => c.name).join(' → ')));
+      list.appendChild(item);
+    }
+    container.appendChild(list);
+  }
+  return container;
+}
+
 // S35.2/S35.4: the header and every sidebar row show the same four `SessionSummary` fields
 // with the same null handling — computed once so the two surfaces cannot drift from each
 // other's rule for `name` (D249, unchanged) or `model`. `SessionSummary` carries no
