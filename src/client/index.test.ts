@@ -891,6 +891,8 @@ async function runConsole(sessions: ReadonlyArray<Record<string, unknown>>) {
     'verbosity-select', 'masthead-panels',
     'checkpoints-open', 'checkpoints-close', 'checklist-open', 'checklist-close',
     'payroll-open', 'payroll-close', 'reviews-open', 'reviews-close',
+    // S36: repeat-fold diagnostic panel
+    'circles', 'circles-open', 'circles-close', 'circles-body',
     'attachments', 'attachments-button', 'attachment-chips',
   ]) {
     byId.set(id, fakeEl('div'));

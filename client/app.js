@@ -1,4 +1,4 @@
-import { appendMessageDeltaText, applyAssistantMessageVerbosity, coalesceKey, createCoalesceGroup, createIncidentGroupsBuilder, formatHeaderBurn, renderAuditRow, renderEvent, renderHiddenAssistantBlocks, renderPayrollSummary, renderRequisitionRow, renderReviewRow, renderSummaryRow, renderTokenBreakdown, renderUnreachedReport, sessionIdentityFields, updateHiddenAssistantBlocks } from './render.js';
+import { appendMessageDeltaText, applyAssistantMessageVerbosity, coalesceKey, createCoalesceGroup, createIncidentGroupsBuilder, foldToolCallRepeats, formatHeaderBurn, renderAuditRow, renderEvent, renderHiddenAssistantBlocks, renderPayrollSummary, renderRepeatFold, renderRequisitionRow, renderReviewRow, renderSummaryRow, renderTokenBreakdown, renderUnreachedReport, sessionIdentityFields, updateHiddenAssistantBlocks } from './render.js';
 
 const $ = (id) => document.getElementById(id);
 
@@ -78,7 +78,12 @@ const state = {
   // session — `refreshChecklist`/`refreshPayroll` also run from background events
   // (a tick from another operator, a `usage` envelope) and must not pop either panel
   // open over the whole screen just because that unrelated refresh ran.
-  panelsOpen: { checklist: false, payroll: false },
+  panelsOpen: { checklist: false, payroll: false, circles: false },
+  // S36: the selected session's own `tool.call` history, `{name, input}` per call, in
+  // arrival order — the fold this panel renders reads this and nothing else (never a
+  // second subscription, never anything persisted). Reset on every `openStream`, same as
+  // the rest of this stream-scoped state.
+  toolCallHistory: [],
   // The transcript's last row, when it is one repeated notices or errors may fold into:
   // `{ key, group }`, keyed by `coalesceKey`. `null` whenever the last row is any other kind,
   // which is what makes the collapse adjacent-only rather than transcript-wide. Reset on
@@ -544,6 +549,20 @@ async function refreshPayroll() {
   breakdown.appendChild(renderTokenBreakdown(document, fetched.payload, currentSession(), state.usageUnavailable));
 }
 
+// ---------------------------------------------------------------------------
+// Circles (S36) — a read of `state.toolCallHistory`, computed fresh on every refresh. No
+// form, no route: the fold never leaves the client and never touches a call in flight
+// (S36.4).
+// ---------------------------------------------------------------------------
+
+function refreshCircles() {
+  const panel = $('circles');
+  const container = $('circles-body');
+  panel.hidden = !state.panelsOpen.circles;
+  clear(container);
+  container.appendChild(renderRepeatFold(document, foldToolCallRepeats(state.toolCallHistory)));
+}
+
 // A `replay_gap` says the server could not serve the history this connection asked for, so
 // what is on screen is not the run (S3.3). A fresh `EventSource` carries no `Last-Event-ID`
 // and therefore asks for the transcript from seq 1 — which is the refetch. Once only: a
@@ -640,6 +659,13 @@ function handleEnvelope(sessionId, envelope) {
     // Shows up for anyone else watching the same session (S14, brief item 10) — not just
     // the operator who ticked it.
     void refreshChecklist();
+  }
+  if (envelope.kind === 'tool.call' && envelope.sessionId === state.sessionId) {
+    // S36: accumulated for the fold this panel reads — a plain history push, after the
+    // fact, alongside (never instead of) the render path below. Nothing here can affect
+    // whether or how this call runs (S36.4).
+    state.toolCallHistory.push({ name: envelope.data.name, input: envelope.data.input });
+    if (state.panelsOpen.circles) refreshCircles();
   }
   if (envelope.kind === 'session.notice' && envelope.sessionId === state.sessionId && envelope.data?.code === 'usage_unavailable') {
     // D146: sticky for the session's life — this transport never reports usage, so every
@@ -868,6 +894,7 @@ function openStream(sessionId) {
   state.assistantBlocksByTurnId = new Map();
   state.lastGroup = null;
   state.usageUnavailable = false;
+  state.toolCallHistory = [];
   clear($('transcript'));
   applyStatusBadge();
   applyTurnControls();
@@ -1441,6 +1468,7 @@ async function confirmTerminate() {
   state.assistantBlocksByTurnId = new Map();
   state.lastGroup = null;
   state.usageUnavailable = false;
+  state.toolCallHistory = [];
   clear($('transcript'));
   resetReviewForm();
   $('compose').hidden = true;
@@ -1448,8 +1476,10 @@ async function confirmTerminate() {
   $('checklist').hidden = true;
   $('payroll').hidden = true;
   $('reviews').hidden = true;
+  $('circles').hidden = true;
   state.panelsOpen.checklist = false;
   state.panelsOpen.payroll = false;
+  state.panelsOpen.circles = false;
   applyTurnControls();
   updateElapsedIndicator();
   await refreshSessions();
@@ -1499,6 +1529,17 @@ function closePayroll() {
   state.panelsOpen.payroll = false;
 }
 
+function openCircles() {
+  closePanelsMenu();
+  state.panelsOpen.circles = true;
+  refreshCircles();
+}
+
+function closeCircles() {
+  $('circles').hidden = true;
+  state.panelsOpen.circles = false;
+}
+
 function openReviews() {
   closePanelsMenu();
   $('reviews').hidden = false;
@@ -1526,8 +1567,10 @@ function showLogin() {
   $('checklist').hidden = true;
   $('payroll').hidden = true;
   $('reviews').hidden = true;
+  $('circles').hidden = true;
   state.panelsOpen.checklist = false;
   state.panelsOpen.payroll = false;
+  state.panelsOpen.circles = false;
 }
 
 async function submitLogin(event) {
@@ -1561,6 +1604,8 @@ function start() {
   $('checklist-close').addEventListener('click', closeChecklist);
   $('payroll-open').addEventListener('click', openPayroll);
   $('payroll-close').addEventListener('click', closePayroll);
+  $('circles-open').addEventListener('click', openCircles);
+  $('circles-close').addEventListener('click', closeCircles);
   $('reviews-open').addEventListener('click', openReviews);
   $('reviews-close').addEventListener('click', closeReviews);
   $('review-form').addEventListener('submit', saveReviewDraft);
