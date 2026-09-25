@@ -6421,6 +6421,81 @@ read, and `Write` results have no `old_string` at all to render from.
 Reversibility: cheap. A new optional-shaped field with no consumers yet; removing it drops one
 contract member and the two sites that populate it.
 
+### 2026-09-25 — D259 Contract items 20 and 23, and item 21's stop, go to `/design` rather than being answered in the contract
+Context: D256 routed runtime-redesign items 13, 24, 28 and 15's remaining quarter to `/contract`
+as `20-contract.md § Unresolved` 20 to 23. Two of them turned out to need a design decision that
+no signature can carry. Item 20 is about what a token estimate *means* beside a measured byte
+count, when SkyNet holds no tokenizer. Item 23's premise was wrong: it said Raw had no source,
+but `Envelope.raw` is attached under `Config.includeRaw` and the envelope is spilled whole. The
+real question is therefore whether to lift the contract's own rule that `raw` is never rendered.
+Item 21's third question — what a budget stop stops, given that the model cannot be interrupted
+mid-turn outside D5's `interrupt` path — is the same kind of question.
+Chosen: all three go to `/design`. Items 20 and 23 stay in `## Unresolved`, annotated with the
+routing, and item 23's premise is corrected in place. Item 21's other two questions are answered
+by D260, and the entry stays open for the stop alone. All three are staged in `## Open` below so
+`/track` can issue them.
+Rejected: **answering item 20 with an estimate type** (`estimatedTokens`, named as an estimate
+wherever it renders) — it is defensible, but choosing a heuristic, and choosing whether to show
+one at all, is a design choice about what the operator is told, not a shape. **Refusing item 20
+outright** — equally defensible, and equally not this command's to pick. **Refusing Raw at three
+views** — the item permits this, but it forecloses the flag-gated view the corrected premise
+reveals, before `/design` has looked at it. **Answering the stop here** — the brief says only
+that a budget is a value the operator sets in configuration, so any stop semantics would be
+invented.
+Reversibility: cheap — nothing is built, and each item is answerable by `/design` in either
+direction.
+
+### 2026-09-25 — D260 A budget crossing is a `session.notice`, with one warning threshold as a fraction, and nothing stops
+Context: `20-contract.md § Unresolved` 21 (runtime-redesign item 24, via D256). The budget figure
+already exists (`Config.sessionTokenBudget`, `PayrollView.remainingTokens`, D129). Brief item 8
+("budget remaining") does not say how the operator learns that the budget was crossed. The item
+asked three things: where thresholds live, what a crossing is on the wire, and what a stop stops.
+Chosen: **one new `Config` field, `sessionTokenBudgetWarnFraction`** (env
+`SESSION_TOKEN_BUDGET_WARN_FRACTION`, strictly between 0 and 1, null to disable). It is
+`invalid_field` when set without a budget. **Two new `SessionNoticeCode` members**,
+`budget_warning` and `budget_exhausted`, both at level `warn`. `session-manager` emits them
+through the host append path the checklist uses, after the `usage` envelope that crossed the
+line. Each appears at most once per session, and that is decided from the spill. A warning is
+never emitted after exhaustion. A crash between the two appends defers the notice to the next
+`usage` envelope rather than losing it. **Nothing is refused or interrupted.** The stop is
+routed to `/design` by D259. Invariant I73.
+Rejected: **absolute token thresholds** — a warning set in tokens silently lands past the
+budget when the operator lowers the budget. **A policy object with warn, soft and hard levels**
+— two of its three levels would have no defined behaviour until the stop is decided. **A new
+envelope kind** — the vocabulary is closed (D44), and `session.notice` already carries exactly
+this kind of fact. **A client-derived state computed from `remainingTokens`** — a crossing that exists only
+where a client computes it exists only while someone is looking. It also leaves no record in the
+spill of when the line was crossed.
+**An in-memory "already announced" flag** — it is lost on restart, so the notice is repeated
+after every restart, and it is a second source D147 declines. **Re-arming a code when the budget
+is raised** — the notice would have to carry the threshold it was measured against. Without that,
+the spill contradicts itself across configuration edits. **Level `error` for exhaustion** —
+`error` means something failed, and here the turn keeps running.
+Reversibility: cheap — two union members and one nullable config field, with no persisted schema
+change. The notices already in spills stay readable if either code is later retired.
+
+### 2026-09-25 — D261 "Blocked" is `SessionSummary.pendingPermissions`, a derived count, not a turn state
+Context: `20-contract.md § Unresolved` 22 (runtime-redesign item 28, via D256). The item asked
+whether `blocked` is a member of the turn machine, a flag, or a stop reason, and said a state
+earns its place only if it also covers a model awaiting an answer. The classification's item 6
+says SkyNet cannot stop the model from inventing that answer. A turn awaiting operator approval
+was already representable in `Turn.pending`, but no read surfaced it without subscribing to the
+session's stream.
+Chosen: **`SessionSummary.pendingPermissions: number`**, which is the live turn's
+`pending.size`, and 0 when there is no turn. It is derived at read time by
+`agent-console/core`'s `toSummary`, is never persisted, and is added to both `SessionSummary`
+declarations. It counts permission requests only, and it **declines the model-asked-a-question
+case by name**. It is an input to D79's client-side badge projection, not an employment-status
+field, and D79 stands. Invariant I74.
+Rejected: **a `blocked` turn phase or `TurnStopReason` member** — a turn awaiting approval has
+not stopped, and a phase would have to be kept consistent with `pending` by hand. A derived count
+cannot disagree with the map it counts. **A boolean `blocked`** — it names a state rather than
+reporting a fact, which is the employment-status field D79 forbids under another name. **Covering
+model questions heuristically** — this is exactly the state-that-claims-to-block-what-it-does-not
+the item warned against. **Persisting the count in `meta.json`** — a rehydrated session holds no
+turn, so a persisted count would outlive what it counts.
+Reversibility: cheap — one derived field on a read shape, with nothing on disk.
+
 ## Open
 
 Staging only. Once an item becomes an issue it leaves this list.
@@ -6440,3 +6515,17 @@ Staging only. Once an item becomes an issue it leaves this list.
   Inferring a reason from `endedAt` or any other already-present field would be guessing at a fact
   the contract does not carry; if an operator needs to see *why* a session ended, that is a
   `SessionSummary` field addition — a contract question, not a rendering one.
+
+- **`/design`: what a token estimate on stored tool output would be, or whether to refuse one**
+  (D259; `20-contract.md § Unresolved` 20, runtime-redesign item 13). The choice is between an
+  estimate declared as one in its own type, and a refusal on S33.3's grounds.
+
+- **`/design`: what a budget stop stops, and whether a soft stop exists** (D259, D260;
+  `20-contract.md § Unresolved` 21, runtime-redesign item 24). Crossings are already announced by
+  `budget_warning` and `budget_exhausted`, and nothing stops today. The failure mode to name is a
+  soft stop that silently becomes a hard one at the next turn boundary.
+
+- **`/design`: whether a Raw view renders `Envelope.raw`** (D259; `20-contract.md § Unresolved` 23,
+  runtime-redesign item 15). Doing so would lift the contract's never-rendered rule. The view would
+  exist only where `INCLUDE_RAW` is on, unless vendor records are persisted by default. The
+  alternative is to refuse Raw at three views.
