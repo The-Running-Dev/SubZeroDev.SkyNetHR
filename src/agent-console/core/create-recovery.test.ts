@@ -31,7 +31,7 @@ async function fixture(t: TestContext, wrapStore: (store: SessionStore) => Sessi
   t.after(async () => { await close(); await rm(root, { recursive: true, force: true }); });
   async function boot() {
     await close();
-    const opened = await createFsSessionStore(config); assert.ok(opened.ok);
+    const opened = await createFsSessionStore(config, () => null); assert.ok(opened.ok);
     const store = wrapStore(opened.value);
     const core = createSessionCore({ config, store, checkpoints, hostCreate: host, hostAttemptTimeoutMs: 5,
       createAdapter: () => ok({ vendor: 'fixture', policy: { mode: 'interactive', sandbox: null, banner: null }, acceptsAttachments: false, send: async () => success(), respond: success, kill: async () => {} }),

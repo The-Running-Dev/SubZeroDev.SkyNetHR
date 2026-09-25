@@ -64,7 +64,10 @@ export function createSessionManager(deps: {
     // Legacy Store injections predate the runtime lease and recovery journal.
     // Supply both durable facilities at this compatibility boundary when absent.
     store: { ...store,
-      lease: (store as unknown as Partial<SessionStore>).lease ?? createFsRuntimeLease(config.storageRoot),
+      // This compatibility fallback has no server.lock signal threaded through it;
+      // `() => null` is the documented safe direction (fail closed on every foreign
+      // hostname) rather than an unsound guess at what generation is held.
+      lease: (store as unknown as Partial<SessionStore>).lease ?? createFsRuntimeLease(config.storageRoot, () => null),
       createAttempts: (store as unknown as Partial<SessionStore>).createAttempts ?? createFsAttemptStore(config.storageRoot),
     } as unknown as SessionStore,
     checkpoints: deps.checkpoints,

@@ -115,7 +115,7 @@ export function runRuntime(input: Readable, output: Writable, dependencies: Runt
     const callbacks = hostCallbacks(strings(p, 'hostMethods', []), timeoutMs);
     const stdoutLineBytes = integer(settings, 'providerStdoutLineBytes', 64 * 1024 * 1024, 1024 ** 3, 1);
     hello = true;
-    store = kind === 'fs' ? unwrap(await createFsSessionStore(options)) : createMemorySessionStore(options);
+    store = kind === 'fs' ? unwrap(await createFsSessionStore(options, () => null)) : createMemorySessionStore(options);
     core = createSessionCore({ config: options, store, hostCreate: callbacks, hostAttemptTimeoutMs: timeoutMs,
       checkpoints: dependencies.checkpoints ?? createCheckpoints(options, { name: 'AgentConsole', email: 'agentconsole@localhost' }),
       createAdapter: (id, adapterOptions) => createRegisteredAdapter(registry, id, { ...adapterOptions, stdoutLineBytes }) });

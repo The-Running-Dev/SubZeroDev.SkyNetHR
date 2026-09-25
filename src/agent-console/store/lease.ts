@@ -11,6 +11,7 @@ export interface RuntimeLeaseHolder {
   readonly hostname: string;
   readonly startedAt: IsoTimestamp;
   readonly osCreatedAt: IsoTimestamp | null;
+  readonly serverLockInstanceId?: string | null;
 }
 export type RuntimeLeaseError = StoreError | {
   readonly code: 'storage_locked'; readonly path: string;
@@ -25,9 +26,10 @@ export interface RuntimeLease {
 // claims. Two contenders can both refuse, but cannot both see themselves alone:
 // the first successful observation necessarily precedes the other's publication.
 // Never overwrite another generation. Stale generations are ignored only after
-// local process death or a proven OS creation-time mismatch; remote/unknown lives
-// fail closed. There is no observation window or fixed retry delay.
-export function createFsRuntimeLease(storageRoot: string): RuntimeLease {
+// local process death, a proven OS creation-time mismatch, or a proven displaced
+// server.lock generation (D262); remote/unknown lives otherwise fail closed. There
+// is no observation window or fixed retry delay.
+export function createFsRuntimeLease(storageRoot: string, heldServerLock: () => string | null): RuntimeLease {
   const directory = path.join(storageRoot, 'runtime-leases');
   const instanceId = randomUUID();
   const filePath = path.join(directory, instanceId + '.json');
@@ -35,12 +37,20 @@ export function createFsRuntimeLease(storageRoot: string): RuntimeLease {
   let held = false;
   let claiming: Promise<Result<void, RuntimeLeaseError>> | null = null;
   async function alive(holder: RuntimeLeaseHolder): Promise<boolean> {
-    if (holder.hostname !== hostname()) return true;
-    try { process.kill(holder.pid, 0); }
-    catch (error) { return (error as NodeJS.ErrnoException).code !== 'ESRCH'; }
-    if (holder.osCreatedAt === null) return true;
-    const created = await supervisor.getOsCreatedAt(holder.pid);
-    return created === null || created === holder.osCreatedAt;
+    if (holder.hostname === hostname()) {
+      try { process.kill(holder.pid, 0); }
+      catch (error) { return (error as NodeJS.ErrnoException).code !== 'ESRCH'; }
+      if (holder.osCreatedAt === null) return true;
+      const created = await supervisor.getOsCreatedAt(holder.pid);
+      return created === null || created === holder.osCreatedAt;
+    }
+    // D262: a foreign hostname fails closed unless this claimant holds server.lock
+    // and the holder names a different (or, pre-D262, absent) generation of it.
+    const heldInstanceId = heldServerLock();
+    if (heldInstanceId === null) return true;
+    if (holder.serverLockInstanceId === undefined) return false;
+    if (holder.serverLockInstanceId !== null && holder.serverLockInstanceId !== heldInstanceId) return false;
+    return true;
   }
   async function acquire(): Promise<Result<void, RuntimeLeaseError>> {
     const temp = filePath + '.tmp';
@@ -50,6 +60,7 @@ export function createFsRuntimeLease(storageRoot: string): RuntimeLease {
         instanceId, pid: process.pid, hostname: hostname(),
         startedAt: new Date().toISOString() as IsoTimestamp,
         osCreatedAt: await supervisor.getOsCreatedAt(process.pid),
+        serverLockInstanceId: heldServerLock(),
       };
       await writeFile(temp, JSON.stringify(self), { flag: 'wx' });
       await link(temp, filePath);
@@ -64,7 +75,8 @@ export function createFsRuntimeLease(storageRoot: string): RuntimeLease {
         }
         if (!holder || typeof holder.instanceId !== 'string' || !Number.isSafeInteger(holder.pid) || holder.pid <= 0 ||
             typeof holder.hostname !== 'string' || !Number.isFinite(Date.parse(holder.startedAt)) ||
-            !(holder.osCreatedAt === null || typeof holder.osCreatedAt === 'string')) {
+            !(holder.osCreatedAt === null || typeof holder.osCreatedAt === 'string') ||
+            !(holder.serverLockInstanceId === undefined || holder.serverLockInstanceId === null || typeof holder.serverLockInstanceId === 'string')) {
           return { ok: false, error: { code: 'corrupt', path: candidate, detail: 'invalid runtime lease' } };
         }
         if (await alive(holder)) return { ok: false, error: { code: 'storage_locked', path: candidate, holder, age: Math.max(0, Date.now() - Date.parse(holder.startedAt)) } };
