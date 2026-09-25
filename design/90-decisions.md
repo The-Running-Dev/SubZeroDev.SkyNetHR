@@ -6496,6 +6496,55 @@ the item warned against. **Persisting the count in `meta.json`** — a rehydrate
 turn, so a persisted count would outlive what it counts.
 Reversibility: cheap — one derived field on a read shape, with nothing on disk.
 
+### 2026-09-25 — D262 A host-claimed runtime lease names its `server.lock` generation, and a later generation disregards it on any hostname
+Context: #403 reported a dev container that refuses to boot for good after it is recreated over
+its named volume: `storage_locked`, with nothing holding the root. `lease.ts`'s `alive()` returns
+"live" for any holder whose `hostname` differs from this host's, and a container's hostname is
+its id, which every recreation changes. This is the bug D180 fixed for `server.lock` (#206), back
+again in the second half of I50. That half was built to reach only processes that can see each
+other's `process.kill(pid, 0)`, and it fails closed past that. D241 wrote the asymmetry into I50
+on purpose: claim-before-reap is "the only thing they share". The contract text agreed, so this
+was a design gap, not a defect in the tree, and #403's own stop clause sent it here because any
+fix changes the lease's on-disk shape. **#403's premise is wrong, and this entry says so rather
+than building on it**: the issue says `server.lock` "compares `image`". It does not. `claimLock`
+reclaims on an unchanged `(instanceId, renewals)` pair over one observation window, and I57 makes
+`image` informational.
+Chosen: a `RuntimeLeaseHolder` carries `serverLockInstanceId`, which is the `server.lock`
+`instanceId` its host held when it claimed, or `null` for a runtime with no host. A claimant that
+holds `server.lock` disregards a holder naming a *different* generation, on any hostname. That
+generation's server lost the root to an observed reclaim (D180) that the reclaimer then confirmed
+(D216), so a lease taken under it is a leftover. Proven local death stays the other ground. Every
+other foreign-hostname holder still fails closed, including every one a standalone runtime sees,
+because that runtime holds no `server.lock` to compare. The lease factories take a required
+`heldServerLock` accessor, read at claim time. **A holder written before this entry has no field,
+and absent is not `null`**: on another hostname, while the claimant holds `server.lock`, it reads
+as a displaced generation, so a volume already stranded by #403 recovers with no operator action.
+That follows D196's precedent: a missing field reaches the reclaim path instead of a refusal.
+**`20-contract.md`'s "no observation window and no retry delay" for the runtime lease survives**:
+the new ground borrows an observation `server.lock` has already completed and makes none of its
+own, so no runtime boot waits. **D241 is revised in part, not overwritten.** Its choice that I50
+is one invariant over both mechanisms stands. What falls is its premise that the ordering is
+all the two halves share. The runtime half now reads the server half's generation, in that
+direction only, and only when the claimant holds `server.lock`. `server.lock`'s own reclaim is
+untouched, per #403's scope.
+Rejected: **comparing `image`, as #403 suggested.** It rests on the false premise above, and
+equal images prove nothing about liveness. Two containers from one image over one volume is
+exactly the case that must refuse. **Disregarding any foreign-hostname lease whenever the claimant
+holds `server.lock`, with no schema change.** It is the smallest change, but it also discards a
+live standalone runtime's lease from another container on a shared volume, since that runtime
+never claims `server.lock`. The accepted legacy residual below is this same hole, kept to leases
+written before this entry. **Mirroring D180 wholesale**, meaning a renewal counter and an
+observation window on runtime leases. It would cover standalone runtimes too, but it is the
+redesign #403 puts out of scope, it deletes the no-window rule, and every boot that found a lease
+would wait a window. **Reading an absent field as `null`**: that is fail-closed on another
+hostname, so the reported volume would still need someone to delete a file by hand once.
+**Reading an absent field as `corrupt`**: it contradicts D196, and every upgraded deployment
+with a leftover lease would need someone to step in. Accepted residual, named in `20-contract.md
+§ Persisted schemas`: a pre-D262 standalone runtime still live in another container over the
+same volume at the upgrade is disregarded. That window closes with the last pre-D262 lease file.
+Reversibility: expensive — a persisted file's shape, I50's text, and two factory signatures.
+Landing point: #403.
+
 ## Open
 
 Staging only. Once an item becomes an issue it leaves this list.
