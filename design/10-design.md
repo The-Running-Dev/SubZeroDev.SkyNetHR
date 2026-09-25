@@ -226,7 +226,7 @@ not one experiment away.
 it turned out to be is not what this section predicted.** The prediction was that the live
 stream might match the *on-disk rollout schema* — `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`,
 records wrapped in `payload`, opening with `session_meta`, usage as `token_count` events
-under `payload.info` (`tools/Measure-Session.ps1:28-29,181,454`). **It does not.** S8.1
+under `payload.info` (the kit's `tools/Measure-Session.ps1`, no longer in this repository). **It does not.** S8.1
 observed two live interfaces at `codex-cli 0.146.0` and neither emits `session_meta`,
 `payload.info` or `token_count`; that schema describes a file on disk, which S8's *Out of
 scope* forbids scraping, and it is not what the CLI puts on a wire. Both interfaces are
@@ -1077,6 +1077,7 @@ flowchart TD
 
     CT --> AC
     CT --> PS
+    CT --> PV
     SM --> CO
     SM --> AS
     SM --> JL
@@ -1107,14 +1108,17 @@ flowchart TD
     ID --> CF
     CF --> JL
     CF --> CT
+    CF --> PV
     ST --> CF
     ST --> CT
     ST --> PS
+    ST --> AS
     CK --> CF
+    CK --> EX
     RC --> ST
     RC --> CF
     RC --> CT
-    JL --> CT
+    JL --> CO
     CL --> CT
 ```
 
@@ -1128,16 +1132,16 @@ flowchart TD
 | `agent-console/extensions` | Optional capability the core calls through hooks rather than depends on — checkpoints today | `agent-console/core` | One extension object per capability |
 | `agent-console/protocol` | The Phase 4 wire: method table, JSON Schema, fixtures, and the browser routing whitelist (I65) | *nothing* | `Operations`, `browserMethods`, schemas and fixtures |
 | `agent-console/runtime` | The stdio JSON-RPC server that exposes the core to a parent process — framing, subscriptions, credit admission, uploads | `agent-console/core`, `store`, `providers`, `extensions` | `main.ts` entry point and the server factory |
-| `contract` | The host vocabulary and generic re-exports | `agent-console/contract`, `agent-console/process` | Types, `RATINGS` (D150), and the re-exported `isFrame` (D171) |
-| `config` | Roots, auth mode, bind address, origin allow-list, caps | `contract`, `jail` | A validated config object |
+| `contract` | The host vocabulary and generic re-exports | `agent-console/contract`, `agent-console/process`, `agent-console/providers` | Types, `RATINGS` (D150), and the re-exported `isFrame` (D171) |
+| `config` | Roots, auth mode, bind address, origin allow-list, caps | `contract`, `jail`, `agent-console/providers` | A validated config object |
 | `identity` | Request → `OperatorId`, or rejection | `config` | One function per deployment mode |
-| `jail` | Path resolution, normalisation and containment | `contract` | `resolveInsideRoot`, `pathsOverlap`, `stripExtendedPrefix` |
-| `store` | The host's own durable state — tool-output blobs, **the two record logs**, `server.lock`, process-ledger composition, ring buffer — and the legacy `Store` shape the manager adapts to `SessionStore` | `config`, `contract`, `agent-console/process` | Read/append primitives |
-| `checkpoints` | Shadow git lifecycle, as the host still declares it | `config`, `contract` | create / list / restore |
+| `jail` | Path resolution, normalisation and containment | `agent-console/core` | `resolveInsideRoot`, `pathsOverlap`, `stripExtendedPrefix` |
+| `store` | The host's own durable state — tool-output blobs, **the two record logs**, `server.lock`, process-ledger composition, ring buffer — and the legacy `Store` shape the manager adapts to `SessionStore` | `config`, `contract`, `agent-console/process`, `agent-console/store` | Read/append primitives |
+| `checkpoints` | Shadow git lifecycle, as the host still declares it | `config`, `contract`, `agent-console/extensions` | create / list / restore |
 | `records` *(tier two)* | Review and requisition lifecycle, and their registries | `config`, `store`, `contract` | Raise / decide / claim, author / finalise, read |
 | `session-manager` | **Composition, not lifecycle**: HR identity and vendor vocabulary over generic principals and providers, the host create callbacks that spend a requisition, `server.lock` at boot, the payroll fold, and **the audit read and the incident view over it** | `agent-console/core`, `agent-console/store`, `config`, `jail`, `store`, `checkpoints`, `agent-console/providers`, `agent-console/process`, `records`, `contract` | Session CRUD, subscribe, `readAudit` |
 | `edge/error-envelope` | The one `ApiErrorCode` → HTTP status mapping | `contract` | `statusForCode`, `sendError` |
-| `edge/http-common` | Everything about a request that is not framing: **the origin check**, identity resolution, login, body reading, the `AuditQuery` parse, and the handlers both edges share | `config`, `session-manager`, `records`, `identity`, `agent-console/providers`, `contract`, `edge/error-envelope` | Handlers and helpers, to the two edges only |
+| `edge/http-common` | Everything about a request that is not framing: the `/livez` and `/readyz` probes, answered before any origin or identity check (D243); **the origin check**, identity resolution, login, body reading, the `AuditQuery` parse, and the handlers both edges share | `config`, `session-manager`, `records`, `identity`, `agent-console/providers`, `contract`, `edge/error-envelope` | Handlers and helpers, to the two edges only |
 | `edge/sse` | SSE framing and `Last-Event-ID` reconnect; its own routing table | `config`, `session-manager`, `records`, `contract`, `edge/http-common`, `edge/error-envelope` | HTTP routes |
 | `edge/ws` | WebSocket framing and first-message auth; its own routing table | `config`, `session-manager`, `records`, `contract`, `edge/http-common`, `edge/error-envelope` | HTTP routes, plus `.handleUpgrade` (D117) |
 | `client` | Rendering, **under the CSP and no-`innerHTML` rules** (D43, D74); the four themes (D58, D78) | `contract` | — |
