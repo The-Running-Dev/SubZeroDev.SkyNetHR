@@ -424,7 +424,7 @@ const AUDIT_READ_CHUNK_BYTES = 64 * 1024;
 // locating one offset.
 const EVENTS_READ_CHUNK_BYTES = 64 * 1024;
 
-export async function createFsSessionStore(config: RuntimeOptions): Promise<Result<SessionStore, StoreError>> {
+export async function createFsSessionStore(config: RuntimeOptions, heldServerLock: () => string | null): Promise<Result<SessionStore, StoreError>> {
   const storageRoot = config.storageRoot;
   try { await mkdir(path.join(storageRoot, 'sessions'), { recursive: true }); } catch (err) { return ioError(storageRoot, (err as Error).message); }
   const auditPath = path.join(storageRoot, 'audit.ndjson');
@@ -432,7 +432,7 @@ export async function createFsSessionStore(config: RuntimeOptions): Promise<Resu
   const processLedger = createFsProcessLedger(storageRoot);
   const ring = new Map<SessionId, Envelope[]>();
   const auditCursorSecret = randomBytes(32);
-  const lease = createFsRuntimeLease(storageRoot);
+  const lease = createFsRuntimeLease(storageRoot, heldServerLock);
   const store: SessionStore = {
     createAttempts: createFsAttemptStore(storageRoot),
     lease,

@@ -1137,30 +1137,9 @@ The filesystem backend's runtime lease is in `runtime-leases/`, separate from th
 unchanged `server.lock` lease. `SessionCore.boot()` acquires it before reaping or scanning;
 `SessionStore.close()` releases it after closing the runtime append handles.
 
-**Scaffold (D262)** — replaced by pointers to `src/agent-console/store/lease.ts` and
-`src/agent-console/store/fs.ts` once the slice that lands it materialises them:
-
-```ts
-// src/agent-console/store/lease.ts
-export interface RuntimeLeaseHolder {
-  readonly instanceId: string;
-  readonly pid: number;
-  readonly hostname: string;
-  readonly startedAt: IsoTimestamp;
-  readonly osCreatedAt: IsoTimestamp | null;
-  readonly serverLockInstanceId?: string | null;
-}
-export function createFsRuntimeLease(
-  storageRoot: string,
-  heldServerLock: () => string | null,
-): RuntimeLease;
-
-// src/agent-console/store/fs.ts
-export function createFsSessionStore(
-  config: RuntimeOptions,
-  heldServerLock: () => string | null,
-): Promise<Result<SessionStore, StoreError>>;
-```
+**D262's `RuntimeLeaseHolder`, `createFsRuntimeLease` and `createFsSessionStore` shapes are
+declared in `src/agent-console/store/lease.ts` and `src/agent-console/store/fs.ts`**, not
+restated here:
 
 - **`serverLockInstanceId` is optional on the type because it is optional on disk, and absent is
   never normalised to `null`.** A lease this build writes always carries it, as a string or

@@ -32,7 +32,7 @@ for (const backend of ['fs', 'memory'] as const) {
     const { dir, beforeRemove } = await root(t), config = configuration(dir);
     let store: SessionStore;
     if (backend === 'memory') store = createMemorySessionStore(config);
-    else { const created = await createFsSessionStore(config); assert.ok(created.ok); store = created.value; }
+    else { const created = await createFsSessionStore(config, () => null); assert.ok(created.ok); store = created.value; }
     beforeRemove(() => store.close());
     assert.ok((await store.createSession(record)).ok);
     assert.deepEqual((await store.readAllMeta())[0]!.result, { ok: true, value: record });
@@ -106,7 +106,7 @@ for (const backend of ['fs', 'memory'] as const) {
 test('A13 — runtime lease refuses a second holder immediately and never changes server.lock', async t => {
   const { dir, beforeRemove } = await root(t), legacy = path.join(dir, 'server.lock');
   await writeFile(legacy, 'legacy host lease');
-  const first = createFsRuntimeLease(dir), second = createFsRuntimeLease(dir);
+  const first = createFsRuntimeLease(dir, () => null), second = createFsRuntimeLease(dir, () => null);
   beforeRemove(async () => { await first.release(); await second.release(); });
   assert.ok((await first.claim()).ok);
   const started = Date.now(), refused = await second.claim();
@@ -118,13 +118,63 @@ test('A13 — runtime lease refuses a second holder immediately and never change
   await second.release(); assert.equal(await readFile(legacy, 'utf8'), 'legacy host lease');
 });
 
+test('D262 — a foreign-hostname runtime lease is reclaimed only for a displaced server.lock generation', async t => {
+  const { dir, beforeRemove } = await root(t);
+  const leaseDir = path.join(dir, 'runtime-leases');
+  await mkdir(leaseDir, { recursive: true });
+  async function writeForeignHolder(id: string, extra: Record<string, unknown>) {
+    const holder = { instanceId: id, pid: 999999, hostname: 'other-host', startedAt: '2020-01-01T00:00:00.000Z', osCreatedAt: null, ...extra };
+    await writeFile(path.join(leaseDir, id + '.json'), JSON.stringify(holder));
+  }
+
+  // Pre-D262 fixture: no `serverLockInstanceId` field at all (D196) — reclaimed once
+  // this claimant holds any server.lock generation.
+  await writeForeignHolder('legacy-holder', {});
+  const legacy = createFsRuntimeLease(dir, () => 'generation-a');
+  assert.ok((await legacy.claim()).ok);
+  await legacy.release();
+  await rm(path.join(leaseDir, 'legacy-holder.json'), { force: true });
+
+  // Holder names a server.lock generation different from the one this claimant
+  // currently holds: reclaimed (D262's displaced-generation ground).
+  await writeForeignHolder('displaced-holder', { serverLockInstanceId: 'generation-a' });
+  const displaced = createFsRuntimeLease(dir, () => 'generation-b');
+  assert.ok((await displaced.claim()).ok);
+  await displaced.release();
+  await rm(path.join(leaseDir, 'displaced-holder.json'), { force: true });
+
+  // Same generation: still the live holder from this host's own server.lock — fails closed.
+  await writeForeignHolder('same-gen-holder', { serverLockInstanceId: 'generation-a' });
+  const sameGen = createFsRuntimeLease(dir, () => 'generation-a');
+  beforeRemove(() => sameGen.release());
+  const sameGenResult = await sameGen.claim();
+  assert.ok(!sameGenResult.ok && sameGenResult.error.code === 'storage_locked');
+  await rm(path.join(leaseDir, 'same-gen-holder.json'), { force: true });
+
+  // No server.lock held by this claimant: fails closed regardless of the holder's generation.
+  await writeForeignHolder('displaced-holder', { serverLockInstanceId: 'generation-a' });
+  const noLock = createFsRuntimeLease(dir, () => null);
+  beforeRemove(() => noLock.release());
+  const noLockResult = await noLock.claim();
+  assert.ok(!noLockResult.ok && noLockResult.error.code === 'storage_locked');
+  await rm(path.join(leaseDir, 'displaced-holder.json'), { force: true });
+
+  // Standalone writer (`serverLockInstanceId: null`): always fails closed on a foreign
+  // hostname, even though this claimant holds a server.lock.
+  await writeForeignHolder('standalone-holder', { serverLockInstanceId: null });
+  const standalone = createFsRuntimeLease(dir, () => 'generation-a');
+  beforeRemove(() => standalone.release());
+  const standaloneResult = await standalone.claim();
+  assert.ok(!standaloneResult.ok && standaloneResult.error.code === 'storage_locked');
+});
+
 test('pre-cutover fixture — full boot rebuilds ended history without rewriting stored bytes', async t => {
   const { dir, beforeRemove } = await root(t), config = configuration(dir);
   const fixture = JSON.parse(await readFile(path.join(process.cwd(), 'src/agent-console/store/fixtures/pre-cutover.json'), 'utf8')) as { meta: SessionMetaFile; events: Envelope[] };
   const sessionDir = path.join(dir, 'sessions', fixture.meta.session.id); await mkdir(sessionDir, { recursive: true });
   const meta = JSON.stringify(fixture.meta), events = fixture.events.map(e => JSON.stringify(e)).join('\n') + '\n';
   await writeFile(path.join(sessionDir, 'meta.json'), meta); await writeFile(path.join(sessionDir, 'events.ndjson'), events);
-  const created = await createFsSessionStore(config); assert.ok(created.ok); const store = created.value; beforeRemove(() => store.close());
+  const created = await createFsSessionStore(config, () => null); assert.ok(created.ok); const store = created.value; beforeRemove(() => store.close());
   const checkpoints = new Proxy({} as Checkpoints, { get() { return () => assert.fail('ended boot must not invoke checkpoints'); } });
   const core = createSessionCore({ config, store, checkpoints, hostCreate: createHostAttempts({ prepare() { return { ok: true, value: undefined }; }, async commit() { return { ok: true, value: undefined }; }, abort() {} }), createAdapter() { assert.fail('ended boot never creates a provider'); } });
   assert.ok((await core.boot()).ok);

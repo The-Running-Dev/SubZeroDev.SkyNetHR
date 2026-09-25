@@ -100,7 +100,8 @@ async function sampleLock(filePath: string): Promise<LockSample> {
   return { kind: 'present', holder: parsed as ServerLock };
 }
 export async function createStore(config: Config): Promise<Result<Store, StoreError>> {
-  const created = await createFsSessionStore(config);
+  let heldLock: ServerLock | null = null;
+  const created = await createFsSessionStore(config, () => heldLock?.instanceId ?? null);
   if (!created.ok) return created;
   // The host is the only writer of its branded identities and provider ids.
   const sessionStore = created.value as unknown as Omit<Store, 'appendReview' | 'readAllReviews' | 'appendRequisition' | 'readAllRequisitions' | 'claimLock' | 'releaseLock' | 'renewLock'>;
@@ -109,7 +110,6 @@ export async function createStore(config: Config): Promise<Result<Store, StoreEr
   const requisitionsPath = path.join(storageRoot, 'requisitions.ndjson');
   const reviewsHandle = lazyHandle(reviewsPath);
   const requisitionsHandle = lazyHandle(requisitionsPath);
-  let heldLock: ServerLock | null = null;
   return { ok: true, value: { ...sessionStore,
 
     async appendReview(record: Review) {
