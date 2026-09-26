@@ -309,47 +309,106 @@ function handshake(
 }
 
 describe('S11.1 — the WebSocket edge delivers the same envelope sequence as SSE, element for element', () => {
-  it('matches for one fixture run', async () => {
-    const h = await makeSharedEdges(undefined, undefined, 'many');
-    const id = await newSession(h, 'w1');
+  // DIAGNOSTIC INSTRUMENTATION for #99 — not a fix, temporary, to be reverted before landing
+  // anything. Repeats the scenario N times per process (SKYNET_S11_1_REPEAT, default 1) so a
+  // flake has more chances to land inside one `npm test` invocation, and records a millisecond
+  // timeline of every WS/SSE event so a failure (assertion OR thrown parse error) prints exactly
+  // what arrived, in what order, and when.
+  const REPEAT = Number(process.env['SKYNET_S11_1_REPEAT'] ?? '1');
 
-    const sseRes = await fetch(`${h.sseBase}/api/sessions/${id}/events`, { headers: { 'x-forwarded-user': 'ben' } });
-    assert.equal(sseRes.status, 200);
-    const sseReader = sseRes.body!.getReader();
+  for (let attempt = 1; attempt <= REPEAT; attempt++) {
+    it(`matches for one fixture run [attempt ${attempt}/${REPEAT}]`, async () => {
+      const t0 = performance.now();
+      const timeline: Array<Record<string, unknown>> = [];
+      const mark = (event: string, extra: Record<string, unknown> = {}): void => {
+        timeline.push({ tMs: Math.round((performance.now() - t0) * 100) / 100, event, ...extra });
+      };
 
-    const { status, client } = await handshake(h.wsBase, `/api/sessions/${id}/events`, {
-      origin: ALLOWED_ORIGIN,
-      'x-forwarded-user': 'ben',
-    });
-    assert.equal(status, 101);
-    client!.send({ after: 0 });
+      const h = await makeSharedEdges(undefined, undefined, 'many');
+      const id = await newSession(h, 'w1');
+      mark('session-created', { id });
 
-    await post(h.sseBase, `/api/sessions/${id}/message`, { text: 'go' });
+      const sseRes = await fetch(`${h.sseBase}/api/sessions/${id}/events`, { headers: { 'x-forwarded-user': 'ben' } });
+      assert.equal(sseRes.status, 200);
+      const sseReader = sseRes.body!.getReader();
+      mark('sse-connected');
 
-    const wsEnvelopes = await client!.collectEnvelopes(8, 15000);
+      const { status, client } = await handshake(h.wsBase, `/api/sessions/${id}/events`, {
+        origin: ALLOWED_ORIGIN,
+        'x-forwarded-user': 'ben',
+      });
+      assert.equal(status, 101);
+      mark('ws-handshake-done');
+      client!.send({ after: 0 });
+      mark('ws-after-sent');
 
-    // Read the same count of `data:` frames off the SSE stream. `raw` may end mid-event when a
-    // chunk boundary falls inside one — only the segments before the last `\n\n` are complete;
-    // the tail is kept and re-joined with the next read rather than parsed as-is.
-    const decoder = new TextDecoder();
-    let raw = '';
-    const sseEnvelopes: unknown[] = [];
-    while (sseEnvelopes.length < 8) {
-      const { value, done } = await sseReader.read();
-      if (done) break;
-      raw += decoder.decode(value, { stream: true });
-      const segments = raw.split('\n\n');
-      raw = segments.pop() ?? '';
-      for (const frame of segments.filter((f) => f.includes('data: '))) {
-        if (sseEnvelopes.length >= 8) break;
-        sseEnvelopes.push(JSON.parse(frame.split('\n').find((l) => l.startsWith('data: '))!.slice('data: '.length)));
+      await post(h.sseBase, `/api/sessions/${id}/message`, { text: 'go' });
+      mark('post-message-resolved');
+
+      let dumped = false;
+      const dump = (label: string, err?: unknown): never => {
+        if (!dumped) {
+          dumped = true;
+          // eslint-disable-next-line no-console
+          console.error(
+            `\n[S11.1 diagnostic] ${label} — attempt ${attempt}/${REPEAT}\n` +
+              `timeline:\n${timeline.map((e) => JSON.stringify(e)).join('\n')}\n`,
+          );
+        }
+        if (err !== undefined) throw err;
+        throw new Error(label);
+      };
+
+      let wsEnvelopes: unknown[];
+      try {
+        wsEnvelopes = await client!.collectEnvelopes(8, 15000);
+        mark('ws-envelopes-collected', { count: wsEnvelopes.length, envelopes: wsEnvelopes });
+      } catch (err) {
+        mark('ws-envelopes-failed', { error: String(err) });
+        dump('WS collection threw', err);
       }
-    }
-    await sseReader.cancel().catch(() => {});
-    client!.close();
 
-    assert.deepEqual(wsEnvelopes, sseEnvelopes, 'the two transports delivered the identical sequence');
-  });
+      // Read the same count of `data:` frames off the SSE stream. `raw` may end mid-event when a
+      // chunk boundary falls inside one — only the segments before the last `\n\n` are complete;
+      // the tail is kept and re-joined with the next read rather than parsed as-is.
+      const decoder = new TextDecoder();
+      let raw = '';
+      const sseEnvelopes: unknown[] = [];
+      try {
+        while (sseEnvelopes.length < 8) {
+          const { value, done } = await sseReader.read();
+          mark('sse-chunk-read', {
+            done,
+            byteLength: value?.byteLength ?? 0,
+            preview: value ? decoder.decode(value, { stream: true }).slice(0, 200) : null,
+          });
+          if (done) break;
+          raw += decoder.decode(value!, { stream: true });
+          const segments = raw.split('\n\n');
+          raw = segments.pop() ?? '';
+          for (const frame of segments.filter((f) => f.includes('data: '))) {
+            if (sseEnvelopes.length >= 8) break;
+            const payload = frame.split('\n').find((l) => l.startsWith('data: '))!.slice('data: '.length);
+            try {
+              sseEnvelopes.push(JSON.parse(payload));
+            } catch (err) {
+              mark('sse-frame-parse-failed', { payload, error: String(err) });
+              dump('SSE frame JSON.parse threw', err);
+            }
+          }
+        }
+        mark('sse-envelopes-collected', { count: sseEnvelopes.length, envelopes: sseEnvelopes, rawTail: raw });
+      } finally {
+        await sseReader.cancel().catch(() => {});
+        client!.close();
+      }
+
+      if (wsEnvelopes!.length !== sseEnvelopes.length || JSON.stringify(wsEnvelopes!) !== JSON.stringify(sseEnvelopes)) {
+        dump('sequence mismatch');
+      }
+      assert.deepEqual(wsEnvelopes!, sseEnvelopes, 'the two transports delivered the identical sequence');
+    });
+  }
 });
 
 describe('S25.3 — message.delta over the real WS wire', () => {
