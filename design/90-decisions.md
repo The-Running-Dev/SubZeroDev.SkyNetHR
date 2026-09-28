@@ -6545,6 +6545,37 @@ same volume at the upgrade is disregarded. That window closes with the last pre-
 Reversibility: expensive — a persisted file's shape, I50's text, and two factory signatures.
 Landing point: #403.
 
+### 2026-09-28 — D263 `§ The divergence classes` points at the kit's contract, which is the only list the checker compares
+Context: #425 asked for a `HeadingCollision` row, because the checker reported it
+`declared-only`. Five days after that issue was filed, kit #391 (`b32acec`) made
+`Test-DesignState.ps1` read the class list from AgentKit's own `design/20-contract.md`, resolved
+through the home install, and never from the calling repository's. The kit's contract already
+carries the row. Run from kit `4fa849d` against this tree, the checker reports no findings, only
+`StateSetAbsent`, so #425's second criterion was met with no edit here. That change also made the
+section's own premises false: "the script is the detection and this section is the policy",
+"a class not listed here does not exist", and D212's "the comparison reaches here". Its
+§ *Artifacts of a unit kind* paragraph was false too, since an absent table now falls back to the
+kit's baseline globs rather than reporting `ContractListUnreadable`. And this tree no longer ships
+`tools/Test-DesignState.ps1` (#411).
+Chosen: **the section points at the kit's § *The divergence classes* and keeps only what that
+contract cannot know about this repository.** That is `StateSetAbsent` as the standing state
+(D192), the finding that return carries and its exit code (D252), the § *Invariants* id form this
+document is still parsed for, and the § *Artifacts of a unit kind* absence. That paragraph now
+binds the commit that first populates the record set to write the table, which replaces the
+`ContractListUnreadable` signal that used to force it: against the kit's baseline, the glob classes
+would compare a file set that is not this repository's and come back clean. D212's "the list is
+this repository's" is revised by this entry. Its transcription practice lapses because the copy
+it maintained is no longer compared. *Error semantics never becomes a pointer* is not breached,
+because the rule forbids pointing at the tree to stand in for semantics, and here the semantics
+move to the one contract that owns the module. #425 closes as superseded, with its first
+criterion unmet as written.
+Rejected: **adding the row and rewriting the prose as an unchecked mirror.** It does what #425
+literally asks, but it keeps a restatement that the next kit class makes stale with nothing to say
+so. That is the divergence *Single ownership* exists to prevent. **Adding the row alone.** It
+leaves the section asserting a comparison the checker no longer makes.
+Reversibility: cheap — one section of prose, and the kit's rows are there to transcribe back.
+Landing point: #425.
+
 ## Open
 
 Staging only. Once an item becomes an issue it leaves this list.

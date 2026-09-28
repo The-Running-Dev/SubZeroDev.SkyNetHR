@@ -2786,136 +2786,50 @@ is a new cause of an existing outcome, not a new outcome.
 
 ### The divergence classes
 
-`tools/Test-DesignState.ps1` declares the same ids and `ClassListDisagreement` compares the two:
-**the script is the detection and this section is the policy** (D192, D197). A class not listed
-here does not exist, and adding one is a contract amendment. **Whether that comparison currently
-reaches this repository is a separate question, and it is answered — yes — at the end of this
-section rather than left to be assumed.**
+**The class list is AgentKit's policy, and its one home is the kit's contract** —
+`SubZeroDev.AgentKit`'s `design/20-contract.md` § *The divergence classes*, read from the home
+install (`$env:AGENTKIT_HOME`, else `~/.agent-kit`) (D263). `Test-DesignState.ps1` is kit-owned
+and runs from there; this tree carries no copy (#411). Its `ClassListDisagreement` compares the
+script's declared ids against the kit's list and never against this document, so a row written
+here would be a copy nothing checks. Every class — blocking, reported, and could-not-evaluate —
+when it is raised, and what the caller does about it, is stated there and not here. Adding a class
+is a kit contract amendment, and it reaches this repository by `/kit-sync`, not by an edit to this
+section.
 
-**The list is this repository's, and it follows the script this tree has** (D212). These classes
-arrive with `SubZeroDev.AgentKit`; a `/kit-sync` bringing a newer script brings its rows with it,
-in the same commit. A row stating a policy no installed code detects is the exact divergence
-`ClassListDisagreement` exists to catch, written in by hand — and so is a class the script detects
-with no row here.
-
-**Blocking.** Every one is evaluable from the checkout alone — no network, no tracker, no running
-service. That rule is what decides membership; it is not a coincidence of the list.
-
-| Class | Raised when | Caller sees |
-|---|---|---|
-| `UnresolvedId` | A record names an id with no record | The referring record and the missing id |
-| `AnchorMissing` | An **active** record carries a tree-pointer field naming a path not in the tree — a unit's `Anchor`, a contract's `Declaration`, or any entry of an `Evidence` list | The record, the field, and the path. **Which of the two sides is wrong is the user's call** |
-| `OwnerMismatch` | A contract's `Owner` is not the unique active unit whose `Exposes` names that contract — nobody exposes it, or two units do | The contract, its `Owner`, and every unit exposing it |
-| `UnrecordedArtifact` | A tree artifact of a unit kind has no record | The unrecorded artifact |
-| `ProjectionStale` | A region differs from its regeneration, after line-ending normalisation | A diff of the region |
-| `RegionMalformed` | A marked region of either kind is unbalanced or nested | The document and the marker |
-| `IdCollision` | An id is duplicated, renumbered, disagrees with its file path, or appears in both the projected and the declared marker form | Every file claiming it |
-| `DecisionAnchorAmbiguous` | A decision anchor resolves to zero or two log headings | The anchor and the count |
-| `LogEntryUnrecorded` | A log heading has no decision record | The entry's heading |
-| `EnforcementUnevidenced` | A conditionally-required field is absent on a record whose own `Status` or `Enforcement` requires it — an invariant with `Enforcement: code` and no `Evidence`, a decision with `Status: superseded` and no `SupersededBy`, or a question with `Status: answered` and no `AnsweredBy` | The record, the absent field, and the value that required it |
-| `ClosureOverBudget` | A **bounded** closure exceeds 16,384 bytes — the unit's own artifact excluded | The unit, its bounded size, its largest contributor, and that unit's own artifact size, named separately from the bounded one |
-| `RecordPairMalformed` | A unit's retired companion exists with no active record, or a field sits in the file its half does not belong to — a retired half in the active record, or an active field in the companion | Both files, the field, and which side it belongs on |
-| `HalfStatusMismatch` | A reference sits in a half its referent's status does not allow, in **either** direction — an active edge naming a retired referent, or a retired half naming an active one | The record, the half, the referent, and the status that contradicts it |
-| `HalfOverlap` | An id appears in both halves of one edge | The unit, the edge, and the id |
-| `SiteAmbiguous` | A `StatedIn` site resolves to zero or two headings in the file it names | The decision, the site, and the count |
-| `SiteOutOfReach` | A `StatedIn` site names a place the unit's reader does not already reach — neither the unit's own `Anchor` nor a record one hop from it | The decision, the site, and the unit |
-| `SiteContradictsLive` | A decision is both named by a unit's `Live` and stated in that same unit | The unit and the decision |
-| `DecisionUnplaced` | `Decision.Affects` derives empty — an accepted decision no `Live` names and no site places, or a superseded one no `Archival` names | The decision, its status, and that it is an interrupted write |
-| `SupersessionCycle` | A `SupersededBy` chain revisits a decision, or a decision names itself | The cycle, in order |
-| `ClassListDisagreement` | The checker's declared class ids differ from this section's list | Both sets, and the difference in each direction |
-| `GlobDisagreement` | For a globbed unit kind, the file set § *Artifacts of a unit kind*'s patterns resolve to differs from the set the checker's enumeration returns | The kind, the direction, and the paths |
-
-**`GlobDisagreement` compares file sets, not tokens, and only in that direction.** Comparing the
-patterns as text would be a third id-level check in a section that already knows id-level checks
-miss definition drift. Resolving both sides against the checkout instead means the table is
-checked for what it *means*, and it is what qualifies the class as blocking on the rule's own
-terms: expansion needs the checkout and nothing else. The `invariant` kind is outside the
-comparison because it has no pattern in either cell, which is a fact about the table rather than
-an exemption the checker carries.
-
-**What a set comparison cannot see, stated rather than left to be found: an exclusion that
-excludes nothing in this checkout.** `*-local.md` is one in any checkout that ships no command
-companion — this one ships `.claude/commands/track-local.md` (D207), so here it does exclude
-something — and removing it from such a table changes no resolved set, and the class stays silent. That is the comparison working as specified, not a hole in it, and the
-exposure is bounded by the same fact that causes it: a divergence invisible here is invisible
-because it has no artifact here to be wrong about.
-
-**`AnchorMissing` is named for a unit's `Anchor` and checks every tree pointer a record carries.**
-`Contract.Declaration` and the `Evidence` list on a unit or an invariant record restate a tree
-path exactly as `Anchor` does, so leaving them unresolved would be an unchecked restatement. One
-class covers all three because the check, the remedy, and the reason each is evaluable from the
-checkout alone are the same in every case. **The name reading narrower than what it checks is the
-price, and it is paid deliberately** — renaming it costs this list, the checker's declared ids,
-and the tests that cite it by name. Three exemptions, each of which would otherwise block
-forever:
-
-- **A retired record is exempt entirely.** Its artifact is gone by definition, which is why it
-  was retired.
-- **An invariant record's `Anchor` is the invariant number, not a path.** Its resolution check is
-  well-formedness and uniqueness, and it is `IdCollision`'s, never `Test-Path`'s.
-- **A contract's `Declaration` of the literal `prose` resolves to nothing on purpose.** A
-  Markdown command surface has no declaration to point at, and that is the field's documented
-  second value rather than an absent path.
-
-**A widened class definition is invisible to `ClassListDisagreement`.** That class compares class
-*ids*, and an id does not change when what it detects does, so a definition widened ahead of its
-detection stays green until the code lands. `GlobDisagreement` fixes the shape of the remedy
-rather than being an exception to it — what closed the glob table's own version of this was
-resolving both sides against the checkout instead of comparing their names. A definition has no
-checkout to resolve against, so that remedy does not carry, and nothing on this list closes it.
-
-**Reported, never blocking.** Each fails in exactly the environment where the failure means
-nothing, which is why none of them is on the list above.
-
-| Class | Raised when | Why it never blocks |
-|---|---|---|
-| `MirrorStale` | A `WorkRef`'s `MirroredAt` is not the current commit | The mirror is stale by construction; that is its documented state, not a divergence |
-| `WorkStateDivergence` | A `WorkRef` disagrees with the tracker | Needs `gh`. A build that fails on an unauthenticated CLI reports an absent comparison as a divergence |
-| `PinAncestry` | A cited commit is not an ancestor of the default branch | A shallow CI checkout has no history to answer with, and "could not check" must not read as "checked and failed" |
-| `SemanticDisagreement` | A model judges a record's claim untrue | Permanently reported. The brief's *no formal specification of behaviour* non-goal puts it out of reach, and a build that fails on a model's opinion is a build nobody trusts |
-| `LiveAlreadyStated` | A decision in a unit's `Live` whose terms already stand somewhere that unit's reader reaches — a section of its own `Anchor`, or of a record one hop from it — with no site naming that place | Permanently reported, and by a reading rather than by the script. Whether a section states a claim is a model judging prose — `SemanticDisagreement`'s territory, which the blocking rule above admits nothing that needs. The script declares the id and never raises it; `/reconcile` is the reading. It names the candidate site so the caller can absorb; it never absorbs |
-
-**Could not evaluate.** Exit 2, and **never** a pass.
-
-| `DesignStateFailure` | Raised when | Caller does |
-|---|---|---|
-| `StateSetAbsent` | `design/state/` missing, or holding no records other than `WorkRef` mirrors | Report that nothing was checked |
-| `RecordUnparseable` | A line matches no production | Report the file, the line number, and the line **verbatim**. Never drop it |
-| `TrackerUnavailable` | `gh` missing or unauthenticated | Report the tracker classes as not compared; the rest of the run completes |
-| `ShallowCheckout` | No history for `merge-base` | Report that ancestry was not checked, and why. Never a pass |
-| `ProjectorFailed` | `Update-DesignProjection.ps1 -DryRun` non-zero or absent | Report `ProjectionStale` as uncomputed, not as clean |
-| `ContractListUnreadable` | A list this section is canonical for cannot be read or parsed — the divergence classes above, § *Invariants*, or § *Artifacts of a unit kind* | Report the class it feeds as uncomputed: `ClassListDisagreement` for the first, `UnrecordedArtifact`'s invariant half for the second, `GlobDisagreement` for the third. **Read-and-disagrees is a finding; cannot-read is not** |
+What this section keeps is what the kit's contract cannot know about this repository.
 
 **`StateSetAbsent` is this repository's standing state, and it is not a defect** (D192). The
 tooling is adopted; the record set is not. `design/state/` holds `WorkRef` mirrors alone, which
 `/track` writes into every target regardless of adoption and which therefore never count toward
-the set being present. A run consequently reaches only the two reads that precede it — this
-section's class list, and § *Invariants* — and returns.
+the set being present. A run consequently reaches only the contract reads that precede it — the
+kit's class list, and this document's § *Invariants* and § *Artifacts of a unit kind* — and
+returns.
 
-**And that return keeps the class-list comparison, which is measured rather than inferred**
-(D197, D212). `Test-ClassListAgreement` runs *before* the graph is read, deliberately, because it
-needs no records, and the `StateSetAbsent` return carries its finding rather than dropping it. Run
-through `Invoke-DesignStateCheck`, a class the script declares with no row here reports
-`ClassListDisagreement`, blocking, beside `StateSetAbsent` — and the exit stays 2. **So this
-section's agreement with the script is enforced whenever the checker runs, and nothing in CI runs
-it**; the policy binds whoever does. **That path's exit code stays 2** (D252): the kit's I20 puts
-could-not-evaluate ahead of findings, and nothing downstream in either repository distinguishes exit
-1 from exit 2, so demoting the run would announce a policy nothing can observe while collapsing a
-genuine could-not-evaluate into drift. The script is kit-owned.
+**And that return keeps the class-list finding** (D197, D212, D263). `Test-ClassListAgreement`
+runs *before* the graph is read, and the `StateSetAbsent` return carries its finding rather than
+dropping it. A kit whose script and contract disagree therefore reports `ClassListDisagreement`,
+blocking, beside `StateSetAbsent`, in this repository too — a kit defect surfacing here, fixed in
+the kit. Nothing in CI runs the checker; the policy binds whoever does. **That path's exit code
+stays 2** (D252): the kit's I20 puts could-not-evaluate ahead of findings, and nothing downstream
+in either repository distinguishes exit 1 from exit 2, so demoting the run would announce a policy
+nothing can observe while collapsing a genuine could-not-evaluate into drift.
 
-**§ *Artifacts of a unit kind* does not exist here, and its absence is reachable rather than
-inert.** `GlobDisagreement` runs after the `StateSetAbsent` return, so nothing reads the glob
-table today; the first commit that populates the record set makes it read, and it reports
-`ContractListUnreadable` until that section is written. Stating it here is what keeps it from
-being rediscovered as a regression.
+**§ *Artifacts of a unit kind* does not exist here, and its absence is not inert** (D263). The
+checker reads that table from this document only when it carries one; absent, it falls back to
+the kit's own baseline, which is shaped for the kit's layout and not this tree's. Nothing reads
+the result today, because `GlobDisagreement` and `UnrecordedArtifact` run after the
+`StateSetAbsent` return. The first commit that populates the record set makes them read, and
+against the baseline they would compare a file set that is not this repository's, with no
+unreadable-list signal to say so — a false clean. **That commit writes the table.** Stating it here
+is what keeps it from being rediscovered as a regression.
 
 **§ *Invariants* is read by id, and the ids must be legible to a parser.** Its rows carry the
 invariant number in the first column in bold, `| **I1** |`, because that is the form
 `Test-DesignState.ps1` matches. The reason this is written down rather than left as formatting:
 a row in any other form is not reported — it is silently absent from the set, and an empty set
 compares clean against every artifact. **A false clean is worse than an unreadable table**, which
-is why `ContractListUnreadable` exists beside it, and it is the one failure mode this section's
-own canonicity cannot protect against.
+is why the kit's `ContractListUnreadable` exists beside it, and it is the one failure mode this
+section's own canonicity cannot protect against.
 
 ### The freeze
 
