@@ -446,6 +446,13 @@ deltas and renders the `message` when it lands, which *Rules the renderer may re
 permits. The alternative was measured rather than assumed; see D168 and
 `findings/S25-token-streaming-probe.md`.
 
+**An envelope's `raw` is never rendered, and no view exists to render it** (D266). The vendor
+record is attached only where the deployment turns it on and is spilled whole with its envelope.
+Checking an adapter's mapping therefore means reading the spill on the host, and the person
+doing that already has the host. A Raw view would add a client surface that exists on some
+deployments and not others, and it would show vendor-shaped records on the one surface the
+vendor boundary keeps them off. The verbosity views stop at three (D246).
+
 Two storage tiers, and they are not the same data:
 
 - **Ring buffer**, in memory, bounded by `Caps.ringCapacity` — a deployment's value, not a
@@ -498,6 +505,12 @@ Lines also collapse two capabilities into one, because a *section* of a line-str
 **is** a line range — those were two separate things only while the unit was bytes. What it
 costs is that the server cannot seek and counts newlines from byte 0 instead; that cost is
 bounded in *Concurrency and ordering*, not hidden.
+
+**A blob is sized in bytes and lines, never in tokens** (D264). Nothing here holds either
+vendor's tokenizer, and the request the CLI sends the model is never seen in production, so a
+token figure for a tool's output could only be a guess. It would be the one guessed number on a
+surface where every other figure is measured, and the question it answers, what this output
+cost, already has a measured answer at turn grain (D248).
 
 **The `turnId` in that path is load-bearing, not decoration.** `callId` is vendor-minted, and
 *Identity spaces* only *assumes* it is unique within a session. If a vendor mints one unique
@@ -856,6 +869,13 @@ per-operator budget needs the operator record D3 refuses.
   reason the bullet above gives — and a currency-formatted `0.00` misreads as authoritative in a
   way `0 tokens` does not, which is why this tile sharpens the open consumer question rather than
   inheriting it quietly.
+- **Budget is announced, never enforced** (D260, D265). Crossing the warn fraction or exhausting
+  the budget writes a `session.notice`, and that is the whole behaviour. The session keeps
+  accepting sends and every turn runs to completion. A mid-turn kill would leave a half-edited
+  workspace, because interrupt undoes nothing. A refusal at the next turn would be friction on a
+  send the owner makes with the notice already in view. And since the budget is read at boot,
+  a refusal that waits for the budget to be raised could only be passed by a restart. The budget
+  is a spending signal, not a safety control.
 - **Idle** is wall-clock time the session was `live` with no turn: the gaps between
   `turn.ended` and the next `turn.started`, plus creation-to-first-turn and last-turn-to-end.
 - **Idle excludes any interval containing a restart, and boot writes the marker that makes
@@ -3026,6 +3046,17 @@ Windows-specific spawn machinery, and it reopens a settled mechanism in order to
 unsettled placement. Rejected **filing the measurement as an issue and deciding later**, which is the
 status quo, and the status quo was a contract asserting an invariant already measured to be
 unachievable.
+
+**From the three runtime-redesign questions D259 routed here, D264 to D266.** All three were
+answered by refusal, and each refusal is cheap to reverse because nothing was built. Rejected **a
+token estimate on stored tool output, declared as an estimate in its own type** (D264), because
+a label does not survive a glance and the figure has no measured source. Rejected **a
+turn-boundary budget gate the owner passes per send with an explicit override** (D265), the
+softest stop that can never harden silently, because it confirms what the sender already knows;
+rejected with it a refusal until the budget is raised, a restart by another name, and a
+mid-turn kill, on D21's grounds. Rejected **a Raw panel shown only under `INCLUDE_RAW` as inert
+text** (D266), because it is a deployment-conditional surface serving a reader who already holds
+the spill.
 
 Standing decisions this design rests on, all in `90-decisions.md`: D1/D10 transport,
 D2 sequencing, D3 delegated auth, D4 the jail, D5 the permission asymmetry, D6 shadow git,
