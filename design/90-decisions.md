@@ -6576,6 +6576,81 @@ leaves the section asserting a comparison the checker no longer makes.
 Reversibility: cheap — one section of prose, and the kit's rows are there to transcribe back.
 Landing point: #425.
 
+### 2026-09-28 — D264 Stored tool output carries no token estimate; its size is bytes and lines
+Context: #462 (D259; `20-contract.md § Unresolved` 20, runtime-redesign item 13). A byte cap and
+an explicit `truncated` flag exist (D162, S23), and a blob's line window and byte size are served
+(D251, D255). No token figure exists. SkyNet holds no tokenizer for either vendor's model, the
+vendor's usage arrives per model call with no attribution (D75, I28), and production never sees
+the request the CLI sends the model — #416 needed a capture bridge to observe one.
+Chosen: **refused.** No token estimate on the envelope, on the tool-output routes, or in the
+client. What a turn cost stays the measured per-call usage, shown per turn (D248, S33). What a
+tool output weighs stays its measured size in bytes and lines. The ground is S33.3's: a figure
+the adapters do not measure does not appear beside figures they do.
+Rejected: **an estimate declared as one in its own type and labelled wherever it renders.** It
+needs a heuristic whose error varies with content (source, prose, minified logs, non-ASCII text)
+and with each vendor's tokenizer, and it puts the only guessed number on a surface where every
+other figure is measured. A label does not survive a glance or a screenshot. The question it
+would answer, how much of the turn this output cost, already has a measured answer at turn grain.
+**Counting with a vendor tokenizer library.** That is a new dependency per vendor, and it needs a
+model-to-tokenizer map fed by a model identity nothing records (`Usage` carries none, D158). It
+would still count what the tool printed, not a figure anything measured. **Leaving it in
+`## Unresolved`.** Nothing learned by shipping supplies a tokenizer, so the entry would never
+close.
+Reversibility: cheap — nothing is built. An estimate type is additive through `/contract` if a
+measured source ever exists.
+Landing point: #462.
+
+### 2026-09-28 — D265 A budget stop is refused: exhaustion is announced and stops nothing
+Context: #463 (D259, D260; `20-contract.md § Unresolved` 21, runtime-redesign item 24). D260
+made a crossing a `session.notice` (`budget_warning`, `budget_exhausted`) and routed what a stop
+stops here. Brief item 8 promises the operator can *see* budget remaining. The non-goal says a
+budget is a value the operator sets in configuration. That value is read from
+`SESSION_TOKEN_BUDGET` at boot (`src/config/index.ts`). Every turn begins with the owner's own
+send, since `core.send` is the only path that starts one.
+Chosen: **no stop exists, hard or soft.** After `budget_exhausted` the session keeps accepting
+sends and every turn runs to completion. The budget is a spending signal the operator reads, not
+a control the server enforces. The failure mode #463 named, a soft stop that silently becomes a
+hard one at the next turn boundary, cannot occur because there is no stop. D260 stands unchanged.
+Rejected: **killing the turn mid-flight on exhaustion.** It is the server judging a turn, which
+D21 refused for elapsed silence. Usage lands per model call, so the kill arrives at an arbitrary
+point in the agent's work. Interrupt undoes nothing, so the workspace is left half-edited, which
+is a worse outcome than the overspend the kill prevents. **Refusing the next turn unless the
+send carries an explicit override, recorded with the turn.** It never hardens silently, since
+every refusal is visible and passable. But every turn begins with the owner's own message, and
+the exhaustion notice is already in the transcript they are reading, so the override confirms
+something the sender already knows. It costs a request field, an error code, an invariant and a
+slice for friction that carries no new information. **Refusing the next turn until the budget is
+raised.** The budget is read at boot, so passing the refusal means a restart. A restart ends every
+live turn on the deployment (D177) to unblock one session, which makes the control costlier to
+pass than the spending it guards. Underneath all three: the budget is not a safety control.
+Unlike a storage failure (D41), exhaustion puts nothing at risk except money the operator is
+choosing to spend.
+Reversibility: cheap — nothing is built. A turn-boundary gate is additive through `/contract`,
+with the notice D260 already writes as its trigger.
+Landing point: #463.
+
+### 2026-09-28 — D266 No Raw view; `Envelope.raw` stays never rendered
+Context: #464 (D259; `20-contract.md § Unresolved` 23, runtime-redesign item 15's remaining
+quarter). D246's three verbosity levels cover the Operator, Tools and Debug views the item names.
+`Envelope.raw` is attached only under `Config.includeRaw` (`INCLUDE_RAW`) and is spilled whole
+with its envelope. `20-contract.md` rules that `raw` exists for debugging and must never be
+rendered.
+Chosen: **refused, and the rule stands unchanged.** Item 15 is satisfied at three views. Checking
+an adapter's mapping means reading `events.ndjson` on the host, where `raw` already sits on a
+deployment with the flag on. Console access is shell access (the brief's *Untrusted users*
+non-goal), so the person a Raw view serves already has the file.
+Rejected: **a Raw panel only where `INCLUDE_RAW` is on, rendering `raw` as inert text at Debug
+level.** It narrows the rule to "never interpreted", which I26's text-node discipline could hold.
+But it ships a client surface that exists on some deployments and not others, a path the default
+configuration never exercises. It also puts vendor-shaped records on the one surface the
+vendor-string rule keeps them off, for an audience that can read the spill. **Persisting `raw` by
+default so the view always has a source.** It doubles what a session writes, and it persists
+whatever the vendor put in its records, which this design never promises to have inspected.
+**Lifting the rule outright.** Rendered `raw` becomes a vendor-specific surface the client can
+come to depend on, and that is how the vendor conditional I20 forbids arrives by the back door.
+Reversibility: cheap — nothing is built, and the rule is one sentence in the contract.
+Landing point: #464.
+
 ## Open
 
 Staging only. Once an item becomes an issue it leaves this list.
