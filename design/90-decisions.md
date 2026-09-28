@@ -6579,23 +6579,3 @@ Landing point: #425.
 ## Open
 
 Staging only. Once an item becomes an issue it leaves this list.
-
-- **`SessionSummary` carries no `endReason` — S35.5 names this rather than inferring one.** The
-  header and every sidebar row (S35) show an ended session as `state: 'ended'` and nothing more.
-  Inferring a reason from `endedAt` or any other already-present field would be guessing at a fact
-  the contract does not carry; if an operator needs to see *why* a session ended, that is a
-  `SessionSummary` field addition — a contract question, not a rendering one.
-
-- **`/design`: what a token estimate on stored tool output would be, or whether to refuse one**
-  (D259; `20-contract.md § Unresolved` 20, runtime-redesign item 13). The choice is between an
-  estimate declared as one in its own type, and a refusal on S33.3's grounds.
-
-- **`/design`: what a budget stop stops, and whether a soft stop exists** (D259, D260;
-  `20-contract.md § Unresolved` 21, runtime-redesign item 24). Crossings are already announced by
-  `budget_warning` and `budget_exhausted`, and nothing stops today. The failure mode to name is a
-  soft stop that silently becomes a hard one at the next turn boundary.
-
-- **`/design`: whether a Raw view renders `Envelope.raw`** (D259; `20-contract.md § Unresolved` 23,
-  runtime-redesign item 15). Doing so would lift the contract's never-rendered rule. The view would
-  exist only where `INCLUDE_RAW` is on, unless vendor records are persisted by default. The
-  alternative is to refuse Raw at three views.
