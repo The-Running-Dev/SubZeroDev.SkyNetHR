@@ -6549,16 +6549,6 @@ Landing point: #403.
 
 Staging only. Once an item becomes an issue it leaves this list.
 
-- **Codex `item/fileChange/patchUpdated` carries a recoverable diff, unmapped.** The app-server
-  protocol schema (`schema/v2/FileChangePatchUpdatedNotification.json`, captured during the S34
-  probe) defines this notification as `changes: [{diff: <unified-diff string>, kind, path}]` per
-  changed file — a real, Codex-native diff, structurally distinct from Claude's `structuredPatch`.
-  `src/agent-console/providers/codex-cli/index.ts`'s `IGNORED_APP_SERVER_METHODS` already lists the
-  method name as previously observed and ignored, but the "carries no content the operator needs"
-  comment is contradicted by the schema. S34 ships `diff: null` for every Codex result (D258) rather
-  than wiring this, because it is new scope beyond S34's authorized "map Claude's `tool_use_result`"
-  — a future slice should map it into the same `ToolResult.diff` field.
-
 - **`SessionSummary` carries no `endReason` — S35.5 names this rather than inferring one.** The
   header and every sidebar row (S35) show an ended session as `state: 'ended'` and nothing more.
   Inferring a reason from `endedAt` or any other already-present field would be guessing at a fact
