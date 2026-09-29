@@ -599,8 +599,14 @@ mirror is kept. Git is the store, and a second copy would be a second thing to f
 sync.
 
 **The sequence is `20-contract.md § checkpoints`'s and is not restated here** — what follows is
-why the second operation is not the one D31 named (D112), and why a fifth was added to report
-what the restore did not reach (D182).
+why the second operation is not the one D31 named (D112), why a fifth was added to report
+what the restore did not reach (D182), and why the ignored set is now fixed before the first
+operation and `clean -fd` is gone (D267). **D267 changes the sequence the contract states** —
+a protected-set read and a preflight ahead of the safety commit, no `clean`, a verification
+that excludes the protected set, a new refusal code, and a way for the restore result to mark
+a protected path the target no longer ignores. That is an amendment `/contract` owns; until it
+lands, the contract's five-operation sequence and the shipped code both carry the deletion
+D267 closes.
 
 **D31 specified `checkout <sha> -- .` here, and that sequence cannot do what D31 says it
 does.** The argument was that `clean -fd` removes what the agent created since the target.
@@ -624,13 +630,49 @@ warning:
 - **The safety checkpoint comes first.** The reset deletes work, including work never
   checkpointed, and an operator who restores to the wrong `sha` would otherwise have no way
   back. Committing the current state first means the mistake is itself a checkpoint.
-- **Ignored paths are neither checkpointed nor cleaned.** `add -A` reads the workspace's own
-  `.gitignore`, so `node_modules`, build output and local env files never enter the shadow
-  repo — and neither `read-tree` nor `clean -fd` takes `-x`, so exactly the same set is left
-  alone. The pair is deliberate and symmetric: a restore can only remove things a checkpoint
-  could have restored, so it never forces a dependency reinstall — the failure that would
-  make operators stop using restores. D31's symmetry argument survives the change of
-  mechanism unaltered.
+- **Ignored paths are neither checkpointed nor touched, and "ignored" is fixed once, before
+  anything is written** (D267). `add -A` reads the workspace's own `.gitignore`, so
+  `node_modules`, build output and local env files never enter the shadow repo, and a restore
+  must leave exactly that set alone: a restore can only remove things a checkpoint could have
+  restored, so it never forces a dependency reinstall — the failure that would make operators
+  stop using restores. D31 and D112 held that symmetry by having every step consult the same
+  rules, and **that argument was false whenever the restore changes `.gitignore` itself**.
+  The safety commit reads the current rules; `read-tree` then writes the target's; `clean -fd`
+  reads those, finds a path the current rules ignored and the target's do not, and deletes
+  it — bytes no checkpoint holds, behind two verification checks that both pass
+  (`design/redteam/2026-09-29-10-design.md` F1). The same disagreement has a second route with
+  no `clean` in it: a currently ignored path the target's *tree* contains is overwritten by
+  `read-tree -u` without a word.
+
+  So the rules are read **once**. Before the safety commit, a live `status --ignored=matching`
+  names the protected set — the paths ignored under the rules in force when the restore
+  starts — and every later step honours that set rather than re-reading `.gitignore`.
+  Nothing the console controls can write between that read and the reset, because a restore
+  is refused while a turn is in flight; an operator editing the workspace out of band is
+  outside the guarantee, as it already was. Three consequences, each of which is the design:
+
+  - **`clean -fd` is removed, not narrowed.** `read-tree --reset -u` already removes every
+    tracked path the target lacks, and removes a directory it empties; with the protected set
+    held back, the only work left for `clean` was the deletion above. Keeping it with the
+    protected set passed as excludes would keep a step whose sole remaining effect is the
+    hazard, guarded by a list it must be handed correctly on every call.
+  - **A collision refuses before any write.** Where a protected path cannot be both
+    preserved and restored — the target's tree holds it, holds paths beneath it, or holds a
+    file where it needs a directory — no ordering makes the restore whole without destroying
+    uncheckpointed bytes. The preflight is a tree lookup against the target, run before the
+    safety commit, and the refusal names the colliding paths. A protected-set read that fails
+    refuses the same way: without the set there is nothing to honour, and guessing it is how
+    F1 happened. **The checkpoint never grows to make a collision passable** — capturing
+    ignored bytes into the safety commit is the widening the brief declined.
+  - **After the restore, the target's rules govern, and the exposure is said out loud.** A
+    protected path the target's `.gitignore` does not ignore — restoring to before
+    `node_modules/` was ignored, say — survives untouched and is now ordinary content: the
+    next checkpoint captures it. That is the honest reading of "the target's state", and the
+    alternative is deletion; but it can make the next checkpoint very large, so the restore
+    result names each such path rather than leaving the operator to discover it in a commit.
+
+  The protected set is a live read, **not** the target's manifest below, so the manifest
+  remains report-only: nothing gates on a pointer the section below calls "not evidence".
 
   **The exclusion is reported rather than silent** (D182). Symmetry keeps a restore from
   forcing a reinstall; it does not make the operator's belief about what was rolled back
@@ -650,11 +692,13 @@ warning:
   `20-contract.md`'s, as is the field the restore result grows to carry the list — an
   amendment `/contract` owns, which this document does not pre-empt.
 - **Success is verified rather than inferred from an exit code.** `read-tree` exits 0 with
-  only a warning when it cannot remove a directory an embedded repository occupies, and
-  `clean` declines such a directory unless forced twice, which this deliberately never does.
-  So the sequence ends with `diff --quiet <sha>` for tracked content and
+  only a warning when it cannot remove a directory an embedded repository occupies. So the
+  sequence ends with `diff --quiet <sha>` for tracked content and
   `ls-files --others --exclude-standard` for what was left behind. Either coming back dirty
-  is `CheckpointError.restore_incomplete`.
+  is `CheckpointError.restore_incomplete`. **The second check excludes the protected set**
+  (D267): a protected path the target does not ignore is untracked by construction, and left
+  in the check it would report every exposure as a failed restore — an alarm on the one
+  outcome the design chose.
 
 None of these operations is atomic, so *Failure modes* keeps its partially-restored row —
 but that row now describes a state this code **detects and reports**, rather than one it
@@ -1788,7 +1832,7 @@ sessions* to each other; nothing compared the server's own storage tree to the r
 admits sessions in. Configure storage at `D:\work\.skynethr` with a root at `D:\work` and
 the shadow git operations run over a work-tree containing `meta.json`, the event spills, the
 audit log, the process records and every session's `ckpt.git`: a checkpoint ingests live
-server state and grows recursively, and a restore or a `clean -fd` deletes the evidence the
+server state and grows recursively, and a restore deletes or overwrites the evidence the
 server is mid-write on — including the audit log D25 exists to make undeletable by the
 subject it indicts. The refusal is at **startup**, not at session creation, because a
 configuration that can destroy server-wide evidence should not be permitted to serve the
@@ -1889,7 +1933,9 @@ a client tell a silent agent from a dead connection, so this costs nothing on th
 | `ckpt.git` init fails | git exit code | `session.notice / warn`; session proceeds **without** checkpoints | Banner: no checkpoints | Session usable, DoD #6 unavailable |
 | Pre-turn `checkpoint.commit` fails | git exit code | `session.notice / warn` naming the cause; **the turn proceeds** with no restore point (D42) | "This turn has no checkpoint", and `ckpt.git/index.lock` named when that is the cause | Turn runs. Earlier checkpoints intact; this turn is not rollback-able |
 | Restore while a turn is in flight | Manager turn state | `409 turn_in_flight` | "Finish or interrupt first" | Workspace untouched |
-| Restore fails part-way | **The verification pass, not the exit code** — `diff --quiet <sha>` for tracked content, `ls-files --others --exclude-standard` for what was left behind (D112) | `error / checkpoint_restore_failed`, non-fatal, plus `500 checkpoint_failed` | Failure named, with the paths left behind | **Workspace is partially restored.** No step in the sequence is atomic, and `read-tree` exits 0 on the embedded-repository case, which is why this is detected rather than assumed absent. The safety checkpoint (D31) is already committed, so the pre-restore state is still reachable |
+| Protected-set read fails at restore start | `status --ignored=matching` exit code, before the safety commit (D267) | Refuse the restore | Refusal naming the cause | **Workspace untouched**, no safety commit written |
+| Restore would reach an ignored path | Preflight: a path ignored under the pre-restore rules is in the target's tree, has target paths beneath it, or has a target *file* as an ancestor (D267) | Refuse with a new `CheckpointError` code — named by the `/contract` amendment | Refusal naming each colliding path | **Workspace untouched**, no safety commit written. Moving or deleting the named paths, then retrying, is the operator's call |
+| Restore fails part-way | **The verification pass, not the exit code** — `diff --quiet <sha>` for tracked content, `ls-files --others --exclude-standard` less the protected set for what was left behind (D112, D267) | `error / checkpoint_restore_failed`, non-fatal, plus `500 checkpoint_failed` | Failure named, with the paths left behind | **Workspace is partially restored.** No step in the sequence is atomic, and `read-tree` exits 0 on the embedded-repository case, which is why this is detected rather than assumed absent. The safety checkpoint (D31) is already committed, so the pre-restore state is still reachable |
 | Disk full or write error on spill | Write error | **Fatal to the session** (D41): interrupt the live turn with `stopReason: 'storage_failure'`, mark the session ended | "Storage failed; this session has ended" | Transcript ends at the last durable event. The ring never outruns the spill, so replay stays truthful |
 | Audit append fails | Write error on `audit.ndjson` | **Deny** the permission with the failure as its reason; `session.notice / error` (D33) | "Denied — the approval could not be recorded" | Turn continues. No tool ran unaudited |
 | Torn trailing line in `events.ndjson` | Last line fails to parse at read | Drop it, log it, serve the rest (D20 made the spill a read path, so this is now reachable) | Transcript one event short | File untouched; the next append starts a fresh line |
@@ -2792,7 +2838,9 @@ From the structural review pass (D29–D43):
   success. Rejected `clean` without the preceding commit — a mistaken restore then has no way
   back. **Superseded in its mechanism by D112**: the reset is `read-tree --reset -u <sha>`,
   because D31's own `checkout <sha> -- .` cannot remove a file the safety commit's `add -A`
-  has just tracked. The goal and both rejections stand.
+  has just tracked. The goal and both rejections stand. **D267 removes `clean -fd`**: once
+  the ignored set is fixed before the restore, its only remaining effect was deleting
+  uncheckpointed ignored content.
 - **D32 — a guard is claimed in the same synchronous block that tests it.** Chosen: state the
   rule once and apply it to the turn slot and the workspace claim. Rejected: a per-session
   async mutex across the protected operation. D238 narrows I27 for Phase 3b's short-lived
@@ -3057,6 +3105,20 @@ rejected with it a refusal until the budget is raised, a restart by another name
 mid-turn kill, on D21's grounds. Rejected **a Raw panel shown only under `INCLUDE_RAW` as inert
 text** (D266), because it is a deployment-conditional surface serving a reader who already holds
 the spill.
+
+**From the ignored-path rollback finding, D267.** The protected set is read once before the
+safety commit, a collision refuses before any write, and `clean -fd` is removed. Rejected **a
+preview that evaluates the target's rules in a scratch tree and asks the operator to confirm**,
+the most informative option: it costs a scratch tree per restore and adds the confirmation step
+D31 deliberately went without, a new interface, and it only moves the warning earlier — the
+protection this decision adds would still have to sit behind it. Rejected **refusing any restore that changes a
+`.gitignore` while anything is ignored**, the simplest rule to state: with `node_modules` present
+it is a near-permanent refusal, and the operator's way past it is deleting the ignored content —
+the forced reinstall the brief rejects. Rejected **keeping `clean -fd` with the protected set
+passed as excludes**, because it retains a step whose only remaining effect is the hazard.
+Rejected **capturing ignored bytes into the safety commit** (`add -f`), which would make every
+collision passable by widening what a checkpoint holds — the widening the brief declined, paid
+for on every restore.
 
 Standing decisions this design rests on, all in `90-decisions.md`: D1/D10 transport,
 D2 sequencing, D3 delegated auth, D4 the jail, D5 the permission asymmetry, D6 shadow git,

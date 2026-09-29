@@ -6651,6 +6651,48 @@ come to depend on, and that is how the vendor conditional I20 forbids arrives by
 Reversibility: cheap — nothing is built, and the rule is one sentence in the contract.
 Landing point: #464.
 
+### 2026-09-29 — D267 A restore fixes the ignored set before it writes, refuses collisions, and drops `clean -fd`
+Context: #468, red-team F1 (`design/redteam/2026-09-29-10-design.md`). D31 and D112 held that a
+restore removes only what a checkpoint could restore, because the safety commit's `add -A` and
+the reset's `clean -fd` read the same ignore rules. They do not when the restore changes
+`.gitignore`: `read-tree --reset -u` writes the target's rules, and `clean -fd` then deletes a
+path the current rules ignored and the target's do not. No checkpoint holds its bytes, and both
+verification checks pass. A probe found a second route with no `clean` in it: a currently
+ignored path that the target's tree contains is overwritten by `read-tree -u`, again with
+verification passing. The same probe showed `read-tree -u` removes directories it empties, so
+once the ignored set is held back, `clean -fd` has no work left except that deletion. The
+brief's DoD #6 exclusion says a restore never removes ignored content.
+Chosen: **the rules in force when the restore starts define "ignored", read once.** A live
+`status --ignored=matching` names the protected set before the safety commit, and a failed read
+refuses. A preflight against the target's tree, a lookup only, refuses with a new
+`CheckpointError` code naming each colliding path, before any write, where a protected path is in
+the target's tree, has target paths beneath it, or has a target file as an ancestor. **`clean
+-fd` is removed.** The verification's untracked-path check excludes the protected set. **The
+checkpoint never grows**: the fix narrows what a restore touches and never widens what a
+checkpoint holds. After the restore the target's rules govern, so a protected path the target
+does not ignore becomes ordinary content the next checkpoint captures; the restore result names
+each such path. The protected set is a separate live read, so D182's manifest stays report-only.
+The premise that nothing writes between the read and the reset rests on `turn_in_flight`;
+out-of-band operator edits stay outside the guarantee, as before. The sequence in `20-contract.md §
+checkpoints`, the new error code, and the result's marking of exposed paths are an amendment
+`/contract` owns, which this entry does not pre-empt. The shipped code in
+`src/agent-console/extensions/checkpoints/` follows that amendment.
+Rejected: **a preview that evaluates the target's rules in a scratch tree, with operator
+confirmation.** It costs a scratch tree per restore and adds the confirmation step D31
+deliberately omitted, which is a new interface. It only moves the warning earlier, and the
+protection chosen here would still have to sit behind it. **Refusing any restore that changes a
+`.gitignore` while anything is ignored.** With `node_modules` present that is a near-permanent
+refusal, and the way past it is deleting ignored content, which is the forced reinstall the brief
+rejects. **Keeping `clean -fd` with the protected set passed as excludes.** It keeps a step whose
+only remaining effect is the hazard, guarded by a list it must be handed correctly on every
+call. **Capturing ignored bytes into the safety commit (`add -f`).** It makes collisions passable
+by widening what a checkpoint holds, which is the widening the brief declined, paid for on every
+restore.
+Reversibility: cheap now, because the contract and code changes are both still ahead. After an
+affected restore under the old sequence, the loss is not reversible: no checkpoint holds the
+bytes.
+Landing point: #468.
+
 ## Open
 
 Staging only. Once an item becomes an issue it leaves this list.
