@@ -6654,3 +6654,14 @@ Landing point: #464.
 ## Open
 
 Staging only. Once an item becomes an issue it leaves this list.
+
+- **`/design`: a restore that changes `.gitignore` deletes ignored content it never captured**
+  (red-team F1, `design/redteam/2026-09-29-10-design.md`, ruled a defect 2026-09-29). The
+  symmetry argument in `10-design.md § Checkpoint` and `20-contract.md § checkpoints` assumes
+  `add -A` and `clean -fd` consult the same ignore rules. `read-tree --reset -u` rewrites
+  `.gitignore` between them, so a path ignored now but not at the target is skipped by the
+  safety commit, then removed by `clean`. Both verification checks pass and D182's report is
+  silent. That breaks brief item 6's "a restore never removes one". The brief stands; the
+  restore sequence, its verification, and the report's "same answer first" claim are what
+  change. The shipped code at `src/agent-console/extensions/checkpoints/index.ts` has the same
+  exposure.
