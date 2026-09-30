@@ -61,7 +61,7 @@ function waitForOutput(child: ChildProcess, pattern: RegExp, timeoutMs = 10000):
 // so an unbounded wait turns the regression these tests exist to catch — a shutdown that
 // never reaches `process.exit` — into a hung suite rather than a failed assertion. `node
 // --test` applies no per-test timeout of its own. The default sits well above the server's
-// own worst case, DRAIN_TIMEOUT_MS (5s) + RELEASE_LOCK_TIMEOUT_MS (2s).
+// own worst case, DRAIN_TIMEOUT_MS (5s) + KILL_TIMEOUT_MS (2s) + RELEASE_LOCK_TIMEOUT_MS (2s).
 function waitForExit(child: ChildProcess, timeoutMs = 15000): Promise<{ code: number | null; signal: NodeJS.Signals | null }> {
   return new Promise((resolve, reject) => {
     const onExit = (code: number | null, signal: NodeJS.Signals | null): void => {
