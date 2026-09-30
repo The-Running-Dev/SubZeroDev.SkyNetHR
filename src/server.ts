@@ -1,5 +1,6 @@
 import { createServer } from 'node:http';
 import type { Socket } from 'node:net';
+import { boundStep } from './bound-step.js';
 import { createSseEdge } from './edge/sse/index.js';
 import { createWsEdge } from './edge/ws/index.js';
 import { resolverFor } from './identity/index.js';
@@ -133,10 +134,11 @@ async function main(): Promise<void> {
   //   5. close    `store.close()` — this process's own OS handles, then exit (D202, I53)
   // A displacement (D195) — a renewal finding the lock gone or foreign — runs the same four
   // steps with a non-zero exit and stops the timer at once rather than at step 4.
-  // Neither timing bound is a `Config` field (module constants, beside each other, is the
-  // shape the design settles on) — promoting either to a deployment flag is a contract
-  // amendment.
+  // None of the timing bounds is a `Config` field (module constants, beside each other, is the
+  // shape the design settles on) — promoting any of them to a deployment flag is a contract
+  // amendment. Worst case 5 + 2 + 2 = 9 s, inside Docker's default 10 s grace (D222).
   const DRAIN_TIMEOUT_MS = 5000;
+  const KILL_TIMEOUT_MS = 2000;
   const RELEASE_LOCK_TIMEOUT_MS = 2000;
 
   // Every socket this server has ever accepted, tracked so step 2 can force-close whatever
@@ -200,12 +202,17 @@ async function main(): Promise<void> {
 
       // Step 3 (kill): never routed through `interrupt` — see `manager.shutdown()`'s own
       // contract for why. `server.ts` holds no adapter and kills nothing itself.
+      // Bounded (D222, I54): a stalled `taskkill /T` or tombstone append must not hold release
+      // and exit until the supervisor kills the process — D176's rejected failure.
       // Caught, and not as belt-and-braces: this chain is fired with `void`, so a rejection
       // escaping here is an unhandled rejection that takes the process down *before* step 4
       // — leaving `server.lock` on disk and exiting non-zero, which is D175's release and
       // I54's exit-zero both lost to the one step the design calls best-effort.
       try {
-        await manager.shutdown();
+        const killed = await boundStep(manager.shutdown(), KILL_TIMEOUT_MS);
+        if (killed === 'timeout') {
+          console.error(`[server] shutdown: killing live turns did not finish within ${KILL_TIMEOUT_MS} ms; releasing the lock anyway`);
+        }
       } catch (err) {
         console.error(`[server] shutdown: killing live turns failed; releasing the lock anyway — ${String(err)}`);
       }
