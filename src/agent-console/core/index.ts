@@ -238,6 +238,9 @@ export function createSessionCore(deps: {
   const { getProcessImage, imagesMatch, killProcessTree } = supervisor;
   const getOsCreatedAt = getOsCreatedAtOverride ?? supervisor.getOsCreatedAt;
   const sessions = new Map<SessionId, SessionEntry>();
+  // D218: the answers whose request already left `turn.pending` (D33) but whose
+  // `permission.resolved` has not yet been emitted. Local to the manager, not a `Turn` field.
+  const inFlightAnswers = new WeakMap<Turn, Map<RequestId, { tool: string; input: Readonly<Record<string, unknown>> }>>();
   // D178, I55: one-way, and `shutdown` is its only setter. Checked at `handleNotification`,
   // the one function every `AdapterNotification` already passes through (it is what an
   // adapter is handed as `notify` at create), so this covers all four kinds — `event`,
@@ -1147,7 +1150,8 @@ export function createSessionCore(deps: {
         return { ok: false, error: { code: 'bad_request', field: 'scope', detail: 'no standing rule may be created against a request with no matchTarget' } };
       }
 
-      entry.lane.run(() => { turn.pending.delete(answer.requestId); }); // before any await (D33)
+      // before any await (D33); D218: tracked as in flight so the `exited` sweep still reaches it
+      entry.lane.run(() => { turn.pending.delete(answer.requestId); inFlightOf(turn).set(answer.requestId, { tool: pending.tool, input: pending.input }); });
 
       const record: AuditRecord = {
         ts: nowIso(),
@@ -1540,6 +1544,9 @@ export function createSessionCore(deps: {
     onDurable?: () => void,
   ): Promise<EventPayloadMap['permission.resolved']> {
     const appended = await audit.append(record);
+    // D218: the child exited while this answer's audit append was in flight and the sweep
+    // already resolved the request `cancelled_process_exit` — nothing is owed here.
+    if (!inFlightOf(turn).has(requestId)) return swept(turn, requestId);
     if (!appended.ok) {
       const resolution = await respondOrCancel(entry, turn, requestId, record, 'deny', {
         turnId: turn.turnId,
@@ -1586,9 +1593,14 @@ export function createSessionCore(deps: {
     intended: EventPayloadMap['permission.resolved'],
   ): Promise<EventPayloadMap['permission.resolved']> {
     const responded = entry.adapter!.respond(requestId, decision);
+    // D218: clear the in-flight entry and assign `permission.resolved`'s `seq` in this one
+    // synchronous tick, before any await, so the child's close cannot take the lower `seq`
+    // and the `exited` sweep cannot resolve the same request twice.
+    inFlightOf(turn).delete(requestId);
     if (!responded.ok) {
-      const resolution: EventPayloadMap['permission.resolved'] = { turnId: turn.turnId, requestId, decision: 'deny', scope: 'once', operator: null, reason: 'cancelled_process_exit' };
+      const resolution = swept(turn, requestId);
       if (responded.error.code === 'write_failed') {
+        const resolved = emit(entry, 'permission.resolved', resolution);
         const cancelled = await audit.append({
           ts: nowIso(),
           operator: null,
@@ -1601,14 +1613,7 @@ export function createSessionCore(deps: {
           scope: 'once',
           reason: 'cancelled_process_exit',
         });
-        await emit(entry, 'permission.resolved', {
-          turnId: turn.turnId,
-          requestId,
-          decision: 'deny',
-          scope: 'once',
-          operator: null,
-          reason: 'cancelled_process_exit',
-        });
+        await resolved;
         if (!cancelled.ok) {
           await emit(entry, 'session.notice', {
             level: 'error',
@@ -1623,6 +1628,15 @@ export function createSessionCore(deps: {
     return intended;
   }
 
+  function inFlightOf(turn: Turn): Map<RequestId, { tool: string; input: Readonly<Record<string, unknown>> }> {
+    let m = inFlightAnswers.get(turn);
+    if (!m) { m = new Map(); inFlightAnswers.set(turn, m); }
+    return m;
+  }
+  function swept(turn: Turn, requestId: RequestId): EventPayloadMap['permission.resolved'] {
+    return { turnId: turn.turnId, requestId, decision: 'deny', scope: 'once', operator: null, reason: 'cancelled_process_exit' };
+  }
+
   // S10.4: the server's own decision for a request matched against a standing rule.
   // Mirrors `answerPermission`'s happy/audit-failure paths via `finalizeResolution`, but
   // the operator is `null` throughout and the grant behind it was already durable when
@@ -1631,6 +1645,7 @@ export function createSessionCore(deps: {
   async function resolvePreapproved(entry: SessionEntry, turn: Turn, request: PermissionRequest, matched: StandingRuleExpression): Promise<void> {
     if (!turn.pending.has(request.requestId)) return; // already resolved by a race
     turn.pending.delete(request.requestId);
+    inFlightOf(turn).set(request.requestId, { tool: request.tool, input: request.input });
 
     // 20-contract.md § Audit record: on `scope === 'standing'`, `reason` carries the
     // matched `StandingRuleExpression` verbatim — the only place it holds anything but
@@ -1763,9 +1778,12 @@ export function createSessionCore(deps: {
         // time inside a `for` loop with an `await` between each) is what keeps that
         // order intact when there is more than one outstanding request.
         const turn = entry.turn;
-        if (turn && turn.pending.size > 0) {
-          const cancelled = [...turn.pending.entries()];
+        const flying = turn ? inFlightOf(turn) : null;
+        if (turn && (turn.pending.size > 0 || flying!.size > 0)) {
+          // D218: answers still awaiting their audit append have already left `pending`.
+          const cancelled = [...turn.pending.entries(), ...flying!.entries()];
           turn.pending.clear();
+          flying!.clear();
           const emits = cancelled.map(([requestId]) =>
             emit(entry, 'permission.resolved', {
               turnId: turn.turnId,

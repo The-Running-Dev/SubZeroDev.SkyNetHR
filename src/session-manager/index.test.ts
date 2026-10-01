@@ -1144,6 +1144,138 @@ test('D213/#322 — a write_failed from respond() resolves the pending permissio
   assert.equal(audit[1]!.reason, 'cancelled_process_exit');
 });
 
+// Shared by the two D218/#339 tests: an adapter that raises one permission request on `send`
+// and hands its `notify` and every `respond` call back to the test.
+function d218Adapter(respondImpl: () => Result<void, AdapterError>) {
+  const handle: { notify: AdapterOptions['notify'] | null; responds: number } = { notify: null, responds: 0 };
+  const factory = (vendor: Vendor, adapterOpts: AdapterOptions): Result<Adapter, AdapterError> => {
+    handle.notify = adapterOpts.notify;
+    const adapter: Adapter = {
+      vendor,
+      policy: { mode: 'interactive', sandbox: null, banner: null },
+      acceptsAttachments: false,
+      async send(_text, _attachments, _resume, turnId) {
+        adapterOpts.notify({
+          kind: 'event',
+          event: { kind: 'permission.request', data: { turnId, requestId: 'req-1', callId: 'call-1', tool: 'Bash', input: { cmd: 'ls' }, matchTarget: null, suggestions: [] } },
+        } as never);
+        return { ok: true, value: undefined };
+      },
+      respond() { handle.responds++; return respondImpl(); },
+      async kill() {},
+    };
+    return { ok: true, value: adapter };
+  };
+  return { factory, handle };
+}
+
+test('D218/#339 — a child that exits while an answer awaits its audit append resolves the request cancelled_process_exit once, before turn.ended, and the answer stands down', async () => {
+  let release = (): void => {};
+  const held = new Promise<void>((resolve) => { release = resolve; });
+  let holdNextAppend = false;
+  let auditAppendCalled = false;
+  const made = await makeManager('full');
+  const { config, checkpoints, workspaceRoot, storageRoot } = made;
+  const st = made.store;
+  const store: Store = {
+    ...st,
+    async appendAudit(record) {
+      if (!holdNextAppend) return st.appendAudit(record);
+      holdNextAppend = false;
+      auditAppendCalled = true;
+      await held;
+      return st.appendAudit(record);
+    },
+  };
+  const owner = 'operator-1' as OperatorId;
+  const projectDir = path.join(workspaceRoot, 'proj-d218a');
+  await mkdir(projectDir);
+  const { factory, handle } = d218Adapter(() => ({ ok: true, value: undefined }));
+  const manager = createSessionManager({ config, store, checkpoints, records: notImplementedProxy<Records>('records'), createAdapter: factory });
+  const created = await manager.create(owner, { vendor: 'claude', cwd: projectDir, model: null, sandbox: null, requisitionId: null });
+  assert.equal(created.ok, true);
+  if (!created.ok) return;
+  const { sessionId } = created.value;
+  const received: Envelope[] = [];
+  await manager.subscribe(sessionId, owner, 0, { deliver: (e) => { if ('seq' in e) received.push(e); }, close: () => {} });
+  await manager.message(sessionId, owner, 'go', []);
+  await waitUntil(() => received.some((e) => e.kind === 'permission.request'));
+  const requestId = (received.find((e) => e.kind === 'permission.request')!.data as { requestId: string }).requestId;
+
+  holdNextAppend = true;
+  const answering = manager.answerPermission(sessionId, owner, { requestId: requestId as never, decision: 'allow', scope: 'once', rule: null, reason: null });
+  await waitUntil(() => auditAppendCalled);
+
+  // The child exits while the decision's audit append is still held open.
+  handle.notify!({ kind: 'exited', code: 1, signal: null });
+  handle.notify!({ kind: 'event', event: { kind: 'turn.ended', data: { stopReason: 'process_exit', usage: null } } } as never);
+  await waitUntil(() => received.some((e) => e.kind === 'turn.ended'));
+  release();
+  await answering;
+  await new Promise((r) => setTimeout(r, 100));
+
+  const resolutions = received.filter((e) => e.kind === 'permission.resolved');
+  assert.equal(resolutions.length, 1, 'exactly one permission.resolved for the request');
+  assert.equal((resolutions[0]!.data as { reason: string }).reason, 'cancelled_process_exit');
+  const turnEnded = received.find((e) => e.kind === 'turn.ended')!;
+  assert.ok((resolutions[0]!.seq as unknown as number) < (turnEnded.seq as unknown as number), 'the cancellation precedes turn.ended (I9)');
+  assert.equal(handle.responds, 0, 'the answer stood down — the child was never answered');
+  const audit = await readAudit(storageRoot);
+  assert.equal(audit.length, 2, 'the decision record, then the cancellation correction (D219)');
+  // The decision's append was held while the sweep's cancellation landed, so order is not asserted.
+  assert.equal(audit.filter((a) => a.decision === 'allow').length, 1);
+  assert.equal(audit.filter((a) => a.reason === 'cancelled_process_exit').length, 1);
+});
+
+test('D218/#339 — respond() failing write_failed emits permission.resolved before its cancellation append, so a close during that append takes the higher seq', async () => {
+  let release = (): void => {};
+  const held = new Promise<void>((resolve) => { release = resolve; });
+  let appends = 0;
+  let cancelAppendCalled = false;
+  const made = await makeManager('full');
+  const { config, checkpoints, workspaceRoot } = made;
+  const st = made.store;
+  const store: Store = {
+    ...st,
+    async appendAudit(record) {
+      appends++;
+      if (appends === 2) { cancelAppendCalled = true; await held; }
+      return st.appendAudit(record);
+    },
+  };
+  const owner = 'operator-1' as OperatorId;
+  const projectDir = path.join(workspaceRoot, 'proj-d218b');
+  await mkdir(projectDir);
+  const { factory, handle } = d218Adapter(() => ({ ok: false, error: { code: 'write_failed', detail: 'stdin not writable' } }));
+  const manager = createSessionManager({ config, store, checkpoints, records: notImplementedProxy<Records>('records'), createAdapter: factory });
+  const created = await manager.create(owner, { vendor: 'claude', cwd: projectDir, model: null, sandbox: null, requisitionId: null });
+  assert.equal(created.ok, true);
+  if (!created.ok) return;
+  const { sessionId } = created.value;
+  const received: Envelope[] = [];
+  await manager.subscribe(sessionId, owner, 0, { deliver: (e) => { if ('seq' in e) received.push(e); }, close: () => {} });
+  await manager.message(sessionId, owner, 'go', []);
+  await waitUntil(() => received.some((e) => e.kind === 'permission.request'));
+  const requestId = (received.find((e) => e.kind === 'permission.request')!.data as { requestId: string }).requestId;
+
+  const answering = manager.answerPermission(sessionId, owner, { requestId: requestId as never, decision: 'allow', scope: 'once', rule: null, reason: null });
+  await waitUntil(() => cancelAppendCalled);
+
+  // The cancellation append is held open: the resolution must already be on the wire, and
+  // the child's close arriving now must take a later seq.
+  assert.equal(received.filter((e) => e.kind === 'permission.resolved').length, 1, 'permission.resolved emitted before the cancellation append settled');
+  handle.notify!({ kind: 'exited', code: 1, signal: null });
+  handle.notify!({ kind: 'event', event: { kind: 'turn.ended', data: { stopReason: 'process_exit', usage: null } } } as never);
+  await waitUntil(() => received.some((e) => e.kind === 'turn.ended'));
+  release();
+  await answering;
+
+  const resolutions = received.filter((e) => e.kind === 'permission.resolved');
+  assert.equal(resolutions.length, 1, 'the exit sweep did not resolve the same request a second time');
+  const turnEnded = received.find((e) => e.kind === 'turn.ended')!;
+  assert.ok((resolutions[0]!.seq as unknown as number) < (turnEnded.seq as unknown as number), 'permission.resolved precedes turn.ended (I9)');
+});
+
 test('S4.9 — a child that dies with requests outstanding resolves each one cancelled_process_exit, each with an audit record, before turn.ended', async () => {
   const { manager, workspaceRoot, storageRoot } = await makeManager('die-with-pending');
   const owner = 'operator-1' as OperatorId;
