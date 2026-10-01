@@ -67,6 +67,12 @@ if (subcommand === 'app-server') {
         notify('totally/unknown/method', { threadId });
         return;
       }
+      case 'unknown-after-ack': {
+        // Delayed so the bad record always lands after `send()` has resolved ok — the
+        // failure path then fires with the turn open (D220), not before it started.
+        setTimeout(() => notify('totally/unknown/method', { threadId }), 100);
+        return;
+      }
       case 'unknown-item-type': {
         notify('item/completed', { item: { id: 'item-x', type: 'webSearch', query: 'q' }, threadId, turnId });
         return;

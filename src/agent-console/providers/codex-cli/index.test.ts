@@ -206,6 +206,22 @@ test('S8.5 — app-server: an unrecognised notification method is a fatal schema
   assert.equal((err.event.data as { fatal: boolean }).fatal, true);
 });
 
+// D220 — a schema mismatch after `send` resolved ok kills the child and ends the open turn
+// `error`, exactly once; the close handler must not add a second `turn.ended`.
+test('D220 — app-server: a malformed notification after send-ok ends the turn error exactly once', async () => {
+  process.env['SKYNET_CODEX_SCENARIO'] = 'unknown-after-ack';
+  const { result, notifications } = await makeAdapter();
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  const sendResult = await result.value.send('hello', [], null, 'turn-d220' as never);
+  assert.equal(sendResult.ok, true);
+
+  await waitUntil(() => notifications.some((n) => n.kind === 'exited'));
+  const ended = eventsOf(notifications, 'turn.ended');
+  assert.equal(ended.length, 1);
+  assert.equal((ended[0]!.event.data as { stopReason: string }).stopReason, 'error');
+});
+
 // S8.5 — the same, for an item `type` outside the three-row table (a real agent action —
 // a web search — this contract does not map, not harmless metadata).
 test('S8.5 — app-server: an unrecognised item type is a fatal schema mismatch', async () => {

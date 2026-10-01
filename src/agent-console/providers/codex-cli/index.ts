@@ -273,12 +273,16 @@ function buildCodexAdapter(opts: AdapterOptions, executable: string, transport: 
       }
 
       const failSchemaMismatch = makeFailSchemaMismatch(emitEvent, (detail) => {
+        const turnOpen = settled && !resultSeen; // send() already succeeded and no result has ended the turn
         resultSeen = true; // this failure, not a bare process exit, is why the child is about to die
         if (!settled) {
           settled = true;
           resolve({ ok: false, error: { code: 'schema_mismatch', detail } });
         }
         if (child) terminate(child);
+        // D220: the close handler stays silent once `resultSeen` is set, so end the open turn here —
+        // after the kill, per I59.
+        if (turnOpen) emitEvent('turn.ended', { stopReason: 'error', usage: null }, null);
       });
 
       function handleItemStarted(params: Record<string, unknown>, rec: unknown): void {
@@ -566,12 +570,16 @@ function buildCodexAdapter(opts: AdapterOptions, executable: string, transport: 
       killRequested = false;
 
       const failSchemaMismatch = makeFailSchemaMismatch(emitEvent, (detail) => {
+        const turnOpen = settled && !resultSeen; // send() already succeeded and no result has ended the turn
         resultSeen = true; // this failure, not a bare process exit, is why the child is about to die
         if (!settled) {
           settled = true;
           resolve({ ok: false, error: { code: 'schema_mismatch', detail } });
         }
         if (child) terminate(child);
+        // D220: the close handler stays silent once `resultSeen` is set, so end the open turn here —
+        // after the kill, per I59.
+        if (turnOpen) emitEvent('turn.ended', { stopReason: 'error', usage: null }, null);
       });
 
       function handleLine(line: string): void {
