@@ -6693,6 +6693,89 @@ affected restore under the old sequence, the loss is not reversible: no checkpoi
 bytes.
 Landing point: #468.
 
+### 2026-10-01 — D268 Host-level Claude Code hooks inside spawned sessions are accepted; their records become audit events
+Context: #415, absorbing #186. `buildEnvironment` keeps `HOME`/`USERPROFILE` in every mode, so
+the spawned CLI reads the host account's own Claude configuration, and hooks configured there run
+inside every SkyNet session (`design/findings/runtime-redesign-classification.md § The hook
+question`). They can block or rewrite tool calls through a path SkyNet does not own. The adapter
+recognises `hook_started` and `hook_response` and drops both, so nothing in the audit record shows
+a hook ran.
+Chosen: **the path is accepted.** Operators are trusted (brief), and the host account's
+configuration is theirs. A hook is the operator's own policy acting on the operator's own
+sessions, not a third party's. **What is not accepted is that it is invisible.** `hook_started`
+and `hook_response` become audit events, so a session's record shows when host configuration
+acted on it. The event shape, its persistence, and the line between what is audited and what is
+replayed are a `20-contract.md` amendment that `/contract` owns, which this entry does not
+pre-empt.
+Rejected: **isolating the child from host configuration** by pointing `HOME` at a constructed
+directory. It also cuts the child off from the operator's credentials and settings, which is the
+reason the environment is inherited at all. **Leaving the records dropped.** That keeps a path
+that can change a tool call's outcome absent from the record an operator reads to learn what
+happened.
+Reversibility: cheap. Nothing is persisted yet, and the acceptance is one environment default.
+Landing point: #415.
+
+### 2026-10-01 — D269 The full design-state mechanism stays unadopted; D208 stands
+Context: #414, absorbing #260, asks to build `design/state-index.md` and the contract's marked
+regions so that `Update-DesignProjection.ps1` and `Test-DesignState.ps1` stop refusing.
+Chosen: **keep D208.** This repository stays mirror-only. Neither issue brings evidence that
+D208 lacked: the cost is the same one D208 named, deciding what a unit, a binding, and a consumer
+mean for these documents, and nothing has changed to make that cheaper or more valuable.
+Rejected: **adopting the mechanism**, for D208's reason. It is design work that would rewrite how
+every document here is cross-referenced, done to satisfy a kit script, not to answer a question
+the design is currently getting wrong.
+Reversibility: cheap. Adopting later is the same work as adopting now.
+Landing point: #414.
+
+### 2026-10-01 — D270 The undocumented `--permission-prompt-tool stdio` flag is an accepted risk
+Context: #184. The flag is accepted by the CLI and absent from its `--help`. D173 showed that the
+handshake it enables works on the real CLI, so the flag works. The open question is whether
+depending on an undocumented flag is acceptable.
+Chosen: **accept the risk and keep the flag.** No documented mechanism carries a Claude
+permission round trip over a child process's stdio. The SDK's in-process `canUseTool` callback
+needs the console to host the agent loop in-process, not drive the CLI as the brief describes.
+The S26 real-CLI probe is how a vendor change is detected: if the flag is removed or changes
+meaning, that probe fails and the permission half of the design is reopened then, on evidence.
+Rejected: **moving to the SDK's `canUseTool`.** It replaces the transport this design is built on
+to avoid a risk that has not materialised. **Treating the flag as a defect to fix.** There is
+nothing in this repository to fix, and the vendor's documentation is not this project's to edit.
+Reversibility: cheap to decide again. Being forced off the flag by a vendor change would be
+expensive, and accepting the risk does not change that cost.
+Landing point: #184.
+
+### 2026-10-01 — D271 `PROTOCOL.md` owns link mechanics; `20-contract.md` owns meaning and invariants
+Context: #379. `src/agent-console/protocol/README.md` says the TypeScript declarations own shape
+and `design/20-contract.md` owns meaning. `PROTOCOL.md` then states delivery policy, timeout
+defaults, and the A5 state machine. D241 stopped the duplication by having the contract point at
+`PROTOCOL.md`, but nothing states where the line between the two falls.
+Chosen: **`PROTOCOL.md` is the canonical home for link mechanics**: framing, the method table,
+timeout defaults, delivery and credit policy, and the A5 create-attempt state machine. The contract
+points at it and does not restate them. **`20-contract.md` keeps what an operator or a second
+implementer must be able to rely on**: invariants, the trust boundary (I65), exclusion (I50), the
+three-outcomes rule, and error semantics. Where `PROTOCOL.md` has to repeat one of those to be
+read on its own, it names the contract as the canonical copy. The README states this boundary.
+Rejected: **`PROTOCOL.md` as an implementer's reference that may restate the contract.** That
+creates two copies with no rule for which one wins, which is the drift *Single ownership* exists
+to prevent. **Moving the mechanics into `20-contract.md`.** D241 already rejected that: those are
+the rules that change most often, and the contract's copy is the one that would go stale.
+Reversibility: cheap. It sets a document boundary; nothing in the shipped code depends on it.
+Landing point: #379.
+
+### 2026-10-01 — D272 The trailing-30-day metrics grid and weekly timecard are out of scope
+Context: #50. The prototype shows a trailing-30-day metrics grid and a weekly timecard. D59
+recast tier two as brief items 8–12, and none of them names either aggregation. S16 covers the
+part that has a source: token burn and idle time, folded from a session's own event log.
+Chosen: **out of scope.** Both views aggregate across sessions and across time, so they need a
+persisted rollup or a cross-session fold that nothing in the brief asks for. They come back into
+scope only if the brief gains an item that names them, together with the data they are computed
+from.
+Rejected: **computing them from the event logs at read time.** It requires a cross-session index
+the design does not have, built for views no brief item calls for. **Keeping the question open.**
+It has been open since D54, and an open question nothing is waiting on is how a staged item
+becomes permanent.
+Reversibility: cheap. Nothing is built for either view.
+Landing point: #50.
+
 ## Open
 
 Staging only. Once an item becomes an issue it leaves this list.
