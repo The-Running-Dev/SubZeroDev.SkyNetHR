@@ -6,6 +6,12 @@ The persisted/core event corpus below remains separate. Frozen v5's authorized
 `adapter_output_overflow` discriminator is pinned alongside the historical error
 subset; existing end, notice and stop-reason unions remain unchanged.
 
+PROTOCOL.md is the canonical home for link mechanics: framing, the method table,
+timeout defaults, delivery and credit policy, and the A5 create-attempt state machine.
+`design/20-contract.md` points at it for those, and owns the invariants, the trust
+boundary, storage-root exclusion, the three-outcomes rule and error semantics. Where
+PROTOCOL.md repeats one of those, the contract's copy wins (D271).
+
 These JSON Schema 2020-12 files describe the Phase 1 contract. They are test assets;
 no runtime module loads them. The TypeScript declarations in `../contract/index.ts`
 own shape, and `design/20-contract.md` owns meaning.
