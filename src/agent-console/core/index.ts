@@ -390,6 +390,10 @@ export function createSessionCore(deps: {
         // no subscriber was ever told this turn began, so `turn.ended` must not claim one
         // ended either (I14) — and with no `turn.started`, no `permission.request` could
         // have arrived yet, so `turn.pending` is empty regardless.
+        // D221: the kill is issued before `turn.ended` is delivered (I59) but not awaited
+        // until after it, so a slow tree kill never holds the envelope back.
+        const killing = entry.adapter!.kill();
+        killing.catch(() => {}); // observed by the `await` below; this only silences the interim gap
         if (turn.phase !== 'starting') {
           const cancelled = [...turn.pending];
           for (const [requestId] of cancelled) {
@@ -428,7 +432,7 @@ export function createSessionCore(deps: {
         }
         // A live turn (the only case this branch had one to clear) always has a real
         // adapter — a rehydrated session's `turn` is always null and never reaches here.
-        await entry.adapter!.kill();
+        await killing;
       }
 
       deliverDirect(entry, 'session.ended', { reason: 'storage_failure', endedAt: entry.record.endedAt });

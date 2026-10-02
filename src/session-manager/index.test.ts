@@ -3218,6 +3218,65 @@ test('S9.8 — a spill failure mid-turn kills the child, resolves the outstandin
   }
 });
 
+test('D221/#341 — a storage failure issues the child kill before turn.ended is delivered, and still awaits it', async () => {
+  const { config, store, checkpoints, workspaceRoot } = await makeManager('full');
+  const owner = 'operator-1' as OperatorId;
+  const projectDir = path.join(workspaceRoot, 'proj-d221');
+  await mkdir(projectDir);
+
+  const killLog: string[] = [];
+  let releaseKill!: () => void;
+  const killGate = new Promise<void>((r) => { releaseKill = r; });
+  const failingStore: Store = {
+    ...store,
+    async appendEvent(sessionId, envelope) {
+      if (envelope.kind === 'permission.request') return { ok: false, error: { code: 'io', path: 'events.ndjson', detail: 'disk full' } };
+      return store.appendEvent(sessionId, envelope);
+    },
+  };
+  const factory = (vendor: Vendor, adapterOpts: AdapterOptions): Result<Adapter, AdapterError> => ({
+    ok: true,
+    value: {
+      vendor,
+      policy: { mode: 'interactive', sandbox: null, banner: null },
+      acceptsAttachments: false,
+      async send(_text, _attachments, _resume, turnId) {
+        adapterOpts.notify({
+          kind: 'event',
+          event: { kind: 'permission.request', data: { turnId, requestId: 'req-1', callId: 'call-1', tool: 'Bash', input: { cmd: 'ls' }, matchTarget: null, suggestions: [] } },
+        } as never);
+        return { ok: true, value: undefined };
+      },
+      respond() { return { ok: true, value: undefined }; },
+      async kill() {
+        killLog.push('kill-issued');
+        // Held open until the test observes `turn.ended`, so the order is not a timing race.
+        await killGate;
+        killLog.push('kill-settled');
+      },
+    },
+  });
+  const manager = createSessionManager({ config, store: failingStore, checkpoints, records: notImplementedProxy<Records>('records'), createAdapter: factory });
+  const created = await manager.create(owner, { vendor: 'claude', cwd: projectDir, model: null, sandbox: null, requisitionId: null });
+  assert.equal(created.ok, true);
+  if (!created.ok) return;
+  const { sessionId } = created.value;
+
+  const received: Envelope[] = [];
+  await manager.subscribe(sessionId, owner, 0, {
+    deliver: (e) => {
+      if (!('seq' in e)) return;
+      received.push(e);
+      if (e.kind === 'turn.ended') { killLog.push('turn.ended'); releaseKill(); }
+    },
+    close: () => {},
+  });
+  await manager.message(sessionId, owner, 'go', []);
+  await waitUntil(() => received.some((e) => e.kind === 'session.ended'), 5000);
+
+  assert.deepEqual(killLog, ['kill-issued', 'turn.ended', 'kill-settled'], 'kill is issued first, turn.ended is delivered while it runs, and the kill is awaited before session.ended');
+});
+
 test('S17.3 — a live child dying with requests outstanding also reaches the incident view, attributed to nobody with the cause in reason', async () => {
   const { manager, workspaceRoot } = await makeManager('die-with-pending');
   const owner = 'operator-1' as OperatorId;
