@@ -3225,6 +3225,8 @@ test('D221/#341 — a storage failure issues the child kill before turn.ended is
   await mkdir(projectDir);
 
   const killLog: string[] = [];
+  let releaseKill!: () => void;
+  const killGate = new Promise<void>((r) => { releaseKill = r; });
   const failingStore: Store = {
     ...store,
     async appendEvent(sessionId, envelope) {
@@ -3248,7 +3250,8 @@ test('D221/#341 — a storage failure issues the child kill before turn.ended is
       respond() { return { ok: true, value: undefined }; },
       async kill() {
         killLog.push('kill-issued');
-        await new Promise((r) => setTimeout(r, 20));
+        // Held open until the test observes `turn.ended`, so the order is not a timing race.
+        await killGate;
         killLog.push('kill-settled');
       },
     },
@@ -3264,7 +3267,7 @@ test('D221/#341 — a storage failure issues the child kill before turn.ended is
     deliver: (e) => {
       if (!('seq' in e)) return;
       received.push(e);
-      if (e.kind === 'turn.ended') killLog.push('turn.ended');
+      if (e.kind === 'turn.ended') { killLog.push('turn.ended'); releaseKill(); }
     },
     close: () => {},
   });
