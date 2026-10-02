@@ -106,6 +106,36 @@ test('S1.1, S1.3, S1.9 — the twelve-row vendor mapping, and stdin stays writab
   // (S4), not the adapter — not asserted here.
 });
 
+// D223 — a deny is written with `interrupt: false`, so the real CLI lets the turn continue.
+test('D223 — a deny control_response carries interrupt: false', async () => {
+  process.env['SKYNET_TEST_SCENARIO'] = 'full';
+  const dir = await mkdtemp(path.join(tmpdir(), 'd223-'));
+  const stdinLog = path.join(dir, 'stdin.log');
+  process.env['SKYNET_STDIN_LOG'] = stdinLog;
+  try {
+    const { adapter, notifications } = makeAdapter('full');
+    await adapter.send('hello', [], null, 'turn-d223' as never);
+    await waitUntil(() => eventsOf(notifications, 'permission.request').length > 0);
+    const requestId = (eventsOf(notifications, 'permission.request')[0]!.event.data as { requestId: string }).requestId;
+
+    assert.equal(adapter.respond(requestId as never, 'deny').ok, true);
+    await waitUntil(() => eventsOf(notifications, 'turn.ended').length > 0);
+
+    const responses = (await readFile(stdinLog, 'utf8'))
+      .split('\n')
+      .filter((l) => l.trim())
+      .map((l) => JSON.parse(l) as { type: string; response?: { response?: Record<string, unknown> } })
+      .filter((m) => m.type === 'control_response');
+    assert.equal(responses.length, 1);
+    assert.deepEqual(
+      { behavior: responses[0]!.response!.response!['behavior'], interrupt: responses[0]!.response!.response!['interrupt'] },
+      { behavior: 'deny', interrupt: false },
+    );
+  } finally {
+    delete process.env['SKYNET_STDIN_LOG'];
+  }
+});
+
 // D258 — extractToolResultDiff's three productive shapes, exercised through the adapter's
 // real stdio mapping rather than as a standalone unit (the function is non-exported and
 // closed over createClaudeAdapter's own isPlainObject).

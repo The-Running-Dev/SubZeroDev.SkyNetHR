@@ -605,7 +605,9 @@ export function createClaudeAdapter(opts: AdapterOptions & { readonly executable
           request_id: requestId,
           response: allow
             ? { behavior: 'allow', updatedInput: {}, toolUseID: pending.callId }
-            : { behavior: 'deny', message: 'Denied by operator', interrupt: true, toolUseID: pending.callId },
+            // D223: `interrupt: true` ended the turn `error` against the real CLI; `false` lets the
+            // agent see the denial and answer it (design/findings/D223-deny-interrupt-probe.md).
+            : { behavior: 'deny', message: 'Denied by operator', interrupt: false, toolUseID: pending.callId },
         },
       });
       if (!wrote) return { ok: false, error: { code: 'write_failed', detail: 'stdin not writable' } };
