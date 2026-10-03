@@ -24,6 +24,11 @@ mkdirSync(workspaceDir, { recursive: true });
 // name), so a detail-string assertion must compare against this, not the raw `workspaceDir`.
 const resolvedWorkspaceDir = stripExtendedPrefix(realpathSync.native(workspaceDir));
 
+// D232: the cookie max-age is read only under shared-secret.
+function sharedSecretEnv(over: Record<string, string | undefined> = {}): Record<string, string | undefined> {
+  return env({ AUTH_MODE: 'shared-secret', AUTH_USER_HEADER: undefined, AUTH_COOKIE_NAME: 'skynet', AUTH_SECRET: 's3cr3t', ...over });
+}
+
 function env(over: Record<string, string | undefined> = {}): Record<string, string | undefined> {
   return {
     AUTH_MODE: 'proxy-header',
@@ -96,18 +101,18 @@ describe('config — fail closed on startup (S2.8)', () => {
 // incident and it must not need a release.
 describe('config — the login cookie lifetime (D115)', () => {
   it('defaults to thirty days', () => {
-    const r = loadConfig(env());
+    const r = loadConfig(sharedSecretEnv());
     assert.equal(r.ok && r.value.sessionCookieMaxAgeSeconds, 30 * 24 * 60 * 60);
   });
 
   it('takes an override from the environment', () => {
-    const r = loadConfig(env({ SESSION_COOKIE_MAX_AGE_SECONDS: '3600' }));
+    const r = loadConfig(sharedSecretEnv({ SESSION_COOKIE_MAX_AGE_SECONDS: '3600' }));
     assert.equal(r.ok && r.value.sessionCookieMaxAgeSeconds, 3600);
   });
 
   it('refuses a value that is not a non-negative integer, naming the field', () => {
     for (const bad of ['-1', 'forever', '1.5', '30d']) {
-      const r = loadConfig(env({ SESSION_COOKIE_MAX_AGE_SECONDS: bad }));
+      const r = loadConfig(sharedSecretEnv({ SESSION_COOKIE_MAX_AGE_SECONDS: bad }));
       assert.equal(r.ok, false, `expected '${bad}' to be refused`);
       assert.equal(r.ok === false && r.error.code, 'invalid_field', bad);
       assert.equal(r.ok === false && r.error.code === 'invalid_field' && r.error.field, 'SESSION_COOKIE_MAX_AGE_SECONDS', bad);
@@ -118,8 +123,24 @@ describe('config — the login cookie lifetime (D115)', () => {
   // shell profile is how a value gets un-overridden, and refusing it would make the one
   // security-relevant knob behave differently from the eight beside it.
   it('treats an empty variable as unset, taking the default', () => {
-    const r = loadConfig(env({ SESSION_COOKIE_MAX_AGE_SECONDS: '' }));
+    const r = loadConfig(sharedSecretEnv({ SESSION_COOKIE_MAX_AGE_SECONDS: '' }));
     assert.equal(r.ok && r.value.sessionCookieMaxAgeSeconds, 30 * 24 * 60 * 60);
+  });
+
+  // D232: read only under shared-secret. A header mode never uses it, so a malformed value
+  // there must not refuse boot.
+  it('refuses a malformed value under shared-secret mode', () => {
+    const r = loadConfig(sharedSecretEnv({ SESSION_COOKIE_MAX_AGE_SECONDS: 'forever' }));
+    assert.equal(r.ok === false && r.error.code === 'invalid_field' && r.error.field, 'SESSION_COOKIE_MAX_AGE_SECONDS');
+  });
+
+  it('does not read it under a header mode: a malformed value there does not refuse boot', () => {
+    for (const bad of ['forever', '-1']) {
+      const proxy = loadConfig(env({ SESSION_COOKIE_MAX_AGE_SECONDS: bad }));
+      assert.equal(proxy.ok, true, `proxy-header, '${bad}'`);
+      const webui = loadConfig(env({ AUTH_MODE: 'open-webui', AUTH_USER_HEADER: 'x-user-id', AUTH_SESSION_HEADER: 'x-session-id', SESSION_COOKIE_MAX_AGE_SECONDS: bad }));
+      assert.equal(webui.ok, true, `open-webui, '${bad}'`);
+    }
   });
 });
 

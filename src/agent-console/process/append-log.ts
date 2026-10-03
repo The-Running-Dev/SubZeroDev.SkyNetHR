@@ -96,17 +96,29 @@ export async function foldLatestById<T>(filePath: string, idField: keyof T, reor
     return [];
   }
   const byId = new Map<string, T>();
-  for (const line of linesResult.value) {
+  // D232 / I38: a dropped line is reported, once per fold rather than once per line so a
+  // badly torn file does not flood the log — the file, how many, and where the first was.
+  let dropped = 0;
+  let firstDropped = 0;
+  const drop = (lineNumber: number): void => {
+    if (dropped === 0) firstDropped = lineNumber;
+    dropped += 1;
+  };
+  for (const [index, line] of linesResult.value.entries()) {
     try {
       const parsed = JSON.parse(line) as T;
       const id = parsed[idField];
-      if (id === undefined || id === null) continue; // missing id field: cannot trust this line
+      if (id === undefined || id === null) { drop(index + 1); continue; } // missing id field: cannot trust this line
       const key = String(id);
       if (reorderByLatestWrite) byId.delete(key);
       byId.set(key, parsed);
     } catch {
       // Dropped: either a torn trailing line, or (mid-file) corrupt input we cannot trust.
+      drop(index + 1);
     }
+  }
+  if (dropped > 0) {
+    console.warn(`[store] dropped ${dropped} line${dropped === 1 ? '' : 's'} from ${filePath}, first at line ${firstDropped}`);
   }
   return Array.from(byId.values());
 }

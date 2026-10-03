@@ -272,7 +272,13 @@ export function loadConfig(env: Readonly<Record<string, string | undefined>>): R
   // ours to set. Thirty days is the default rather than a constant, because shortening a
   // session lifetime is what a deployment does after an incident and it must not need a
   // release (D103's argument for the caps, applied to the one value that is a credential).
-  const sessionCookieMaxAgeSeconds = parseIntEnv(env, 'SESSION_COOKIE_MAX_AGE_SECONDS', 30 * 24 * 60 * 60);
+  // D232: a header mode does not parse it, so a malformed value there is no boot refusal
+  // over a setting the mode never reads; it carries the default, unused.
+  const defaultCookieMaxAgeSeconds = 30 * 24 * 60 * 60;
+  const sessionCookieMaxAgeSeconds =
+    auth.value.mode === 'shared-secret'
+      ? parseIntEnv(env, 'SESSION_COOKIE_MAX_AGE_SECONDS', defaultCookieMaxAgeSeconds)
+      : ({ ok: true, value: defaultCookieMaxAgeSeconds } as const);
   if (!sessionCookieMaxAgeSeconds.ok) return sessionCookieMaxAgeSeconds;
 
   let sessionTokenBudget: number | null = null;
