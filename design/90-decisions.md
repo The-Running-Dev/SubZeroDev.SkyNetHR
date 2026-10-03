@@ -6897,12 +6897,3 @@ Reversibility: cheap — no `exec --json` tool call and no non-null reason has b
 ## Open
 
 Staging only. Once an item becomes an issue it leaves this list.
-
-- **D274's code.** The contract is amended (D276, I75) and S8.7 reworded. The `exec --json`
-  adapter maps `command_execution` items with the composed `<turnId>.<itemId>` instead of dropping them, and drops with
-  `adapter_unknown_record` an item whose id would make the composite unsafe.
-- **D275's code.** The contract is amended (D276, I76). Add `Caps.permissionReasonBytes` to both
-  `Caps` declarations and `CAPS_PERMISSION_REASON_BYTES` to config; `answerPermission` refuses an
-  empty or over-cap `reason`; the manager passes an operator's deny reason to `respond` only after
-  the audit append succeeds; the client's deny control gains a reason field that says the text
-  goes to the agent and sends `null` when empty.
