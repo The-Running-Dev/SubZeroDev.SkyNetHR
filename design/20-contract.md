@@ -1498,6 +1498,32 @@ on the pid: the recorded process is the agent CLI, and what holds the workspace 
 it spawned. Terminate-then-force is the POSIX half only — Windows has no signal to be graceful
 with, so `taskkill /T /F` is one step and the grace period has nothing to elapse over (D148).
 
+**A deny answered through `respond` never ends the turn** (D223, D273). The child receives the
+denial as the tool's result and the turn goes on: the agent reads it and answers, and the turn
+ends by one of the paths `turn.ended` already enumerates. On Claude that is `interrupt: false` on
+the deny's `control_response`. `interrupt: true` ended the turn `error_during_execution` against
+the real CLI (`design/findings/D223-deny-interrupt-probe.md`), which throws away the rest of the
+turn on every deny — an operator's, and the audit-failure deny under *Error semantics*, whose whole
+argument is that the turn continues. Stopping a turn is `kill`'s, driven by the manager's
+interrupt (D24); a deny is not a second way to do it, and an adapter must never answer one in a
+form its vendor treats as ending the turn.
+
+**`respond` gains a `reason`, and the tree does not carry it yet** (D273). Scaffold, until the
+change that lands it replaces this block with a pointer:
+
+```ts
+respond(requestId: RequestId, decision: PermissionDecision, reason: string | null): Result<void, AdapterError>;
+```
+
+`reason` is the deny's text as the agent will read it, and it is non-null only where the *server*
+forced the deny — today, the audit append that failed, where it names the storage failure. An
+operator's deny passes `null`, and so does every `allow`; the operator's stated reason stays in the
+`AuditRecord` and does not reach the model (`## Unresolved` 24). On `null` the adapter sends its own
+fixed text. On non-null it sends `reason` and never the fixed text, which names the operator as the
+cause of a decision no operator made. **The parameter must not acquire a default**: a defaulted
+`null` lets the one call site that owes a cause drop it without a trace, which is the gap D223
+found. `reason` never changes the decision, and a vendor whose wire carries no deny text drops it.
+
 **`Adapter` gains nothing for shutdown, and that is deliberate** (D178). There is no `detach`,
 and no way for an adapter to be told the server is stopping: the silence step 3 needs lives on
 `SessionManager`'s own notification sink instead (I55) — one public addition rather than two,
@@ -2724,7 +2750,8 @@ Three error paths are decisions rather than mappings, and are stated so they are
 re-derived:
 
 - **An audit append that fails denies the permission.** The manager sends
-  `control_response { behavior: 'deny' }` with the storage failure as the reason, emits
+  `control_response { behavior: 'deny' }` with the storage failure as `Adapter.respond`'s
+  `reason`, emits
   `permission.resolved { decision: 'deny', reason: 'audit_unavailable' }` and a
   `session.notice / error`. The turn continues, the agent can respond to the denial, and nothing
   unaudited executes. **Denial is the only decision safe to make without being able to record
@@ -3525,3 +3552,13 @@ belong to the `exec --json` fallback alone; neither affects a session on `app-se
 
     **Routed to `/design` by D259**, since both answers turn on the never-rendered rule, which is a
     design decision and not a signature. Staged in `90-decisions.md § Open` for `/track`.
+
+24. **Whether an operator's stated deny reason reaches the agent.** Arrived with D273, which gave
+    `Adapter.respond` a `reason` and settled only the case the design determines: a deny the server
+    forced carries its cause. `10-design.md` says the `AuditRecord`'s `reason` holds the operator's
+    stated reason on a denial and says nothing of the model seeing it. Forwarding it lets an operator
+    steer the agent with the refusal itself; it also makes operator-typed text model input on a path
+    that is today audit-only, which is a question about what the operator is told a reason *is*, not
+    about a signature. Until it is answered an operator's deny passes `null`, and nothing downstream
+    may forward the stated reason by another route. **Routed to `/design` by D273.** Staged in
+    `90-decisions.md § Open` for `/track`.

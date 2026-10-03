@@ -6776,6 +6776,41 @@ becomes permanent.
 Reversibility: cheap. Nothing is built for either view.
 Landing point: #50.
 
+### 2026-10-03 — D273 `Adapter.respond` takes a `reason`, non-null only for a server-forced deny; a deny never ends the turn
+Context: #343's last criterion, D223's `/contract` half. #477 switched the Claude deny to
+`interrupt: false` on the probe's evidence (`design/findings/D223-deny-interrupt-probe.md`), but the
+contract stated no rule for it, so nothing stops the next adapter answering a deny in a form its
+vendor treats as ending the turn. Separately, *Error semantics* says an audit-failure deny carries
+"the storage failure as the reason", and `Adapter.respond(requestId, decision)` has nowhere to put
+one: every deny sends "Denied by operator", including the deny no operator made.
+Chosen: **both, in `20-contract.md § adapters/*`.** A deny answered through `respond` never ends the
+turn; stopping one is `kill`'s, under D24. `respond` gains `reason: string | null` with no default,
+non-null only where the server forced the deny — today the failed audit append, naming the storage
+failure. On `null` the adapter sends its fixed text; on non-null it sends `reason` and never the
+fixed text. An operator's deny passes `null`, and whether its stated reason should reach the model
+is `## Unresolved` 24, routed to `/design`. The code change is not this entry's: it lands through
+§ Open.
+Rejected: **recording the `interrupt: false` rationale alone.** It ticks #343's box and leaves the
+audit-failure row stating something the code does not do, with D223's signature half unowned.
+Rejected: **forwarding the operator's stated reason too.** Neither D223 nor `10-design.md` decides
+it, and it turns operator-typed text from audit-only into model input.
+Rejected: **`reason?: string`, optional.** The one caller that owes a cause could omit it and
+compile, which is the gap D223 found.
+Rejected: **a deny-only overload or a separate `deny(requestId, reason)` method.** Two entry points
+for one resolution, and the manager's single `respondOrCancel` path would branch on the decision to
+pick one.
+Reversibility: cheap — no code depends on the parameter yet.
+
 ## Open
 
 Staging only. Once an item becomes an issue it leaves this list.
+
+- **`/fix`: land D273's `reason` on `Adapter.respond`.** `20-contract.md § adapters/*` scaffolds
+  `respond(requestId, decision, reason: string | null)` with no default. The audit-append-failure
+  deny passes the storage failure; every other call passes `null`. The Claude adapter sends `reason`
+  as the deny's `message` when it is non-null, and its fixed text only when it is `null`; the Codex
+  adapter accepts and drops it. A test drives a failing audit append and asserts the deny's
+  `message` names the storage failure and is not "Denied by operator". The landing commit replaces
+  the scaffold with a pointer to `src/agent-console/providers/types.ts`.
+- **`/design`: whether an operator's stated deny reason reaches the agent** (`20-contract.md
+  ## Unresolved` 24, D273). Today it is audit-only, and an operator's deny passes `null`.
