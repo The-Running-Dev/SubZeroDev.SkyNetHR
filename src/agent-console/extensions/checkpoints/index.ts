@@ -325,10 +325,6 @@ export function createCheckpoints(config: Pick<RuntimeOptions, 'storageRoot'>, i
         // S32.11: a deleted session's manifests go with its shadow git directory.
         await rm(ignoredDir(config.storageRoot, sessionId), { recursive: true, force: true });
       } catch (err) {
-        // No dedicated teardown code exists in `CheckpointError` (only lifecycle codes
-        // for init/commit/restore); `init_failed` is the closest existing member for "the
-        // shadow git directory could not be managed on disk" and the caller (S5.11's
-        // notice path) reports the detail string regardless of which variant this is.
         return { ok: false, error: { code: 'init_failed', detail: (err as Error).message } };
       }
       return { ok: true, value: undefined };

@@ -1434,3 +1434,51 @@ test('D202 — Store.close() is a no-op on a store that never opened any handle'
 
   await assert.doesNotReject(storeResult.value.close(), 'nothing was ever opened, so there is nothing to close');
 });
+
+// D232 / I38: a record-log line that fails to parse or has no id is dropped, and the drop is
+// reported — once per fold, not once per line, naming the file, the count and the first line.
+test('D232 — a fold that drops lines warns once, naming the file, the count and the first dropped line number', async () => {
+  const { storageRoot, store } = await newStore();
+  const filePath = path.join(storageRoot, 'requisitions.ndjson');
+  await writeFile(
+    filePath,
+    [
+      JSON.stringify({ requisitionId: 'req-1' }),
+      '{"requisitionId":"req-2","torn',
+      JSON.stringify({ title: 'no id here' }),
+      '{"requisitionId":"req-3","torn',
+      JSON.stringify({ requisitionId: 'req-4' }),
+    ].join('\n') + '\n',
+  );
+
+  const originalWarn = console.warn;
+  const warnings: string[] = [];
+  console.warn = (...args: unknown[]) => warnings.push(args.map(String).join(' '));
+  let read;
+  try {
+    read = await store.readAllRequisitions();
+  } finally {
+    console.warn = originalWarn;
+  }
+  assert.equal(read.length, 2, 'the registry is shortened to the lines that parse and carry an id');
+  const mine = warnings.filter((w) => w.includes(filePath));
+  assert.equal(mine.length, 1, `one warning per fold, not one per line; got: ${JSON.stringify(warnings)}`);
+  assert.ok(mine[0]!.includes('3 line'), `names the count; got: ${mine[0]}`);
+  assert.ok(mine[0]!.includes('line 2'), `names the first dropped line number; got: ${mine[0]}`);
+});
+
+test('D232 — a fold that drops nothing logs nothing', async () => {
+  const { storageRoot, store } = await newStore();
+  const filePath = path.join(storageRoot, 'requisitions.ndjson');
+  await writeFile(filePath, JSON.stringify({ requisitionId: 'req-1' }) + '\n');
+
+  const originalWarn = console.warn;
+  const warnings: string[] = [];
+  console.warn = (...args: unknown[]) => warnings.push(args.map(String).join(' '));
+  try {
+    await store.readAllRequisitions();
+  } finally {
+    console.warn = originalWarn;
+  }
+  assert.deepEqual(warnings.filter((w) => w.includes(filePath)), []);
+});
