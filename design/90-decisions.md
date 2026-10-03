@@ -6804,13 +6804,3 @@ Reversibility: cheap — no code depends on the parameter yet.
 ## Open
 
 Staging only. Once an item becomes an issue it leaves this list.
-
-- **`/fix`: land D273's `reason` on `Adapter.respond`.** `20-contract.md § adapters/*` scaffolds
-  `respond(requestId, decision, reason: string | null)` with no default. The audit-append-failure
-  deny passes the storage failure; every other call passes `null`. The Claude adapter sends `reason`
-  as the deny's `message` when it is non-null, and its fixed text only when it is `null`; the Codex
-  adapter accepts and drops it. A test drives a failing audit append and asserts the deny's
-  `message` names the storage failure and is not "Denied by operator". The landing commit replaces
-  the scaffold with a pointer to `src/agent-console/providers/types.ts`.
-- **`/design`: whether an operator's stated deny reason reaches the agent** (`20-contract.md
-  ## Unresolved` 24, D273). Today it is audit-only, and an operator's deny passes `null`.
