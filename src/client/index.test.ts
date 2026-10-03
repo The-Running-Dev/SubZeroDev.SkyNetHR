@@ -1527,15 +1527,27 @@ describe('S18.9 — the termination screen is presentation over DELETE /api/sess
     }
   });
 
-  it('an already-ended session offers no Terminate control and says why', async () => {
-    const { byId, restore } = await runConsole([{ id: 's1', owner: 'ben', cwd: '/w', vendor: 'claude', state: 'ended' }]);
+  it('an already-ended session still offers Terminate (D229), with the ended notice kept as context, and DELETEs it', async () => {
+    const { byId, restore, fetchCalls, fetchMethods } = await runConsole([
+      { id: 's1', owner: 'ben', cwd: '/w', vendor: 'claude', state: 'ended' },
+    ]);
     try {
       const button = byId.get('sessions')!.children[0]!.children[0]!;
       for (const fn of button.listeners.get('click') ?? []) fn({});
       for (const fn of byId.get('terminate-open')!.listeners.get('click') ?? []) fn({});
 
-      assert.equal(byId.get('terminate-confirm')!.hidden, true);
-      assert.equal(byId.get('terminate-ended')!.hidden, false);
+      assert.equal(byId.get('terminate-confirm')!.hidden, false, 'an ended session must be deletable from the console');
+      assert.equal(byId.get('terminate-ended')!.hidden, false, 'the ended notice stays as context');
+
+      for (const fn of byId.get('terminate-confirm')!.listeners.get('click') ?? []) fn({});
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      const deletes = fetchCalls
+        .map((u, i) => ({ u, m: fetchMethods[i] }))
+        .filter((c) => c.u === '/api/sessions/s1' && c.m === 'DELETE');
+      assert.equal(deletes.length, 1, 'exactly one DELETE to the ended session\'s own route');
+      assert.equal(byId.get('terminate')!.hidden, true, 'the panel closes on success');
     } finally {
       await restore();
     }
