@@ -6801,6 +6801,69 @@ for one resolution, and the manager's single `respondOrCancel` path would branch
 pick one.
 Reversibility: cheap — no code depends on the parameter yet.
 
+### 2026-10-03 — D274 On `codex exec --json` the adapter composes a session-unique `CallId` from `(turnId, item id)`; session-uniqueness becomes an adapter obligation
+Context: #93, `20-contract.md § Unresolved` 13, `10-design.md` open question 7. S8.1 measured
+`exec --json` item ids as a per-turn counter (`item_0`, `item_1`, …) that restarts every turn of a
+thread, so `CallId` is not session-unique on that transport, and S8.7 drops its `command_execution`
+items rather than correlate them. Storage was already safe — the blob path carries `turnId` (D22,
+I22) — but correlation is not: the client keeps one session-wide map from `callId` to its tool
+block (D246), and every consumer above the adapter assumes the *Identity spaces* row. The server's
+`turnId` already reaches the adapter on every `send`.
+Chosen: **the `exec --json` adapter composes the `CallId` it emits from the server's `turnId` and the
+vendor item id**; `app-server` and Claude pass the vendor id through unchanged. *Identity spaces*'
+"unique within: session" for `callId` stops being a bare assumption about the vendor and becomes an
+**adapter obligation**: an adapter emits a session-unique `CallId`, composing one where its vendor's
+id is not, the same way D75 made summable usage an adapter obligation rather than a consumer's
+problem. The composite is still opaque above the adapter (I21) and must be a safe path segment,
+since it is one (I22). Nothing above `adapters/*` changes. The composition's exact form, the
+exec mapping row, the minting text in *Identity minting* and the "Item ids" paragraph are
+`/contract`'s amendment; S8.7's stop clause says correlation "needs a server-side alias", which this
+contradicts, and rewording it is `/slices`'. The code lands through #93.
+Rejected: **widening correlation to `(turnId, callId)` for every consumer.** It makes one fallback
+transport's flaw every vendor-neutral consumer's cost — the client's session-wide map, the event
+schema, every equality on `callId` — which is the leak I20 exists to stop, and the cost lands on the
+primary transport too, which does not need it.
+Rejected: **a server-side alias minted by `session-manager`.** *Identity spaces* already refused a
+mapping table for vendor ids, and the manager would still need the colliding pair to map from, so
+it would rebuild the composite one layer up, above the boundary that is meant to hide it.
+Rejected: **an adapter-local turn counter as the prefix.** It restarts when the adapter instance is
+recreated — a server restart, a resumed session — and would collide with ids already in the spill;
+the server's `turnId` is persisted and session-unique by construction.
+Rejected: **leaving tool calls unmapped on the fallback.** The status quo: operators on that
+transport see no tool activity at all, and nothing about the fallback makes that acceptable.
+Reversibility: cheap — no `exec --json` tool call has ever been emitted, so no stored event carries
+either form.
+
+### 2026-10-03 — D275 An operator's stated deny reason reaches the agent; one string, two readers
+Context: #480, `20-contract.md § Unresolved` 24. D273 gave `Adapter.respond` a `reason` and left an
+operator's deny passing `null` — the agent reads the adapter's fixed text and the stated reason
+stays in the `AuditRecord` — because forwarding it was undecided, not because it was refused. Two
+facts bear on it. A deny never ends the turn (D273), and a `send` during a turn is refused
+`turn_in_flight`, so the deny is the only thing an operator can say to the agent mid-turn; the
+alternative is an interrupt, which ends the turn and undoes nothing (D24). And no client has ever
+offered a field to type a reason — the shipped client always sends `reason: null` — so no operator
+has written one under the belief that the agent would not read it.
+Chosen: **forward it.** On a deny the operator answered with a non-null reason, the manager passes
+that reason to `respond` and the adapter sends it in place of its fixed text; with none, the fixed
+text, as now. The agent and the audit record read the same bytes, so `audit.ndjson` records what
+the agent was told. **Operator text reaches the agent only once it is durable in the audit log**:
+if the append fails, the deny is the server's (*Control flow § 2*) and carries the storage cause,
+and the operator's text is not sent. The control that collects a reason says it goes to the agent.
+Operators are trusted and their prompts are already model input, so this opens no new trust
+boundary — it gives an existing one a mid-turn channel. A bound on the reason's bytes, refused
+rather than truncated, is `/contract`'s along with the amendment to `adapters/*` and the close of
+Unresolved 24; the client field and the manager change land through #480.
+Rejected: **keeping it audit-only.** The agent learns that it was refused and never why, retries
+the same thing a different way, and the operator's only remaining steer is an interrupt that throws
+the turn away.
+Rejected: **two fields, an audit note and a message to the agent.** Two inputs on one refusal, a
+wire change to `PermissionAnswer` and a new audit field — and the audit would no longer record what
+the agent was actually told, which is the question an audit is read to answer.
+Rejected: **forwarding the operator's text even when the append fails.** It puts operator-typed text
+into the model with no record that it was sent, the one gap the audit-failure deny exists to close.
+Reversibility: cheap — no client sends a non-null reason yet, so no stored record or transcript
+depends on either reading.
+
 ## Open
 
 Staging only. Once an item becomes an issue it leaves this list.

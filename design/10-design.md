@@ -519,8 +519,8 @@ same path — and the turn-1 envelope's fetch link then serves turn-2 bytes. Tha
 wrong data in the one store meant to preserve full outputs, and it is worse than the missing-
 blob case, which at least announces itself with a `404`. `turnId` is server-minted and
 session-unique, so the path holds whatever a vendor does. This closes the collision only: the
-*correlation* half of the same question — pairing a `tool.result` to its `tool.call` — is
-untouched and stays open.
+*correlation* half of the same question — pairing a `tool.result` to its `tool.call` — is closed
+separately, inside the adapter (D274, *Identity spaces*).
 
 These blobs are the one part of storage with no stated retention rule — see *Open questions*.
 
@@ -557,7 +557,7 @@ most likely source of a subtle cross-vendor bug, so they are enumerated:
 | `turnId` | server | session | client |
 | `seq` | server | session | nobody — it is ordered and compared |
 | `cliSessionId` | **vendor** | vendor's own store | everything above the adapter |
-| `callId` | **vendor** | session (assumed) | everything above the adapter |
+| `callId` | **vendor**, or adapter-composed from vendor parts (D274) | session (adapter obligation) | everything above the adapter |
 | `requestId` | **vendor** | turn (assumed) | everything above the adapter |
 
 The last three are the exception to "no vendor above the adapter". They cross the boundary
@@ -566,9 +566,9 @@ server-side alias for a vendor id buys nothing but a mapping table to get wrong.
 opaque**: no code above the adapter may parse, compare-for-ordering, or infer structure
 from them. Equality is the only permitted operation.
 
-The two "(assumed)" rows are assumptions about Claude that hold in the observed stream. **For
-Codex they are no longer assumptions and no longer one answer** — S8.1 measured them, and the
-result splits by transport:
+The `requestId` row's "(assumed)", and the `callId` row's before D274, are assumptions about
+Claude that hold in the observed stream. **For Codex they are no longer assumptions and no
+longer one answer** — S8.1 measured them, and the result splits by transport:
 
 - **`codex app-server`: UUID-based** (`exec-a2215fa5-…`), distinct across two sequential
   turns of one thread. That is evidence of the scheme rather than proof it never collides —
@@ -579,12 +579,19 @@ result splits by transport:
   `codex exec resume --last` runs. On that transport the `callId` row's "unique within:
   session" is **false**, measured rather than doubted.
 
-So tool correlation across a session does break on the fallback, exactly as the old wording
-feared it might. Storage does not rest on the assumption — the blob path carries `turnId`, so
-a turn-scoped `callId` cannot overwrite anything (D22, I22) — but correlation does, and no
-path scheme fixes that. S8.7 stopped the slice before implementing correlation on that
-transport rather than inventing an alias for it; the choice is reserved in
-`20-contract.md § Unresolved` 13, and open question 7 below carries the design half.
+So the vendor id alone does break correlation on the fallback, exactly as the old wording
+feared it might. Storage never rested on the assumption — the blob path carries `turnId`, so
+a turn-scoped id cannot overwrite anything (D22, I22) — but correlation did, and no path
+scheme fixes that. **The fix is inside the adapter, not above it** (D274): on `exec --json`
+the adapter composes the `CallId` it emits from the server's `turnId`, which every `send`
+already hands it, and the vendor item id; elsewhere it passes the vendor id through. That
+turns the row's "unique within: session" from an assumption about each vendor into an
+obligation on each adapter — met by construction where a vendor's ids are turn-scoped, and
+still assumed of the vendor where they are not. The composite is as opaque as any other
+`callId` and is a path segment like one, and nothing above the adapter can tell which kind
+it is holding. An alias minted above the boundary was rejected for the reason in the
+paragraph above; widening every consumer's key to `(turnId, callId)` was rejected because it
+makes one fallback transport's flaw the cost of every vendor-neutral consumer.
 
 ### Checkpoint
 
@@ -718,6 +725,14 @@ nothing of its own.
 what names the cause when the *server* forced the decision rather than an operator — an
 audit append that failed (see *Control flow § 2*), or a permission resolved
 `cancelled_process_exit` because the child died.
+
+**An operator's stated reason is also what the agent reads** (D275). On a deny it replaces the
+adapter's fixed text, so this field holds exactly the words the agent was given, and the control
+that collects it says so. A deny is the operator's only way to speak to the agent mid-turn — it
+never ends the turn (D273), and a `send` during one is refused — so a reason that stopped here
+would leave the agent knowing it was refused and never why. The text reaches the agent only
+after this record is durable; a deny whose append fails is the server's, and carries the storage
+cause instead.
 
 `vendor` and `sandbox` are copied from the `Session` at decision time rather than looked up
 later, and that redundancy is the point: D25 deletes `meta.json` and keeps `audit.ndjson`,
@@ -1471,7 +1486,9 @@ wedge a turn whose child is blocked forever. It does neither — it sends
 `permission.resolved` carrying that denial and a `session.notice / error` naming the cause.
 The turn continues, the agent can respond to the denial, the operator is told why, and
 nothing unaudited executes. Denial is the only decision that is safe to make without being
-able to record it.
+able to record it. **That holds for an operator's deny too**: the storage cause replaces any
+reason the operator typed, because operator text reaches the agent only once its audit
+record is durable (D275), and here it is not.
 
 **"Always allow" is recorded here, not handed to the CLI** (D35). `updatedPermissions` would
 persist the grant in the CLI's own settings, where every later match runs with no
@@ -3120,6 +3137,21 @@ Rejected **capturing ignored bytes into the safety commit** (`add -f`), which wo
 collision passable by widening what a checkpoint holds — the widening the brief declined, paid
 for on every restore.
 
+**From the colliding `exec --json` item ids, D274.** The adapter composes a session-unique
+`CallId` from the server's `turnId` and the vendor item id. Rejected **widening every
+consumer's correlation key to `(turnId, callId)`**, which is correct and costs every
+vendor-neutral consumer a change to absorb one fallback transport's flaw. Rejected **a
+server-side alias**, for the reason *Identity spaces* gives against any mapping table over
+vendor ids. Rejected **an adapter-local turn counter**, which restarts with the adapter
+instance and collides with ids already in the spill.
+
+**From whether an operator's deny reason reaches the agent, D275.** It does, as the same bytes
+the audit record holds. Rejected **audit-only**, which leaves an operator who wants to steer
+the agent mid-turn nothing but an interrupt that discards the turn. Rejected **separate audit
+and agent fields**, two inputs for one refusal and an audit that no longer records what the
+agent was told. Rejected **forwarding it when the audit append fails**, which is exactly the
+unrecorded input that deny exists to prevent.
+
 Standing decisions this design rests on, all in `90-decisions.md`: D1/D10 transport,
 D2 sequencing, D3 delegated auth, D4 the jail, D5 the permission asymmetry, D6 shadow git,
 D7 no database, D8 reference-only prior art, D9/D11/D12 the Open WebUI evaluations.
@@ -3243,11 +3275,10 @@ these are cited by number elsewhere in this document and in the slices.
    UUID-based and distinct across turns — assumed session-unique, exactly as Claude's are. On
    `exec --json` they are a per-turn counter that restarts each turn, so `CallId` is **not**
    session-unique there; that is a known collision, not an assumption that might fail. The
-   *storage* half stays closed — the blob path carries `turnId` (D22) — and the *correlation*
-   half is open on the fallback only. S8.7 stopped before implementing it rather than
-   inventing an alias; the obvious fix, composing a `CallId` from `(turnId, itemId)` inside
-   the adapter, is invisible above the boundary and may well be right, but choosing it is this
-   question's to answer, not a mapping table's. Carried as `20-contract.md § Unresolved` 13.
+   *storage* half stays closed — the blob path carries `turnId` (D22). **The *correlation*
+   half is resolved by D274**: the `exec --json` adapter composes its `CallId` from
+   `(turnId, item id)`, and session-uniqueness is an adapter obligation (*Identity spaces*).
+   `20-contract.md § Unresolved` 13 closes with `/contract`'s amendment.
 8. **Answered by S10.1, and more narrowly than it was asked.** The question was whether
    `permission_suggestions` is a *sufficient* grammar. It is not merely insufficient, it is
    **unobservable**: the `control_request` that would carry it has never appeared on this
