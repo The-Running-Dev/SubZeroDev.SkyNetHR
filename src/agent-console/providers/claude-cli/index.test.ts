@@ -152,7 +152,9 @@ test('D273 — respond sends reason as the deny message when non-null, and the f
     };
     await answer(0, 'the audit record could not be written: disk full');
     await answer(1, null);
-    await waitUntil(() => eventsOf(notifications, 'tool.result').length >= 2);
+    // The scenario asks three times and ends the turn (and exits) only once the third is answered.
+    await answer(2, null);
+    await waitUntil(() => eventsOf(notifications, 'turn.ended').length > 0);
 
     const denies = (await readFile(stdinLog, 'utf8'))
       .split('\n')
@@ -160,9 +162,9 @@ test('D273 — respond sends reason as the deny message when non-null, and the f
       .map((l) => JSON.parse(l) as { type: string; response?: { response?: Record<string, unknown> } })
       .filter((m) => m.type === 'control_response')
       .map((m) => m.response!.response!);
-    assert.deepEqual(denies.map((d) => d['behavior']), ['deny', 'deny']);
-    assert.deepEqual(denies.map((d) => d['message']), ['the audit record could not be written: disk full', 'Denied by operator']);
-    assert.deepEqual(denies.map((d) => d['interrupt']), [false, false]);
+    assert.deepEqual(denies.map((d) => d['behavior']), ['deny', 'deny', 'deny']);
+    assert.deepEqual(denies.map((d) => d['message']), ['the audit record could not be written: disk full', 'Denied by operator', 'Denied by operator']);
+    assert.deepEqual(denies.map((d) => d['interrupt']), [false, false, false]);
   } finally {
     delete process.env['SKYNET_STDIN_LOG'];
   }
