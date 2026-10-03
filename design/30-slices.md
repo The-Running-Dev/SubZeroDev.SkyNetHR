@@ -583,8 +583,10 @@ Acceptance:
     no fallback. The finding is written up, the remaining criteria are recorded as blocked
     rather than failed, and the decision about what to do instead is `/design`'s.
   - S8.7 If S8.1 finds `callId`s unique only within a turn, the slice stops before
-    implementing tool correlation and says so — open question 7's correlation half needs a
-    server-side alias, which is a design decision, not an adapter one.
+    implementing tool correlation and says so — open question 7's correlation half is
+    `/design`'s to decide, not this slice's. S8.1 found it so for `exec --json`, and D274 has
+    since decided it: the adapter composes a session-unique `CallId` (I75), and nothing above
+    `adapters/*` changes. That mapping lands outside this slice.
 
 Out of scope: making Codex match Claude's interactive model (D5 lets it under-deliver,
 visibly); scraping `~/.codex/sessions/**/rollout-*.jsonl`; revisiting D5 inside this slice —

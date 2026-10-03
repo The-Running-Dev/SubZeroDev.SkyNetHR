@@ -6898,9 +6898,8 @@ Reversibility: cheap — no `exec --json` tool call and no non-null reason has b
 
 Staging only. Once an item becomes an issue it leaves this list.
 
-- **D274's slice reword and code.** The contract is amended (D276, I75). `/slices`: reword S8.7's
-  "needs a server-side alias" stop clause. Then the `exec --json` adapter maps `command_execution`
-  items with the composed `<turnId>.<itemId>` instead of dropping them, and drops with
+- **D274's code.** The contract is amended (D276, I75) and S8.7 reworded. The `exec --json`
+  adapter maps `command_execution` items with the composed `<turnId>.<itemId>` instead of dropping them, and drops with
   `adapter_unknown_record` an item whose id would make the composite unsafe.
 - **D275's code.** The contract is amended (D276, I76). Add `Caps.permissionReasonBytes` to both
   `Caps` declarations and `CAPS_PERMISSION_REASON_BYTES` to config; `answerPermission` refuses an
