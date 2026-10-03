@@ -1461,8 +1461,11 @@ function openTerminate() {
   renderSummaryRow(document, dl, 'Folder', session.cwd);
   renderSummaryRow(document, dl, 'Status', session.state);
   const ended = session.state === 'ended';
+  // D229: an ended session stays deletable — the confirm button is the console's only DELETE
+  // caller, and hiding it left a restart-ended or storage-failure-ended session's spill on disk.
+  // The ended notice stays beside it as context.
   $('terminate-ended').hidden = !ended;
-  $('terminate-confirm').hidden = ended;
+  $('terminate-confirm').hidden = false;
   $('terminate').hidden = false;
 }
 
