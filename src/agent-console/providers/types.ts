@@ -75,7 +75,9 @@ export interface Adapter {
     turnId: TurnId,
     model?: string,
   ): Promise<Result<void, AdapterError>>;
-  respond(requestId: RequestId, decision: PermissionDecision): Result<void, AdapterError>;
+  // (D273) `reason` is the deny's text as the agent reads it, non-null only where the server
+  // forced the deny. No default: a defaulted `null` lets the one caller that owes a cause drop it.
+  respond(requestId: RequestId, decision: PermissionDecision, reason: string | null): Result<void, AdapterError>;
   kill(): Promise<void>; // terminate-then-force, on the process tree
 }
 
@@ -156,7 +158,7 @@ export interface TurnHandle {
   // The existing send acknowledgement is distinct from the lifetime of the turn.
   readonly started: Promise<Result<void, AdapterError>>;
   readonly done: Promise<TurnOutcome>;
-  respondToPermission(requestId: RequestId, decision: PermissionDecision): Result<Resolution, AdapterError>;
+  respondToPermission(requestId: RequestId, decision: PermissionDecision, reason: string | null): Result<Resolution, AdapterError>;
   interrupt(): Promise<void>;
 }
 

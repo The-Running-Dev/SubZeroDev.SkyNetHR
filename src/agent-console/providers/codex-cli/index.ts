@@ -754,7 +754,8 @@ function buildCodexAdapter(opts: AdapterOptions, executable: string, transport: 
     // I25: the shipped policy is `preauthorised`, so the manager's `pending` map — the
     // only source of a real `requestId` — is always empty for a Codex session. Nothing
     // is ever outstanding to respond to.
-    respond(_requestId: RequestId, _decision: PermissionDecision): Result<void, AdapterError> {
+    // D273: Codex's wire carries no deny text, so `reason` is dropped.
+    respond(_requestId: RequestId, _decision: PermissionDecision, _reason: string | null): Result<void, AdapterError> {
       if (!child) return { ok: false, error: { code: 'no_child' } };
       return { ok: true, value: undefined };
     },

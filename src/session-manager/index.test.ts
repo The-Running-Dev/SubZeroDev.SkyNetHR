@@ -1077,6 +1077,26 @@ test('S4.7 — an audit append failure denies the permission, and the turn conti
   assert.equal(toolResult.ok, false, 'the tool never ran — the child was told deny');
 });
 
+// D273/#479 — the deny nobody decided carries its cause to the agent, not the operator-blaming text.
+test('D273 — an audit append failure tells the agent the storage failure, not "Denied by operator"', async () => {
+  const { manager, workspaceRoot } = await makeManager('full', {}, (store) => ({
+    ...store,
+    async appendAudit() {
+      return { ok: false, error: { code: 'io', path: 'audit.ndjson', detail: 'disk full' } } as const;
+    },
+  }));
+  const owner = 'operator-1' as OperatorId;
+  const { sessionId, received, requestEnvelope } = await runOneRequest('full', workspaceRoot, manager, owner, 'proj-d273');
+  const requestId = (requestEnvelope.data as { requestId: string }).requestId;
+
+  await manager.answerPermission(sessionId, owner, { requestId: requestId as never, decision: 'allow', scope: 'once', rule: null, reason: null });
+
+  await waitUntil(() => received.some((e) => e.kind === 'tool.result'));
+  const output = (received.find((e) => e.kind === 'tool.result')!.data as { output: string }).output;
+  assert.notEqual(output, 'Denied by operator', 'a deny the server forced must not name the operator as its cause');
+  assert.match(output, /disk full/, 'the storage failure reaches the agent');
+});
+
 test('D213/#322 — a write_failed from respond() resolves the pending permission cancelled_process_exit, not the operator\'s decision', async () => {
   const { config, store, checkpoints, workspaceRoot, storageRoot } = await makeManager('full');
   const owner = 'operator-1' as OperatorId;

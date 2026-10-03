@@ -1552,7 +1552,9 @@ export function createSessionCore(deps: {
     // already resolved the request `cancelled_process_exit` — nothing is owed here.
     if (!inFlightOf(turn).has(requestId)) return swept(turn, requestId);
     if (!appended.ok) {
-      const resolution = await respondOrCancel(entry, turn, requestId, record, 'deny', {
+      // D273: no operator made this deny, so the agent is told the cause rather than "Denied by operator".
+      const failure = 'detail' in appended.error ? appended.error.detail : appended.error.code;
+      const resolution = await respondOrCancel(entry, turn, requestId, record, 'deny', `The audit record could not be written, so the tool call was denied: ${failure}`, {
         turnId: turn.turnId,
         requestId,
         decision: 'deny',
@@ -1569,7 +1571,7 @@ export function createSessionCore(deps: {
     }
 
     onDurable?.();
-    return respondOrCancel(entry, turn, requestId, record, success.decision, {
+    return respondOrCancel(entry, turn, requestId, record, success.decision, null, {
       turnId: turn.turnId,
       requestId,
       decision: success.decision,
@@ -1594,9 +1596,10 @@ export function createSessionCore(deps: {
     requestId: RequestId,
     record: AuditRecord,
     decision: PermissionDecision,
+    reason: string | null,
     intended: EventPayloadMap['permission.resolved'],
   ): Promise<EventPayloadMap['permission.resolved']> {
-    const responded = entry.adapter!.respond(requestId, decision);
+    const responded = entry.adapter!.respond(requestId, decision, reason);
     // D218: clear the in-flight entry and assign `permission.resolved`'s `seq` in this one
     // synchronous tick, before any await, so the child's close cannot take the lower `seq`
     // and the `exited` sweep cannot resolve the same request twice.

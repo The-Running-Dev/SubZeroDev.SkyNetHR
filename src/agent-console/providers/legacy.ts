@@ -20,9 +20,9 @@ export async function createRegisteredAdapter(registry: ProviderRegistry, id: st
       handle = session.startTurn({ text, attachments, resume, ...(model === undefined ? {} : { model }) }, { turnId, emit: event, frame: event });
       return handle.started;
     },
-    respond(requestId, decision) {
+    respond(requestId, decision, reason) {
       if (!handle) return { ok: false, error: { code: 'no_child' } };
-      const result = handle.respondToPermission(requestId, decision);
+      const result = handle.respondToPermission(requestId, decision, reason);
       if (!result.ok) return result;
       if (result.value.reason === 'cancelled_process_exit') return { ok: false, error: result.value.cause };
       return { ok: true, value: undefined };

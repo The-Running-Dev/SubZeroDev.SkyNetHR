@@ -81,11 +81,11 @@ test('Phase 2 — turn handles preserve synchronous delivery outcomes, frame sep
   assert.ok((await first.started).ok);
   assert.equal(options.model, 'default');
   assert.equal(modelSeen, 'override');
-  const answered = first.respondToPermission('request' as never, 'allow');
+  const answered = first.respondToPermission('request' as never, 'allow', null);
   assert.equal(answered instanceof Promise, false);
   assert.deepEqual(answered, { ok: true, value: { decision: 'allow', reason: 'answered' } });
   failedWrite = true;
-  const cancelled = first.respondToPermission('request' as never, 'allow');
+  const cancelled = first.respondToPermission('request' as never, 'allow', null);
   assert.ok(cancelled.ok);
   assert.equal(cancelled.value.reason, 'cancelled_process_exit');
   options.notify({ kind: 'event', event: { kind: 'message.delta', data: { role: 'assistant', text: 'one' } } });
