@@ -1048,6 +1048,40 @@ describe('S3.3 — a reported replay_gap makes the client refetch the transcript
   });
 });
 
+describe('D225 — the refetch-once rule is per refetch, not per selection', () => {
+  it('a gap after the refetch stream has delivered earns a second refetch', async () => {
+    const { byId, streams, restore } = await runConsole([{ id: 's1', cwd: '/w/p', vendor: 'claude', state: 'live' }]);
+    try {
+      const button = byId.get('sessions')!.children[0]!.children[0]!;
+      for (const fn of button.listeners.get('click') ?? []) fn({});
+
+      deliver(streams[0]!, GAP);
+      assert.equal(streams.length, 2, 'the first gap reopens the stream');
+      deliver(streams[1]!, { seq: 1, sessionId: 's1', ts: GAP.ts, kind: 'message', data: { turnId: 't', role: 'assistant', text: 'the refetch worked' } });
+      deliver(streams[1]!, GAP);
+      assert.equal(streams.length, 3, 'an unrelated later gap refetches again rather than giving up');
+      const shown = byId.get('status')!.children.map((c) => c.textContent).join(' ');
+      assert.doesNotMatch(shown, /history unavailable/);
+    } finally {
+      await restore();
+    }
+  });
+
+  it('a gap on the refetch stream before it delivers anything still stops', async () => {
+    const { byId, streams, restore } = await runConsole([{ id: 's1', cwd: '/w/p', vendor: 'claude', state: 'live' }]);
+    try {
+      const button = byId.get('sessions')!.children[0]!.children[0]!;
+      for (const fn of button.listeners.get('click') ?? []) fn({});
+
+      deliver(streams[0]!, GAP);
+      deliver(streams[1]!, GAP);
+      assert.equal(streams.length, 2, 'the gap itself carries a seq and must not count as the refetch delivering');
+    } finally {
+      await restore();
+    }
+  });
+});
+
 describe('S25.5 — the client renders deltas or the final message and never both, picking by turnId', () => {
   it('grows one bubble across several deltas and suppresses the message that follows it', async () => {
     const { byId, streams, restore } = await runConsole([{ id: 's1', cwd: '/w/p', vendor: 'claude', state: 'live' }]);
