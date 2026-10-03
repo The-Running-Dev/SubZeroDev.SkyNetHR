@@ -6818,7 +6818,7 @@ problem. The composite is still opaque above the adapter (I21) and must be a saf
 since it is one (I22). Nothing above `adapters/*` changes. The composition's exact form, the
 exec mapping row, the minting text in *Identity minting* and the "Item ids" paragraph are
 `/contract`'s amendment; S8.7's stop clause says correlation "needs a server-side alias", which this
-contradicts, and rewording it is `/slices`'. The code lands through #93.
+contradicts, and rewording it is `/slices`'. The code lands through § Open.
 Rejected: **widening correlation to `(turnId, callId)` for every consumer.** It makes one fallback
 transport's flaw every vendor-neutral consumer's cost — the client's session-wide map, the event
 schema, every equality on `callId` — which is the leak I20 exists to stop, and the cost lands on the
@@ -6852,7 +6852,8 @@ and the operator's text is not sent. The control that collects a reason says it 
 Operators are trusted and their prompts are already model input, so this opens no new trust
 boundary — it gives an existing one a mid-turn channel. A bound on the reason's bytes, refused
 rather than truncated, is `/contract`'s along with the amendment to `adapters/*` and the close of
-Unresolved 24; the client field and the manager change land through #480.
+Unresolved 24; the client field, the manager change and the adapters' sending it land through
+§ Open.
 Rejected: **keeping it audit-only.** The agent learns that it was refused and never why, retries
 the same thing a different way, and the operator's only remaining steer is an interrupt that throws
 the turn away.
@@ -6867,3 +6868,14 @@ depends on either reading.
 ## Open
 
 Staging only. Once an item becomes an issue it leaves this list.
+
+- **D274's contract amendment and code.** `/contract` (opus/high): close `## Unresolved` 13, state
+  the composed `CallId`'s form and that it is a safe path segment, fill the `exec --json` mapping
+  row, and amend *Identity minting* and the Codex "Item ids" paragraph. `/slices`: reword S8.7's
+  "needs a server-side alias" stop clause. Then the `exec --json` adapter maps
+  `command_execution` items with the composed id instead of dropping them.
+- **D275's contract amendment and code.** `/contract` (opus/high): amend `adapters/*` `respond` so
+  an operator's deny carries its stated reason, close `## Unresolved` 24, and bound the reason's
+  bytes, refused rather than truncated. Then the manager passes the operator's reason to `respond`
+  only after the audit append succeeds, and the client's deny control gains a reason field that
+  says the text goes to the agent.
