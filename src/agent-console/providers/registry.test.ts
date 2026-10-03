@@ -133,7 +133,36 @@ test('Phase 2 — concurrent Codex probes share one async result; refresh change
   assert.equal((await provider.probe({ cwd, refresh: true })).available, false);
   const before = await readFile(log, 'utf8');
   assert.equal((await provider.probe({ cwd })).available, false);
-  assert.equal(await readFile(log, 'utf8'), before, 'negative results are cached too');
+  assert.equal(await readFile(log, 'utf8'), before + 'app-server\nexec\n', 'a not-found result is probed again, not cached (D226)');
+});
+
+test('D226 — a Codex installed after a failed create is picked up without a restart: not-found → install → create succeeds', async (t) => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'provider-install-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const cli = path.join(dir, 'cli.mjs');
+  const provider = defineCodexProvider(cli);
+  const input = { sandbox: 'workspace-write', streamDeltas: false } as const;
+  const missing = await provider.create({ cwd, notify() {}, emit() {} }, input);
+  assert.deepEqual(missing.ok, false, 'create before install is refused');
+  assert.equal((await provider.probe({ cwd })).available, false);
+  await writeFile(cli, 'process.exit(0);\n');
+  assert.ok((await provider.probe({ cwd })).available, 'a later probe sees the installed binary');
+  const created = await provider.create({ cwd, notify() {}, emit() {} }, input);
+  assert.ok(created.ok, 'create after install succeeds');
+  await created.value.close();
+});
+
+test('D226 — a timed-out Codex probe is cached: a hung binary stalls once, not per create', async (t) => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'provider-hung-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const log = path.join(dir, 'probes');
+  const cli = path.join(dir, 'cli.mjs');
+  await writeFile(cli, `import {appendFileSync} from 'node:fs';\nappendFileSync(${JSON.stringify(log)},process.argv[2]+'\\n');\nsetInterval(()=>{},1000);\n`);
+  const provider = defineCodexProvider(cli);
+  assert.equal((await provider.probe({ cwd })).available, false);
+  const before = await readFile(log, 'utf8');
+  assert.equal((await provider.probe({ cwd })).available, false);
+  assert.equal(await readFile(log, 'utf8'), before, 'the hung result is served from the cache');
 });
 
 test('Phase 2 — a concurrent refresh cannot change the transport behind a created capability snapshot', async (t) => {

@@ -1,6 +1,6 @@
 import { spawnProcess, killProbe } from '../process/index.js';
 
-export interface ProbeResult { readonly ok: boolean; readonly output: string }
+export interface ProbeResult { readonly ok: boolean; readonly output: string; readonly timedOut: boolean }
 
 // Short help/version probes drain both pipes. Their timeout does not block other sessions.
 export function probeCommand(command: string, args: readonly string[], cwd: string, shell: boolean, timeoutMs = 2000): Promise<ProbeResult> {
@@ -8,11 +8,11 @@ export function probeCommand(command: string, args: readonly string[], cwd: stri
     let output = '';
     let settled = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
-    const finish = (ok: boolean): void => {
+    const finish = (ok: boolean, timedOut = false): void => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      resolve({ ok, output: output.trim() });
+      resolve({ ok, output: output.trim(), timedOut });
     };
     try {
       const child = spawnProcess({ command, args: [...args], shell }, { cwd, stdin: 'ignore', overrides: { FORCE_COLOR: '0', NO_COLOR: '1' } });
@@ -22,7 +22,7 @@ export function probeCommand(command: string, args: readonly string[], cwd: stri
       child.once('close', (code) => finish(code === 0));
       timer = setTimeout(() => {
         killProbe(child);
-        finish(false);
+        finish(false, true);
       }, timeoutMs);
     } catch { finish(false); }
   });
