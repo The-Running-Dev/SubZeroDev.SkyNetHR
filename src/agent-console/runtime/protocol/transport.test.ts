@@ -37,16 +37,25 @@ test('Phase 4 framing — actual 8 MiB cap emits protocolError before faulting',
   assert.equal(JSON.parse(wire).method, 'runtime.protocolError');
 });
 
+// Waits on the response, not on a fixed sleep. The exchange is request, host callback, host reply,
+// response — each hop a separate writer flush — so one stalled event-loop turn on a loaded runner
+// (the observed flake was `lines.at(-1)?.result` still undefined on windows-latest) outlasts any
+// constant. Bounded, because `node --test` applies no per-test timeout and an unbounded wait would
+// hang the suite instead of failing it.
 test('Phase 4 duplex — host replies are consumed while request handler awaits, with disjoint ids', async () => {
   const input = new PassThrough(), output = new PassThrough(); const lines: Record<string, unknown>[] = [];
+  let responded!: () => void, gaveUp!: (error: Error) => void;
+  const response = new Promise<void>((resolve, reject) => { responded = resolve; gaveUp = reject; });
+  const timer = setTimeout(() => gaveUp(new Error(`timed out waiting for the create response; lines so far: ${JSON.stringify(lines)}`)), 10_000);
   let peer: RpcPeer;
   peer = new RpcPeer(input, output, async () => peer.call('host.create.status', { createAttemptId: 'a' }).result, () => {});
   output.on('data', chunk => {
     const value = JSON.parse(String(chunk)) as Record<string, unknown>; lines.push(value);
     if (value.method) { assert.equal(value.id, 'r:1'); input.write(JSON.stringify({ jsonrpc: '2.0', id: value.id, result: { state: 'committed' } }) + '\n'); }
+    else responded();
   });
   input.write('{"jsonrpc":"2.0","id":1,"method":"create"}\n');
-  await delay(10); assert.deepEqual(lines.at(-1)?.result, { state: 'committed' }); peer.stop('test');
+  try { await response; assert.deepEqual(lines.at(-1)?.result, { state: 'committed' }); } finally { clearTimeout(timer); peer.stop('test'); }
 });
 
 test('Phase 4 cancellation — cooperative signal does not suppress a completed operation', async () => {
