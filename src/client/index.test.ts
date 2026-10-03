@@ -1107,6 +1107,32 @@ describe('S25.5 — the client renders deltas or the final message and never bot
       await restore();
     }
   });
+
+  it('D224 — a reconnect on the same stream (onopen, no re-select) removes the partial bubble, so the replayed message renders once, in full', async () => {
+    const { byId, streams, restore } = await runConsole([{ id: 's1', cwd: '/w/p', vendor: 'claude', state: 'live' }]);
+    try {
+      const button = byId.get('sessions')!.children[0]!.children[0]!;
+      for (const fn of button.listeners.get('click') ?? []) fn({});
+      const transcript = byId.get('transcript')!;
+
+      deliver(streams[0]!, { seq: 3, sessionId: 's1', ts: 't0', kind: 'message', data: { turnId: 'turn-0', role: 'assistant', text: 'an earlier, finished turn' } });
+      deliver(streams[0]!, { sessionId: 's1', ts: 't1', kind: 'message.delta', data: { turnId: 'turn-1', role: 'assistant', text: 'starting' } });
+      assert.equal(transcript.children.length, 2, 'the finished message and the partial bubble are on screen');
+
+      // The browser's own EventSource retry: the same stream object fires `onopen` again,
+      // with no re-select to clear the transcript for it.
+      (streams[0] as unknown as { onopen: () => void }).onopen();
+      assert.equal(streams.length, 1, 'a reconnect on the same stream opens no new one');
+      assert.equal(transcript.children.length, 1, 'only the partial bubble is removed; the finished message stays');
+      assert.equal(JSON.stringify(transcript.children).includes('starting'), false, 'the truncated text is gone');
+
+      deliver(streams[0]!, { seq: 4, sessionId: 's1', ts: 't2', kind: 'message', data: { turnId: 'turn-1', role: 'assistant', text: 'starting over, uninterrupted' } });
+      assert.equal(transcript.children.length, 2, 'the replayed message renders once');
+      assert.equal(JSON.stringify(transcript.children).includes('starting over, uninterrupted'), true);
+    } finally {
+      await restore();
+    }
+  });
 });
 
 describe('S7.2 — an ended session offers no compose box', () => {

@@ -249,6 +249,27 @@ function trackAssistantBlock(node) {
   applyAssistantTurnVerbosity(turnId);
 }
 
+// D224: a reconnect never replays a delta (I51), so a bubble drawn from deltas before the
+// connection dropped can never be finished — and the `message` that replays would render a
+// second one beside it. Remove each tracked partial bubble, then forget it. Every entry is a
+// child of the transcript: `openStream` clears both together, and nothing else removes one.
+function discardPartialBubbles() {
+  const transcript = $('transcript');
+  for (const [turnId, node] of state.streamedMessages) {
+    transcript.removeChild(node);
+    const group = state.assistantBlocksByTurnId.get(turnId);
+    if (!group) continue;
+    group.blocks = group.blocks.filter((block) => block !== node);
+    if (group.blocks.length > 0) {
+      applyAssistantTurnVerbosity(turnId);
+      continue;
+    }
+    if (group.placeholder !== null) transcript.removeChild(group.placeholder);
+    state.assistantBlocksByTurnId.delete(turnId);
+  }
+  state.streamedMessages = new Map();
+}
+
 function applyTranscriptVerbosity() {
   for (const turnId of state.assistantBlocksByTurnId.keys()) applyAssistantTurnVerbosity(turnId);
 }
@@ -779,10 +800,10 @@ function openSseStream(sessionId) {
     // this is checked at every callback below rather than trusted to `close()` alone.
     if (state.stream !== stream) return;
     // A browser-level auto-reconnect fires this too, not just the first connect — and a
-    // reconnect never replays a delta (I51), so any entry left over from a turn that was
-    // mid-stream when the connection dropped must not survive it either, or the `message`
-    // that follows on replay gets suppressed with nothing left to show for it.
-    state.streamedMessages = new Map();
+    // reconnect never replays a delta (I51), so any partial bubble left over from a turn that
+    // was mid-stream when the connection dropped must not survive it either, or the `message`
+    // that follows on replay renders a second one beside it (D224).
+    discardPartialBubbles();
     if (sessionIsEnded()) applySessionAvailability();
     else status('connected', 'ok');
   };
@@ -842,9 +863,9 @@ function openWsStream(sessionId) {
     if (state.stream !== stream) return;
     // Same reasoning as the SSE path's onopen: this fires on a reconnect too (the
     // `onclose` handler below calls `openWsStream` directly, not `openStream`), and a
-    // reconnect never replays a delta (I51), so a stale entry from an interrupted turn
-    // must not survive it either.
-    state.streamedMessages = new Map();
+    // reconnect never replays a delta (I51), so a partial bubble from an interrupted turn
+    // must not survive it either (D224).
+    discardPartialBubbles();
     stream.send(JSON.stringify({ after: state.lastSeq }));
     if (sessionIsEnded()) applySessionAvailability();
     else status('connected', 'ok');
