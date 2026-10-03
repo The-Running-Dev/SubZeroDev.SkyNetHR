@@ -66,7 +66,10 @@ conflating them is the most likely source of a subtle cross-vendor bug
 - `CliSessionId`, `CallId`, `RequestId` — **the vendor**. These are the one deliberate
   exception to "no vendor above the adapter", and they are **opaque**: no code above
   `adapters/*` may parse one, compare one for ordering, or infer structure from one.
-  Equality is the only permitted operation (I21).
+  Equality is the only permitted operation (I21). **A `CallId` is the vendor's id or one the
+  adapter composes from vendor parts**, and which is the adapter's business: an adapter whose
+  vendor's id is not session-unique composes one that is (D274, I75). Composing is still not
+  minting — the parts are the vendor's and the server's `turnId`, never an adapter counter.
 - `ResolvedPath` — **only `jail`**. A `ResolvedPath` is a path *proven*, once, to resolve
   inside a configured workspace root; a module that constructs one by assertion has defeated
   the jail. `Requisition.workspace` is deliberately not one (I34).
@@ -673,7 +676,9 @@ whole of why:**
 `scope === 'standing'`, `reason` carries the matched `StandingRuleExpression` **verbatim** —
 which is what makes an auto-approval explain itself without a new persisted field. On a denial
 it carries the operator's stated reason, and where the server forced the decision it names the
-cause.
+cause. **On an operator's deny it is the text the agent was sent**, byte for byte, or `null`
+where the agent was sent the adapter's fixed text instead (D275, I76) — the record answers what
+the agent was told, not merely what the operator meant.
 
 **The read side is one read with filters, never two shapes** (D73). `AuditQuery` serves brief
 item 7 in tier one and the incident view of item 11 in tier two; the incident view is
@@ -875,6 +880,18 @@ operator configured and never receives is the failure a refusal at boot exists t
 `Caps.sessionToolOutputBytes` is declared in `src/contract/index.ts` (D162, S23): total blob
 bytes one session may store, enforced at the `writeToolOutput` call site.
 
+**`permissionReasonBytes` — scaffold, owed to both `Caps` declarations** (D276) —
+`src/contract/index.ts` and `src/agent-console/core/types.ts` — read from
+`CAPS_PERMISSION_REASON_BYTES`:
+
+```ts
+readonly permissionReasonBytes: number; // rejection threshold for one PermissionAnswer.reason
+```
+
+UTF-8 bytes of one non-null `PermissionAnswer.reason`, on any decision. A threshold, never a
+truncation, per the rule above: **a reason the agent reads is the reason the audit records**
+(I76), so shortening one would put text in front of the model that the operator never wrote.
+
 ## Persisted schemas
 
 ```
@@ -903,7 +920,7 @@ though it were new is silent wrong state rather than a parse error.
 |---|---|---|---|
 | `meta.json` | `sessionId` from the directory name | — | Written by temp-file-then-atomic-rename, never in place, on exactly three occasions: create, a `state` transition, a `cliSessionId` change. Never per event (I16) |
 | `events.ndjson` | `(sessionId, seq)` | `seq` ascending, contiguous from 1 | Append-only, written in `seq` order through the session's own append chain (D89). Not fsync'd per line. **Read backwards from the tail to locate `after + 1`, then emitted forward** — O(envelopes since the disconnect), not O(file). No offset index exists and none is planned (D163). **A `message.delta` is never appended**: it is a frame, not an envelope, so this file holds no line for one and a replay never produces one (D168, I51) |
-| `tool-output/<turnId>/<callId>` | `(sessionId, turnId, callId)` | — | Written once, never appended. `turnId` is in the path because `callId` is vendor-minted and only *assumed* session-unique (I22). Bounded per session by `Caps.sessionToolOutputBytes`: past the budget the blob is **not written**, and the fetch answers `404 no_such_output` exactly as S9.5 already specifies (D162). Nothing already written is ever evicted. **A windowed read adds no file**: no sidecar, no line table, no index of any kind, so this row is the whole of a blob's on-disk footprint and the budget above bounds it alone (D251, I67). The sidecar was available rather than blocked — D250 cleared it of D163's consistency objection, which prices an index against a growing, tearable append-only file and does not reach a blob written once and never appended — and was declined on its merits |
+| `tool-output/<turnId>/<callId>` | `(sessionId, turnId, callId)` | — | Written once, never appended. `turnId` is in the path because `callId`'s session-uniqueness is an adapter obligation (I75) the store cannot check, and the path must not depend on it (I22). Bounded per session by `Caps.sessionToolOutputBytes`: past the budget the blob is **not written**, and the fetch answers `404 no_such_output` exactly as S9.5 already specifies (D162). Nothing already written is ever evicted. **A windowed read adds no file**: no sidecar, no line table, no index of any kind, so this row is the whole of a blob's on-disk footprint and the budget above bounds it alone (D251, I67). The sidecar was available rather than blocked — D250 cleared it of D163's consistency objection, which prices an index against a growing, tearable append-only file and does not reach a blob written once and never appended — and was declined on its merits |
 | `attachments/<turnId>/<attachmentId>` | `(sessionId, turnId, attachmentId)` | — | Written once, never appended, fsync'd before the envelope naming it exists (I49). `attachmentId` is server-minted, so the operator's `filename` never reaches a path. A sidecar `attachments/<turnId>/<attachmentId>.meta` holds the stored `mediaType` as UTF-8 text, written the same way, so the read route can echo it for an allow-listed image type without scanning the spill for the `AttachmentRef` that named this id. Removed with the session (D25, D160) |
 | `audit.ndjson` | append order | append order, read newest first | Server-wide. fsync'd before the decision it records reaches the child (I10). Never truncated, never deleted with a session (I13). Every read is a bounded window resumed by `AuditCursor` (I39) |
 | `pids.ndjson` | append order; `pid` is not unique over time | append order | Server-wide. Two line shapes: a `ProcessRecord` at spawn, a `ProcessTombstone` at exit (D95). The latest line for a `pid` decides liveness; the spawn line carries everything else |
@@ -1509,14 +1526,18 @@ interrupt (D24); a deny is not a second way to do it, and an adapter must never 
 form its vendor treats as ending the turn.
 
 **`respond` takes a `reason`** (D273). The declaration is `Adapter.respond` in
-`src/agent-console/providers/types.ts`. `reason` is the deny's text as the agent will read it, and it is non-null only where the *server*
-forced the deny — today, the audit append that failed, where it names the storage failure. An
-operator's deny passes `null`, and so does every `allow`; the operator's stated reason stays in the
-`AuditRecord` and does not reach the model (`## Unresolved` 24). On `null` the adapter sends its own
-fixed text. On non-null it sends `reason` and never the fixed text, which names the operator as the
-cause of a decision no operator made. **The parameter must not acquire a default**: a defaulted
-`null` lets the one call site that owes a cause drop it without a trace, which is the gap D223
-found. `reason` never changes the decision, and a vendor whose wire carries no deny text drops it.
+`src/agent-console/providers/types.ts`. `reason` is the deny's text as the agent will read it, and
+it is non-null on exactly two denies (D275): one the *server* forced — today, the audit append
+that failed, where it names the storage failure — and an operator's deny answered with a stated
+reason, **passed only once that deny's `AuditRecord` is durable** (I76). An operator's deny with no
+stated reason passes `null`, and so does **every `allow`**, stated reason or not: an allow's reason
+is audit-only, because there is no refusal for it to explain. On `null` the adapter sends its own
+fixed text. On non-null it sends `reason` and never the fixed text, which on a forced deny names
+the operator as the cause of a decision no operator made. The adapter sends `reason` as given —
+no prefix, no quoting, no truncation — since the audit records those bytes as what the agent was
+told. **The parameter must not acquire a default**: a defaulted `null` lets the call sites that
+owe a cause or a stated reason drop it without a trace, which is the gap D223 found. `reason`
+never changes the decision, and a vendor whose wire carries no deny text drops it.
 
 **`Adapter` gains nothing for shutdown, and that is deliberate** (D178). There is no `detach`,
 and no way for an adapter to be told the server is stopping: the silence step 3 needs lives on
@@ -1943,6 +1964,13 @@ What the declarations cannot say:
   operator-typed at answer time rather than parsed from a vendor suggestion. `scope: 'always'`
   additionally requires `decision === 'allow'` and a non-null `matchTarget` on the named request
   (I43). **None of those four failures is silently downgraded to `once`.**
+- **`PermissionAnswer.reason` is `null` or non-empty text within `Caps.permissionReasonBytes`**
+  (D276), on any decision, checked before the request is claimed exactly as `rule` is. An empty
+  string is refused rather than read as `null`: the audit records the reason as sent, so the two
+  are different records, and a client with an empty field sends `null`. **On a deny, a non-null
+  reason is model input** (D275): the manager passes it to `Adapter.respond` after the decision's
+  `AuditRecord` is durable and never before, and where that append fails it passes the storage
+  cause instead and the operator's text is sent nowhere (I76).
 - **`answerPermission` returning `{ accepted: false }` is not an error.** It means another
   client answered first, and it carries `200`.
 - **`interrupt` takes a `turnId` and that is not a formality.** Two clients are an explicitly
@@ -2286,6 +2314,9 @@ are binding** and are in `10-design.md § Security controls`:
   at runtime, which is what keeps the theme feature compatible with a `style-src 'self'` that has
   no `unsafe-inline`. The choice is held in browser storage and **never reaches this server**
   (D60).
+- **The control that collects a deny's reason says the text is sent to the agent** (D275). An
+  operator must not type a reason believing it is an audit note; the audit and the agent read the
+  same bytes. An empty field is sent as `reason: null`, never `""`.
 
 ## HTTP routes
 
@@ -2736,7 +2767,7 @@ control rather than concealment (D50, D70).
 | `SessionError.turn_in_flight` | A second message, or a restore, end, or delete during a turn | Yes, once the turn ends | `409 turn_in_flight` |
 | `SessionError.workspace_busy` | The resolved path overlaps a live session's `cwd` | Yes, once that session ends | `409 workspace_busy`, naming the holding path and operator |
 | `SessionError.no_such_item` | A tick for an `itemId` absent from the configured template | No | `404 no_such_item` |
-| `SessionError.bad_request` | A malformed or missing field. On `answerPermission` this is four distinct cases, each naming the offending field: `scope: 'always'` with no `rule` (`rule`); a `rule` `parseStandingRule` refuses (`rule`); `scope: 'always'` with `decision: 'deny'` (`decision`); `scope: 'always'` against a request whose `matchTarget` is `null` (`scope`) | No | `422 bad_request`, naming the field |
+| `SessionError.bad_request` | A malformed or missing field. On `answerPermission` this is five distinct cases, each naming the offending field: `scope: 'always'` with no `rule` (`rule`); a `rule` `parseStandingRule` refuses (`rule`); `scope: 'always'` with `decision: 'deny'` (`decision`); `scope: 'always'` against a request whose `matchTarget` is `null` (`scope`); a `reason` that is empty or over `Caps.permissionReasonBytes` (`reason`, D276) | No | `422 bad_request`, naming the field |
 | `SessionError.payroll_unavailable` | The fold could not read the spill | Sometimes | `500 payroll_unavailable`. The session is unaffected — it is a read of a file the session is still writing |
 | `SessionError.jail` / `adapter` / `checkpoint` / `storage` / `records` | A dependency's error, wrapped | Per the cause | Map the cause, per the rows above |
 
@@ -2748,7 +2779,9 @@ re-derived:
   `reason`, emits
   `permission.resolved { decision: 'deny', reason: 'audit_unavailable' }` and a
   `session.notice / error`. The turn continues, the agent can respond to the denial, and nothing
-  unaudited executes. **Denial is the only decision safe to make without being able to record
+  unaudited executes. **The storage failure replaces whatever the operator answered**, including
+  a stated deny reason, which is sent nowhere: operator text reaches the agent only once its record
+  is durable (D275, I76). **Denial is the only decision safe to make without being able to record
   it** — the alternatives are running a tool with no record, or wedging a turn whose child is
   blocked forever.
 - **A spill append that fails ends the session.** The live turn is interrupted with
@@ -2942,6 +2975,8 @@ highest-value section in this document.
 | **I72** | `HEAD` on the tool-output route opens no blob and counts no line — one `stat`, no scan. It carries no line total, and it refuses `fromLine` or `lineCount` with `422 bad_request` rather than answering them (D255) | `store`, `edge/sse`, `edge/ws` |
 | **I73** | A session's spill holds at most one `session.notice / budget_warning` and at most one `budget_exhausted`, each at a higher `seq` than a `usage` envelope that brought the full component-wise burn to its line, and never where `sessionTokenBudget` is null. `budget_warning` never follows `budget_exhausted` in the same session, and neither notice refuses, interrupts or delays a turn. Nothing emits either on a session whose spill holds no `usage` envelope (D260) | `session-manager` |
 | **I74** | `SessionSummary.pendingPermissions` equals the live turn's `pending.size`, is `0` whenever `turn === null` — and so whenever `state === 'ended'` — and is never written to disk. It counts permission requests and nothing else (D261) | `agent-console/core` |
+| **I75** | Every `CallId` an adapter emits is unique within its session — across turns, adapter instances and server restarts — and a `tool.result` carries the `CallId` of the `tool.call` it closes. Where a vendor's own id is not session-unique the adapter composes one from the server's `turnId` and the vendor's id, never from a counter of its own, and the composite is a safe single path segment; an item whose id would make it unsafe is not mapped. Uniqueness is held by the adapter and assumed by every consumer above it, none of which may check, repair or widen it (D274) | `adapters/*` |
+| **I76** | On an operator's deny, the `reason` passed to `Adapter.respond` is byte for byte the decision `AuditRecord`'s `reason`, and it is passed only after that record is durable. Where the append fails, no operator-typed text reaches `respond` — the storage cause does. An `allow` passes `null` whatever the operator stated (D275, D276) | `session-manager` |
 
 **I40, I41 and I42 were never allocated, and the gap is left open rather than closed.** The
 numbering jumps from I39 to I43 and nothing is missing. Ids here are cited by number in
@@ -3112,7 +3147,8 @@ Newline-delimited JSON on stdout. **No deltas of any kind**: text arrives whole,
 | `turn.started` | *nothing* |
 | `item.completed`, `item.type == 'reasoning'` | `thinking` |
 | `item.completed`, `item.type == 'agent_message'` | `message`, role assistant |
-| `item.started` / `item.completed`, `item.type == 'command_execution'` | *not mapped* — recognised and dropped, deliberately. The item's `aggregated_output`, `exit_code` and `status` are all there; what is missing is a session-unique `CallId` to correlate on. See *Item ids* below and `## Unresolved` 13 |
+| `item.started`, `item.type == 'command_execution'` | `tool.call`; `callId` composed from the turn and the item's `id` — see *Item ids* below |
+| `item.completed`, `item.type == 'command_execution'` | `tool.result`, same `callId`; `ok` from `status`, `output` from `aggregated_output` |
 | `turn.completed` | `turn.ended`, `stopReason: 'completed'`. Its `usage` is **not** mapped — see *Usage* |
 | `close` with no `turn.completed` seen | `turn.ended`, `stopReason: 'process_exit'` |
 
@@ -3199,29 +3235,42 @@ this consumes an existing path rather than adding one.
 unknown from zero, and giving it one is a second public-surface change; `## Unresolved` 12
 carries it.
 
-### Item ids, and where the fallback breaks correlation
+### Item ids, and the fallback's composed `CallId`
 
-`CallId` is session-unique **by assumption** (`10-design.md § Data model — Identity spaces`).
-That assumption is now measured for Codex, and it holds on only one of the two transports.
+`CallId` is session-unique **by adapter obligation** (D274, I75): each consumer above the adapter
+assumes it, and each adapter either passes through a vendor id that already is or composes one
+that is. Measured for Codex, the vendor id holds on only one of the two transports.
 
 - **`app-server`: UUID-based** (`exec-a2215fa5-…`), distinct across two sequential turns of one
   thread. That is evidence of the scheme, not proof it never collides — two turns were probed,
-  and only for `commandExecution` items. It is treated exactly as Claude's is: assumed, and
-  stated as an assumption.
+  and only for `commandExecution` items. It is passed through unchanged, exactly as Claude's is,
+  and its uniqueness is an assumption the adapter states rather than one it manufactures.
 - **`exec --json`: a per-turn counter** — `item_0`, `item_1`, `item_2` — that **restarts on every
   turn of the same thread**, reproduced across two independent `codex exec resume --last` runs.
-  This is not an assumption that might fail; it is a known collision.
+  This is not an assumption that might fail; it is a known collision, so this adapter composes.
 
-S8.7 stops the slice before implementing tool correlation where this is found, and it is found.
-**The fallback's `tool.call` / `tool.result` correlation is therefore not specified here and no
-alias is invented**; `## Unresolved` 13 carries it. What must not happen is the obvious patch:
-composing a session-unique `CallId` from `(turnId, itemId)` inside the adapter is cheap and
-invisible above the boundary, and may well be the answer — but S8.7 reserves it, and a contract
-that quietly took it would be deciding open question 7's correlation half by writing a table.
+**The composite is `<turnId>.<itemId>`** (D276): the `turnId` the manager passed to the `send`
+that started the turn, a full stop, then the vendor item's `id` unchanged. The `turnId` is the
+server's, persisted and unique within the session by construction, which is why it is the prefix
+and an adapter-local turn counter is not — a counter restarts with the adapter instance, on a
+server restart or a resumed session, and would collide with ids already in the spill (D274). **The
+form is the adapter's and is not a contract any consumer may read**: above `adapters/*` the
+composite is as opaque as any vendor id (I21), and nothing splits it to recover the turn — the
+envelope already carries `turnId`.
 
-Storage is unaffected either way: D22 already puts `turnId` in the blob path, so a turn-scoped
-`callId` cannot overwrite an earlier turn's output (I22). **Correlation is the half no path
-scheme closes.**
+**The composite must be a safe single path segment, because it is one** (I22): it names the blob
+under `tool-output/<turnId>/`, and the edges refuse a `callId` that is not one. The full stop is
+chosen because it is legal there and appears in no `TurnId` the server mints; the prefix keeps the composite clear
+of every reserved device name. What remains in the vendor's hands is the suffix, so **an item whose
+`id` would make the composite unsafe is not mapped**: the adapter drops that item's `tool.call`
+and `tool.result` and surfaces one non-fatal `error / adapter_unknown_record`, as D228 does for a
+record it can name and must not act on. It is deliberately not `schema_mismatch`, which would cost
+the turn for an id the measured counter never produces.
+
+Storage was never the problem: D22 already puts `turnId` in the blob path, so a turn-scoped
+`callId` could not overwrite an earlier turn's output (I22). **Correlation was the half no path
+scheme closes**, and the composite closes it at the one layer that knows the vendor's id is
+turn-scoped.
 
 ### Schema mismatch
 
@@ -3369,6 +3418,12 @@ belong to the `exec --json` fallback alone; neither affects a session on `app-se
     composing a session-unique `CallId` from `(turnId, itemId)` — is deliberately **not** taken
     here: it is invisible above the adapter boundary and may well be right, but S8.7 reserves the
     choice, and writing it into the mapping table would decide it by omission. (#93)
+
+    **Resolved by D274, with the form by D276.** `/design` took the obvious fix on its merits: the
+    `exec --json` adapter composes `<turnId>.<itemId>`, session-uniqueness becomes an adapter
+    obligation (I75), and nothing above `adapters/*` changes. The mapping rows and the composite's
+    path-segment rule are under *Vendor mapping — Codex*. S8.7's "needs a server-side alias" stop
+    clause now contradicts this and is `/slices`' to reword. (#93)
 
 14. **Resolved by D178.** The call site is one new method on `SessionManager`, declared under
     *Public surface § `session-manager`* with the three things it must do and the order it must
@@ -3556,3 +3611,10 @@ belong to the `exec --json` fallback alone; neither affects a session on `app-se
     about a signature. Until it is answered an operator's deny passes `null`, and nothing downstream
     may forward the stated reason by another route. **Routed to `/design` by D273.** Staged in
     `90-decisions.md § Open` for `/track`.
+
+    **Resolved by D275, bounded by D276.** It reaches the agent: one string with two readers, sent
+    by `respond` in place of the fixed text only after its `AuditRecord` is durable, never on an
+    append failure, and never on an allow (I76). `PermissionAnswer.reason` is `null` or non-empty
+    within `Caps.permissionReasonBytes`, refused rather than truncated, and the control that
+    collects it says where it goes. The amendments are under *Public surface § `adapters/*`*,
+    *§ `session-manager`* and *§ `client`*, and *Error semantics*. (#480)

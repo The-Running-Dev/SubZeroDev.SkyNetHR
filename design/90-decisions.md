@@ -6865,17 +6865,45 @@ into the model with no record that it was sent, the one gap the audit-failure de
 Reversibility: cheap — no client sends a non-null reason yet, so no stored record or transcript
 depends on either reading.
 
+### 2026-10-03 — D276 The composed `CallId` is `<turnId>.<itemId>`; `PermissionAnswer.reason` is null or non-empty within `Caps.permissionReasonBytes`
+Context: `/contract`'s half of D274 and D275. D274 fixed what the `exec --json` composite is made
+of and that it must be a safe path segment, not its spelling or what happens when the vendor's half
+makes it unsafe. D275 required the reason's bytes bounded and refused rather than truncated, and
+left the cap's name, its scope across decisions, and the empty string undecided.
+Chosen: **the composite is `<turnId>.<itemId>`**, and an item whose id would make it fail
+`isSafePathSegment` is not mapped — one non-fatal `error / adapter_unknown_record`, as D228. **The
+bound is `Caps.permissionReasonBytes`** (`CAPS_PERMISSION_REASON_BYTES`), UTF-8 bytes, value the
+deployment's (D84), on **every** non-null reason whatever the decision, checked before the request
+is claimed; an empty string is `422 bad_request` naming `reason`, and the client sends `null` for
+an empty field. Held by I75 and I76.
+Rejected: **`:` or `/` as the separator.** Neither is a legal path segment on the platforms this
+runs on, and the composite is one.
+Rejected: **`-` or `_`.** Both occur in the parts — `-` in every UUID, `_` in `item_0` — so the
+string would read ambiguously to anyone debugging a blob path, though the fixed-length prefix keeps
+it unique; the full stop occurs in neither.
+Rejected: **sanitising an unsafe vendor id into a safe one.** Any rewrite can map two ids to one,
+which is the collision the composite exists to remove.
+Rejected: **`schema_mismatch` on an unsafe id.** It costs the turn for a shape the measured counter
+never produces — the same trade D228 declined.
+Rejected: **bounding deny reasons only.** An allow's reason is still operator text in an
+append-only, never-shortened log (I13), and two rules for one field is a second branch for no
+reader's benefit.
+Rejected: **reusing `Caps.standingRuleBytes`.** A grammar expression and a sentence to the model
+are bounded for different reasons and a deployment may want them apart.
+Rejected: **normalising `""` to `null`.** The audit records the reason as sent; a server that
+rewrites it records something no client said.
+Reversibility: cheap — no `exec --json` tool call and no non-null reason has been emitted or stored.
+
 ## Open
 
 Staging only. Once an item becomes an issue it leaves this list.
 
-- **D274's contract amendment and code.** `/contract` (opus/high): close `## Unresolved` 13, state
-  the composed `CallId`'s form and that it is a safe path segment, fill the `exec --json` mapping
-  row, and amend *Identity minting* and the Codex "Item ids" paragraph. `/slices`: reword S8.7's
-  "needs a server-side alias" stop clause. Then the `exec --json` adapter maps
-  `command_execution` items with the composed id instead of dropping them.
-- **D275's contract amendment and code.** `/contract` (opus/high): amend `adapters/*` `respond` so
-  an operator's deny carries its stated reason, close `## Unresolved` 24, and bound the reason's
-  bytes, refused rather than truncated. Then the manager passes the operator's reason to `respond`
-  only after the audit append succeeds, and the client's deny control gains a reason field that
-  says the text goes to the agent.
+- **D274's slice reword and code.** The contract is amended (D276, I75). `/slices`: reword S8.7's
+  "needs a server-side alias" stop clause. Then the `exec --json` adapter maps `command_execution`
+  items with the composed `<turnId>.<itemId>` instead of dropping them, and drops with
+  `adapter_unknown_record` an item whose id would make the composite unsafe.
+- **D275's code.** The contract is amended (D276, I76). Add `Caps.permissionReasonBytes` to both
+  `Caps` declarations and `CAPS_PERMISSION_REASON_BYTES` to config; `answerPermission` refuses an
+  empty or over-cap `reason`; the manager passes an operator's deny reason to `respond` only after
+  the audit append succeeds; the client's deny control gains a reason field that says the text
+  goes to the agent and sends `null` when empty.
