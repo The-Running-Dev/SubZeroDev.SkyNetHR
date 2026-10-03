@@ -59,9 +59,9 @@ export async function wrapAdapter(
       });
       return {
         started, done,
-        respondToPermission(requestId, decision) {
+        respondToPermission(requestId, decision, reason) {
           if (active !== state || state.ended) return { ok: false, error: { code: 'no_child' } };
-          const response = adapter.respond(requestId, decision);
+          const response = adapter.respond(requestId, decision, reason);
           if (response.ok) return { ok: true, value: { decision, reason: 'answered' } };
           if (response.error.code === 'no_child' || response.error.code === 'write_failed') {
             return { ok: true, value: { decision: 'deny', reason: 'cancelled_process_exit', cause: response.error } };

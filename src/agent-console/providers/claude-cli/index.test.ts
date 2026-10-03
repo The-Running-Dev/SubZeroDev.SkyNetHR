@@ -63,7 +63,7 @@ test('S1.1, S1.3, S1.9 — the twelve-row vendor mapping, and stdin stays writab
 
   // S1.1: stdin is still writable here — this is the point in the real handshake where
   // a naive implementation would already have closed it.
-  const respondResult = adapter.respond(requestId as never, 'allow');
+  const respondResult = adapter.respond(requestId as never, 'allow', null);
   assert.equal(respondResult.ok, true);
 
   // Row 10: result (success) -> turn.ended, stopReason 'completed'. Reaching this after
@@ -118,7 +118,7 @@ test('D223 — a deny control_response carries interrupt: false', async () => {
     await waitUntil(() => eventsOf(notifications, 'permission.request').length > 0);
     const requestId = (eventsOf(notifications, 'permission.request')[0]!.event.data as { requestId: string }).requestId;
 
-    assert.equal(adapter.respond(requestId as never, 'deny').ok, true);
+    assert.equal(adapter.respond(requestId as never, 'deny', null).ok, true);
     await waitUntil(() => eventsOf(notifications, 'turn.ended').length > 0);
 
     const responses = (await readFile(stdinLog, 'utf8'))
@@ -131,6 +131,40 @@ test('D223 — a deny control_response carries interrupt: false', async () => {
       { behavior: responses[0]!.response!.response!['behavior'], interrupt: responses[0]!.response!.response!['interrupt'] },
       { behavior: 'deny', interrupt: false },
     );
+  } finally {
+    delete process.env['SKYNET_STDIN_LOG'];
+  }
+});
+
+// D273 — a non-null `reason` is the deny's `message`; `null` keeps the fixed text; neither changes `behavior`.
+test('D273 — respond sends reason as the deny message when non-null, and the fixed text only when null', async () => {
+  process.env['SKYNET_TEST_SCENARIO'] = 'many-permissions';
+  const dir = await mkdtemp(path.join(tmpdir(), 'd273-'));
+  const stdinLog = path.join(dir, 'stdin.log');
+  process.env['SKYNET_STDIN_LOG'] = stdinLog;
+  try {
+    const { adapter, notifications } = makeAdapter('many-permissions');
+    await adapter.send('hello', [], null, 'turn-d273' as never);
+    const answer = async (index: number, reason: string | null) => {
+      await waitUntil(() => eventsOf(notifications, 'permission.request').length > index);
+      const requestId = (eventsOf(notifications, 'permission.request')[index]!.event.data as { requestId: string }).requestId;
+      assert.equal(adapter.respond(requestId as never, 'deny', reason).ok, true);
+    };
+    await answer(0, 'the audit record could not be written: disk full');
+    await answer(1, null);
+    // The scenario asks three times and ends the turn (and exits) only once the third is answered.
+    await answer(2, null);
+    await waitUntil(() => eventsOf(notifications, 'turn.ended').length > 0);
+
+    const denies = (await readFile(stdinLog, 'utf8'))
+      .split('\n')
+      .filter((l) => l.trim())
+      .map((l) => JSON.parse(l) as { type: string; response?: { response?: Record<string, unknown> } })
+      .filter((m) => m.type === 'control_response')
+      .map((m) => m.response!.response!);
+    assert.deepEqual(denies.map((d) => d['behavior']), ['deny', 'deny', 'deny']);
+    assert.deepEqual(denies.map((d) => d['message']), ['the audit record could not be written: disk full', 'Denied by operator', 'Denied by operator']);
+    assert.deepEqual(denies.map((d) => d['interrupt']), [false, false, false]);
   } finally {
     delete process.env['SKYNET_STDIN_LOG'];
   }

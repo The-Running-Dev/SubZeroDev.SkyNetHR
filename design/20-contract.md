@@ -1508,14 +1508,8 @@ argument is that the turn continues. Stopping a turn is `kill`'s, driven by the 
 interrupt (D24); a deny is not a second way to do it, and an adapter must never answer one in a
 form its vendor treats as ending the turn.
 
-**`respond` gains a `reason`, and the tree does not carry it yet** (D273). Scaffold, until the
-change that lands it replaces this block with a pointer:
-
-```ts
-respond(requestId: RequestId, decision: PermissionDecision, reason: string | null): Result<void, AdapterError>;
-```
-
-`reason` is the deny's text as the agent will read it, and it is non-null only where the *server*
+**`respond` takes a `reason`** (D273). The declaration is `Adapter.respond` in
+`src/agent-console/providers/types.ts`. `reason` is the deny's text as the agent will read it, and it is non-null only where the *server*
 forced the deny — today, the audit append that failed, where it names the storage failure. An
 operator's deny passes `null`, and so does every `allow`; the operator's stated reason stays in the
 `AuditRecord` and does not reach the model (`## Unresolved` 24). On `null` the adapter sends its own

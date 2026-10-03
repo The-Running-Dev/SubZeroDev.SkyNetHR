@@ -592,7 +592,7 @@ export function createClaudeAdapter(opts: AdapterOptions & { readonly executable
       });
     },
 
-    respond(requestId: RequestId, decision: PermissionDecision): Result<void, AdapterError> {
+    respond(requestId: RequestId, decision: PermissionDecision, reason: string | null): Result<void, AdapterError> {
       if (!child) return { ok: false, error: { code: 'no_child' } };
       const pending = pendingByRequestId.get(requestId);
       if (!pending) return { ok: true, value: undefined }; // already resolved elsewhere; nothing to write
@@ -607,7 +607,8 @@ export function createClaudeAdapter(opts: AdapterOptions & { readonly executable
             ? { behavior: 'allow', updatedInput: {}, toolUseID: pending.callId }
             // D223: `interrupt: true` ended the turn `error` against the real CLI; `false` lets the
             // agent see the denial and answer it (design/findings/D223-deny-interrupt-probe.md).
-            : { behavior: 'deny', message: 'Denied by operator', interrupt: false, toolUseID: pending.callId },
+            // D273: the fixed text names the operator, so it is only for a deny an operator made.
+            : { behavior: 'deny', message: reason ?? 'Denied by operator', interrupt: false, toolUseID: pending.callId },
         },
       });
       if (!wrote) return { ok: false, error: { code: 'write_failed', detail: 'stdin not writable' } };

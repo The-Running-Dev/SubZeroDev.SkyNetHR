@@ -100,7 +100,8 @@ function line(obj) {
   writeSync(1, JSON.stringify(obj) + '\n');
 }
 
-function toolResultFor(behavior, callId) {
+// The real CLI hands the deny's `message` to the agent as the tool's result text (D273).
+function toolResultFor(behavior, callId, message) {
   const allowed = behavior === 'allow';
   line({
     type: 'user',
@@ -108,7 +109,7 @@ function toolResultFor(behavior, callId) {
       content: [{
         type: 'tool_result',
         tool_use_id: callId,
-        content: allowed ? 'ok' : 'Denied by operator',
+        content: allowed ? 'ok' : (message ?? 'Denied by operator'),
         is_error: !allowed,
       }],
     },
@@ -191,8 +192,9 @@ function onLine(msg) {
   if (msg.type === 'control_response') {
     awaitingControlResponse = false;
     const behavior = msg.response?.response?.behavior ?? 'allow';
+    const message = msg.response?.response?.message;
     if (scenario === 'many-permissions') {
-      toolResultFor(behavior, currentCallId);
+      toolResultFor(behavior, currentCallId, message);
       permissionsGranted += 1;
       if (permissionsGranted < 3) {
         sendControlRequest('req-' + (permissionsGranted + 1), 'call-' + (permissionsGranted + 1));
@@ -210,7 +212,7 @@ function onLine(msg) {
       line({ type: 'result', subtype: 'success' });
       return;
     }
-    toolResultFor(behavior, currentCallId);
+    toolResultFor(behavior, currentCallId, message);
     line({ type: 'result', subtype: 'success' });
     return;
   }
