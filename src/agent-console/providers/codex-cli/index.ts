@@ -1,7 +1,7 @@
 import type { ChildProcess } from 'node:child_process';
 import { spawnProcess, resolveSpawn, reportableImage, terminateProcess, closeStdin, protectStdin } from '../../process/index.js';
 import { platform } from 'node:process';
-import { probeCommand } from '../probe.js';
+import { probeCommand, type ProbeResult } from '../probe.js';
 import type { ProbeContext, ProviderStatus } from '../types.js';
 import type {
   Adapter,
@@ -43,24 +43,34 @@ function sandboxBanner(mode: SandboxMode): string {
 
 const SANDBOX_MODES = new Set<SandboxMode>(['read-only', 'workspace-write', 'unrestricted']);
 
-async function probeOk(executable: string, cwd: string, subcommand: string): Promise<boolean> {
+function probeOk(executable: string, cwd: string, subcommand: string): Promise<ProbeResult> {
   const resolved = resolveSpawn(executable, [subcommand, '--help'], executable === 'codex');
-  return (await probeCommand(resolved.command, resolved.args, cwd, resolved.shell)).ok;
+  return probeCommand(resolved.command, resolved.args, cwd, resolved.shell);
 }
 
-// Cache the in-flight promise as well as failures: concurrent creates share one probe.
+// Cache the in-flight promise, a detected transport, and a timed-out probe: concurrent creates
+// share one probe and a hung binary stalls once. A not-found result is dropped once settled, so
+// a Codex installed after start is picked up without a restart (D226).
 const transportCache = new Map<string, Promise<Transport | null>>();
 function detectTransport(executable: string, cwd: string, refresh = false): Promise<Transport | null> {
   const key = JSON.stringify([executable, cwd]);
   if (refresh) transportCache.delete(key);
   let result = transportCache.get(key);
   if (!result) {
-    result = (async () => {
-      if (await probeOk(executable, cwd, 'app-server')) return 'app-server';
-      if (await probeOk(executable, cwd, 'exec')) return 'exec';
+    let hung = false;
+    const probing: Promise<Transport | null> = (async () => {
+      const appServer = await probeOk(executable, cwd, 'app-server');
+      if (appServer.ok) return 'app-server';
+      const exec = await probeOk(executable, cwd, 'exec');
+      if (exec.ok) return 'exec';
+      hung = appServer.timedOut || exec.timedOut;
       return null;
     })();
-    transportCache.set(key, result);
+    result = probing;
+    transportCache.set(key, probing);
+    void probing.then((transport) => {
+      if (transport === null && !hung && transportCache.get(key) === probing) transportCache.delete(key);
+    });
   }
   return result;
 }
