@@ -18,7 +18,7 @@ const checkpointBackend: Checkpoints = { async init() { return success(); }, asy
 function noEffects() { return createHostAttempts({ prepare: success, async commit() { return success(); }, abort() {} }); }
 function error(result: Result<unknown, SessionError>, code: SessionError['code']) { assert.ok(!result.ok); assert.equal(result.error.code, code); }
 
-async function fixture(t: TestContext, options: { host?: HostCreateCallbacks; max?: number; checkpoints?: Partial<Checkpoints>; sendFailure?: boolean; wrapStore?: (store: SessionStore) => SessionStore } = {}) {
+async function fixture(t: TestContext, options: { host?: HostCreateCallbacks; hostAttemptTimeoutMs?: number; max?: number; checkpoints?: Partial<Checkpoints>; sendFailure?: boolean; wrapStore?: (store: SessionStore) => SessionStore } = {}) {
   const root = await realpath(await mkdtemp(path.join(tmpdir(), 'agent-core-')));
   const config: RuntimeOptions = { storageRoot: root as never, workspaceRoots: [root as never], caps, includeRaw: false, streamDeltas: false, maxLiveSessionsPerWorkspace: options.max ?? 1 };
   const store = (options.wrapStore ?? (s => s))(createMemorySessionStore(config));
@@ -31,7 +31,7 @@ async function fixture(t: TestContext, options: { host?: HostCreateCallbacks; ma
     async send(_text, attachments) { sent = attachments; return options.sendFailure ? { ok: false, error: { code: 'agent_unavailable', image: 'fixture', detail: 'cannot spawn' } } : success(); },
     respond() { return response; }, async kill() { kills++; },
   };
-  const core = createSessionCore({ config, store, checkpoints: { ...checkpointBackend, ...options.checkpoints }, hostCreate: options.host ?? noEffects(), hostAttemptTimeoutMs: 5, createAdapter: (_id, value) => { adapterOptions = value; return ok(adapter); } });
+  const core = createSessionCore({ config, store, checkpoints: { ...checkpointBackend, ...options.checkpoints }, hostCreate: options.host ?? noEffects(), hostAttemptTimeoutMs: options.hostAttemptTimeoutMs ?? 5, createAdapter: (_id, value) => { adapterOptions = value; return ok(adapter); } });
   t.after(async () => { await core.shutdown(); await store.close(); await rm(root, { recursive: true, force: true }); });
   const input = { vendor: 'fixture', cwd: root, model: null, sandbox: null };
   const create = async () => { const created = await core.create('alice', input); assert.ok(created.ok); return created.value.sessionId; };
@@ -43,7 +43,8 @@ async function fixture(t: TestContext, options: { host?: HostCreateCallbacks; ma
 test('A11 — a pending prepare owns allocation before the host callback and releases on failure', async t => {
   const entered = deferred<void>(), preparation = deferred<Result<void, unknown>>();
   const host = createHostAttempts({ prepare() { entered.resolve(); return preparation.promise; }, async commit() { return success(); }, abort() {} });
-  const f = await fixture(t, { host });
+  // The pending prepare must outlive any event-loop stall: the default 5 ms attempt timeout would release the allocation under load (#489).
+  const f = await fixture(t, { host, hostAttemptTimeoutMs: 30_000 });
   const creating = f.core.create('alice', f.input);
   await entered.promise;
   error(await f.core.create('bob', f.input), 'workspace_busy');
