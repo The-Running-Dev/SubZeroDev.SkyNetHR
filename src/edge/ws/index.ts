@@ -347,6 +347,9 @@ export function createWsEdge(deps: EdgeDeps): WsRequestListener {
       // are keyed on integers — a fractional `after` must not reach `manager.subscribe`
       // with different rounding behaviour than the SSE path's.
       const after = (typeof afterRaw === 'number' && Number.isInteger(afterRaw) && afterRaw > 0 ? afterRaw : 0) as Seq | 0;
+      // (D225) The floor is `after`, not zero: a drop before anything is written would
+      // otherwise restate seq 0, which is not a seq this client holds (D156).
+      lastSeqWritten = after;
 
       // S11.3: first-message auth resolves the same `OperatorId` as the SSE edge, from the
       // same credentials — the handshake's own headers/cookies, not a second token scheme.

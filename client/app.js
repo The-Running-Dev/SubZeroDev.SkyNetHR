@@ -632,6 +632,12 @@ function handleEnvelope(sessionId, envelope) {
 
   if (envelope.kind === 'error' && envelope.data?.kind === 'replay_gap') {
     if (handleReplayGap()) return;
+  } else if (state.refetched && envelope.sessionId === state.sessionId && typeof envelope.seq === 'number') {
+    // D225: the refetch stream has delivered, so the refetch worked. Only a gap on the
+    // refetch stream itself means the spill cannot be read; a later, unrelated gap in this
+    // selection is a new one and earns its own refetch. A frame carries no `seq` (D168) and
+    // proves nothing about the replayed history, so it does not clear this.
+    state.refetched = false;
   }
   // Every envelope for the session on screen resets the silence clock, not only the ones
   // that render — D21's "no output for N min" measures since the last *envelope*, which

@@ -14,7 +14,7 @@ import { createSessionManager } from '../../session-manager/index.js';
 import { createStore } from '../../store/index.js';
 import { createCheckpoints } from '../../checkpoints/index.js';
 import { stripExtendedPrefix } from '../../jail/index.js';
-import type { AuthConfig, Config, ReadinessState, Records } from '../../contract/index.js';
+import type { AuthConfig, Config, ReadinessState, Records, SessionManager } from '../../contract/index.js';
 
 const FIXTURE = path.join(process.cwd(), 'src', 'agent-console', 'providers', 'claude-cli', 'fixtures', 'fake-claude-cli.mjs');
 const ALLOWED_ORIGIN = 'https://console.example';
@@ -68,6 +68,7 @@ async function makeSharedEdges(
   auth: AuthConfig = { mode: 'proxy-header', userHeader: 'x-forwarded-user' },
   over: Partial<Config> = {},
   scenario = 'full',
+  wrapManager: (real: SessionManager) => SessionManager = (real) => real,
 ): Promise<Harness> {
   process.env['SKYNET_TEST_SCENARIO'] = scenario;
   process.env['SKYNET_CLAUDE_EXECUTABLE'] = FIXTURE;
@@ -107,12 +108,12 @@ async function makeSharedEdges(
   };
   const storeResult = await createStore(config);
   if (!storeResult.ok) throw new Error('store failed to init');
-  const manager = createSessionManager({
+  const manager = wrapManager(createSessionManager({
     config,
     store: storeResult.value,
     checkpoints: createCheckpoints(config),
     records: notImplementedProxy<Records>('records'),
-  });
+  }));
   const deps = { config, identity: resolverFor(config.auth, config.trustProxy), manager, records: notImplementedProxy<Records>('records'), readiness: { ready: true } as ReadinessState };
 
   const sseServer = createServer(createSseEdge(deps));
@@ -736,6 +737,99 @@ describe('#133 — a slow live subscriber is dropped past caps.subscriberQueueHi
     const gapFrame = texts.find((t) => t.includes('"kind":"replay_gap"'));
     assert.ok(gapFrame, `a replay_gap envelope was delivered before the drop; saw ${texts.length} text frames`);
     assert.match(gapFrame!, /"fatal":false/, 'the gap is reported non-fatal, same shape session-manager.subscribe mints');
+  });
+});
+
+describe('D225 — a backpressure drop before anything is delivered restates the resume point, not seq 0', () => {
+  it('a resumed stream whose first write is an undrained frame reports a gap at `after`', async () => {
+    const RESUME_AT = 7;
+    const h = await makeSharedEdges(
+      undefined,
+      {
+        caps: {
+          ringCapacity: 500,
+          toolResultBytes: 65536,
+          subscriberQueueHighWater: 0, // the first write that does not flush is already over the mark
+          keepaliveMs: 15000,
+          auditPageMax: 200,
+          reviewBodyBytes: 1024,
+          requisitionTextBytes: 1024,
+          standingRuleBytes: 1024,
+          attachmentBytes: 10485760,
+          attachmentCount: 5,
+          sessionToolOutputBytes: 10485760,
+        },
+      },
+      'full',
+      // The only things this subscriber is handed are frames — they carry no `seq`, so none can
+      // move the stream's watermark — and together they are far larger than the socket's buffers,
+      // so a write cannot flush to a client that is not reading. How many it takes before the
+      // kernel stops accepting them varies by platform; deliveries after the drop are ignored.
+      (real) => ({
+        ...real,
+        subscribe: async (sessionId, _owner, _after, sink) => {
+          const frame = {
+            sessionId,
+            ts: new Date().toISOString(),
+            kind: 'message.delta',
+            data: { turnId: 't', role: 'assistant', text: 'x'.repeat(4 * 1024 * 1024) },
+          } as never;
+          for (let i = 0; i < 32; i++) sink.deliver(frame);
+          return { ok: true, value: { close() {} } } as never;
+        },
+      }),
+    );
+    const id = await newSession(h, 'w225-ws');
+
+    const { socket, head } = await new Promise<{ socket: Socket; head: Buffer }>((resolve, reject) => {
+      const url = new URL(`${h.wsBase}/api/sessions/${id}/events`);
+      const req = request({
+        host: url.hostname,
+        port: url.port,
+        path: url.pathname,
+        method: 'GET',
+        headers: {
+          connection: 'Upgrade',
+          upgrade: 'websocket',
+          origin: ALLOWED_ORIGIN,
+          'x-forwarded-user': 'ben',
+          'sec-websocket-version': '13',
+          'sec-websocket-key': randomBytes(16).toString('base64'),
+        },
+      });
+      req.on('upgrade', (_res, sock, upgradeHead: Buffer) => {
+        sockets.push(sock);
+        resolve({ socket: sock, head: upgradeHead });
+      });
+      req.on('error', reject);
+      req.end();
+    });
+    socket.write(encodeClientFrame(0x1, Buffer.from(JSON.stringify({ after: RESUME_AT }), 'utf8')));
+
+    // Nothing is read until the server has had time to write and drop, so the write above
+    // cannot have flushed.
+    await new Promise((resolve) => setTimeout(resolve, 500).unref());
+
+    const raw: Buffer[] = head.length > 0 ? [head] : [];
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error(`timed out waiting for the drop; saw ${raw.length} chunks`)), 20000);
+      timer.unref();
+      socket.on('data', (c: Buffer) => raw.push(c));
+      socket.on('close', () => {
+        clearTimeout(timer);
+        resolve();
+      });
+      socket.on('error', (err) => {
+        clearTimeout(timer);
+        reject(err);
+      });
+    });
+    const { frames } = parseServerFrames(Buffer.concat(raw));
+    const texts = frames.filter((f) => f.opcode === 0x1).map((f) => f.payload.toString('utf8'));
+    const gapText = texts.find((t) => t.includes('"kind":"replay_gap"'));
+    assert.ok(gapText, `a replay_gap envelope was delivered before the drop; saw ${texts.length} text frames`);
+    const gap = JSON.parse(gapText!) as { seq: number };
+    assert.equal(gap.seq, RESUME_AT, 'the gap restates the resume point the client sent; seq 0 is not a seq it holds (D156)');
   });
 });
 
