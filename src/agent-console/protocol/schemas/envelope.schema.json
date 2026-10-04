@@ -27,6 +27,9 @@
           "$ref": "events/thinking.schema.json"
         },
         {
+          "$ref": "events/hook.schema.json"
+        },
+        {
           "$ref": "events/tool.call.schema.json"
         },
         {

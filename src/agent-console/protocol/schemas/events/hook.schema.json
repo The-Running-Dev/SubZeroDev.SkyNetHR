@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.agent-console.invalid/events/hook.schema.json",
+  "type": "object",
+  "properties": {
+    "kind": { "const": "hook" },
+    "data": {
+      "type": "object",
+      "properties": {
+        "turnId": { "type": "string" },
+        "hookId": { "type": "string" },
+        "hookName": { "type": "string" },
+        "hookEvent": { "type": "string" },
+        "phase": { "enum": ["started", "completed"] },
+        "outcome": { "type": ["string", "null"] },
+        "exitCode": { "type": ["integer", "null"] }
+      },
+      "required": ["turnId", "hookId", "hookName", "hookEvent", "phase", "outcome", "exitCode"]
+    }
+  },
+  "required": ["kind", "data"]
+}
