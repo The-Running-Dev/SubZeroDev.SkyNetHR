@@ -192,6 +192,13 @@ function thinkingNode(doc, data, handlers) {
   return row(doc, 'thinking', 'thinking', body);
 }
 
+function hookNode(doc, data) {
+  const parts = [data.hookName, data.hookEvent, data.phase];
+  if (data.outcome !== null) parts.push(data.outcome);
+  if (data.exitCode !== null) parts.push(`exit ${data.exitCode}`);
+  return row(doc, 'hook', 'hook', el(doc, 'div', 'hook', parts.join(' · ')));
+}
+
 // Registers itself with `handlers.onToolCallRendered(callId, refs)` when given one, so a
 // later `permission.request` sharing this `callId` can find and merge into this same row
 // (D246) rather than rendering the input a second time.
@@ -785,6 +792,7 @@ const RENDERERS = {
   // `appendMessageDeltaText` grows it for every delta after that.
   'message.delta': messageNode,
   thinking: thinkingNode,
+  hook: hookNode,
   'tool.call': toolCallNode,
   'tool.result': toolResultNode,
   'permission.request': permissionRequestNode,

@@ -226,6 +226,26 @@ async function setUpApp({ sessions, extraRoutes = [], payrollCounter = null } = 
   return { doc, fetchCalls, sseInstances, wsInstances, selectA, selectB };
 }
 
+for (const edge of ['sse', 'ws']) test(`#415 ${edge} — hook records reach the transcript in arrival order`, async () => {
+  const { doc, sseInstances, wsInstances, selectA } = await setUpApp();
+  doc.__setEdge(edge);
+  selectA();
+  await flush();
+  for (const [index, phase] of ['completed', 'started', 'completed'].entries()) {
+    const envelope = { seq: index + 1, sessionId: 'sess-a', kind: 'hook', data: {
+      turnId: 'turn-a', hookId: 'hook-a', hookName: 'preflight', hookEvent: 'SessionStart',
+      phase, outcome: null, exitCode: null,
+    } };
+    if (edge === 'sse') sseInstances[0].emit('hook', envelope);
+    else wsInstances[0].emit(envelope);
+  }
+  const transcript = doc.getElementById('transcript');
+  assert.equal(transcript.children.length, 3);
+  assert.deepEqual(transcript.children.map(row => row.children.at(-1).textContent), [
+    'preflight · SessionStart · completed', 'preflight · SessionStart · started', 'preflight · SessionStart · completed',
+  ]);
+});
+
 test('#204 SSE — a delayed event from a session switched away from does not render or move lastSeq, and the new session still renders normally', async () => {
   const { doc, sseInstances, selectA, selectB } = await setUpApp();
   doc.__setEdge('sse');

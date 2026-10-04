@@ -184,6 +184,7 @@ const KINDS_CARRYING_TURN_ID = new Set<EventKind>([
   'message',
   'message.delta',
   'thinking',
+  'hook',
   'tool.call',
   'tool.result',
   'permission.request',

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
-import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
@@ -39,6 +39,61 @@ function eventsOf(notifications: readonly AdapterNotification[], kind: string) {
     .filter((n): n is Extract<AdapterNotification, { kind: 'event' }> => n.kind === 'event')
     .filter((n) => n.event.kind === kind);
 }
+
+test('#415 — captured hooks emit ordered transcript metadata, without output in the payload', async t => {
+  process.env['SKYNET_TEST_SCENARIO'] = 'usage-real';
+  const fixturePath = path.join(path.dirname(FIXTURE), 'usage-probe-bash.ndjson');
+  process.env['SKYNET_USAGE_FIXTURE'] = fixturePath;
+  t.after(() => { delete process.env['SKYNET_TEST_SCENARIO']; delete process.env['SKYNET_USAGE_FIXTURE']; });
+  const records = readFileSync(fixturePath, 'utf8').trim().split('\n').map(line => JSON.parse(line) as Record<string, unknown>)
+    .filter(record => record['subtype'] === 'hook_started' || record['subtype'] === 'hook_response');
+  const { adapter, notifications } = makeAdapter('usage-real');
+  t.after(() => adapter.kill());
+  await adapter.send('hello', [], null, 'hook-turn' as never);
+  await waitUntil(() => eventsOf(notifications, 'turn.ended').length > 0);
+  const hooks = eventsOf(notifications, 'hook');
+  assert.ok(records.length > 0);
+  assert.deepEqual(hooks.map(event => event.event.data), records.map(record => ({
+    hookId: record['hook_id'], phase: record['subtype'] === 'hook_started' ? 'started' : 'completed',
+    hookEvent: record['hook_event'], hookName: record['hook_name'],
+    outcome: record['subtype'] === 'hook_started' ? null : record['outcome'] ?? null,
+    exitCode: record['subtype'] === 'hook_started' ? null : record['exit_code'] ?? null,
+  })));
+});
+
+test('#415 — optional hook outcomes are nullable; malformed metadata is rejected', async t => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'hook-fixture-'));
+  t.after(async () => { delete process.env['SKYNET_TEST_SCENARIO']; delete process.env['SKYNET_USAGE_FIXTURE']; await rm(dir, { recursive: true, force: true }); });
+  const base = { type: 'system', subtype: 'hook_response', hook_id: 'orphan', hook_name: 'preflight', hook_event: 'SessionStart' };
+  const cases = [
+    { record: base, valid: true },
+    { record: { ...base, outcome: 'vendor-defined', exit_code: 7 }, valid: true },
+    { record: { ...base, subtype: 'hook_started', outcome: 'ignored', exit_code: 7 }, valid: true },
+    { record: { ...base, hook_id: 1 }, valid: false },
+    { record: { ...base, outcome: {} }, valid: false },
+    { record: { ...base, exit_code: 1.5 }, valid: false },
+  ];
+  for (const [index, entry] of cases.entries()) {
+    process.env['SKYNET_TEST_SCENARIO'] = 'usage-real';
+    const fixturePath = path.join(dir, `${index}.ndjson`);
+    await writeFile(fixturePath, `${JSON.stringify(entry.record)}\n${JSON.stringify({ type: 'result', subtype: 'success' })}\n`);
+    process.env['SKYNET_USAGE_FIXTURE'] = fixturePath;
+    const { adapter, notifications } = makeAdapter('usage-real');
+    try {
+      await adapter.send('hello', [], null, 'hook-turn' as never);
+      await waitUntil(() => eventsOf(notifications, entry.valid ? 'turn.ended' : 'error').length > 0);
+      const hooks = eventsOf(notifications, 'hook');
+      assert.equal(hooks.length, entry.valid ? 1 : 0, `case ${index}`);
+      if (entry.valid) {
+        const data = hooks[0]!.event.data as { outcome: string | null; exitCode: number | null };
+        assert.equal(data.outcome, index === 1 ? 'vendor-defined' : null);
+        assert.equal(data.exitCode, index === 1 ? 7 : null);
+      } else {
+        assert.ok(eventsOf(notifications, 'error').some(event => (event.event.data as { kind: string }).kind === 'adapter_schema_mismatch'));
+      }
+    } finally { await adapter.kill(); }
+  }
+});
 
 // S1.1 and S1.3 (rows 1–10 of the twelve-row Claude vendor mapping table) and half of
 // S1.9 at the adapter layer — the session-manager-level harness round trip is covered
