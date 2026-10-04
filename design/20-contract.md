@@ -345,7 +345,8 @@ which *Rules the renderer may rely on* already permits.
 A frame is an envelope minus `seq` — the manager assigns `sessionId`, `ts` and the payload's
 `turnId` as it always has, and assigns no `seq`, because a frame has no position in the
 replayable stream. `raw` (`src/agent-console/contract/index.ts`) exists for debugging and **must never be
-rendered**.
+rendered**, by any view at any verbosity level, whether or not `Config.includeRaw` is on (D266).
+Its reader is whoever reads `events.ndjson` on the host.
 
 `Config.streamDeltas` (`src/config/index.ts`) is what makes the Claude CLI emit them at all —
 defaulting off, threaded to the adapter as `AdapterOptions.streamDeltas` — and is the only new
@@ -405,9 +406,11 @@ where an outage fell without claiming to say why the session ended.
 payload fields it reads the text from are not verified against a published schema, so a client
 branches on `code` and `level` and never on `text`.
 
-**The two budget notices announce a crossing and stop nothing** (D260). No turn is refused,
-interrupted or delayed by either; what a stop would stop is `/design`'s question and is not
-answered here (see `## Unresolved` 21). What the declaration cannot say:
+**The two budget notices announce a crossing and stop nothing** (D260), **and no stop exists to
+add** (D265). No turn is refused, interrupted or delayed by either, and after `budget_exhausted`
+the session keeps accepting sends. A turn-boundary gate, a refusal until the budget is raised and
+a mid-turn kill were each refused; none may be added except through `/design`. What the
+declaration cannot say:
 
 - **Burn is the same full component-wise sum `PayrollView.remainingTokens` subtracts** — input,
   output, cache reads and cache creation — so a notice and the tile never disagree about whether
@@ -621,6 +624,12 @@ an empty blob (I71). **`ToolOutputStat` is not `ToolOutputTotals` with a field m
 the whole of what one `stat` can answer, and a line count is not in that set at any price short
 of the index D251 declined (D255, I72).
 
+**No shape here, on the envelope, or on the route carries a token figure** (D264). A blob's size
+is its bytes and lines. A token count would need a tokenizer this server does not hold, so it
+would be the one estimate among measured figures. What a turn cost stays the per-call `usage`
+at turn grain. An estimate type may be added only through `/design`, and only once something
+measures it.
+
 ### Checkpoint
 
 Declared in `src/contract/index.ts`: `Checkpoint`, `IgnoredEntry`, `IgnoredManifest`,
@@ -631,7 +640,7 @@ persisted, because git is the store and a second copy would be a second thing to
 sync. `ts` is the git commit time, not a server clock reading.
 
 **The ignored-path manifest is the one exception to that, and it is an exception rather than a
-softening** (D182, D187). Ignored paths are neither checkpointed nor cleaned, so git holds no
+softening** (D182, D187). Ignored paths are neither checkpointed nor touched by a restore, so git holds no
 record of them at all and there is nothing for a second copy to disagree *with*. What the
 manifest can be is absent, and the whole of the rule below exists so that absence cannot be read
 as a clean result.
@@ -653,6 +662,32 @@ a pointer and evidence is invisible at the call site.
 (I58). A checkpoint predating this mechanism has no manifest, a manifest write can fail, and a
 manifest read at restore can fail; all three land on `null`, and a client renders it as unknown.
 An empty array is a real answer and says the ignored paths match.
+
+**`RestoreResult` gains `exposed`** (D267, D277). **Scaffold, owed to the declaration** in both
+places `RestoreResult` is declared (`src/contract/index.ts`, `src/agent-console/core/types.ts`):
+
+```ts
+interface RestoreResult {
+  readonly safety: Checkpoint;
+  readonly unreached: readonly IgnoredDelta[] | null;
+  readonly exposed: readonly string[];
+}
+```
+
+**An `exposed` entry is a protected path the target's rules do not ignore.** The protected set
+is what `status --ignored=matching` named when the restore started (*Public surface §
+`checkpoints`*). The restore left those bytes untouched. Under the rules the restore wrote they
+are now ordinary content, and the next checkpoint's `add -A` captures them. Each element is one
+protected-set entry's path, in `IgnoredEntry.path`'s form: workspace-relative, POSIX separators,
+no trailing `/` on a collapsed directory. **A collapsed directory is named once, however much of
+it is exposed.** So the list is bounded by the protected set and not by the file count beneath
+it, which matters because the case that motivates it is a `node_modules`.
+
+**`exposed` is never `null`.** It is computed from the restore's own verification read, and a
+restore whose verification read fails is `restore_incomplete` and returns no `RestoreResult`. An
+empty array means nothing was exposed. **It is not a failure and it is not part of `unreached`**.
+`unreached` says which ignored paths differ from the target's manifest; `exposed` says which
+paths stopped being ignored. The lists answer different questions, and a client renders both.
 
 ### Audit record
 
@@ -929,7 +964,7 @@ though it were new is silent wrong state rather than a parse error.
 | `create-attempts/<sessionId>.json` | `sessionId` | — | Server-wide recovery state, not a session artifact and not reachable through any session read. Present means a create has **not** been durably published by this runtime; the record never asserts an outcome, because the host remains the authority for it (I66). Written before the first host side effect and removed only at publication, by temp-file-then-`rename` with the contents fsync'd on both platforms and the directory name fsync'd on POSIX — Windows cannot open a directory for fsync. **An unreadable record answers `corrupt`, never "absent"**: losing a reservation would release a workspace an already-committed session may hold, which is the failure `pathsOverlap` exists to prevent |
 | `reviews.ndjson` *(tier two)* | `reviewId` | append order; the latest line for an id wins | Server-wide. Never rewritten. Survives deletion of the session it names (D67). Durable per line (D128). A `final` line is terminal — no later line for that id is written |
 | `requisitions.ndjson` *(tier two)* | `requisitionId` | append order; the latest line for an id wins | Server-wide. Never rewritten. **Not durable per line**, which is why a lost consumption line reverts an approval to spendable — D68's written exception |
-| `ckpt.git/` | git object ids | git history | Git is the store. `add -A` honours the workspace's own `.gitignore`, and neither `read-tree` nor `clean -fd` takes `-x`, so exactly the same set is left alone — which is what `ignored/<sha>.json` exists to report on |
+| `ckpt.git/` | git object ids | git history | Git is the store. `add -A` honours the workspace's own `.gitignore`, and a restore touches no path in the protected set it read before its first write (D267, I77), so the ignored set is left alone — which is what `ignored/<sha>.json` exists to report on |
 | `ignored/<sha>.json` | the checkpoint `sha` | — | **Written by `checkpoints`, not by `store`** — it is the only artifact in this directory that is, because it is derived from the same `git status` the checkpoint is built from and is meaningless apart from a sha (D187). Written once after the commit that names it, never appended, never rewritten. Not durable: a lost manifest degrades a later restore's report to unknown and costs nothing else. **A checkpoint whose manifest is absent is still a valid checkpoint** — capture failure never fails the commit. Removed with the session directory (D25) |
 
 **The four server-wide append files are the design's only shared mutable state that is
@@ -1055,7 +1090,7 @@ second predicate — against every declared root and returns
 `ConfigError.invalid_field { field: 'STORAGE_ROOT' }` naming the root it collides with. Storage
 inside a workspace puts `meta.json`, the spills, `audit.ndjson`, `pids.ndjson` and every
 `ckpt.git` inside a checkpoint's own work-tree: `add -A` would ingest live server state and grow
-recursively, and a restore or `clean -fd` would delete evidence this server is mid-write on,
+recursively, and a restore would delete evidence this server is mid-write on,
 including the audit log that exists to be beyond the reach of the subject it indicts (I13).
 
 **The refusal is at startup and not at session creation**, and that is the decision rather than
@@ -1408,21 +1443,46 @@ hooks are in `src/agent-console/extensions/checkpoints/`; the host supplies the 
 author identity. Neither implementation nor hooks depend on adapters.
 
 **`restore` returns the safety checkpoint, never the target** — as `RestoreResult.safety`,
-since the return type carries the report as well (D182). Its sequence is five operations of
-which the second is not D31's (D112):
+since the return type carries the report as well (D182). After `cat-file -e <sha>`, which is still
+first and is what raises `no_such_checkpoint`, the sequence is six operations. The fourth is not
+D31's (D112), the last was added to report what was not reached (D182), and the first two fix the
+ignored set before anything is written (D267):
 
 ```
+read      status --ignored=matching                     the protected set, read once
+preflight <sha>'s tree vs the protected set             refuse a collision before any write
 commit    --allow-empty -m "before restore to <sha>"    a way back
 read-tree --reset -u <sha>                              make the work-tree match, exactly
-clean     -fd                                           remove directories read-tree emptied
 verify    diff --quiet <sha>, ls-files --others         prove it, do not infer it
+          less the protected set
 report    <sha>'s manifest vs status --ignored=matching say what was not reached
 ```
 
-**The report runs last and would give the same answer first**, which is worth stating because it
-is the symmetry claim restated as an ordering fact: no step between touches an ignored path, so
-the ignored set restore finds at the end is the set it would have found at the start. Running it
-last means it never delays the restore and never has a way to prevent one.
+**Nothing is written to the workspace or the shadow repository before `preflight` passes** (I77).
+A failed `read` is `ignored_set_unreadable`; a collision is `ignored_path_collision`. Both leave
+the workspace untouched and write no safety commit, so neither is a partial restore. A collision
+is a protected path the target's tree holds, a protected path with target paths beneath it, or a
+protected path with a target *file* as an ancestor. The lookup reads the target's tree and never
+the work-tree.
+
+**There is no `clean` step** (D267). `read-tree --reset -u` removes every tracked path the target
+lacks and removes a directory it empties. Once the protected set is held back, the only work
+`clean -fd` had left was deleting a path the current rules ignore and the target's do not. That
+is the deletion D267 closes, and narrowing the step with excludes would keep a step whose only
+remaining effect is the hazard. **A `clean` of any form may not be reintroduced except through
+`/design`.**
+
+**The report runs last, and now it must.** It used to give the same answer first, because no step
+touched an ignored path and the rules never changed under it. A restore that changes `.gitignore`
+breaks the second half. The report reads the workspace under the rules the target wrote, which
+are the rules the target's manifest was captured under, so the comparison is like for like only
+after `read-tree`. Running it last also means it never delays the restore and never has a way to
+prevent one.
+
+**`exposed` comes from the verification read, not from a seventh query.** The untracked-path
+check already lists every untracked, non-ignored path under the target's rules. An entry of
+those at or beneath a protected-set entry is the exposure, and that entry is named in `exposed`.
+The same read with those entries removed is the check for what was left behind.
 
 **D31 specified `checkout <sha> -- .` and that sequence cannot do what D31 says it does.** The
 argument was that `clean -fd` removes what the agent created since the target. It does not,
@@ -1434,11 +1494,20 @@ makes index and work-tree match the target exactly — additions, edits and remo
 **without moving `HEAD`**, so the shadow history stays linear and `list`'s `git log` still walks
 it.
 
-**Ignored paths are neither checkpointed nor cleaned.** `add -A` reads the workspace's own
-`.gitignore`, and neither `read-tree` nor `clean -fd` takes `-x`, so exactly the same set is
-left alone. The pair is deliberate and symmetric: a restore can only remove things a checkpoint
-could have restored, so it never forces a dependency reinstall — the failure that would make
-operators stop using restores.
+**Ignored paths are neither checkpointed nor touched, and "ignored" means ignored when the restore
+started** (D267). `add -A` reads the workspace's own `.gitignore`, and no restore step deletes,
+overwrites or creates a path at or beneath a protected-set entry (I77). The pair is deliberate and
+symmetric: a restore can only remove things a checkpoint could have restored, so it never forces
+a dependency reinstall — the failure that would make operators stop using restores. D31 and D112
+held the symmetry by having every step consult the same rules, which was false whenever the
+restore changes `.gitignore` itself. Reading the set once is what holds it now. **The checkpoint
+never grows to make a collision passable**: the safety commit never captures ignored bytes, and
+`add -f` in any step defeats I77. The premise that nothing writes between `read` and `read-tree`
+rests on `turn_in_flight`; an operator editing the workspace out of band is outside the
+guarantee.
+
+**The protected set is never the target's manifest.** It is a separate live read. The manifest
+stays report-only, as the obligations below require.
 
 **The exclusion is reported rather than silent, and reporting it is what the manifest is for**
 (D182). Symmetry keeps a restore from forcing a reinstall; it does nothing to make the operator's
@@ -1462,12 +1531,14 @@ Three obligations follow, and none of them is optional:
   site, so the constraint is written where the call site is.
 
 **Success is verified, not inferred from an exit code.** `read-tree` exits 0 with only a warning
-when it cannot remove a directory an embedded repository occupies, and `clean` declines such a
-directory unless forced twice, which this deliberately never does. So the sequence ends with
-`diff --quiet <sha>` for tracked content and `ls-files --others --exclude-standard` for what was
-left behind. Either coming back dirty is `CheckpointError.restore_incomplete`, and the workspace
-is then **partially restored** — a state this code detects and reports rather than one it
-accepts silently. No step is atomic; the safety checkpoint is the way back.
+when it cannot remove a directory an embedded repository occupies. So the sequence ends with
+`diff --quiet <sha>` for tracked content and `ls-files --others --exclude-standard`, less the
+protected set, for what was left behind. **The exclusion is not optional** (D267). A protected
+path the target does not ignore is untracked by construction, and left in the check it would
+report every exposure as a failed restore. Either check coming back dirty is
+`CheckpointError.restore_incomplete`, and the workspace is then **partially restored** — a state
+this code detects and reports rather than one it accepts silently. No step is atomic; the safety
+checkpoint is the way back.
 
 **`init` failing is not fatal to a session.** The session proceeds without checkpoints and says
 so; DoD #6 is unavailable for it and nothing else changes. A workspace needs no git repository
@@ -2317,6 +2388,10 @@ are binding** and are in `10-design.md § Security controls`:
 - **The control that collects a deny's reason says the text is sent to the agent** (D275). An
   operator must not type a reason believing it is an audit note; the audit and the agent read the
   same bytes. An empty field is sent as `reason: null`, never `""`.
+- **A restore's `exposed` paths are shown, and so is what they cost** (D267, D277). Each path is
+  named, along with the fact that the next checkpoint will capture it. A `restore_collision`
+  refusal shows every path in `error.detail.paths` and says nothing was changed. Neither may be
+  rendered as a failed restore or folded into the `unreached` list.
 
 ## HTTP routes
 
@@ -2380,7 +2455,7 @@ The `404` is `no_such_session` because `ApiErrorCode` carries no route-level not
 | `POST` | `/api/sessions/:id/interrupt` | `{ turnId: TurnId }` | `200 { ok: true }` | `403 bad_origin`, `404 no_such_session`, `422 bad_request` |
 | `POST` | `/api/sessions/:id/end` | `{}` | `200 { ok: true }` | `403 bad_origin`, `404 no_such_session`, `409 turn_in_flight` |
 | `POST` | `/api/sessions/:id/rename` | `{ name: string \| null }` | `200 { ok: true }` | `403 bad_origin`, `404 no_such_session`, `422 bad_request` |
-| `POST` | `/api/sessions/:id/checkpoint/restore` | `{ sha: GitSha }` | `200 { ok: true, safety, unreached }` | `403 bad_origin`, `404 no_such_session`, `404 no_such_checkpoint`, `409 session_ended`, `409 turn_in_flight`, `422 bad_request`, `500 checkpoint_failed` |
+| `POST` | `/api/sessions/:id/checkpoint/restore` | `{ sha: GitSha }` | `200 { ok: true, safety, unreached, exposed }` | `403 bad_origin`, `404 no_such_session`, `404 no_such_checkpoint`, `409 restore_collision`, `409 session_ended`, `409 turn_in_flight`, `422 bad_request`, `500 checkpoint_failed` |
 | `DELETE` | `/api/sessions/:id` | — | `200 { ok: true }` | `403 bad_origin`, `404 no_such_session`, `409 turn_in_flight` |
 | `GET` | `/api/sessions` | — | `200 { sessions: SessionSummary[] }`, caller's own only | `401 unauthenticated` |
 | `GET` | `/api/sessions/:id` | — | `200 { session: SessionSummary }` | `401 unauthenticated`, `404 no_such_session` |
@@ -2411,7 +2486,14 @@ as unknown and an empty array as "nothing differs", and must not collapse the tw
 distinction is the entire reason item 6 of the brief is qualified rather than unqualified, and a
 renderer that shows both as a clean restore puts back exactly the silence this route exists to
 break. `ok: true` continues to mean the restore itself succeeded; a dirty verification pass is
-`500 checkpoint_failed` and carries no `RestoreResult`.
+`500 checkpoint_failed` and carries no `RestoreResult`. **`exposed` is carried and rendered
+whenever it is non-empty** (D267, D277). It is how the operator learns that the next checkpoint
+will capture paths that were ignored a moment ago. Folding it into `unreached` would claim those
+paths differ from the target, which they need not. **`409 restore_collision` carries the
+colliding paths as `error.detail.paths`**, the way `workspace_busy` carries its holder, and a
+client shows every one of them. A refusal that says only
+"collision" leaves the operator to find the paths by hand, which is the work the preflight
+already did.
 
 **The tool-output route serves `Content-Type: text/plain; charset=utf-8` with
 `X-Content-Type-Options: nosniff` and `Content-Disposition: attachment`**, so a tool result that
@@ -2651,6 +2733,26 @@ one variant. The two are also acted on differently — a held root is someone el
 operator goes and looks at it; a corrupt lock is a damaged file on this host and the operator
 removes it.
 
+**`CheckpointError` gains two variants, and `ApiErrorCode` gains `restore_collision`** (D267,
+D277). **Scaffold, owed to the declaration** in both places `CheckpointError` is declared
+(`src/contract/index.ts`, `src/agent-console/core/types.ts`), and to `STATUS_FOR` in
+`src/edge/error-envelope/index.ts`:
+
+```ts
+| { readonly code: 'ignored_path_collision'; readonly paths: readonly string[] }
+| { readonly code: 'ignored_set_unreadable'; readonly detail: string }
+```
+
+`paths` is non-empty and holds every colliding protected-set entry, in `IgnoredEntry.path`'s
+form, not only the first one found. An operator who fixes one path and retries into the next has
+been handed the list one item at a time. **A collision is not a checkpoint failure**, and that is
+why it gets its own HTTP code instead of `500 checkpoint_failed`. Nothing went wrong. The workspace
+holds content the restore declines to destroy, and only the operator can resolve that.
+`ignored_set_unreadable` did not reuse `git_unavailable` (D227's reuse pattern). That variant means
+checkpoints are absent for the session. A failed `status` at restore start means only that this
+restore was refused, and a client that treated it as `checkpoints_unavailable` would stop offering
+restores that still work.
+
 | HTTP | `code` | Meaning |
 |---|---|---|
 | 401 | `unauthenticated` | No usable identity |
@@ -2663,6 +2765,7 @@ removes it.
 | 409 | `session_ended` | The session is ended: it accepts no new turn, no checklist tick, and no restore |
 | 409 | `workspace_busy` | The resolved path equals, contains, or is contained by a live session's `cwd` |
 | 409 | `outside_workspace_root` | `cwd` failed the jail check |
+| 409 | `restore_collision` | A restore would delete or overwrite a path ignored when it started; the body names each one, and nothing was written |
 | 422 | `bad_request` | Malformed body or query parameters, or a text field over its cap |
 | 500 | `checkpoint_failed` | A checkpoint operation failed; see the accompanying `error` event |
 | 503 | `agent_unavailable` | CLI missing or failed to spawn |
@@ -2744,7 +2847,9 @@ control rather than concealment (D50, D70).
 | `CheckpointError.commit_failed` | A commit fails for any other reason | Sometimes | As above |
 | *(no variant)* | **The ignored-path manifest could not be captured at commit, written, read, or parsed at restore** (D182) | — | **Not an error at all, at either end.** The commit succeeds with no manifest; the restore succeeds with `unreached: null`. A manifest is a report and never a gate, so no path may fail on its absence — and `null` is the one thing that must never be rendered as "nothing differs" (I58) |
 | `CheckpointError.no_such_checkpoint` | Restore names an unknown `sha` | No | `404 no_such_checkpoint`; the workspace is untouched |
-| `CheckpointError.restore_incomplete` | `read-tree` or `clean` fails, **or the verification pass comes back dirty** — `diff --quiet <sha>` for tracked content, `ls-files --others --exclude-standard` for what was left behind. Never an exit code alone: `read-tree` exits 0 with a warning on the embedded-repository case (D112) | No | `error / checkpoint_restore_failed`, non-fatal, plus `500 checkpoint_failed`. **The workspace is partially restored**; the safety checkpoint is the way back |
+| `CheckpointError.ignored_set_unreadable` | The restore's opening `status --ignored=matching` fails or its output does not parse (D267) | Sometimes | `500 checkpoint_failed`, with the detail on the accompanying `error` event. **The workspace is untouched and no safety commit is written.** Never reported as a partial restore, and never as `checkpoints_unavailable` |
+| `CheckpointError.ignored_path_collision` | The preflight finds a protected-set entry in the target's tree, with target paths beneath it, or with a target file as an ancestor (D267) | Not until the operator moves or deletes the named paths | `409 restore_collision` naming every path. **The workspace is untouched and no safety commit is written.** The server never resolves the collision itself, never with `add -f` and never by deleting |
+| `CheckpointError.restore_incomplete` | `read-tree` fails, **or the verification pass comes back dirty** — `diff --quiet <sha>` for tracked content, `ls-files --others --exclude-standard` less the protected set for what was left behind (D267). Never an exit code alone: `read-tree` exits 0 with a warning on the embedded-repository case (D112) | No | `error / checkpoint_restore_failed`, non-fatal, plus `500 checkpoint_failed`. **The workspace is partially restored**; the safety checkpoint is the way back |
 | `AdapterError.invalid_model` | A provider option or turn override fails the existing shell-safe model grammar | No, correct the value | Refuse before sending; the host maps to `422 bad_request` for model |
 | `AdapterError.turn_in_flight` | A provider session already holds an unfinished turn | After that turn completes | Refuse without disturbing the live handle |
 | `AdapterError.session_closed` | A turn is requested after provider-session close | No | Create a new provider session |
@@ -2977,6 +3082,7 @@ highest-value section in this document.
 | **I74** | `SessionSummary.pendingPermissions` equals the live turn's `pending.size`, is `0` whenever `turn === null` — and so whenever `state === 'ended'` — and is never written to disk. It counts permission requests and nothing else (D261) | `agent-console/core` |
 | **I75** | Every `CallId` an adapter emits is unique within its session — across turns, adapter instances and server restarts — and a `tool.result` carries the `CallId` of the `tool.call` it closes. Where a vendor's own id is not session-unique the adapter composes one from the server's `turnId` and the vendor's id, never from a counter of its own, and the composite is a safe single path segment; an item whose id would make it unsafe is not mapped. Uniqueness is held by the adapter and assumed by every consumer above it, none of which may check, repair or widen it (D274) | `adapters/*` |
 | **I76** | On an operator's deny, the `reason` passed to `Adapter.respond` is byte for byte the decision `AuditRecord`'s `reason`, and it is passed only after that record is durable. Where the append fails, no operator-typed text reaches `respond` — the storage cause does. An `allow` passes `null` whatever the operator stated (D275, D276) | `session-manager` |
+| **I77** | A restore reads the protected set, the paths `status --ignored=matching` names, exactly once and before its first write to the workspace or the shadow repository. Nothing is written until that read succeeds and the preflight against the target's tree finds no collision. No restore step runs `clean`, captures ignored bytes, or deletes, overwrites or creates a path at or beneath a protected-set entry. `RestoreResult.exposed` is exactly the protected-set entries at or beneath which the verification's `ls-files --others --exclude-standard` lists a path. That read, with those paths removed, is the only one checked for what was left behind (D267, D277) | `checkpoints` |
 
 **I40, I41 and I42 were never allocated, and the gap is left open rather than closed.** The
 numbering jumps from I39 to I43 and nothing is missing. Ids here are cited by number in
@@ -3550,6 +3656,10 @@ belong to the `exec --json` fallback alone; neither affects a session on `app-se
     means, which is a design question rather than a signature one; the contract holds no view
     until `/design` has chosen. Staged in `90-decisions.md § Open` for `/track`.
 
+    **Resolved by D264: refused.** A blob's size is its bytes and lines, and no shape carries a
+    token figure. The refusal is written under *Types § Tool-output window*, and an estimate type
+    comes back only through `/design`, once something measures it. (#462)
+
 21. **Budget thresholds, and a budget crossing as an event.** Runtime-redesign item 24, routed here
     by D256. `Config.sessionTokenBudget` and `PayrollView.remainingTokens` already exist (D129), so
     the *figure* is determined and only the behaviour around it is not. Three things are undecided
@@ -3569,6 +3679,12 @@ belong to the `exec --json` fallback alone; neither affects a session on `app-se
     the failure mode above cannot occur because no stop does. What a stop stops, and whether a
     soft one exists at all, is `/design`'s, staged in `90-decisions.md § Open` for `/track`; this
     entry stays until it is answered.
+
+    **The stop is resolved by D265: no stop exists, and the entry is closed.** Both notices
+    announce and stop nothing. A turn-boundary gate, a refusal until the budget is raised and a
+    mid-turn kill were each refused, and the budget paragraph under *Types § Event payloads* says
+    so.
+    (#463)
 
 22. **A first-class `blocked` turn state.** Runtime-redesign item 28, routed here by D256. A turn
     state machine (`TurnStopReason`) and a permission-pending path (`PermissionRequest`) both
@@ -3601,6 +3717,10 @@ belong to the `exec --json` fallback alone; neither affects a session on `app-se
 
     **Routed to `/design` by D259**, since both answers turn on the never-rendered rule, which is a
     design decision and not a signature. Staged in `90-decisions.md § Open` for `/track`.
+
+    **Resolved by D266: refused; the never-rendered rule stands.** Three views are the answer.
+    `raw` is rendered by no view at any verbosity, whether or not `Config.includeRaw` is on, and
+    its reader is whoever reads `events.ndjson` on the host. (#464)
 
 24. **Whether an operator's stated deny reason reaches the agent.** Arrived with D273, which gave
     `Adapter.respond` a `reason` and settled only the case the design determines: a deny the server

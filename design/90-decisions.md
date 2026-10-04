@@ -6894,6 +6894,54 @@ Rejected: **normalising `""` to `null`.** The audit records the reason as sent; 
 rewrites it records something no client said.
 Reversibility: cheap — no `exec --json` tool call and no non-null reason has been emitted or stored.
 
+### 2026-10-04 — D277 D267's surface: `exposed` from the verification read, `ignored_path_collision` as `409 restore_collision`, `ignored_set_unreadable` as its own variant
+Context: D267 left three things to `/contract`: the code for a collision refusal, how the restore
+result marks a protected path the target no longer ignores, and the restated sequence. A failed
+protected-set read also needed a variant. A probe confirmed `status --ignored=matching` never
+collapses a directory that holds tracked files; it lists the ignored files inside one instead. So
+a protected entry never contains tracked content. Two facts the contract had stated were also no
+longer true. "The report runs last and would give the same answer first" fails whenever a restore
+changes `.gitignore`. The persisted-schemas row and the `checkpoints` section both said "neither
+`read-tree` nor `clean -fd` takes `-x`".
+Chosen: **`RestoreResult.exposed: readonly string[]`, never null.** It holds the protected-set
+entries at or beneath which the verification's `ls-files --others --exclude-standard` lists a
+path, in `IgnoredEntry.path`'s form, so a partly exposed collapsed directory is named once. It is
+computed from a read the restore already makes, and a failed read is already
+`restore_incomplete`, so it has no unknown state to carry. **`CheckpointError.ignored_path_collision
+{ paths }` maps to a new `409 restore_collision`**, with every colliding path in
+`error.detail.paths`. **`CheckpointError.ignored_set_unreadable { detail }` maps to
+`500 checkpoint_failed`.** Both leave the workspace untouched and write no safety commit. **The
+report must run last**, because it compares the target's manifest with the workspace under the
+target's rules, which hold only after `read-tree`. I77 holds the sequence. The user chose both
+codes.
+Rejected: **`exposed` as nullable, or computed by a second `status` call.** Either one adds an
+unknown state, and the verification read already has the answer. **Folding exposure into
+`unreached`.** `unreached` says a path differs from the target's manifest, and an exposed path need
+not differ. Merging the two lists claims a difference nobody measured. **Naming every exposed file
+instead of the entry.** A `node_modules` would name tens of thousands of paths. **A collision as
+`500 checkpoint_failed`.** Nothing failed. A 500 tells a client to retry or report a fault, when
+the only fix is the operator moving the named paths. **Reusing `git_unavailable` for a failed
+protected-set read** under D227's reuse pattern. That variant means a session has no
+checkpoints, and a client rendering it as `checkpoints_unavailable` would stop offering restores
+that still work. **Naming only the first colliding path.** It turns one refusal into one round
+trip per path.
+Reversibility: cheap — no code implements the D267 sequence yet, and `restore_collision` has
+never been emitted.
+
 ## Open
 
 Staging only. Once an item becomes an issue it leaves this list.
+
+- **D267's code.** The contract is amended (D277, I77). Add `exposed` to both `RestoreResult`
+  declarations, and `ignored_path_collision` and `ignored_set_unreadable` to both `CheckpointError`
+  declarations. Add `restore_collision` to `ApiErrorCode` and `STATUS_FOR` (409), and map the new
+  variants in `http-common` with `detail: { paths }` for the collision. In `restore`, after
+  `cat-file -e`: read the protected set, preflight against `ls-tree -r <sha>`, then commit and
+  `read-tree`. Remove `clean -fd`, exclude the protected set from the untracked-path check, and
+  derive `exposed` from that read. The client renders `exposed` and every path of a
+  `restore_collision`. Comments that still say "neither `read-tree` nor `clean -fd` takes `-x`" go.
+- **D267's acceptance criteria.** `/slices` adds to S6 (or S32, where the manifest lives) the
+  cases that close F1. A restore that un-ignores a path leaves its bytes and names it in
+  `exposed`. A target that tracks a currently ignored path refuses with `restore_collision` and
+  writes nothing. A failed protected-set read refuses with no safety commit. A tree with an
+  embedded repository still comes back `restore_incomplete`.
