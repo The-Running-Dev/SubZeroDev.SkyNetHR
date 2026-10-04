@@ -363,11 +363,11 @@ test('app-server: a malformed JSON line is non-fatal and the stream continues', 
   assert.ok(eventsOf(notifications, 'message').some((m) => (m.event.data as { text: string }).text === 'after the bad line'));
 });
 
-// S8.3/S8.7 — the exec --json fallback: turn lifecycle, messages and thinking still
-// stream; tool.call/tool.result are deliberately not synthesised (S8.7 — the item ids on
-// this transport collide across turns, and correlation is `20-contract.md § Unresolved`
-// 13); no usage event (its basis is undetermined, same section).
-test('S8.3, S8.7 — exec fallback: lifecycle and messages map, tool events and usage do not', async () => {
+// S8.3, D274/D276/I75 — the exec --json fallback: turn lifecycle, messages and thinking
+// stream, and a `command_execution` item maps to a tool.call/tool.result pair whose
+// `callId` is composed `<turnId>.<itemId>` (the item ids collide across turns); no usage
+// event (its basis is undetermined, `20-contract.md § Usage`).
+test('S8.3, D274 — exec fallback: lifecycle, messages and tool events map under a composed callId; usage does not', async () => {
   process.env['SKYNET_CODEX_NO_APP_SERVER'] = '1';
   process.env['SKYNET_CODEX_SCENARIO'] = 'full';
   const { result, notifications } = await makeAdapter();
@@ -380,9 +380,14 @@ test('S8.3, S8.7 — exec fallback: lifecycle and messages map, tool events and 
 
   assert.ok(notifications.some((n) => n.kind === 'cli-session'));
   assert.equal(eventsOf(notifications, 'permission.request').length, 0);
-  assert.equal(eventsOf(notifications, 'tool.call').length, 0);
-  assert.equal(eventsOf(notifications, 'tool.result').length, 0);
   assert.equal(eventsOf(notifications, 'usage').length, 0);
+
+  const calls = eventsOf(notifications, 'tool.call');
+  assert.equal(calls.length, 1);
+  assert.deepEqual(calls[0]!.event.data, { callId: 'turn-7.item_1', name: 'exec', input: { command: 'echo hi' }, summary: 'echo hi' });
+  const results = eventsOf(notifications, 'tool.result');
+  assert.equal(results.length, 1);
+  assert.deepEqual(results[0]!.event.data, { callId: 'turn-7.item_1', ok: true, output: 'hi\n', truncated: false, bytes: 3, diff: null });
 
   const thinking = eventsOf(notifications, 'thinking');
   assert.equal(thinking.length, 1);
@@ -393,6 +398,50 @@ test('S8.3, S8.7 — exec fallback: lifecycle and messages map, tool events and 
   assert.equal((messages[0]!.event.data as { text: string }).text, 'Working on it');
 
   assert.equal((eventsOf(notifications, 'turn.ended')[0]!.event.data as { stopReason: string }).stopReason, 'completed');
+  delete process.env['SKYNET_CODEX_NO_APP_SERVER'];
+});
+
+// D274/I75 — the same item id in two turns of one adapter (`item_1` restarts every turn on
+// this transport) yields two distinct CallIds, and each result closes its own call.
+test('D274, I75 — exec fallback: the same itemId in different turns yields distinct callIds', async () => {
+  process.env['SKYNET_CODEX_NO_APP_SERVER'] = '1';
+  process.env['SKYNET_CODEX_SCENARIO'] = 'full';
+  const { result, notifications } = await makeAdapter();
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+
+  assert.equal((await result.value.send('one', [], null, 'turn-a' as never)).ok, true);
+  await waitUntil(() => eventsOf(notifications, 'turn.ended').length === 1);
+  assert.equal((await result.value.send('two', [], null, 'turn-b' as never)).ok, true);
+  await waitUntil(() => eventsOf(notifications, 'turn.ended').length === 2);
+
+  const callIds = (kind: string) => eventsOf(notifications, kind).map((e) => (e.event.data as { callId: string }).callId);
+  assert.deepEqual(callIds('tool.call'), ['turn-a.item_1', 'turn-b.item_1']);
+  assert.deepEqual(callIds('tool.result'), ['turn-a.item_1', 'turn-b.item_1']);
+  delete process.env['SKYNET_CODEX_NO_APP_SERVER'];
+});
+
+// D276/I75 — an item id that makes the composite an unsafe path segment is not mapped: no
+// tool.call, no tool.result, exactly one non-fatal adapter_unknown_record, and the turn
+// completes. The safe-id case is the first test above.
+test('D276, I75 — exec fallback: an unsafe item id is dropped with one adapter_unknown_record', async () => {
+  process.env['SKYNET_CODEX_NO_APP_SERVER'] = '1';
+  process.env['SKYNET_CODEX_SCENARIO'] = 'unsafe-id';
+  const { result, notifications } = await makeAdapter();
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+
+  assert.equal((await result.value.send('hello', [], null, 'turn-9' as never)).ok, true);
+  await waitUntil(() => eventsOf(notifications, 'turn.ended').length > 0);
+
+  assert.equal(eventsOf(notifications, 'tool.call').length, 0);
+  assert.equal(eventsOf(notifications, 'tool.result').length, 0);
+  const errors = eventsOf(notifications, 'error');
+  assert.equal(errors.length, 1);
+  assert.equal((errors[0]!.event.data as { kind: string }).kind, 'adapter_unknown_record');
+  assert.equal((errors[0]!.event.data as { fatal: boolean }).fatal, false);
+  assert.equal((eventsOf(notifications, 'turn.ended')[0]!.event.data as { stopReason: string }).stopReason, 'completed');
+  assert.equal(eventsOf(notifications, 'message').length, 1);
   delete process.env['SKYNET_CODEX_NO_APP_SERVER'];
 });
 

@@ -164,6 +164,16 @@ if (subcommand === 'app-server') {
       line({ type: 'turn.completed', usage: { input_tokens: 10, cached_input_tokens: 0, cache_write_input_tokens: 0, output_tokens: 7, reasoning_output_tokens: 0 } });
       break;
     }
+    case 'unsafe-id': {
+      // D276: a vendor item id that makes `<turnId>.<itemId>` an unsafe path segment (`/`).
+      line({ type: 'thread.started', thread_id: threadId });
+      line({ type: 'turn.started' });
+      line({ type: 'item.started', item: { id: 'bad/id', type: 'command_execution', command: 'echo hi', aggregated_output: '', exit_code: null, status: 'in_progress' } });
+      line({ type: 'item.completed', item: { id: 'bad/id', type: 'command_execution', command: 'echo hi', aggregated_output: 'hi\n', exit_code: 0, status: 'completed' } });
+      line({ type: 'item.completed', item: { id: 'item_2', type: 'agent_message', text: 'Working on it' } });
+      line({ type: 'turn.completed', usage: { input_tokens: 10, cached_input_tokens: 0, cache_write_input_tokens: 0, output_tokens: 7, reasoning_output_tokens: 0 } });
+      break;
+    }
     case 'unknown-type': {
       // Emitted before `thread.started` — the adapter resolves `send()` on that record
       // specifically (`../index.ts`, runExec), so a mismatch that is genuinely the very
