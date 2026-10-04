@@ -1992,6 +1992,7 @@ function toSummary(record: SessionRecord): SessionSummary {
     state: record.state,
     createdAt: record.createdAt,
     endedAt: record.endedAt,
+    endReason: record.state === 'live' ? null : (record.endReason ?? null),
     name: record.name,
   };
 }

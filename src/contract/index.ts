@@ -154,6 +154,7 @@ export interface SessionSummary {
   readonly state: SessionState;
   readonly createdAt: IsoTimestamp;
   readonly endedAt: IsoTimestamp | null;
+  readonly endReason: SessionEndReason | null;
   readonly name: string | null;
 }
 

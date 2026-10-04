@@ -317,13 +317,26 @@ async function refreshSessions() {
   if (result.status === 401) return;
   if (result.status !== 200) return status(describe(result), 'error');
 
-  const list = $('sessions');
-  clear(list);
   state.sessionsById = new Map();
   for (const session of result.payload.sessions) {
     state.sessionsById.set(session.id, session);
   }
-  for (const session of result.payload.sessions) {
+  renderSessionList();
+
+  // A refresh can discover a session ended from another tab or during a restart.
+  applySessionAvailability();
+  applyPolicyBanner();
+  applyStatusBadge();
+  applyTurnControls();
+  applySessionIdentity();
+  $('terminate-open').hidden = state.sessionId === null;
+  $('masthead-panels').hidden = state.sessionId === null;
+}
+
+function renderSessionList() {
+  const list = $('sessions');
+  clear(list);
+  for (const session of state.sessionsById.values()) {
     const item = document.createElement('li');
     item.className = 'session';
     if (session.id === state.sessionId) item.className = 'session session--current';
@@ -350,17 +363,6 @@ async function refreshSessions() {
     item.appendChild(rename);
     list.appendChild(item);
   }
-
-  // A session can end without this client doing anything — a restart, or its operator
-  // closing it from another tab — so the refresh that discovers that is also what has to
-  // withdraw the compose box.
-  applySessionAvailability();
-  applyPolicyBanner();
-  applyStatusBadge();
-  applyTurnControls();
-  applySessionIdentity();
-  $('terminate-open').hidden = state.sessionId === null;
-  $('masthead-panels').hidden = state.sessionId === null;
 }
 
 // S35.2/S35.4: the header's own copy of the same `SessionSummary` fields the sidebar rows show,
@@ -655,7 +657,15 @@ function handleEnvelope(sessionId, envelope) {
     // not be left typing into a box whose next send is a `409`. The event still renders
     // below, so the transcript says what happened as well as the status bar.
     const session = currentSession();
-    if (session !== null) state.sessionsById.set(state.sessionId, { ...session, state: 'ended' });
+    if (session !== null) {
+      state.sessionsById.set(state.sessionId, {
+        ...session,
+        state: 'ended',
+        endedAt: envelope.data.endedAt,
+        endReason: envelope.data.reason,
+      });
+      renderSessionList();
+    }
     applySessionAvailability();
     applyStatusBadge();
     applyTurnControls();

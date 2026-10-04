@@ -54,6 +54,21 @@ test('A11 — a pending prepare owns allocation before the host callback and rel
   error(retry, 'host_create');
 });
 
+test('#461 — get, list and listPage expose the recorded end reason and null while live', async t => {
+  const f = await fixture(t), id = await f.create();
+  const summaries = () => {
+    const got = f.core.get(id, 'alice');
+    assert.ok(got.ok);
+    return [got.value, f.core.list('alice')[0]!, f.core.listPage('alice', null, 1).items[0]!];
+  };
+  for (const summary of summaries()) assert.equal(summary.endReason, null);
+  assert.ok((await f.core.end(id, 'alice')).ok);
+  for (const summary of summaries()) assert.equal(summary.endReason, 'operator');
+  error(f.core.get(id, 'bob'), 'not_found');
+  assert.deepEqual(f.core.list('bob'), []);
+  assert.deepEqual(f.core.listPage('bob', null, 1).items, []);
+});
+
 test('A11/A22 — restore reserves exclusively and refuses send/end/remove/restore until finally', async t => {
   const entered = deferred<void>(), restore = deferred<ReturnType<typeof ok<{ safety: Checkpoint; unreached: [] }>>>();
   const f = await fixture(t, { max: 2, checkpoints: { restore() { entered.resolve(); return restore.promise; } } });
