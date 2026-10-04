@@ -560,12 +560,24 @@ function buildCodexAdapter(opts: AdapterOptions, executable: string, transport: 
       (async () => {
         try {
           await rpcCall('initialize', { clientInfo: { name: 'skynet-hr', version: '0.0.0' } });
-          let threadId: string;
+          let threadId: string | null = resume;
+          const threadOptions = { cwd: opts.cwd, sandbox: cliSandboxValue(sandbox), approvalPolicy: 'never', model: opts.model };
           if (resume !== null) {
-            threadId = resume;
-            await rpcCall('thread/resume', { threadId: resume, cwd: opts.cwd, sandbox: cliSandboxValue(sandbox), approvalPolicy: 'never', model: opts.model });
-          } else {
-            const started = (await rpcCall('thread/start', { cwd: opts.cwd, sandbox: cliSandboxValue(sandbox), approvalPolicy: 'never', model: opts.model })) as
+            try {
+              await rpcCall('thread/resume', { threadId: resume, ...threadOptions });
+            } catch (err) {
+              // Only an explicit vendor refusal means the conversation is gone.
+              // Transport failures and timeouts must not silently discard context.
+              if ((err as { rpcError?: boolean }).rpcError !== true) throw err;
+              emitEvent('session.notice', {
+                level: 'warn', code: 'resume_unavailable',
+                text: 'The previous conversation could not be resumed. Continuing with a fresh thread; earlier vendor context is unavailable.',
+              }, null);
+              threadId = null;
+            }
+          }
+          if (threadId === null) {
+            const started = (await rpcCall('thread/start', threadOptions)) as
               | { thread?: { id?: string } }
               | undefined;
             const startedId = started?.thread?.id;

@@ -138,22 +138,32 @@ if (subcommand === 'app-server') {
   });
 
   function onLine(msg) {
+    if (process.env.SKYNET_CODEX_RPC_LOG) appendFileSync(process.env.SKYNET_CODEX_RPC_LOG, JSON.stringify({ pid: process.pid, method: msg.method, params: msg.params }) + '\n');
     if (msg.method === 'initialize') {
+      if (scenario === 'initialize-error') { line({ id: msg.id, error: { code: -32603, message: 'initialize failed' } }); return; }
       respond(msg.id, { userAgent: 'fake-codex-cli/0.0.0' });
       return;
     }
     if (msg.method === 'thread/start') {
+      if (scenario === 'resume-refused-start-error' || scenario === 'start-error') { line({ id: msg.id, error: { code: -32603, message: 'start failed' } }); return; }
       if (process.env.SKYNET_CODEX_PARAMS_LOG) appendFileSync(process.env.SKYNET_CODEX_PARAMS_LOG, JSON.stringify({ method: msg.method, params: msg.params }) + '\n');
       respond(msg.id, { thread: { id: threadId } });
       notify('thread/started', { thread: { id: threadId } });
       return;
     }
     if (msg.method === 'thread/resume') {
+      if (scenario === 'resume-exit') { process.exit(1); return; }
+      if (scenario === 'resume-timeout') return;
+      if (scenario.startsWith('resume-refused') && msg.params.threadId === 'lost-thread') {
+        line({ id: msg.id, error: { code: -32600, message: 'thread not found' } });
+        return;
+      }
       if (process.env.SKYNET_CODEX_PARAMS_LOG) appendFileSync(process.env.SKYNET_CODEX_PARAMS_LOG, JSON.stringify({ method: msg.method, params: msg.params }) + '\n');
       respond(msg.id, { thread: { id: threadId } });
       return;
     }
     if (msg.method === 'turn/start') {
+      if (scenario === 'turn-error') { line({ id: msg.id, error: { code: -32603, message: 'turn failed' } }); return; }
       // The two schema-mismatch scenarios emit their bad record before ever
       // acknowledging turn/start, so a client that resolves `send()` as soon as the
       // handshake acks is still guaranteed to see the bad record first — this is what
