@@ -49,6 +49,7 @@ export interface EventPayloadMap {
   message: MessageEvent;
   'message.delta': MessageDelta;
   thinking: Thinking;
+  hook: HookEvent;
   'tool.call': ToolCall;
   'tool.result': ToolResult;
   'permission.request': PermissionRequest;
@@ -175,6 +176,16 @@ export interface MessageDelta {
 export interface Thinking {
   readonly turnId: TurnId;
   readonly text: string;
+}
+
+export interface HookEvent {
+  readonly turnId: TurnId;
+  readonly hookId: string;
+  readonly phase: 'started' | 'completed';
+  readonly hookEvent: string;
+  readonly hookName: string;
+  readonly outcome: string | null;
+  readonly exitCode: number | null;
 }
 
 export interface ToolCall {

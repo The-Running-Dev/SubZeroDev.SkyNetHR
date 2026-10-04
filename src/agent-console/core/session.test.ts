@@ -40,6 +40,34 @@ async function fixture(t: TestContext, options: { host?: HostCreateCallbacks; ho
   return { core, store, input, create, events, notify, kills: () => kills, sent: () => sent, response: (value: typeof response) => { response = value; } };
 }
 
+test('#415 — hooks are stamped, persisted, replayed and deleted with the transcript, never audited', async t => {
+  let auditWrites = 0;
+  const f = await fixture(t, { wrapStore: store => ({ ...store, async appendAudit(record) {
+    auditWrites++;
+    return store.appendAudit(record);
+  } }) });
+  const id = await f.create();
+  const sent = await f.core.send(id, 'alice', 'hello', []);
+  assert.ok(sent.ok);
+  const data = { hookId: 'orphan', hookName: 'preflight', hookEvent: 'SessionStart', phase: 'completed' as const, outcome: 'vendor-defined', exitCode: 0 };
+  f.notify({ kind: 'event', event: { kind: 'hook', data, raw: { stdout: 'private output' } } });
+  await new Promise(resolve => setImmediate(resolve));
+  f.store.dropRing(id);
+  const replay = await f.events(id);
+  const hook = replay.find(event => event.kind === 'hook');
+  assert.ok(hook);
+  assert.deepEqual(hook.data, { ...data, turnId: sent.value.turnId });
+  assert.equal(hook.raw, undefined);
+  assert.equal(auditWrites, 0);
+  f.notify({ kind: 'event', event: { kind: 'turn.ended', data: { stopReason: 'completed', usage: null } } });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.ok((await f.core.end(id, 'alice')).ok);
+  assert.ok((await f.core.remove(id, 'alice')).ok);
+  const deleted = [];
+  for await (const event of f.store.readEventsAfter(id, 0)) deleted.push(event);
+  assert.deepEqual(deleted, []);
+});
+
 test('A11 — a pending prepare owns allocation before the host callback and releases on failure', async t => {
   const entered = deferred<void>(), preparation = deferred<Result<void, unknown>>();
   const host = createHostAttempts({ prepare() { entered.resolve(); return preparation.promise; }, async commit() { return success(); }, abort() {} });

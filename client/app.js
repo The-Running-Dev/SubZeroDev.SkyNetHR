@@ -831,7 +831,7 @@ function openSseStream(sessionId) {
   for (const kind of [
     'session.started', 'session.ended', 'session.notice',
     'turn.started', 'turn.ended', 'usage',
-    'message', 'message.delta', 'thinking', 'tool.call', 'tool.result',
+    'message', 'message.delta', 'thinking', 'hook', 'tool.call', 'tool.result',
     'permission.request', 'permission.resolved', 'checkpoint.created', 'checklist.item.completed', 'error',
   ]) {
     stream.addEventListener(kind, (event) => {

@@ -1,0 +1,14 @@
+{
+  "seq": 1,
+  "sessionId": "session-1",
+  "ts": "2026-10-04T12:00:00.000Z",
+  "kind": "hook",
+  "data": {
+    "turnId": "turn-1",
+    "hookId": "hook-1",
+    "hookName": "preflight",
+    "hookEvent": "SessionStart",
+    "phase": "completed",
+    "exitCode": 0
+  }
+}
