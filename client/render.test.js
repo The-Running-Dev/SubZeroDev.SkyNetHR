@@ -318,6 +318,22 @@ test('S34.3 — a hostile added line and a quote-carrying context line reach the
   assert.equal(context[0].textContent, ' path "quoted/here".txt');
 });
 
+test('#415 — orphan hook completion is visible and inert at every verbosity', () => {
+  for (const verbosity of ['compact', 'normal', 'full']) {
+    const node = renderEvent(fakeDocument(), { kind: 'hook', data: {
+      turnId: 't', hookId: 'h', phase: 'completed', hookEvent: '<event>', hookName: '<script>alert(1)</script>',
+      outcome: 'vendor-defined result', exitCode: 0,
+    } }, { verbosity });
+    const line = find(node, 'hook');
+    assert.ok(line);
+    assert.match(line.textContent, /<script>alert\(1\)<\/script>/);
+    assert.match(line.textContent, /vendor-defined result/);
+    assert.match(line.textContent, /exit 0/);
+    assert.equal(line.children.length, 0);
+    assert.equal(find(node, 'fold'), null);
+  }
+});
+
 test('S34.4 — a truncated result with a diff renders the diff it has and states it is partial', () => {
   const doc = fakeDocument();
   const node = renderEvent(doc, toolResultEnvelope(twoHunkDiff(), { truncated: true, bytes: 9001 }), { verbosity: 'full' });

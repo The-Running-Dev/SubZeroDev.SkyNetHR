@@ -304,7 +304,7 @@ type OutputOverflowAddition = Assert<Equals<Exclude<Host.ErrorEventKind, Before.
 type ToolResultDiffAddition = Assert<Equals<Exclude<keyof Host.ToolResult, keyof Before.ToolResult>, 'diff'>>;
 type EventPayloadMapBefore = Assert<Equals<HistoricalPayloadMap, Before.EventPayloadMap>>;
 type EventPayloadMapReexport = Assert<Equals<Host.EventPayloadMap, Extracted.EventPayloadMap>>;
-type EventKindBefore = Assert<Equals<Exclude<Host.EventKind, 'x-skynet.checklist.item.completed'>, Before.EventKind>>;
+type EventKindBefore = Assert<Equals<Exclude<Host.EventKind, 'x-skynet.checklist.item.completed' | 'hook'>, Before.EventKind>>;
 type EventKindReexport = Assert<Equals<Host.EventKind, Extracted.EventKind>>;
 type EnvelopeBefore = Assert<Equals<HistoricalEnvelope<Host.Envelope<Before.EventKind>>, Before.Envelope>>;
 type EnvelopeReexport = Assert<Equals<Host.Envelope, Extracted.Envelope>>;
@@ -334,6 +334,8 @@ type MessageDeltaBefore = Assert<Equals<Host.MessageDelta, Before.MessageDelta>>
 type MessageDeltaReexport = Assert<Equals<Host.MessageDelta, Extracted.MessageDelta>>;
 type ThinkingBefore = Assert<Equals<Host.Thinking, Before.Thinking>>;
 type ThinkingReexport = Assert<Equals<Host.Thinking, Extracted.Thinking>>;
+type HookReexport = Assert<Equals<Host.HookEvent, Extracted.HookEvent>>;
+type HookProviderEmitted = Assert<Equals<Extract<Host.AdapterEmitted, 'hook'>, 'hook'>>;
 type ToolCallBefore = Assert<Equals<Host.ToolCall, Before.ToolCall>>;
 type ToolCallReexport = Assert<Equals<Host.ToolCall, Extracted.ToolCall>>;
 type ToolResultBefore = Assert<Equals<HistoricalToolResult, Before.ToolResult>>;
@@ -358,7 +360,7 @@ type ChecklistCutoverEnvelope = {
   readonly data: Before.ChecklistItemCompleted;
   readonly raw?: unknown;
 };
-type ChecklistCutoverKind = Assert<Equals<Exclude<Host.EventKind, Before.EventKind>, 'x-skynet.checklist.item.completed'>>;
+type ChecklistCutoverKind = Assert<Equals<Exclude<Host.EventKind, Before.EventKind | 'hook'>, 'x-skynet.checklist.item.completed'>>;
 type ChecklistCutoverPayload = Assert<Equals<Host.EventPayloadMap['x-skynet.checklist.item.completed'], Before.ChecklistItemCompleted>>;
 type ChecklistCutoverShape = Assert<Equals<Host.Envelope<'x-skynet.checklist.item.completed'>, ChecklistCutoverEnvelope>>;
 type isFrameBefore = Assert<Equals<typeof hostIsFrame,

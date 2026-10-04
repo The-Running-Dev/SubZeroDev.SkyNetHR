@@ -22,8 +22,8 @@ const isWindows = platform === 'win32';
 
 // Top-level record `type`s the wire protocol may legitimately send that this vocabulary
 // does not render. Verified against a real CLI run (`design/findings/S1-claude-adapter.md`):
-// `rate_limit_event` and several `system` subtypes (`hook_started`, `hook_response`,
-// `thinking_tokens`, `post_turn_summary`, ...) are common, harmless, and no part of the
+// `rate_limit_event` and several `system` subtypes (`thinking_tokens`,
+// `post_turn_summary`, ...) are common, harmless, and no part of the
 // thirteen-row vendor mapping — flagging them as `adapter_unknown_record` would spam the
 // operator with noise on every ordinary turn. Genuinely unrecognised `type`s still do
 // (S1.4).
@@ -34,8 +34,6 @@ const CLAUDE_IMAGE_MEDIA_TYPES = new Set(['image/png', 'image/jpeg', 'image/gif'
 
 const IGNORED_TOP_LEVEL_TYPES = new Set(['rate_limit_event', 'control_response']);
 const IGNORED_SYSTEM_SUBTYPES = new Set([
-  'hook_started',
-  'hook_response',
   'thinking_tokens',
   'post_turn_summary',
 ]);
@@ -208,6 +206,23 @@ export function createClaudeAdapter(opts: AdapterOptions & { readonly executable
     switch (type) {
       case 'system': {
         const subtype = rec['subtype'];
+        if (subtype === 'hook_started' || subtype === 'hook_response') {
+          if (['hook_id', 'hook_name', 'hook_event'].some(field => typeof rec[field] !== 'string')) {
+            return failSchemaMismatch('hook record carried invalid identity fields', rec);
+          }
+          const completed = subtype === 'hook_response';
+          if (completed && ((rec['outcome'] != null && typeof rec['outcome'] !== 'string')
+            || (rec['exit_code'] != null && (typeof rec['exit_code'] !== 'number' || !Number.isInteger(rec['exit_code']))))) {
+            return failSchemaMismatch('hook record carried an invalid outcome or exit code', rec);
+          }
+          emitEvent('hook', {
+            hookId: rec['hook_id'], hookName: rec['hook_name'], hookEvent: rec['hook_event'],
+            phase: completed ? 'completed' : 'started',
+            outcome: completed ? rec['outcome'] ?? null : null,
+            exitCode: completed ? rec['exit_code'] ?? null : null,
+          }, rec);
+          return;
+        }
         if (subtype === 'init') {
           const sessionId = rec['session_id'];
           if (typeof sessionId === 'string') {
