@@ -132,7 +132,8 @@ turn, buffer and subscribers (D49). What the declaration cannot say:
   CLI mints a fresh id on each `--resume`, so a write-once cell would have turn 3 resuming the
   id turn 1 reported. Where a child dies before emitting `init` at all the cell stays null, the
   next turn spawns **without** `--resume`, and that emits
-  `session.notice / resume_unavailable`.
+  `session.notice / resume_unavailable`. For Codex the cell holds a thread id, and a refused
+  resume replaces it with a fresh thread's (D279).
 - **`lastSeq` on disk is a diagnostic hint and not authority** (D37, I17). Boot derives it from
   the tail of `events.ndjson`; where the two disagree the spill is right.
 - `state` is one-way. It distinguishes the two ways a session has no turn running: a **live,
@@ -170,6 +171,20 @@ in-memory map it counts and a rehydrated session holds no turn. It counts permis
 and which nothing here can detect or hold the turn for; a field claiming to would be the state
 that claims to block what it does not. It is exactly as fresh as the summary carrying it: a list
 read is a snapshot, and nothing pushes a change to it.
+
+**`endReason` — scaffold, owed to both declarations** (D281):
+
+```ts
+readonly endReason: SessionEndReason | null;
+```
+
+It is `SessionRecord.endReason` passed through, with an absent field read as `null`. **A
+projection and never a derivation**: nothing reconstructs it from the spill, from `endedAt`, or
+from which notices a session carries, so a session ended before the field existed reads `null`
+for ever and is not back-filled. It is `null` whenever `state === 'live'`. Once
+`state === 'ended'` it is `null` only for such a pre-field record. It is the one place
+`server_restart` reaches a client as an end reason (see *Event payloads*). Nothing new is
+persisted: the record already carries it, so `meta.json` and its `schemaVersion` are unchanged.
 
 **`LiveSession` declares only what the invariants are stated over** — the persisted record
 plus the one piece of state that is never written. `turn === null` means idle, and it is
@@ -321,6 +336,8 @@ new checklist completions use `x-skynet.checklist.item.completed`; historical
 and feed the same host-owned fold and duplicate suppression. This is the only vocabulary
 addition authorized by D239; providers cannot emit either checklist kind. A successful
 completion still requires a durable append through the session's event ordering path.
+**`hook` is the one later addition (D278)**, made through `/contract` and not at the edge. It is
+vendor-neutral: Claude's two hook subtypes map to it, and any vendor's hook record would too.
 
 **Not everything a client receives is an envelope, and `message.delta` is the one exception**
 (D168). A delta is a **frame**: delivered to live subscribers and to nobody else, carrying no
@@ -381,7 +398,10 @@ dropped with the derive-state-from-the-stream proposal it belonged to, and nothi
 it since. The value is retained knowingly and **an implementer must not close the apparent gap
 by emitting one at boot**. What boot does append is `session.notice / server_restart` (D130),
 which shares the spelling and is a different thing: a notice is not an end reason, and it marks
-where an outage fell without claiming to say why the session ended.
+where an outage fell without claiming to say why the session ended. **The value does reach a
+client, through `SessionSummary.endReason`, never through an envelope** (D281). Boot persists it
+on the record, and the summary reads it from there. That makes it current state, not history, so
+it is not something the stream needs to replay.
 
 **`SessionNoticeCode` members, and the one with no producer:**
 
@@ -391,7 +411,7 @@ where an outage fell without claiming to say why the session ended.
 | `task_started`, `task_progress`, `task_completed` | the Claude CLI reported a background task's `system` subtype of the same name; level `info` (#406) |
 | `task_failed` | as above; level `error` |
 | `task_cancelled` | as above; level `warn` |
-| `resume_unavailable` | spawning with no `--resume`; conversation context is not carried forward |
+| `resume_unavailable` | a turn after the first starts without the vendor's prior conversation; context is not carried forward. Two producers: `session-manager`, when no `cliSessionId` was ever recorded (S4.15, D34), and the Codex adapter, when the vendor refused the recorded one and a fresh thread was started (D279) |
 | `checkpoints_unavailable` | `ckpt.git` could not be initialised; the session proceeds without checkpoints |
 | `checkpoint_skipped` | the pre-turn checkpoint failed; the turn proceeds with no restore point (D42) |
 | `sandbox` | **never — no producer, retained knowingly.** Superseded by `PermissionPolicy.banner`, which the client renders instead and which survives a replay because it is a session field rather than an envelope (S8.3). Dropping a member narrows a declared union and buys nothing |
@@ -493,6 +513,48 @@ node and nothing else: no module parses it, matches against it, or derives anyth
 or security-relevant from it, and **its shape is not contractual**, so an adapter may change
 how it reads without breaking a consumer. Testing it for empty, to decide whether to show the
 line at all, is display and is permitted.
+
+**`hook` — scaffold, owed to `EventPayloadMap` and to `AdapterEmitted`** (D268, D278):
+
+```ts
+export interface HookEvent {
+  readonly turnId: TurnId;
+  readonly hookId: string;
+  readonly phase: 'started' | 'completed';
+  readonly hookEvent: string;
+  readonly hookName: string;
+  readonly outcome: string | null;
+  readonly exitCode: number | null;
+}
+```
+
+It records that configuration the console does not own ran inside a session, and nothing more.
+**It is a transcript event, not an audit record**: it is spilled, replayed and deleted with the
+session under D25, and it never enters `audit.ndjson`. That log holds permission decisions and
+nothing else (S14.10). The cost, accepted by name, is that a deleted session's hook history goes
+with it, whereas its permission decisions survive (I13). What the declaration cannot say:
+
+- **One event per vendor hook record, emitted by the adapter in arrival order.** A `started`
+  and a `completed` sharing a `hookId` are the two ends of one hook run. `hookId` is
+  vendor-minted and opaque above `adapters/*` in the same way a `CallId` is, and nothing
+  correlates on it except a renderer pairing the two lines. A `completed` with no `started`
+  is rendered on its own and is not an error.
+- **`outcome` and `exitCode` are `null` on `started`.** On `completed` each is the vendor's
+  value, or `null` where the vendor sent none. `outcome` is the vendor's string verbatim, and
+  its values are not verified against a published schema. Like `ToolCall.summary` it is display
+  only (I78).
+- **No hook output is carried.** The vendor's `output`, `stdout` and `stderr` are dropped at the
+  adapter. A hook's output is unbounded, it is written by configuration the console does not
+  own, and on some hook events the vendor may feed it back to the model. Carrying it would
+  need a cap and a truncation rule this payload does not have. What D268 requires is that a
+  hook's run is visible, not its output. Where the bytes are needed, `Envelope.raw` keeps the
+  whole record on a deployment with `Config.includeRaw` on, and it is still never rendered
+  (D266).
+- **It carries a `turnId` because a hook runs inside a child, and a child exists only for a
+  turn** (D16). It belongs to the turn by field, like every other turn-scoped payload, not by
+  position in the stream.
+- **It is rendered as one line at every verbosity level** (I26). It has no body for D246's
+  levels to fold. A level that hid it would put back the invisibility D268 refused.
 
 **`PermissionRequest.input` is exactly what will run, never a summary.** Where the control is a
 prompt, the prompt must show what is actually being run.
@@ -2392,11 +2454,23 @@ are binding** and are in `10-design.md § Security controls`:
   named, along with the fact that the next checkpoint will capture it. A `restore_collision`
   refusal shows every path in `error.detail.paths` and says nothing was changed. Neither may be
   rendered as a failed restore or folded into the `unreached` list.
+- **Every vendor choice is a selection from `GET /api/vendors`, never free text** (D280). This
+  covers both the session form and the requisition form. Each option shows the listing's
+  `label`. An unavailable vendor is shown, disabled, with its `unavailableReason`. The client
+  carries no vendor literal, so S2.11's search of client sources for vendor names stays empty.
+  A failed or empty fetch leaves the form unable to create and says why. It never falls back to
+  a hard-coded list.
 
 ## HTTP routes
 
 The routing table is this document's, not the tree's: it is a surface a client is held to and
 no single declaration expresses it.
+
+**A row whose path is followed by `*owed*` is a route this document has declared and no slice
+has built yet** (D283). Until that slice lands, both edges answer it from their catch-all, and
+`src/edge/http-common/route-parity.test.ts` asserts exactly that — so the marker cannot outlive
+the code. The slice that wires the route deletes the marker in the same commit, and from then on
+the route is checked like every other row. A client may not call an owed route.
 
 All request and response bodies are JSON unless stated. **Every route under `/api/` requires
 authentication, with exactly one exception — `POST /api/login`, which cannot, because it is
@@ -2444,6 +2518,42 @@ oauth2-proxy that we do not set and cannot attribute.
 
 The `404` is `no_such_session` because `ApiErrorCode` carries no route-level not-found; see
 *Error semantics*.
+
+### Vendors
+
+| Method | Path | Request | Success | Refusals |
+|---|---|---|---|---|
+| `GET` | `/api/vendors` *owed* | — | `200 { vendors: VendorListing[] }` | `401 unauthenticated` |
+
+**`VendorListing` — scaffold, owed to `src/contract/index.ts`** (D280):
+
+```ts
+export interface VendorListing {
+  readonly id: Vendor;
+  readonly label: string;
+  readonly available: boolean;
+  readonly unavailableReason: string | null;
+}
+```
+
+**This is how a client learns which vendors exist, and it is the only way** (D280, I81). It
+projects the configured provider registry's `list`, one entry per registered definition, in
+registration order. It is the same list `VENDORS` derives from (D236), so every id the create
+route accepts appears here, and no other id does. An absent `unavailableReason` reads as `null`.
+`capabilities` and `cliVersion` are deliberately not projected: nothing the console renders
+from this list needs them, and exposing them would make a vendor's capability set a client
+contract.
+
+**Availability is a hint, and the create route stays authoritative.** The probe runs against
+the first entry of `Config.workspaceRoots`, as the runtime protocol's `providers.list` does,
+and reads the registry's probe cache without refreshing it. A session created in another root,
+or after the binary changed, can therefore still answer `503 agent_unavailable`, and a vendor
+outside the list still answers `422 bad_request`. No refresh route is added. Refresh stays the
+runtime protocol's.
+
+**A client may rely on every id being one the create route accepts, and on the order being
+stable for one configuration.** It may not rely on any particular id being present. It never
+supplies a vendor the list did not name.
 
 ### Sessions
 
@@ -3083,6 +3193,10 @@ highest-value section in this document.
 | **I75** | Every `CallId` an adapter emits is unique within its session — across turns, adapter instances and server restarts — and a `tool.result` carries the `CallId` of the `tool.call` it closes. Where a vendor's own id is not session-unique the adapter composes one from the server's `turnId` and the vendor's id, never from a counter of its own, and the composite is a safe single path segment; an item whose id would make it unsafe is not mapped. Uniqueness is held by the adapter and assumed by every consumer above it, none of which may check, repair or widen it (D274) | `adapters/*` |
 | **I76** | On an operator's deny, the `reason` passed to `Adapter.respond` is byte for byte the decision `AuditRecord`'s `reason`, and it is passed only after that record is durable. Where the append fails, no operator-typed text reaches `respond` — the storage cause does. An `allow` passes `null` whatever the operator stated (D275, D276) | `session-manager` |
 | **I77** | A restore reads the protected set, the paths `status --ignored=matching` names, exactly once and before its first write to the workspace or the shadow repository. Nothing is written until that read succeeds and the preflight against the target's tree finds no collision. No restore step runs `clean`, captures ignored bytes, or deletes, overwrites or creates a path at or beneath a protected-set entry. `RestoreResult.exposed` is exactly the protected-set entries at or beneath which the verification's `ls-files --others --exclude-standard` lists a path. That read, with those paths removed, is the only one checked for what was left behind (D267, D277) | `checkpoints` |
+| **I78** | A `hook` event is emitted only by an adapter, at most one per vendor hook record, and carries none of the hook's output. Above `adapters/*`, `hookEvent`, `hookName` and `outcome` are display text: nothing branches on them, matches against them or persists anything derived from them. No hook record is written to `audit.ndjson` (D278) | `adapters/*`, `client` |
+| **I79** | A `codex app-server` child lives for exactly one turn. A JSON-RPC error answering `thread/resume` produces exactly one `session.notice / resume_unavailable`, then one `thread/start` on the same child. It is never `schema_mismatch`, and a turn never falls back twice. The fresh thread's id replaces `cliSessionId` (D279) | `adapters/*` |
+| **I80** | `SessionSummary.endReason` is the persisted `SessionRecord.endReason`, with an absent field read as `null`. It is `null` whenever `state === 'live'`. Nothing derives, infers or back-fills it from the spill, `endedAt` or a notice (D281) | `agent-console/core` |
+| **I81** | The ids `GET /api/vendors` returns are exactly the configured registry's, which is the set the create route accepts. The client offers a vendor only from that response, and its sources carry no vendor literal (D280) | `edge/sse`, `edge/ws`, `client` |
 
 **I40, I41 and I42 were never allocated, and the gap is left open rather than closed.** The
 numbering jumps from I39 to I43 and nothing is missing. Ids here are cited by number in
@@ -3119,6 +3233,8 @@ Verified against `Forks-Claude-Code-Chat@ab6e307`, and against the installed CLI
 | `result`, any other subtype | `turn.ended`, `stopReason: 'error'`; close stdin |
 | `close` with no `result` seen | `turn.ended`, `stopReason: 'process_exit'` |
 | `stream_event` → `content_block_delta` → `delta.type: 'text_delta'` | `message.delta` — a **frame**, on the same terms as Codex's (D168, I51) |
+| `system` / `hook_started` | `hook`, `phase: 'started'`; `hookId`, `hookName`, `hookEvent` from the record's `hook_id`, `hook_name`, `hook_event` (D278) |
+| `system` / `hook_response` | `hook`, `phase: 'completed'`; as above, plus `outcome` and `exitCode` from `outcome` and `exit_code`. `output`, `stdout` and `stderr` are not mapped |
 | A record on the ignored list below | *nothing*, deliberately — **not** `adapter_unknown_record` |
 
 Launched with `-p --output-format stream-json --input-format stream-json --verbose
@@ -3128,16 +3244,24 @@ CLI does not run non-interactively and the stream-json transport never starts. O
 messages and `control_response` are single JSON lines written to stdin, **which stays open for
 the whole turn**.
 
-**The thirteen rows are not the CLI's whole vocabulary, and the mapper must not treat them as one**
+**The fifteen rows are not the CLI's whole vocabulary, and the mapper must not treat them as one**
 (D92). The live stream carries records that are ordinary, harmless, and no part of this
 vocabulary; raising `error / adapter_unknown_record` for each would put a diagnostic line in
 front of the operator on every routine turn. The adapter therefore holds a named ignore list —
-top-level `rate_limit_event` and `control_response`; the `system` subtypes `hook_started`,
-`hook_response`, `thinking_tokens` and `post_turn_summary`; and the `content_block_delta`
-delta types `thinking_delta` and `input_json_delta` (D172) — and returns silently for those.
-Anything outside both the thirteen rows and that list still raises `adapter_unknown_record`,
+top-level `rate_limit_event` and `control_response`; the `system` subtypes `thinking_tokens`
+and `post_turn_summary`; and the `content_block_delta` delta types `thinking_delta` and
+`input_json_delta` (D172) — and returns silently for those. `hook_started` and `hook_response`
+left that list for the two `hook` rows above (D278).
+Anything outside both the fifteen rows and that list still raises `adapter_unknown_record`,
 non-fatally, with the record preserved in `raw`. **The list is a vendor fact and lives with the
 vendor's adapter; adding to it is an adapter change, never a change to `ErrorEventKind`.**
+
+**A hook record whose `hook_id`, `hook_name` or `hook_event` is absent or is not a string maps to
+no `hook` event.** It raises a non-fatal `adapter_unknown_record` with the record kept in `raw`,
+so the run stays visible as a diagnostic rather than vanishing. It is not `schema_mismatch`: a
+hook belongs to the host's configuration, and failing the turn over a malformed record would
+let a record about that configuration end turns the configuration itself never stopped. An absent or
+non-string `outcome`, or a non-integer `exit_code`, maps to `null` and is not an error.
 
 **The `message.delta` row above is S25.3's**, filled from observation the same way the Codex
 tables were filled by S8.1 rather than hypothesised: `--include-partial-messages` is proven to
@@ -3242,6 +3366,35 @@ schema-generated (`codex app-server generate-json-schema`, `v2/`), not hand-tran
 | `turn/completed` | `turn.ended`; `stopReason` from `turn.status` — `completed`, `interrupted`, `failed` (as `error`), and anything else is `schema_mismatch`. Its `last` is **not** mapped: see *Usage* |
 | `item/commandExecution/requestApproval` | **unreachable under the shipped policy** — see below |
 | `close` with no `turn/completed` seen | `turn.ended`, `stopReason: 'process_exit'` |
+| `hook/started`, `hook/completed` | *nothing*, on the ignore list. **Not yet `hook`** (D278): no captured fixture shows their fields, and this table is filled from observation. Mapping them is an adapter change once one does |
+| `item/started` or `item/completed`, type `fileChange` | **unmapped and unobserved.** Today it is `schema_mismatch`, like any type outside this table. Whether it ever arrives is `## Unresolved` 25 (D282) |
+
+**One child per turn, and the thread is what carries the conversation** (D16, D279). The adapter
+spawns `codex app-server` when `send` is called and terminates it on `turn/completed`, or on
+`close` when no `turn/completed` arrived. It keeps no server warm between turns, so a session
+holds no idle Codex child, and `ProcessRecord` sees one child per turn exactly as it does for
+Claude. Continuity is the vendor's thread. The `threadId` that `thread/started` reports is the
+session's `cliSessionId`, last-write-wins as D34 makes Claude's, and each later turn's handshake
+is `initialize` → `thread/resume` on that id → `turn/start`. A turn with no `cliSessionId` sends
+`thread/start` instead. The resume carries the session's own `cwd`, `sandbox` and
+`approvalPolicy: 'never'`, so a resumed thread runs under the launch policy it started with, not
+one the vendor stored. The request shapes are the adapter's, verified against the installed
+CLI's generated schema. The contract fixes the sequence and what each step's failure means, not
+the shapes.
+
+**A refused `thread/resume` starts a fresh thread and says so. It does not fail the turn**
+(D279). Where the CLI answers `thread/resume` with a JSON-RPC error, the adapter emits one
+`session.notice / resume_unavailable` at `level: 'warn'`, then sends `thread/start` on the same
+child, and the turn proceeds there. That error might be a thread the vendor pruned, or one its
+store never held. The fresh thread's id replaces `cliSessionId` through the same `cli-session`
+notification as any other `thread/started`, so the next turn resumes the new thread rather than
+retrying the refused one. **Only a JSON-RPC error response to `thread/resume` triggers this.**
+An error from `initialize`, `thread/start` or `turn/start` stays `schema_mismatch`, a child that
+exits mid-handshake stays `agent_unavailable`, and a `thread/start` that fails after a refused
+resume is `schema_mismatch` for the turn. Falling back is the operator's continuity, not a
+retry loop, so there is exactly one fallback per turn. The notice is the whole of what the
+operator is told, and it is enough: the session continues, and only the vendor's memory of
+earlier turns is gone. The console's own transcript is untouched (I79).
 
 ### `codex exec --json` — fallback
 
@@ -3738,3 +3891,21 @@ belong to the `exec --json` fallback alone; neither affects a session on `app-se
     within `Caps.permissionReasonBytes`, refused rather than truncated, and the control that
     collects it says where it goes. The amendments are under *Public surface § `adapters/*`*,
     *§ `session-manager`* and *§ `client`*, and *Error semantics*. (#480)
+
+25. **Whether a Codex edit ever reaches the wire, and as what.** Arrived with #458, which asks
+    for `ToolResult.diff` from `item/fileChange/patchUpdated`. The schema defines that
+    notification as carrying `changes: [{ diff, kind, path }]`, and a `fileChange` item type
+    beside it. Neither has been observed. S34's probe edited a file through `app-server` and
+    captured no write of any kind (`design/findings/S34-enumeration.md` § 2). The root cause was
+    not found, and sandbox mode, approval policy and the model's choice of edit path remain the
+    candidates. Neither notification has a `tool.call` or `tool.result` mapping either, so there
+    is no `ToolResult` for a diff to attach to. A mapping written from the schema alone would be
+    a table row nobody has seen fire.
+
+    **Deferred to a probe by D282.** The probe has to answer three things against the installed
+    CLI, under the sandbox modes the console launches with. Does an `app-server` edit turn emit a
+    `fileChange` item, `item/fileChange/patchUpdated`, or both? Which `CallId`, `ok` and `output`
+    would a `tool.call`/`tool.result` pair read from them? Does the `diff` string parse into
+    D258's hunk shape? Until then a `fileChange` item stays `schema_mismatch`, every Codex
+    `ToolResult.diff` stays `null`, and nothing maps either record speculatively. A negative
+    answer closes this item as "Codex carries no recoverable change on this transport". (#458)

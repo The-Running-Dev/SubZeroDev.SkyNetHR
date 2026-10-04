@@ -6928,6 +6928,126 @@ trip per path.
 Reversibility: cheap — no code implements the D267 sequence yet, and `restore_collision` has
 never been emitted.
 
+### 2026-10-04 — D278 Vendor hook records become a `hook` transcript event, not an audit record
+Context: #415. The Claude CLI emits `system/hook_started` and `system/hook_response` around every
+configured hook. The adapter ignored both, so an operator could not see that a hook ran, blocked a
+tool call, or failed. The event envelope was closed to new kinds outside `/contract` (D268), and
+`audit.ndjson` (S14.10) records operator decisions only.
+Chosen: **a vendor-neutral `hook` event kind in `EventPayloadMap` and `AdapterEmitted`**, one per
+vendor hook record in arrival order, with `turnId`, an opaque `hookId`, `phase`, `hookEvent`,
+`hookName`, and `outcome`/`exitCode` that are null on `started`. It is spilled, replayed and
+deleted with the session like any transcript event (D25), rendered as one line at every verbosity
+level, and carries none of the hook's output. A Claude hook record with a missing or non-string
+`hook_id`/`hook_name`/`hook_event` is a non-fatal `adapter_unknown_record` carrying `raw`. A bad
+`outcome` or `exit_code` reads as null. Codex's `hook/started` and `hook/completed` stay on the
+ignore list until a fixture shows their fields. The user chose the spill event. I78 holds it.
+Rejected: **writing hook records to `audit.ndjson`.** The audit log records what an operator
+decided, and a hook is configuration running unattended; mixing the two makes the audit answer a
+question it was not built for. **Both a spill event and an audit line.** Two copies of one fact,
+with no reader needing the second. **Carrying `stdout`/`stderr`/`output`.** Hook output is
+arbitrary text the model may be fed, unbounded and unescaped, and nothing above the adapter needs
+it to show that a hook ran; `raw` already holds it for debugging and is never rendered (D266).
+**Mapping Codex `hook/*` from the schema alone.** The vendor tables are filled from observation,
+and a guessed mapping is a `schema_mismatch` waiting for the first real record. **`schema_mismatch`
+on a malformed hook record.** It costs the turn for a record that only ever informs.
+Reversibility: cheap — no `hook` event has been emitted or spilled. Once one has, removing the
+kind strands spilled events a replay must still read.
+Landing point: #415.
+
+### 2026-10-04 — D279 A `codex app-server` child lives one turn; a refused `thread/resume` starts a fresh thread with `resume_unavailable`
+Context: #83. The contract did not say how long an app-server child lives, how a later turn
+reaches the earlier conversation, or what happens when the vendor no longer holds the recorded
+thread. The adapter's handshake catches any JSON-RPC error as `schema_mismatch`, so a pruned thread
+would fail every later turn of the session for good.
+Chosen: **one child per turn, as D16 already fixes for Claude.** The handshake is `initialize` →
+`thread/resume` on `cliSessionId` (or `thread/start` when there is none) → `turn/start`, and the
+child is terminated on `turn/completed` or `close`. `threadId` is the `cliSessionId`,
+last-write-wins as D34. The resume carries the session's own `cwd`, `sandbox` and
+`approvalPolicy: 'never'`. **A JSON-RPC error answering `thread/resume` emits one
+`session.notice / resume_unavailable` at `warn`, then `thread/start` on the same child**, and the
+new thread id replaces `cliSessionId`. Only that error triggers it, and only once per turn. The
+`resume_unavailable` row now names two producers. The user chose the fresh thread. I79 holds it.
+Rejected: **failing the turn.** The session would be dead to Codex for good while the console's
+own transcript is intact, and the operator's only recourse would be a new session. **Keeping the
+server warm between turns.** D16 rejected that for Claude, for the same reasons: an idle child per
+session, and a `ProcessRecord` that no longer sees one child per turn. **Retrying the resume, or
+falling back more than once.** The refusal is a fact about the vendor's store and a retry gets the
+same answer; a second fallback is a loop. **Falling back on any handshake error.** An
+`initialize` or `turn/start` error is a protocol fault, and starting a fresh thread over one would
+hide it.
+Reversibility: cheap — no turn has fallen back yet. The notice is the only trace a fallback
+leaves.
+Landing point: #83.
+
+### 2026-10-04 — D280 `GET /api/vendors` returns `VendorListing[]`, and the client picks vendors only from it
+Context: #64. The session and requisition forms took the vendor as free text, which S2.11 forbids
+the client from knowing any other way: the client carries no vendor literal. The registry already
+knew which vendors were configured and whether each was available, but nothing exposed it.
+Chosen: **`GET /api/vendors` → `200 { vendors: VendorListing[] }`**, with `401 unauthenticated`
+its only refusal. `VendorListing` is `{ id, label, available, unavailableReason }`, a projection of
+`registry.list` in registration order. Availability is the cached probe against the first entry of
+`Config.workspaceRoots`, read without a refresh. Create stays authoritative: its `503
+agent_unavailable` and `422 bad_request` still apply. Every vendor choice in the client is a select
+from this list, with an unavailable vendor shown disabled and its reason. A failed or empty fetch
+leaves the form unable to create and says why. The user chose the route. I81 holds it.
+Rejected: **an S2.11 exception for a hard-coded list.** It is the literal S2.11 exists to keep out,
+and a second vendor would need a client release. **Exposing `capabilities` or `cliVersion`.**
+Nothing the form does branches on them, and a field on a public route is a promise. **A refresh
+route.** A probe is a process spawn per vendor that any HTTP caller could then trigger at will,
+and create already refuses an unavailable vendor with a reason. **Falling back to a built-in list on a failed
+fetch.** It offers vendors the server may not have.
+Reversibility: cheap — the route is new and has no consumer yet.
+Landing point: #64.
+
+### 2026-10-04 — D281 `SessionSummary.endReason` passes the persisted value through
+Context: #461. Boot persists `SessionRecord.endReason = 'server_restart'` for a session the restart
+ended, but `SessionSummary` has no field for it and D45 forbids a `session.ended` envelope at boot,
+so the client could not tell a restart from a clean exit.
+Chosen: **`readonly endReason: SessionEndReason | null` on both `SessionSummary` declarations**,
+the persisted value with an absent field read as null. It is null while live, and null once ended
+only for a record that predates the field. Nothing new is persisted. `server_restart` reaches the
+client through this field, never through an envelope. The user chose the field. I80 holds it.
+Rejected: **declining.** The value already exists on disk and the operator has no other way to
+learn why a session ended. **Deriving it from the spill, `endedAt` or a notice.** Inference
+produces a reason nobody recorded, and an old record would get a guessed one. **Emitting
+`session.ended` with `server_restart` at boot.** D45 rejected it: an event appended at boot for a
+turn nobody ran reorders a replay.
+Reversibility: cheap — an additive field; no client reads it yet.
+Landing point: #461.
+
+### 2026-10-04 — D282 Codex `fileChange` waits for a probe; `## Unresolved` 25
+Context: #458. S34's enumeration (`design/findings/S34-enumeration.md`) captured a real Codex edit
+turn with no `fileChange` item and no `item/fileChange/patchUpdated` notification, although the
+generated schema defines both and the file was edited on disk. A mapping written now would be
+written from the schema alone.
+Chosen: **defer to a probe.** `## Unresolved` 25 asks whether either is emitted under the sandbox
+modes the console launches with, what the `CallId`, `ok` and `output` mapping would be, and whether
+`diff` parses into D258's hunks. Until it closes, a `fileChange` item stays `schema_mismatch` and a
+Codex `diff` stays null. A negative probe result closes the item. The user chose the probe.
+Rejected: **specifying the mapping from the schema.** The one capture contradicts the schema's
+implication that the item arrives, and the vendor tables are filled from observation. **Moving
+`fileChange` to the ignore list now.** It would hide the first real one, which is the observation
+the probe needs.
+Reversibility: cheap — nothing changes until the probe reports.
+Landing point: #458.
+
+### 2026-10-04 — D283 A routing-table row may be marked `*owed*` until its slice builds it
+Context: D280 added `GET /api/vendors` to the routing table in a contract-only change. The
+route-parity check (D144, #136) reads every row of that table and fails when either edge answers
+one from its catch-all. Any contract amendment that adds a route therefore broke CI before the
+slice that builds it could exist.
+Chosen: **a path followed by `*owed*` is declared but not built.** The parity check skips it in
+its wired-on-both-edges case, and a second case asserts it still falls through on both edges.
+That makes the marker self-retiring: the slice that wires the route fails the second case until
+it deletes the marker in the same commit. `GET /api/vendors` is the first owed row. The user
+chose the marker.
+Rejected: **building the route in the contract change.** It puts #64's code ahead of `/slices`,
+which has not written its criteria, and still leaves the client half unbuilt. **Stating the route
+in prose outside the table until its slice lands.** Nothing then forces the row back in, and the
+routing table this document owns stops being the whole of it. **A skip list in the test.** It is
+a second copy of the routing table's state, kept in the tree and not in the document that owns it.
+Reversibility: cheap — one marker and two test cases.
+
 ## Open
 
 Staging only. Once an item becomes an issue it leaves this list.
@@ -6945,3 +7065,6 @@ Staging only. Once an item becomes an issue it leaves this list.
   `exposed`. A target that tracks a currently ignored path refuses with `restore_collision` and
   writes nothing. A failed protected-set read refuses with no safety commit. A tree with an
   embedded repository still comes back `restore_incomplete`.
+- **D278–D281's code and acceptance criteria.** The contract is amended (I78–I81). Each issue —
+  #415, #83, #64, #461 — carries its own slice; `/slices` writes their criteria, then this item
+  goes. #64's slice deletes the `*owed*` marker on `GET /api/vendors` (D283).

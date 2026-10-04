@@ -28,8 +28,9 @@ function fillPlaceholders(routePath: string): string {
 /** Reads `## HTTP routes` out of `20-contract.md` and returns every `Method`/`Path` pair its
  * tables declare — the routing table this document owns per its own opening line ("The
  * routing table is this document's, not the tree's"), enumerated rather than restated by hand
- * (#136: a hand-asserted parity claim in prose is exactly what went stale). */
-async function readContractRoutes(): Promise<Array<{ method: string; path: string }>> {
+ * (#136: a hand-asserted parity claim in prose is exactly what went stale). A path followed by
+ * `*owed*` is declared but not yet built (D283), and comes back with `owed: true`. */
+async function readContractRoutes(): Promise<Array<{ method: string; path: string; owed: boolean }>> {
   const contractPath = path.join(process.cwd(), 'design', '20-contract.md');
   const text = await readFileAsync(contractPath, 'utf8');
   const sectionStart = text.indexOf('\n## HTTP routes');
@@ -37,11 +38,11 @@ async function readContractRoutes(): Promise<Array<{ method: string; path: strin
   assert.ok(sectionStart !== -1 && sectionEnd !== -1 && sectionEnd > sectionStart, 'design/20-contract.md § HTTP routes was not found where this check expects it');
   const section = text.slice(sectionStart, sectionEnd);
 
-  const routes: Array<{ method: string; path: string }> = [];
-  const rowPattern = /^\| `(GET|POST|DELETE)` \| `([^`]+)` \|/gm;
+  const routes: Array<{ method: string; path: string; owed: boolean }> = [];
+  const rowPattern = /^\| `(GET|POST|DELETE)` \| `([^`]+)`( \*owed\*)? \|/gm;
   let match: RegExpExecArray | null;
   while ((match = rowPattern.exec(section)) !== null) {
-    routes.push({ method: match[1]!, path: match[2]! });
+    routes.push({ method: match[1]!, path: match[2]!, owed: match[3] !== undefined });
   }
   assert.ok(routes.length > 0, 'no routes were parsed out of design/20-contract.md § HTTP routes');
   return routes;
@@ -158,11 +159,28 @@ describe('#136/D144 — edge/ws serves every route in design/20-contract.md § H
     const h = await makeSharedEdges();
     try {
       for (const route of routes) {
+        if (route.owed) continue;
         const routePath = fillPlaceholders(route.path);
         const sseHit = await hitsCatchAll(h.sseBase, route.method, routePath);
         assert.equal(sseHit, false, `edge/sse falls through to its catch-all for ${route.method} ${route.path}`);
         const wsHit = await hitsCatchAll(h.wsBase, route.method, routePath);
         assert.equal(wsHit, false, `edge/ws falls through to its catch-all for ${route.method} ${route.path}`);
+      }
+    } finally {
+      for (const s of servers.splice(0)) { s.closeAllConnections(); s.close(); }
+    }
+  });
+
+  // The other half of D283: an `*owed*` row must still fall through on both edges. Once a slice
+  // wires the route this fails until the marker is deleted, so the marker cannot go stale.
+  it('every route marked *owed* is still unwired on both edge/sse and edge/ws', async () => {
+    const owed = (await readContractRoutes()).filter((route) => route.owed);
+    const h = await makeSharedEdges();
+    try {
+      for (const route of owed) {
+        const routePath = fillPlaceholders(route.path);
+        assert.equal(await hitsCatchAll(h.sseBase, route.method, routePath), true, `edge/sse now serves ${route.method} ${route.path}; delete its *owed* marker in design/20-contract.md`);
+        assert.equal(await hitsCatchAll(h.wsBase, route.method, routePath), true, `edge/ws now serves ${route.method} ${route.path}; delete its *owed* marker in design/20-contract.md`);
       }
     } finally {
       for (const s of servers.splice(0)) { s.closeAllConnections(); s.close(); }
