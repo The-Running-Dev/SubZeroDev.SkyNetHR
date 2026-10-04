@@ -613,6 +613,14 @@ body {
 
 .tool__diff-hunk-header { color: var(--ink-faint); }
 
+.tool__diff-path {
+  margin-top: var(--space-2);
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.tool__diff-path:first-child { margin-top: 0; }
+
 .tool__diff-line {
   white-space: pre-wrap;
   word-break: break-word;

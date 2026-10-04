@@ -20,6 +20,7 @@ import type {
 import { NdjsonSplitter } from '../ndjson.js';
 import { isSafePathSegment } from '../../store/paths.js';
 import { summariseCommand } from './summarise.js';
+import { isFileChanges, fileChangesDiff, fileChangeOutput, type FileChange } from './diff.js';
 
 const isWindows = platform === 'win32';
 type Transport = 'app-server' | 'exec';
@@ -173,14 +174,12 @@ const IGNORED_APP_SERVER_METHODS = new Set([
   'windowsSandbox/setupCompleted',
   'account/login/completed',
   'item/fileChange/outputDelta',
-  'item/fileChange/patchUpdated',
 ]);
 
 // `item/started`/`item/completed` fire for the operator's own prompt too, echoed back as
-// a `userMessage` item — content the operator already has, not new information. Every
-// other item `type` outside the contract's three (`reasoning`, `agentMessage`,
-// `commandExecution`) is real agent output this table does not describe (a file edit, an
-// MCP tool call, a web search, …) and must fail loudly rather than vanish.
+// a `userMessage` item — content the operator already has, not new information.
+// Other item types outside the mapped handlers carry agent output (an MCP tool call,
+// a web search, …) and must fail loudly rather than vanish.
 const IGNORED_ITEM_TYPES = new Set(['userMessage']);
 
 // Shared by both transports' `failSchemaMismatch`: emits the fatal error event, then hands
@@ -250,6 +249,7 @@ function buildCodexAdapter(opts: AdapterOptions, executable: string, transport: 
       let resultSeen = false;
       let requestSeq = 1;
       const pendingOutgoing = new Map<number, { resolve: (result: unknown) => void; reject: (err: Error) => void }>();
+      const filePatches = new Map<string, FileChange[]>();
 
       function writeMessage(msg: Record<string, unknown>): boolean {
         if (!child?.stdin || child.stdin.destroyed) return false;
@@ -300,6 +300,16 @@ function buildCodexAdapter(opts: AdapterOptions, executable: string, transport: 
         const item = params['item'] as Record<string, unknown> | undefined;
         if (!item) return failSchemaMismatch('item/started carried no item', rec);
         const type = item['type'];
+        if (type === 'fileChange') {
+          if (typeof item['id'] !== 'string' || !isSafePathSegment(item['id']) || !isFileChanges(item['changes'])) {
+            return failSchemaMismatch('fileChange carried an invalid id or changes', rec);
+          }
+          emitEvent('tool.call', {
+            callId: item['id'], name: 'apply_patch', input: { changes: item['changes'] },
+            summary: item['changes'].map(change => `${change.kind.type}: ${change.path}`).join(', '),
+          }, rec);
+          return;
+        }
         if (type === 'commandExecution') {
           const command = String(item['command'] ?? '');
           emitEvent(
@@ -317,6 +327,22 @@ function buildCodexAdapter(opts: AdapterOptions, executable: string, transport: 
         const item = params['item'] as Record<string, unknown> | undefined;
         if (!item) return failSchemaMismatch('item/completed carried no item', rec);
         const type = item['type'];
+        if (type === 'fileChange') {
+          if (typeof item['id'] !== 'string' || !isSafePathSegment(item['id']) || !isFileChanges(item['changes'])
+            || !['completed', 'failed', 'declined'].includes(String(item['status']))) {
+            return failSchemaMismatch('fileChange carried an invalid id, changes, or terminal status', rec);
+          }
+          // The completed item is authoritative; patch notifications are a fallback
+          // for a completed item with no changes of its own.
+          const changes = item['changes'].length > 0 ? item['changes'] : filePatches.get(item['id']) ?? [];
+          filePatches.delete(item['id']);
+          const output = fileChangeOutput(changes);
+          emitEvent('tool.result', {
+            callId: item['id'], ok: item['status'] === 'completed', output,
+            truncated: false, bytes: Buffer.byteLength(output, 'utf8'), diff: fileChangesDiff(changes),
+          }, rec);
+          return;
+        }
         if (type === 'reasoning') {
           const summary = (item['summary'] as string[] | undefined) ?? [];
           const content = (item['content'] as string[] | undefined) ?? [];
@@ -333,8 +359,6 @@ function buildCodexAdapter(opts: AdapterOptions, executable: string, transport: 
           const output = String(item['aggregatedOutput'] ?? '');
           emitEvent(
             'tool.result',
-            // (D258) `null`: this adapter does not map `item/fileChange/patchUpdated` yet —
-            // logged as a follow-up in design/90-decisions.md § Open.
             { callId: item['id'], ok: item['status'] === 'completed', output, truncated: false, bytes: Buffer.byteLength(output, 'utf8'), diff: null },
             rec,
           );
@@ -371,6 +395,12 @@ function buildCodexAdapter(opts: AdapterOptions, executable: string, transport: 
             return;
           case 'item/started':
             handleItemStarted(params, rec);
+            return;
+          case 'item/fileChange/patchUpdated':
+            if (typeof params['itemId'] !== 'string' || !isSafePathSegment(params['itemId']) || !isFileChanges(params['changes'])) {
+              return failSchemaMismatch('patchUpdated carried an invalid itemId or changes', rec);
+            }
+            filePatches.set(params['itemId'], params['changes']);
             return;
           case 'item/reasoning/summaryTextDelta':
           case 'item/commandExecution/outputDelta':

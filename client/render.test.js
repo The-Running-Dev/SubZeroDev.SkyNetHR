@@ -325,6 +325,17 @@ test('S34.4 — a truncated result with a diff renders the diff it has and state
   assert.equal(find(node, 'tool__truncated').textContent, 'diff partial — 9001 bytes in full');
 });
 
+test('#458 — file labels group hunks and reach the diff view as inert text', () => {
+  const hunks = twoHunkDiff().hunks;
+  const hostile = '<img src=x onerror=alert(1)>';
+  const node = renderEvent(fakeDocument(), toolResultEnvelope({ hunks: [
+    { ...hunks[0], path: hostile }, { ...hunks[1], path: hostile }, { ...hunks[0], path: 'next.txt' },
+  ] }), { verbosity: 'full' });
+  const labels = findAll(node, 'tool__diff-path');
+  assert.deepEqual(labels.map(label => label.textContent), [hostile, 'next.txt']);
+  assert.ok(labels.every(label => label.children.length === 0));
+});
+
 test('S34.5 — a result with no recoverable change (Read/Bash) renders exactly as it did before diffs existed', () => {
   const doc = fakeDocument();
   const node = renderEvent(doc, toolResultEnvelope(null, { output: 'file contents' }), { verbosity: 'full' });

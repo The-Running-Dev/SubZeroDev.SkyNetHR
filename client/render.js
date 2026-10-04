@@ -225,8 +225,11 @@ function toolResultDiffNode(doc, diff) {
   const container = el(doc, 'div', 'tool__diff');
   const totalLines = diff.hunks.reduce((sum, hunk) => sum + hunk.lines.length, 0);
   let shown = 0;
+  let lastPath;
   for (const hunk of diff.hunks) {
     if (shown >= DIFF_LINE_BOUND) break;
+    if (hunk.path && hunk.path !== lastPath) container.appendChild(el(doc, 'div', 'tool__diff-path', hunk.path));
+    lastPath = hunk.path;
     const hunkNode = el(doc, 'div', 'tool__diff-hunk');
     hunkNode.appendChild(
       el(doc, 'div', 'tool__diff-hunk-header', `@@ -${hunk.oldStart},${hunk.oldLines} +${hunk.newStart},${hunk.newLines} @@`),
