@@ -25,10 +25,11 @@ import type {
   SessionId,
   TurnId,
   Vendor,
+  VendorListing,
 } from '../../contract/index.js';
 import { RATINGS } from '../../contract/index.js';
 import { sendError } from '../error-envelope/index.js';
-import { VENDORS } from '../../config/providers.js';
+import { providerRegistry, VENDORS } from '../../config/providers.js';
 
 // D10 (`10-design.md § Module boundaries`) decided the two transport edges stay separate
 // modules and neither imports the other — it did not forbid a third module both compose
@@ -366,6 +367,14 @@ export function resolveOperator(req: IncomingMessage, res: ServerResponse, ident
  */
 export function createHttpHandlers(deps: EdgeDeps) {
   const { config, manager } = deps;
+
+  async function handleListVendors(_req: IncomingMessage, res: ServerResponse): Promise<void> {
+    const providers = await providerRegistry.list({ cwd: config.workspaceRoots[0]! });
+    const vendors: VendorListing[] = providers.map(({ id, label, available, unavailableReason }) => ({
+      id: id as Vendor, label, available, unavailableReason: unavailableReason ?? null,
+    }));
+    sendJson(res, 200, { vendors });
+  }
 
   async function handleCreate(req: IncomingMessage, res: ServerResponse, owner: OperatorId): Promise<void> {
     const raw = await readBody(req);
@@ -1012,6 +1021,7 @@ export function createHttpHandlers(deps: EdgeDeps) {
   }
 
   return {
+    handleListVendors,
     handleCreate,
     handleMessage,
     handlePermission,

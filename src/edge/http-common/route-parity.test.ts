@@ -15,6 +15,8 @@ import { createCheckpoints } from '../../checkpoints/index.js';
 import { createRecords } from '../../records/index.js';
 import { stripExtendedPrefix } from '../../jail/index.js';
 import type { Config, ReadinessState } from '../../contract/index.js';
+import { providerRegistry, VENDORS } from '../../config/providers.js';
+import type { ProbeContext } from '../../agent-console/providers/types.js';
 
 const readFileAsync = promisify(readFile);
 
@@ -51,6 +53,7 @@ async function readContractRoutes(): Promise<Array<{ method: string; path: strin
 const servers: Server[] = [];
 
 interface Harness {
+  readonly workspaceRoot: string;
   readonly sseBase: string;
   readonly wsBase: string;
 }
@@ -111,7 +114,7 @@ async function makeSharedEdges(): Promise<Harness> {
   const wsAddr = wsServer.address();
   if (wsAddr === null || typeof wsAddr === 'string') throw new Error('no port');
 
-  return { sseBase: `http://127.0.0.1:${sseAddr.port}`, wsBase: `http://127.0.0.1:${wsAddr.port}` };
+  return { workspaceRoot, sseBase: `http://127.0.0.1:${sseAddr.port}`, wsBase: `http://127.0.0.1:${wsAddr.port}` };
 }
 
 // The exact refusal every edge's catch-all falls back to for a path or sub-path it does not
@@ -154,6 +157,36 @@ async function hitsCatchAll(base: string, method: string, routePath: string): Pr
 }
 
 describe('#136/D144 — edge/ws serves every route in design/20-contract.md § HTTP routes', () => {
+  it('#64 — authenticated inventory projects the configured registry identically on both edges', async (t) => {
+    const h = await makeSharedEdges();
+    const contexts: ProbeContext[] = [];
+    const listing = VENDORS.map((id, index) => ({
+      id, label: `Agent ${index}`, available: index === 0,
+      ...(index === 0 ? {} : { unavailableReason: 'executable missing' }),
+      cliVersion: 'private-version',
+      capabilities: { workspace: 'required' as const, permissions: 'interactive' as const,
+        attachments: { supported: false }, usage: true, resume: true, streamingDeltas: false,
+        needsProcess: true, conversationState: 'provider' as const },
+    }));
+    t.mock.method(providerRegistry, 'list', async (context: ProbeContext) => { contexts.push(context); return listing; });
+    try {
+      for (const base of [h.sseBase, h.wsBase]) {
+        const before = contexts.length;
+        const refused = await fetch(`${base}/api/vendors`);
+        assert.equal(refused.status, 401);
+        assert.equal(contexts.length, before, 'authentication precedes provider probing');
+        const response = await fetch(`${base}/api/vendors`, { headers: { 'x-forwarded-user': 'ben' } });
+        assert.equal(response.status, 200);
+        assert.deepEqual(await response.json(), { vendors: listing.map(({ id, label, available, unavailableReason }) => ({
+          id, label, available, unavailableReason: unavailableReason ?? null,
+        })) });
+      }
+      assert.deepEqual(contexts, [{ cwd: h.workspaceRoot }, { cwd: h.workspaceRoot }]);
+    } finally {
+      for (const s of servers.splice(0)) { s.closeAllConnections(); s.close(); }
+    }
+  });
+
   it('every enumerated route is wired on both edge/sse and edge/ws', async () => {
     const routes = await readContractRoutes();
     const h = await makeSharedEdges();

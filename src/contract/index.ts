@@ -109,6 +109,12 @@ export type ChecklistItemId = Brand<string, 'ChecklistItemId'>;
 export type AuditCursor = Brand<string, 'AuditCursor'>;
 
 export type Vendor = typeof import('../config/providers.js').providerDefinitions[number]['id'];
+export interface VendorListing {
+  readonly id: Vendor;
+  readonly label: string;
+  readonly available: boolean;
+  readonly unavailableReason: string | null;
+}
 export type SessionState = 'live' | 'ended';
 
 // ---------------------------------------------------------------------------

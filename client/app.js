@@ -15,6 +15,8 @@ const state = {
   // restart, or closed by its operator — refuses every message with `409 session_ended`,
   // and a box that still invites typing turns that refusal into a surprise.
   sessionsById: new Map(),
+  vendorsById: new Map(),
+  vendorRequestToken: 0,
   // S12: the opaque `nextCursor` from the last audit page fetched, round-tripped verbatim
   // — nothing here parses, decodes or constructs one (D86, S12.5).
   auditCursor: null,
@@ -311,6 +313,52 @@ function describe(result) {
 // ---------------------------------------------------------------------------
 // Sessions
 // ---------------------------------------------------------------------------
+
+function renderVendorPickers(vendors, message, loading = false, previous = []) {
+  const available = vendors.some(vendor => vendor.available);
+  for (const [index, id] of ['vendor', 'requisition-vendor'].entries()) {
+    const picker = $(id);
+    clear(picker);
+    const placeholder = text('option', '', loading ? 'Loading agents…' : 'Choose an agent');
+    placeholder.value = '';
+    picker.appendChild(placeholder);
+    for (const vendor of vendors) {
+      const label = vendor.available ? vendor.label : `${vendor.label} — ${vendor.unavailableReason || 'unavailable'}`;
+      const option = text('option', '', label);
+      option.value = vendor.id;
+      option.disabled = !vendor.available;
+      picker.appendChild(option);
+    }
+    picker.value = vendors.some(vendor => vendor.id === previous[index] && vendor.available) ? previous[index] : '';
+    picker.disabled = !available;
+    $(`${id}-status`).textContent = message;
+  }
+  $('start-session-submit').disabled = !available;
+  $('raise-requisition-submit').disabled = !available;
+}
+
+async function refreshVendors() {
+  const token = ++state.vendorRequestToken;
+  const previous = [$('vendor').value, $('requisition-vendor').value];
+  state.vendorsById.clear();
+  renderVendorPickers([], '', true);
+  try {
+    const result = await api('GET', '/api/vendors');
+    if (token !== state.vendorRequestToken) return;
+    if (result.status !== 200) throw new Error(describe(result));
+    const vendors = result.payload?.vendors;
+    if (!Array.isArray(vendors) || !vendors.every(vendor => vendor && typeof vendor.id === 'string' && vendor.id !== '' &&
+      typeof vendor.label === 'string' && typeof vendor.available === 'boolean' &&
+      (vendor.unavailableReason === null || typeof vendor.unavailableReason === 'string'))) throw new Error('invalid agent list');
+    state.vendorsById = new Map(vendors.map(vendor => [vendor.id, vendor]));
+    const message = vendors.length === 0 ? 'No agents are configured on this server. Use Refresh to retry.'
+      : vendors.some(vendor => vendor.available) ? '' : 'No agents are currently available. Use Refresh to retry.';
+    renderVendorPickers(vendors, message, false, previous);
+  } catch (error) {
+    if (token !== state.vendorRequestToken) return;
+    renderVendorPickers([], `Could not load agents: ${error.message}. Use Refresh to retry.`);
+  }
+}
 
 async function refreshSessions() {
   const result = await api('GET', '/api/sessions');
@@ -949,6 +997,7 @@ async function createSession(event) {
   const sandbox = $('sandbox').value.trim();
   const requisitionId = $('requisition-id').value.trim();
   if (cwd === '' || vendor === '') return status('a folder and an agent are both required', 'error');
+  if (!state.vendorsById.get(vendor)?.available) return status('choose an available agent', 'error');
 
   status('starting…', 'info');
   const result = await api('POST', '/api/sessions', {
@@ -1367,6 +1416,7 @@ async function raiseRequisition(event) {
   if (title === '' || justification === '' || workspace === '' || vendor === '') {
     return status('title, justification, workspace and agent are all required', 'error');
   }
+  if (!state.vendorsById.get(vendor)?.available) return status('choose an available agent', 'error');
   const result = await api('POST', '/api/requisitions', { title, justification, workspace, vendor });
   if (result.status === 401) return;
   if (result.status !== 201) return status(describe(result), 'error');
@@ -1621,6 +1671,7 @@ async function submitLogin(event) {
   $('login').hidden = true;
   $('console').hidden = false;
   await refreshSessions();
+  await refreshVendors();
 }
 
 function start() {
@@ -1630,7 +1681,7 @@ function start() {
   $('attachments-button').addEventListener('click', () => $('attachments').click());
   $('attachments').addEventListener('change', onAttachmentsChosen);
   $('login-form').addEventListener('submit', submitLogin);
-  $('refresh').addEventListener('click', () => void refreshSessions());
+  $('refresh').addEventListener('click', () => { void refreshSessions(); void refreshVendors(); });
   $('audit-open').addEventListener('click', openAudit);
   $('audit-close').addEventListener('click', closeAudit);
   $('audit-filters').addEventListener('submit', filterAudit);
@@ -1664,6 +1715,7 @@ function start() {
   if (typeof elapsedTicker.unref === 'function') elapsedTicker.unref();
   initTheme();
   initVerbosity();
+  void refreshVendors();
   void refreshSessions();
   void refreshRequisitionOptions();
 }
