@@ -7031,6 +7031,23 @@ the probe needs.
 Reversibility: cheap — nothing changes until the probe reports.
 Landing point: #458.
 
+### 2026-10-04 — D283 A routing-table row may be marked `*owed*` until its slice builds it
+Context: D280 added `GET /api/vendors` to the routing table in a contract-only change. The
+route-parity check (D144, #136) reads every row of that table and fails when either edge answers
+one from its catch-all. Any contract amendment that adds a route therefore broke CI before the
+slice that builds it could exist.
+Chosen: **a path followed by `*owed*` is declared but not built.** The parity check skips it in
+its wired-on-both-edges case, and a second case asserts it still falls through on both edges.
+That makes the marker self-retiring: the slice that wires the route fails the second case until
+it deletes the marker in the same commit. `GET /api/vendors` is the first owed row. The user
+chose the marker.
+Rejected: **building the route in the contract change.** It puts #64's code ahead of `/slices`,
+which has not written its criteria, and still leaves the client half unbuilt. **Stating the route
+in prose outside the table until its slice lands.** Nothing then forces the row back in, and the
+routing table this document owns stops being the whole of it. **A skip list in the test.** It is
+a second copy of the routing table's state, kept in the tree and not in the document that owns it.
+Reversibility: cheap — one marker and two test cases.
+
 ## Open
 
 Staging only. Once an item becomes an issue it leaves this list.
@@ -7050,4 +7067,4 @@ Staging only. Once an item becomes an issue it leaves this list.
   embedded repository still comes back `restore_incomplete`.
 - **D278–D281's code and acceptance criteria.** The contract is amended (I78–I81). Each issue —
   #415, #83, #64, #461 — carries its own slice; `/slices` writes their criteria, then this item
-  goes.
+  goes. #64's slice deletes the `*owed*` marker on `GET /api/vendors` (D283).

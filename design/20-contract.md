@@ -2466,6 +2466,12 @@ are binding** and are in `10-design.md § Security controls`:
 The routing table is this document's, not the tree's: it is a surface a client is held to and
 no single declaration expresses it.
 
+**A row whose path is followed by `*owed*` is a route this document has declared and no slice
+has built yet** (D283). Until that slice lands, both edges answer it from their catch-all, and
+`src/edge/http-common/route-parity.test.ts` asserts exactly that — so the marker cannot outlive
+the code. The slice that wires the route deletes the marker in the same commit, and from then on
+the route is checked like every other row. A client may not call an owed route.
+
 All request and response bodies are JSON unless stated. **Every route under `/api/` requires
 authentication, with exactly one exception — `POST /api/login`, which cannot, because it is
 what mints the credential.** The static client assets the same listener serves — `/`,
@@ -2517,7 +2523,7 @@ The `404` is `no_such_session` because `ApiErrorCode` carries no route-level not
 
 | Method | Path | Request | Success | Refusals |
 |---|---|---|---|---|
-| `GET` | `/api/vendors` | — | `200 { vendors: VendorListing[] }` | `401 unauthenticated` |
+| `GET` | `/api/vendors` *owed* | — | `200 { vendors: VendorListing[] }` | `401 unauthenticated` |
 
 **`VendorListing` — scaffold, owed to `src/contract/index.ts`** (D280):
 
