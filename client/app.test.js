@@ -428,8 +428,33 @@ test('S35.5 — an ended session reads as "ended" in both surfaces and states no
   assert.equal(doc.getElementById('session-state').textContent, 'ended');
   const row = doc.getElementById('sessions').children[0];
   assert.match(row.children[0].children[1].textContent, /· ended$/);
-  // SessionSummary carries no endReason field, so nothing rendered can name one.
+  // Historical sessions without a recorded reason do not acquire a guessed one.
   assert.equal(/reason/i.test(row.children[0].children[1].textContent), false);
+});
+
+for (const edge of ['sse', 'ws']) {
+  test(`#461 ${edge} — session end updates the header and sidebar without a reload`, async () => {
+    const { doc, sseInstances, wsInstances, selectA } = await setUpApp();
+    doc.__setEdge(edge);
+    selectA();
+    await flush();
+    const envelope = { seq: 1, sessionId: 'sess-a', ts: '2026-10-04T10:00:00.000Z', kind: 'session.ended', data: { reason: 'storage_failure', endedAt: '2026-10-04T10:00:00.000Z' } };
+    if (edge === 'sse') sseInstances[0].emit(envelope.kind, envelope);
+    else wsInstances[0].emit(envelope);
+    assert.equal(doc.getElementById('session-state').textContent, 'ended — storage failure');
+    assert.match(doc.getElementById('sessions').children[0].children[0].children[1].textContent, /· ended — storage failure$/);
+    assert.equal(doc.getElementById('compose').hidden, true);
+  });
+}
+
+test('#461 — a reloaded session shows its stored end reason in the header and sidebar', async () => {
+  const { doc, selectA } = await setUpApp({ sessions: [
+    { id: 'sess-a', cwd: '/work/a', vendor: 'acme-agent', state: 'ended', endReason: 'server_restart', name: null, model: null },
+  ] });
+  selectA();
+  await flush();
+  assert.equal(doc.getElementById('session-state').textContent, 'ended — server restart');
+  assert.match(doc.getElementById('sessions').children[0].children[0].children[1].textContent, /· ended — server restart$/);
 });
 
 test('S35.8 — a session name and folder carrying angle brackets and a quote render as literal text, not markup', async () => {

@@ -747,9 +747,7 @@ export function renderRepeatFold(doc, fold) {
 
 // S35.2/S35.4: the header and every sidebar row show the same four `SessionSummary` fields
 // with the same null handling — computed once so the two surfaces cannot drift from each
-// other's rule for `name` (D249, unchanged) or `model`. `SessionSummary` carries no
-// `endReason` (S35.5): `state` alone is shown, and a row that needs to say *why* a session
-// ended is a contract question this slice records rather than answers.
+// other's rule for name, model, or the persisted reason a session ended.
 export const DEFAULT_MODEL_LABEL = 'default model';
 
 export function sessionIdentityFields(session) {
@@ -757,7 +755,9 @@ export function sessionIdentityFields(session) {
     name: session.name ?? session.cwd,
     vendor: session.vendor,
     model: session.model ?? DEFAULT_MODEL_LABEL,
-    state: session.state,
+    state: session.state === 'ended' && session.endReason != null
+      ? `ended — ${session.endReason.replaceAll('_', ' ')}`
+      : session.state,
   };
 }
 

@@ -403,10 +403,18 @@ test('S35.2 — sessionIdentityFields falls back from name to cwd (D249) and sta
   assert.equal(named.model, 'opus');
 });
 
-test('S35.5 — an ended session carries state "ended" and nothing else — SessionSummary has no endReason to show', () => {
+test('#461 — an ended session without a recorded reason remains simply ended', () => {
   const fields = sessionIdentityFields(session({ state: 'ended' }));
   assert.equal(fields.state, 'ended');
   assert.equal('endReason' in fields, false);
+});
+
+test('#461 — session identity shows a recorded end reason only for ended sessions', () => {
+  for (const reason of ['operator', 'server_restart', 'storage_failure']) {
+    assert.equal(sessionIdentityFields(session({ state: 'ended', endReason: reason })).state, `ended — ${reason.replaceAll('_', ' ')}`);
+    assert.equal(sessionIdentityFields(session({ state: 'live', endReason: reason })).state, 'live');
+  }
+  assert.equal(sessionIdentityFields(session({ state: 'ended', endReason: null })).state, 'ended');
 });
 
 test('S35.8 — a name and a folder carrying markup-looking characters come back as the literal fields, not markup', () => {
