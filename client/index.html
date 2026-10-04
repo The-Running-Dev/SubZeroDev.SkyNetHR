@@ -71,9 +71,12 @@
     </label>
     <label class="field">
       <span class="field__label">Agent</span>
-      <input id="requisition-vendor" class="field__input" type="text" required>
+      <select id="requisition-vendor" class="field__input" required disabled aria-describedby="requisition-vendor-status">
+        <option value="">Loading agents…</option>
+      </select>
+      <span id="requisition-vendor-status" class="field__hint" role="status"></span>
     </label>
-    <button class="button" type="submit">Raise</button>
+    <button id="raise-requisition-submit" class="button" type="submit" disabled>Raise</button>
   </form>
   <div class="audit__table-wrap">
     <table class="audit-table">
@@ -263,7 +266,10 @@
       </label>
       <label class="field">
         <span class="field__label">Agent</span>
-        <input id="vendor" class="field__input" type="text" required>
+        <select id="vendor" class="field__input" required disabled aria-describedby="vendor-status">
+          <option value="">Loading agents…</option>
+        </select>
+        <span id="vendor-status" class="field__hint" role="status"></span>
       </label>
       <label class="field">
         <span class="field__label">Model <span class="field__hint">optional</span></span>
@@ -284,7 +290,7 @@
           <option value="">none</option>
         </select>
       </label>
-      <button class="button" type="submit">Start</button>
+      <button id="start-session-submit" class="button" type="submit" disabled>Start</button>
     </form>
   </aside>
 

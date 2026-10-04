@@ -226,6 +226,65 @@ async function setUpApp({ sessions, extraRoutes = [], payrollCounter = null } = 
   return { doc, fetchCalls, sseInstances, wsInstances, selectA, selectB };
 }
 
+test('#64 — both pickers use server IDs, display unavailable agents safely, and submit the selected ID', async () => {
+  const vendors = [
+    { id: 'new-agent', label: '<b>New agent</b>', available: true, unavailableReason: null },
+    { id: 'offline-agent', label: 'Offline agent', available: false, unavailableReason: 'executable missing' },
+  ];
+  const { doc } = await setUpApp({ extraRoutes: [['/api/vendors', () => ({ status: 200, payload: { vendors } })]] });
+  for (const id of ['vendor', 'requisition-vendor']) {
+    const picker = doc.getElementById(id);
+    assert.deepEqual(picker.children.map(option => option.value), ['', 'new-agent', 'offline-agent']);
+    assert.equal(picker.children[1].textContent, '<b>New agent</b>');
+    assert.equal(picker.children[1].children.length, 0);
+    assert.equal(picker.children[2].disabled, true);
+    assert.match(picker.children[2].textContent, /executable missing/);
+    assert.equal(picker.disabled, false);
+  }
+  const posts = [];
+  const previousFetch = globalThis.fetch;
+  globalThis.fetch = async (url, options) => {
+    if (options.method === 'POST') {
+      posts.push({ url, body: JSON.parse(options.body) });
+      return { status: 422, json: async () => ({ error: { code: 'test_refusal', message: 'captured' } }) };
+    }
+    return previousFetch(url, options);
+  };
+  doc.getElementById('cwd').value = '/work/a';
+  doc.getElementById('requisition-title').value = 'Work';
+  doc.getElementById('requisition-justification').value = 'Needed';
+  doc.getElementById('requisition-workspace').value = '/work/a';
+  for (const vendor of ['offline-agent', 'invented-agent', 'new-agent']) {
+    doc.getElementById('vendor').value = vendor;
+    doc.getElementById('requisition-vendor').value = vendor;
+    doc.getElementById('new-session').dispatch('submit', { preventDefault() {} });
+    doc.getElementById('raise-requisition').dispatch('submit', { preventDefault() {} });
+    await flush();
+  }
+  assert.deepEqual(posts.map(post => [post.url, post.body.vendor]), [
+    ['/api/sessions', 'new-agent'], ['/api/requisitions', 'new-agent'],
+  ]);
+});
+
+for (const scenario of ['empty', 'unavailable', 'error', 'network']) test(`#64 — ${scenario} listing blocks creation and Refresh retries`, async () => {
+  let recovered = false;
+  const { doc } = await setUpApp({ extraRoutes: [['/api/vendors', () => {
+    if (recovered) return { status: 200, payload: { vendors: [{ id: 'new-agent', label: 'New agent', available: true, unavailableReason: null }] } };
+    if (scenario === 'network') throw new Error('offline');
+    if (scenario === 'error') return { status: 500, payload: null };
+    return { status: 200, payload: { vendors: scenario === 'empty' ? [] : [{ id: 'offline-agent', label: 'Offline', available: false, unavailableReason: 'missing' }] } };
+  }]] });
+  for (const id of ['vendor', 'requisition-vendor', 'start-session-submit', 'raise-requisition-submit']) {
+    assert.equal(doc.getElementById(id).disabled, true, id);
+  }
+  assert.match(doc.getElementById('vendor-status').textContent, /No agents|Could not load/);
+  recovered = true;
+  doc.getElementById('refresh').dispatch('click', {});
+  await flush(12);
+  assert.equal(doc.getElementById('vendor').disabled, false);
+  assert.equal(doc.getElementById('start-session-submit').disabled, false);
+});
+
 for (const edge of ['sse', 'ws']) test(`#415 ${edge} — hook records reach the transcript in arrival order`, async () => {
   const { doc, sseInstances, wsInstances, selectA } = await setUpApp();
   doc.__setEdge(edge);

@@ -873,6 +873,7 @@ async function runConsole(sessions: ReadonlyArray<Record<string, unknown>>) {
   for (const id of [
     'status', 'login', 'console', 'sessions', 'transcript', 'compose', 'new-session', 'login-form',
     'refresh', 'cwd', 'vendor', 'model', 'sandbox', 'requisition-id', 'text', 'secret', 'checkpoints', 'checkpoint-list', 'restore-report',
+    'vendor-status', 'requisition-vendor-status', 'start-session-submit', 'raise-requisition-submit',
     'checklist', 'checklist-list',
     'payroll', 'payroll-summary', 'payroll-breakdown',
     'policy-banner', 'audit', 'audit-open', 'audit-close', 'audit-filters', 'audit-filter-session',

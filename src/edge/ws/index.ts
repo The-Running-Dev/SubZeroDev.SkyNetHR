@@ -177,6 +177,7 @@ export function createWsEdge(deps: EdgeDeps): WsRequestListener {
   const { config, identity, manager, readiness } = deps;
 
   const {
+    handleListVendors,
     handleCreate,
     handleMessage,
     handlePermission,
@@ -463,6 +464,10 @@ export function createWsEdge(deps: EdgeDeps): WsRequestListener {
         const owner = resolveOperator(req, res, identity);
         if (owner === null) return;
 
+        if (method === 'GET' && pathname === '/api/vendors') {
+          await handleListVendors(req, res);
+          return;
+        }
         if (method === 'GET' && pathname === '/api/sessions') {
           return sendJson(res, 200, { sessions: manager.list(owner) });
         }

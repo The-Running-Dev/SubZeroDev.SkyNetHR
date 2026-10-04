@@ -2523,7 +2523,7 @@ The `404` is `no_such_session` because `ApiErrorCode` carries no route-level not
 
 | Method | Path | Request | Success | Refusals |
 |---|---|---|---|---|
-| `GET` | `/api/vendors` *owed* | — | `200 { vendors: VendorListing[] }` | `401 unauthenticated` |
+| `GET` | `/api/vendors` | — | `200 { vendors: VendorListing[] }` | `401 unauthenticated` |
 
 **`VendorListing` — scaffold, owed to `src/contract/index.ts`** (D280):
 
