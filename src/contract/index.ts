@@ -506,6 +506,8 @@ export interface Caps {
   // is ever evicted, and the rule does not reach `attachments/` (D160): a tool blob is a
   // re-runnable command's output, an attachment is the operator's only copy.
   readonly sessionToolOutputBytes: number;
+  // (D275, D276) Refusal threshold, UTF-8 bytes, on every non-null `PermissionAnswer.reason`.
+  readonly permissionReasonBytes: number;
 }
 
 export interface Config {

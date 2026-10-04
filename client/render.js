@@ -427,11 +427,18 @@ function permissionRequestNode(doc, data, handlers) {
   allowBtn.type = 'button';
   const denyBtn = el(doc, 'button', 'button button--deny', 'Deny');
   denyBtn.type = 'button';
+  // D275: the text typed here is the agent's to read — it replaces the generic denial — so
+  // the field says so. Empty is `null` on the wire, never the empty string (D276).
+  const reasonInput = el(doc, 'input', 'permission__reason');
+  reasonInput.type = 'text';
+  reasonInput.placeholder = 'Reason for denying (sent to the agent; optional)';
+  reasonInput.title = 'Reason for denying — this text is sent to the agent';
   const hint = el(doc, 'div', 'permission__hint', 'awaiting an answer');
 
   function setResolved(text) {
     allowBtn.disabled = true;
     denyBtn.disabled = true;
+    reasonInput.disabled = true;
     hint.textContent = text;
   }
 
@@ -439,8 +446,11 @@ function permissionRequestNode(doc, data, handlers) {
     async function answer(decision) {
       allowBtn.disabled = true;
       denyBtn.disabled = true;
+      reasonInput.disabled = true;
       hint.textContent = 'sending…';
-      const accepted = await handlers.onAnswerPermission(data.requestId, decision);
+      const typed = reasonInput.value;
+      const reason = decision === 'deny' && typed.trim() !== '' ? typed : null;
+      const accepted = await handlers.onAnswerPermission(data.requestId, decision, reason);
       // A definite outcome — who answered, and with what — arrives separately as this
       // same request's `permission.resolved` envelope, which calls `setResolved`
       // above; `accepted: false` here means only that this click lost the race.
@@ -454,6 +464,7 @@ function permissionRequestNode(doc, data, handlers) {
 
   actions.appendChild(allowBtn);
   actions.appendChild(denyBtn);
+  actions.appendChild(reasonInput);
   body.appendChild(actions);
   body.appendChild(hint);
 

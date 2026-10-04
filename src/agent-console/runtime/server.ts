@@ -110,7 +110,8 @@ export function runRuntime(input: Readable, output: Writable, dependencies: Runt
       caps: { ringCapacity: integer(caps, 'ringCapacity', 2000, 1_000_000, 1), toolResultBytes: integer(caps, 'toolResultBytes', 16_384, 1024 * 1024, 1),
         subscriberQueueHighWater: integer(caps, 'subscriberQueueHighWater', 256, 100_000, 1), auditPageMax: integer(caps, 'auditPageMax', 1000, 10_000, 1),
         standingRuleBytes: integer(caps, 'standingRuleBytes', 4096, 1_000_000, 1), attachmentBytes: integer(caps, 'attachmentBytes', 10 * 1024 * 1024, 1024 ** 3, 1),
-        attachmentCount: integer(caps, 'attachmentCount', 10, 1000, 1), sessionToolOutputBytes: integer(caps, 'sessionToolOutputBytes', 256 * 1024 * 1024, Number.MAX_SAFE_INTEGER, 1) } };
+        attachmentCount: integer(caps, 'attachmentCount', 10, 1000, 1), sessionToolOutputBytes: integer(caps, 'sessionToolOutputBytes', 256 * 1024 * 1024, Number.MAX_SAFE_INTEGER, 1),
+        permissionReasonBytes: integer(caps, 'permissionReasonBytes', 4096, 1_000_000, 1) } };
     const timeoutMs = integer(settings, 'hostAttemptTimeoutMs', 30_000, 300_000, 1);
     const callbacks = hostCallbacks(strings(p, 'hostMethods', []), timeoutMs);
     const stdoutLineBytes = integer(settings, 'providerStdoutLineBytes', 64 * 1024 * 1024, 1024 ** 3, 1);

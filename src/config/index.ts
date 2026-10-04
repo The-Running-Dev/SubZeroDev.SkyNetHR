@@ -247,6 +247,10 @@ export function loadConfig(env: Readonly<Record<string, string | undefined>>): R
   // heavy `find`/`grep` session without letting one session's tool volume fill the disk.
   const sessionToolOutputBytes = parseIntEnv(env, 'CAPS_SESSION_TOOL_OUTPUT_BYTES', 256 * 1024 * 1024);
   if (!sessionToolOutputBytes.ok) return sessionToolOutputBytes;
+  // (D275, D276) A refusal threshold, not a truncation: the agent and the audit record read
+  // the same bytes, so a reason is either sent whole or refused.
+  const permissionReasonBytes = parseIntEnv(env, 'CAPS_PERMISSION_REASON_BYTES', 4 * 1024);
+  if (!permissionReasonBytes.ok) return permissionReasonBytes;
 
   const caps: Caps = {
     ringCapacity: ringCapacity.value,
@@ -260,6 +264,7 @@ export function loadConfig(env: Readonly<Record<string, string | undefined>>): R
     attachmentBytes: attachmentBytes.value,
     attachmentCount: attachmentCount.value,
     sessionToolOutputBytes: sessionToolOutputBytes.value,
+    permissionReasonBytes: permissionReasonBytes.value,
   };
 
   const includeRaw = env['INCLUDE_RAW'] === 'true';

@@ -189,6 +189,7 @@ export interface Caps {
     readonly attachmentBytes: number;
     readonly attachmentCount: number;
     readonly sessionToolOutputBytes: number;
+    readonly permissionReasonBytes: number;
 }
 
 export interface SessionMetaFile {

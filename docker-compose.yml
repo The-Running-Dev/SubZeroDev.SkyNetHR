@@ -95,6 +95,7 @@ services:
       CAPS_STANDING_RULE_BYTES: "${CAPS_STANDING_RULE_BYTES:-}"
       CAPS_ATTACHMENT_BYTES: "${CAPS_ATTACHMENT_BYTES:-}"
       CAPS_ATTACHMENT_COUNT: "${CAPS_ATTACHMENT_COUNT:-}"
+      CAPS_PERMISSION_REASON_BYTES: "${CAPS_PERMISSION_REASON_BYTES:-}"
       CHECKLIST_JSON: "${CHECKLIST_JSON:-}"
       INCLUDE_RAW: "${INCLUDE_RAW:-}"
       # D10: standalone deployment streams over SSE; behind a proxy that buffers or does
