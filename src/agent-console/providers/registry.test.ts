@@ -121,12 +121,13 @@ test('Phase 2 — concurrent Codex probes share one async result; refresh change
   assert.ok(timerFired, 'the event loop progresses while help runs');
   assert.equal(await readFile(log, 'utf8'), 'app-server\n');
   assert.ok(statuses.every(s => s.available && s.capabilities.usage && s.capabilities.streamingDeltas));
-  assert.equal(statuses[0]!.capabilities.permissions, 'preauthorised');
+  assert.equal(statuses[0]!.capabilities.permissions, 'interactive');
   await writeFile(mode, 'exec');
   const fallback = await provider.probe({ cwd, refresh: true });
   assert.ok(fallback.available);
   assert.equal(fallback.capabilities.usage, false);
   assert.equal(fallback.capabilities.streamingDeltas, false);
+  assert.equal(fallback.capabilities.permissions, 'preauthorised');
   assert.equal(fallback.capabilities.attachments.supported, false);
   assert.equal(await readFile(log, 'utf8'), 'app-server\napp-server\nexec\n');
   await writeFile(mode, 'neither');

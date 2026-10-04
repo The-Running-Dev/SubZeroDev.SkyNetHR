@@ -163,15 +163,15 @@ for (const scenario of ['single', 'patch', 'malformed', 'failed', 'invalid']) {
 }
 
 // S8.3 — policy is reported at create, before any turn runs, and names the sandbox.
-test('S8.3 — a Codex session reports a preauthorised policy naming its sandbox', async () => {
+test('S8.3 — a Codex session reports an interactive app-server policy naming its sandbox', async () => {
   delete process.env['SKYNET_CODEX_NO_APP_SERVER'];
   const { result } = await makeAdapter('read-only');
   assert.equal(result.ok, true);
   if (!result.ok) return;
   assert.equal(result.value.vendor, 'codex');
-  assert.equal(result.value.policy.mode, 'preauthorised');
+  assert.equal(result.value.policy.mode, 'interactive');
   assert.equal(result.value.policy.sandbox, 'read-only');
-  assert.ok(result.value.policy.banner !== null && result.value.policy.banner.includes('read-only'));
+  assert.equal(result.value.policy.banner, null);
 });
 
 // S21.8/D160 — undeclared, not merely unprobed: no finding has verified either Codex
@@ -260,7 +260,7 @@ test('S8.3, S8.4 — app-server: the mapped table, and zero permission.request e
 // D217 — both a fresh thread/start and a resumed thread/resume carry the session's
 // sandbox and policy, not just the fresh path; the resumed thread must not silently run
 // under the CLI's own defaults. Same for model (never read before D217).
-test('D217 — thread/start and thread/resume both carry cwd, sandbox, approvalPolicy: never, and model', async () => {
+test('D217 — thread/start and thread/resume both carry cwd, sandbox, approvalPolicy: on-request, and model', async () => {
   delete process.env['SKYNET_CODEX_NO_APP_SERVER'];
   process.env['SKYNET_CODEX_SCENARIO'] = 'full';
   const dir = await mkdtemp(path.join(tmpdir(), 'skynet-codex-params-'));
@@ -285,11 +285,11 @@ test('D217 — thread/start and thread/resume both carry cwd, sandbox, approvalP
   assert.ok(startCall, 'thread/start was called');
   assert.ok(resumeCall, 'thread/resume was called');
   assert.equal(startCall.params.sandbox, 'read-only');
-  assert.equal(startCall.params.approvalPolicy, 'never');
+  assert.equal(startCall.params.approvalPolicy, 'on-request');
   assert.equal(startCall.params.model, 'gpt-5-codex');
   assert.equal(resumeCall.params.threadId, 'fake-thread-resumed');
   assert.equal(resumeCall.params.sandbox, 'read-only');
-  assert.equal(resumeCall.params.approvalPolicy, 'never');
+  assert.equal(resumeCall.params.approvalPolicy, 'on-request');
   assert.equal(resumeCall.params.model, 'gpt-5-codex');
   assert.equal(typeof resumeCall.params.cwd, 'string');
 
@@ -341,24 +341,6 @@ test('S8.5 — app-server: an unrecognised item type is a fatal schema mismatch'
   assert.equal(sendResult.ok, false);
   if (sendResult.ok) return;
   assert.equal(sendResult.error.code, 'schema_mismatch');
-});
-
-// S8.4 — the row is marked "unreachable under the shipped policy" because the adapter
-// always launches with `approvalPolicy: 'never'`; if the server sends one anyway (a
-// defensive case, not exercised by a real session under this policy) it is declined
-// directly and the turn still completes with zero permission.request events.
-test('S8.4 — an approval request under the shipped policy is declined without a permission.request event', async () => {
-  process.env['SKYNET_CODEX_SCENARIO'] = 'approval-request';
-  const { result, notifications } = await makeAdapter();
-  assert.equal(result.ok, true);
-  if (!result.ok) return;
-  const sendResult = await result.value.send('hello', [], null, 'turn-4' as never);
-  assert.equal(sendResult.ok, true);
-
-  await waitUntil(() => eventsOf(notifications, 'turn.ended').length > 0);
-  assert.equal(eventsOf(notifications, 'permission.request').length, 0);
-  const errors = eventsOf(notifications, 'error');
-  assert.ok(errors.some((e) => (e.event.data as { kind: string }).kind === 'adapter_unknown_record' && (e.event.data as { fatal: boolean }).fatal === false));
 });
 
 // The child dying with no `turn/completed` seen maps to `turn.ended`/`process_exit` —

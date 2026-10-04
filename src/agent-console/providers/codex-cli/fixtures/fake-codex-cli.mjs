@@ -14,6 +14,11 @@ import { appendFileSync, readFileSync } from 'node:fs';
 const args = process.argv.slice(2);
 const subcommand = args[0];
 const scenario = process.env.SKYNET_CODEX_SCENARIO ?? 'full';
+// Approval messages come from the completed 0.158.0 exchanges in approval-probe.json.
+const approvalTraces = JSON.parse(readFileSync(new URL('./approval-probe.json', import.meta.url), 'utf8')).traces;
+function observedApproval(tool) {
+  return structuredClone(approvalTraces.find(trace => trace.tool === tool && trace.decision === 'accept').records.find(entry => entry.record.method?.endsWith('/requestApproval')).record);
+}
 
 if (args[1] === '--help') {
   // (#134) A caching regression can only be told apart from a correct re-probe-every-time
@@ -104,10 +109,38 @@ if (subcommand === 'app-server') {
         notify('item/completed', { item: { id: 'item-x', type: 'webSearch', query: 'q' }, threadId, turnId });
         return;
       }
-      case 'approval-request': {
-        // A real client id counter starts at 1 for `initialize`; the fixture's own
-        // outgoing request ids are namespaced well above that so they cannot collide.
-        line({ id: 9001, method: 'item/commandExecution/requestApproval', params: { threadId, turnId, itemId: 'item-a1', command: 'rm -rf /', approvalId: null } });
+      case 'approval-file':
+      case 'approval-file-missing': {
+        if (scenario === 'approval-file') notify('item/started', { threadId, turnId, item: { id: 'item-a1', type: 'fileChange', changes: [{ path: 'accept.txt', kind: { type: 'add' }, diff: 'approval-probe\n' }], status: 'inProgress' } });
+        const request = observedApproval('apply_patch');
+        Object.assign(request.params, { threadId, turnId, itemId: 'item-a1' });
+        line(request);
+        return;
+      }
+      case 'approval-request':
+      case 'approval-string-id':
+      case 'approval-bad-id':
+      case 'approval-bad-item':
+      case 'approval-bad-command':
+      case 'approval-bad-cwd':
+      case 'approval-duplicate':
+      case 'approval-resolved':
+      case 'approval-unknown': {
+        notify('item/started', { threadId, turnId, item: { type: 'agentMessage', id: 'msg-before-approval', text: '', phase: 'commentary' } });
+        const request = observedApproval('exec');
+        request.id = scenario === 'approval-string-id' ? 'rpc-approval' : 0;
+        Object.assign(request.params, { threadId, turnId, itemId: 'item-a1', command: 'echo approval-probe', cwd: process.cwd() });
+        if (scenario === 'approval-bad-id') request.id = null;
+        if (scenario === 'approval-bad-item') request.params.itemId = '../unsafe';
+        if (scenario === 'approval-bad-command') request.params.command = null;
+        if (scenario === 'approval-bad-cwd') request.params.cwd = null;
+        if (scenario === 'approval-unknown') request.method = 'new/requestApproval';
+        line(request);
+        if (scenario === 'approval-duplicate') line(request);
+        if (scenario === 'approval-resolved') {
+          notify('serverRequest/resolved', { threadId, requestId: request.id });
+          notify('item/completed', { threadId, turnId, item: { type: 'agentMessage', id: 'msg-resolved', text: 'resolved' } });
+        }
         return;
       }
       case 'crash': {
@@ -138,7 +171,7 @@ if (subcommand === 'app-server') {
   });
 
   function onLine(msg) {
-    if (process.env.SKYNET_CODEX_RPC_LOG) appendFileSync(process.env.SKYNET_CODEX_RPC_LOG, JSON.stringify({ pid: process.pid, method: msg.method, params: msg.params }) + '\n');
+    if (process.env.SKYNET_CODEX_RPC_LOG) appendFileSync(process.env.SKYNET_CODEX_RPC_LOG, JSON.stringify({ pid: process.pid, ...msg }) + '\n');
     if (msg.method === 'initialize') {
       if (scenario === 'initialize-error') { line({ id: msg.id, error: { code: -32603, message: 'initialize failed' } }); return; }
       respond(msg.id, { userAgent: 'fake-codex-cli/0.0.0' });
@@ -179,8 +212,12 @@ if (subcommand === 'app-server') {
     }
     // A response to `item/commandExecution/requestApproval` (the fixture's own outgoing
     // request, above): finish the turn once the adapter has answered it.
-    if (msg.id === 9001) {
-      notify('item/completed', { item: { id: 'item-a1', type: 'commandExecution', command: 'rm -rf /', aggregatedOutput: '', exitCode: null, status: 'declined' }, threadId, turnId });
+    if ((msg.id === 0 || msg.id === 'rpc-approval') && msg.result) {
+      const status = msg.result.decision === 'accept' ? 'completed' : 'declined';
+      const item = scenario === 'approval-file'
+        ? { id: 'item-a1', type: 'fileChange', changes: [{ path: 'accept.txt', kind: { type: 'add' }, diff: 'approval-probe\n' }], status }
+        : { id: 'item-a1', type: 'commandExecution', command: 'echo approval-probe', aggregatedOutput: '', exitCode: msg.result.decision === 'accept' ? 0 : null, status };
+      notify('item/completed', { item, threadId, turnId });
       notify('turn/completed', { threadId, turn: { id: turnId, items: [], itemsView: 'summary', status: 'completed', error: null, startedAt: null, completedAt: null, durationMs: null } });
     }
   }
