@@ -1198,7 +1198,7 @@ export function createSessionCore(deps: {
         // request on this session.
         rule !== null ? () => entry.standingRules.push(rule) : undefined,
         // D275, I76: only a deny's reason reaches the agent, and only once the record is durable.
-        null,
+        answer.decision === 'deny' ? answer.reason : null,
       );
       return { ok: true, value: { accepted: true, resolution } };
     },
