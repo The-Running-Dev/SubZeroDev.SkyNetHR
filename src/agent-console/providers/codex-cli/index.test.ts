@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
@@ -52,6 +52,58 @@ function eventsOf(notifications: readonly AdapterNotification[], kind: string) {
   return notifications
     .filter((n): n is Extract<AdapterNotification, { kind: 'event' }> => n.kind === 'event')
     .filter((n) => n.event.kind === kind);
+}
+
+test('#83 — a refused resume falls back once on the same child, then the next child resumes the replacement thread', async t => {
+  delete process.env['SKYNET_CODEX_NO_APP_SERVER'];
+  process.env['SKYNET_CODEX_SCENARIO'] = 'resume-refused';
+  const dir = await mkdtemp(path.join(tmpdir(), 'codex-resume-'));
+  const log = path.join(dir, 'rpc.ndjson');
+  process.env['SKYNET_CODEX_RPC_LOG'] = log;
+  t.after(async () => { delete process.env['SKYNET_CODEX_SCENARIO']; delete process.env['SKYNET_CODEX_RPC_LOG']; await rm(dir, { recursive: true, force: true }); });
+  const { result, notifications } = await makeAdapter();
+  assert.ok(result.ok);
+  t.after(() => result.value.kill());
+  assert.ok((await result.value.send('first', [], 'lost-thread' as never, 'turn-1' as never)).ok);
+  await waitUntil(() => notifications.some(n => n.kind === 'exited'));
+  const replacement = notifications.find(n => n.kind === 'cli-session');
+  assert.ok(replacement?.kind === 'cli-session');
+  assert.notEqual(replacement.cliSessionId, 'lost-thread');
+  assert.ok((await result.value.send('second', [], replacement.cliSessionId, 'turn-2' as never)).ok);
+  await waitUntil(() => notifications.filter(n => n.kind === 'exited').length === 2);
+  const calls = (await readFile(log, 'utf8')).trim().split('\n').map(line => JSON.parse(line) as { pid: number; method: string; params: Record<string, unknown> });
+  assert.deepEqual(calls.map(call => call.method), ['initialize', 'thread/resume', 'thread/start', 'turn/start', 'initialize', 'thread/resume', 'turn/start']);
+  assert.equal(new Set(calls.slice(0, 4).map(call => call.pid)).size, 1);
+  assert.notEqual(calls[0]!.pid, calls[4]!.pid);
+  assert.equal(calls[3]!.params['threadId'], replacement.cliSessionId);
+  assert.equal(calls[5]!.params['threadId'], replacement.cliSessionId);
+  const notices = eventsOf(notifications, 'session.notice');
+  assert.equal(notices.length, 1);
+  assert.equal((notices[0]!.event.data as { code: string }).code, 'resume_unavailable');
+  assert.equal(eventsOf(notifications, 'error').length, 0);
+  assert.equal(eventsOf(notifications, 'turn.ended').length, 2);
+});
+
+for (const scenario of ['resume-refused-start-error', 'resume-exit', 'resume-timeout', 'initialize-error', 'start-error', 'turn-error']) {
+  test(`#83 — ${scenario} does not retry the handshake`, async t => {
+    delete process.env['SKYNET_CODEX_NO_APP_SERVER'];
+    process.env['SKYNET_CODEX_SCENARIO'] = scenario;
+    const dir = await mkdtemp(path.join(tmpdir(), 'codex-resume-error-'));
+    const log = path.join(dir, 'rpc.ndjson');
+    process.env['SKYNET_CODEX_RPC_LOG'] = log;
+    t.after(async () => { delete process.env['SKYNET_CODEX_SCENARIO']; delete process.env['SKYNET_CODEX_RPC_LOG']; await rm(dir, { recursive: true, force: true }); });
+    const { result, notifications } = await makeAdapter();
+    assert.ok(result.ok);
+    t.after(() => result.value.kill());
+    const sent = await result.value.send('hello', [], scenario === 'start-error' ? null : 'lost-thread' as never, 'turn-1' as never);
+    assert.ok(!sent.ok);
+    assert.equal(sent.error.code, ['resume-exit', 'resume-timeout'].includes(scenario) ? 'agent_unavailable' : 'schema_mismatch');
+    await waitUntil(() => notifications.some(n => n.kind === 'exited'));
+    const calls = (await readFile(log, 'utf8')).trim().split('\n').map(line => JSON.parse(line) as { method: string });
+    assert.equal(calls.filter(call => call.method === 'thread/resume').length, ['initialize-error', 'start-error'].includes(scenario) ? 0 : 1);
+    assert.equal(calls.filter(call => call.method === 'thread/start').length, ['resume-refused-start-error', 'start-error'].includes(scenario) ? 1 : 0);
+    assert.equal(eventsOf(notifications, 'session.notice').length, scenario === 'resume-refused-start-error' ? 1 : 0);
+  });
 }
 
 test('#458 — real CLI file-change records produce a paired tool call and result', async t => {
