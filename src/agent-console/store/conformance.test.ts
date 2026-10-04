@@ -10,7 +10,7 @@ import { createSessionCore } from '../core/index.js';
 import { createHostAttempts } from '../core/create-attempts.js';
 import type { Checkpoints, Envelope, RuntimeOptions, SessionId, SessionMetaFile, SessionRecord, SessionStore } from '../core/types.js';
 
-const caps = { ringCapacity: 2, toolResultBytes: 1024, subscriberQueueHighWater: 20, auditPageMax: 10, standingRuleBytes: 1024, attachmentBytes: 1024, attachmentCount: 2, sessionToolOutputBytes: 4096 };
+const caps = { ringCapacity: 2, toolResultBytes: 1024, subscriberQueueHighWater: 20, auditPageMax: 10, standingRuleBytes: 1024, attachmentBytes: 1024, attachmentCount: 2, sessionToolOutputBytes: 4096, permissionReasonBytes: 4096 };
 async function root(t: TestContext) {
   const dir = await mkdtemp(path.join(tmpdir(), 'agent-store-'));
   const closers: (() => Promise<void>)[] = [];

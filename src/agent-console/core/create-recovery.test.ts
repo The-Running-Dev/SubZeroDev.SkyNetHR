@@ -13,7 +13,7 @@ const success = () => ok(undefined);
 async function fixture(t: TestContext, wrapStore: (store: SessionStore) => SessionStore = s => s) {
   const root = await realpath(await mkdtemp(path.join(tmpdir(), 'create-recovery-')));
   const config: RuntimeOptions = { storageRoot: root as never, workspaceRoots: [root as never], includeRaw: false, streamDeltas: false,
-    caps: { ringCapacity: 20, toolResultBytes: 1024, subscriberQueueHighWater: 20, auditPageMax: 10, standingRuleBytes: 1024, attachmentBytes: 1024, attachmentCount: 2, sessionToolOutputBytes: 4096 } };
+    caps: { ringCapacity: 20, toolResultBytes: 1024, subscriberQueueHighWater: 20, auditPageMax: 10, standingRuleBytes: 1024, attachmentBytes: 1024, attachmentCount: 2, sessionToolOutputBytes: 4096, permissionReasonBytes: 4096 } };
   let uncertain: SessionId | undefined;
   let state: CreateAttemptState | 'unavailable' | 'timeout' = 'committing';
   const statuses: SessionId[] = [];

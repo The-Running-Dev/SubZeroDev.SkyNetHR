@@ -216,7 +216,7 @@ async function makeManager(
       auditPageMax: 200,
       reviewBodyBytes: 1024,
       requisitionTextBytes: 1024,
-      standingRuleBytes: 1024, attachmentBytes: 10485760, attachmentCount: 5, sessionToolOutputBytes: 10485760,
+      standingRuleBytes: 1024, attachmentBytes: 10485760, attachmentCount: 5, sessionToolOutputBytes: 10485760, permissionReasonBytes: 4096,
       ...capsOverride,
     },
     sessionCookieMaxAgeSeconds: 2592000,
@@ -1097,6 +1097,64 @@ test('D273 — an audit append failure tells the agent the storage failure, not 
   assert.match(output, /disk full/, 'the storage failure reaches the agent');
 });
 
+// D275/#497 — an operator's stated deny reason is what the agent is told, once it is durable.
+test('D275 — an operator deny reason reaches the agent and is byte for byte the audit record\'s reason', async () => {
+  const { manager, workspaceRoot, storageRoot } = await makeManager('full');
+  const owner = 'operator-1' as OperatorId;
+  const { sessionId, received, requestEnvelope } = await runOneRequest('full', workspaceRoot, manager, owner, 'proj-d275');
+  const requestId = (requestEnvelope.data as { requestId: string }).requestId;
+
+  const answered = await manager.answerPermission(sessionId, owner, { requestId: requestId as never, decision: 'deny', scope: 'once', rule: null, reason: 'use the staging db' });
+  assert.equal(answered.ok, true);
+
+  await waitUntil(() => received.some((e) => e.kind === 'tool.result'));
+  const output = (received.find((e) => e.kind === 'tool.result')!.data as { output: string }).output;
+  assert.match(output, /use the staging db/, 'the operator\'s text reaches the agent');
+  assert.doesNotMatch(output, /Denied by operator/, 'in place of the fixed text, never alongside it');
+  const audit = await readAudit(storageRoot);
+  assert.equal((audit[audit.length - 1] as { reason: string }).reason, 'use the staging db');
+});
+
+test('D275/I76 — when the audit append fails the operator\'s reason is discarded and the agent is told the storage cause', async () => {
+  const { manager, workspaceRoot } = await makeManager('full', {}, (store) => ({
+    ...store,
+    async appendAudit() {
+      return { ok: false, error: { code: 'io', path: 'audit.ndjson', detail: 'disk full' } } as const;
+    },
+  }));
+  const owner = 'operator-1' as OperatorId;
+  const { sessionId, received, requestEnvelope } = await runOneRequest('full', workspaceRoot, manager, owner, 'proj-i76');
+  const requestId = (requestEnvelope.data as { requestId: string }).requestId;
+
+  await manager.answerPermission(sessionId, owner, { requestId: requestId as never, decision: 'deny', scope: 'once', rule: null, reason: 'operator text never recorded' });
+
+  await waitUntil(() => received.some((e) => e.kind === 'tool.result'));
+  const output = (received.find((e) => e.kind === 'tool.result')!.data as { output: string }).output;
+  assert.match(output, /disk full/);
+  assert.doesNotMatch(output, /operator text never recorded/, 'operator text is not sent where it was not made durable');
+});
+
+test('D276 — an empty or over-cap reason is refused bad_request naming reason before the request is claimed; a reason at the cap is accepted', async () => {
+  const { manager, workspaceRoot } = await makeManager('full', { permissionReasonBytes: 8 });
+  const owner = 'operator-1' as OperatorId;
+  const { sessionId, requestEnvelope } = await runOneRequest('full', workspaceRoot, manager, owner, 'proj-d276');
+  const requestId = (requestEnvelope.data as { requestId: string }).requestId as never;
+  const answer = (reason: string) => manager.answerPermission(sessionId, owner, { requestId, decision: 'deny', scope: 'once', rule: null, reason });
+
+  const empty = await answer('');
+  assert.equal(empty.ok, false);
+  if (!empty.ok) assert.deepEqual([empty.error.code, (empty.error as { field?: string }).field], ['bad_request', 'reason']);
+  const over = await answer('123456789');
+  assert.equal(over.ok, false);
+  if (!over.ok) assert.deepEqual([over.error.code, (over.error as { field?: string }).field], ['bad_request', 'reason']);
+  const multibyte = await answer('éééééé'); // 12 bytes, 6 characters
+  assert.equal(multibyte.ok, false, 'the cap is UTF-8 bytes, not characters');
+
+  const accepted = await answer('12345678');
+  assert.equal(accepted.ok, true);
+  if (accepted.ok) assert.equal(accepted.value.accepted, true, 'the refusals above never claimed the request');
+});
+
 test('D213/#322 — a write_failed from respond() resolves the pending permission cancelled_process_exit, not the operator\'s decision', async () => {
   const { config, store, checkpoints, workspaceRoot, storageRoot } = await makeManager('full');
   const owner = 'operator-1' as OperatorId;
@@ -1429,7 +1487,7 @@ const RULE_CAPS: Caps = {
   auditPageMax: 200,
   reviewBodyBytes: 1024,
   requisitionTextBytes: 1024,
-  standingRuleBytes: 32, attachmentBytes: 10485760, attachmentCount: 5, sessionToolOutputBytes: 10485760,
+  standingRuleBytes: 32, attachmentBytes: 10485760, attachmentCount: 5, sessionToolOutputBytes: 10485760, permissionReasonBytes: 4096,
 };
 
 function fakeRequest(tool: string, matchTarget: string | null): PermissionRequest {

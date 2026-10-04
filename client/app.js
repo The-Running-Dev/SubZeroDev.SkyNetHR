@@ -964,14 +964,14 @@ async function createSession(event) {
 
 // Posts the operator's decision and reports whether the server accepted it — `false`
 // means another client (or this one, twice) already answered, per the wire contract.
-async function answerPermission(requestId, decision) {
+async function answerPermission(requestId, decision, reason = null) {
   if (state.sessionId === null) return false;
   const result = await api('POST', `/api/sessions/${encodeURIComponent(state.sessionId)}/permission`, {
     requestId,
     decision,
     scope: 'once',
     rule: null,
-    reason: null,
+    reason,
   });
   if (result.status === 401) return false;
   if (result.status !== 200) {

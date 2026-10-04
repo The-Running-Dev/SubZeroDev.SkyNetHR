@@ -9,7 +9,7 @@ import { createMemorySessionStore } from '../store/memory.js';
 import { createAttachmentStaging } from './attachments.js';
 import type { Adapter, AdapterOptions, AttachmentPayload, Checkpoint, Checkpoints, Envelope, GitSha, IsoTimestamp, Result, RuntimeOptions, SessionError, SessionId, SessionStore, TurnId } from './types.js';
 
-export const caps = { ringCapacity: 20, toolResultBytes: 1024, subscriberQueueHighWater: 20, auditPageMax: 10, standingRuleBytes: 1024, attachmentBytes: 1024, attachmentCount: 2, sessionToolOutputBytes: 4096 };
+export const caps = { ringCapacity: 20, toolResultBytes: 1024, subscriberQueueHighWater: 20, auditPageMax: 10, standingRuleBytes: 1024, attachmentBytes: 1024, attachmentCount: 2, sessionToolOutputBytes: 4096, permissionReasonBytes: 64 };
 const ok = <T>(value: T) => ({ ok: true as const, value });
 const success = () => ok(undefined);
 function deferred<T>() { let resolve!: (value: T) => void; const promise = new Promise<T>(r => { resolve = r; }); return { promise, resolve }; }

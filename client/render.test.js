@@ -493,3 +493,47 @@ test('S36.7 — a tool name and argument carrying markup reach the panel only as
   assert.equal(pre.children.length, 0);
   assert.match(pre.textContent, /<script>/);
 });
+
+// D275/D276 — the deny control collects a reason, says it goes to the agent, and sends null (never '') when empty.
+function permissionDoc() {
+  const doc = {
+    createElement(tag) {
+      const node = fakeElement();
+      node.tagName = tag;
+      node.attrs = {};
+      node.listeners = {};
+      node.addEventListener = (type, fn) => { node.listeners[type] = fn; };
+      return node;
+    },
+  };
+  return doc;
+}
+
+async function denyWith(typed, decision = 'deny') {
+  const calls = [];
+  const doc = permissionDoc();
+  const envelope = { seq: 1, sessionId: 's', kind: 'permission.request', data: { turnId: 't', requestId: 'req-1', callId: 'c', tool: 'Bash', input: { command: 'ls' } } };
+  const node = renderEvent(doc, envelope, { onAnswerPermission: async (...args) => { calls.push(args); return true; } });
+  const input = find(node, 'permission__reason');
+  input.value = typed;
+  const btn = findAll(node, 'button button--deny')[0] ?? find(node, 'button button--deny');
+  const target = decision === 'deny' ? btn : find(node, 'button button--allow');
+  await target.listeners.click();
+  return { calls, input };
+}
+
+test('D275 — the deny control\'s reason field states that the text goes to the agent', () => {
+  const doc = permissionDoc();
+  const envelope = { seq: 1, sessionId: 's', kind: 'permission.request', data: { turnId: 't', requestId: 'req-1', callId: 'c', tool: 'Bash', input: {} } };
+  const input = find(renderEvent(doc, envelope, { onAnswerPermission: async () => true }), 'permission__reason');
+  assert.ok(input, 'a reason field exists');
+  assert.match(input.placeholder, /sent to the agent/);
+  assert.match(input.title, /sent to the agent/);
+});
+
+test('D275/D276 — a typed reason is sent with the deny; an empty or blank field sends null, never the empty string', async () => {
+  assert.deepEqual((await denyWith('use staging')).calls, [['req-1', 'deny', 'use staging']]);
+  assert.deepEqual((await denyWith('')).calls, [['req-1', 'deny', null]]);
+  assert.deepEqual((await denyWith('   ')).calls, [['req-1', 'deny', null]]);
+  assert.deepEqual((await denyWith('ignored on allow', 'allow')).calls, [['req-1', 'allow', null]], 'an allow never carries a reason');
+});

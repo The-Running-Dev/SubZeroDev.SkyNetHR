@@ -34,7 +34,7 @@ function baseConfig(storageRoot: string, requisitionTextBytes = 1024, reviewBody
       auditPageMax: 200,
       reviewBodyBytes,
       requisitionTextBytes,
-      standingRuleBytes: 1024, attachmentBytes: 10485760, attachmentCount: 5, sessionToolOutputBytes: 10485760,
+      standingRuleBytes: 1024, attachmentBytes: 10485760, attachmentCount: 5, sessionToolOutputBytes: 10485760, permissionReasonBytes: 4096,
     },
     sessionCookieMaxAgeSeconds: 2592000,
     includeRaw: false,

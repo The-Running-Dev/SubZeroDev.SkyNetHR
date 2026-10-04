@@ -1125,6 +1125,18 @@ export function createSessionCore(deps: {
       const entry = sessions.get(sessionId);
       if (!entry || entry.record.owner !== owner) return { ok: false, error: { code: 'not_found', sessionId } };
 
+      // D276: checked before the request is claimed, on every non-null reason whatever the
+      // decision — refused, never truncated, since the agent and the audit record read the
+      // same bytes (I76). An empty string is the client's `null` mis-sent.
+      if (answer.reason !== null) {
+        if (answer.reason === '') {
+          return { ok: false, error: { code: 'bad_request', field: 'reason', detail: 'reason must be non-empty; send null for none' } };
+        }
+        if (Buffer.byteLength(answer.reason, 'utf8') > config.caps.permissionReasonBytes) {
+          return { ok: false, error: { code: 'bad_request', field: 'reason', detail: `reason exceeds ${config.caps.permissionReasonBytes} bytes` } };
+        }
+      }
+
       // I43: a standing rule is only ever created where `decision === 'allow'`, `rule`
       // parses, and the named request's `matchTarget` is non-null — every other
       // `scope: 'always'` is `bad_request`, never silently downgraded to `once`. These
@@ -1185,6 +1197,8 @@ export function createSessionCore(deps: {
         // never persisted (D110), and from this point matched against every later
         // request on this session.
         rule !== null ? () => entry.standingRules.push(rule) : undefined,
+        // D275, I76: only a deny's reason reaches the agent, and only once the record is durable.
+        answer.decision === 'deny' ? answer.reason : null,
       );
       return { ok: true, value: { accepted: true, resolution } };
     },
@@ -1546,6 +1560,7 @@ export function createSessionCore(deps: {
     record: AuditRecord,
     success: { decision: PermissionDecision; scope: ResolvedScope; operator: PrincipalId | null; reason: PermissionResolvedReason },
     onDurable?: () => void,
+    agentReason: string | null = null,
   ): Promise<EventPayloadMap['permission.resolved']> {
     const appended = await audit.append(record);
     // D218: the child exited while this answer's audit append was in flight and the sweep
@@ -1571,7 +1586,7 @@ export function createSessionCore(deps: {
     }
 
     onDurable?.();
-    return respondOrCancel(entry, turn, requestId, record, success.decision, null, {
+    return respondOrCancel(entry, turn, requestId, record, success.decision, agentReason, {
       turnId: turn.turnId,
       requestId,
       decision: success.decision,
