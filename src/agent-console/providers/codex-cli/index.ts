@@ -18,6 +18,7 @@ import type {
   TurnId,
 } from '../types.js';
 import { NdjsonSplitter } from '../ndjson.js';
+import { isSafePathSegment } from '../../store/paths.js';
 import { summariseCommand } from './summarise.js';
 
 const isWindows = platform === 'win32';
@@ -565,19 +566,42 @@ function buildCodexAdapter(opts: AdapterOptions, executable: string, transport: 
 
   // -------------------------------------------------------------------------
   // `codex exec --json` — non-interactive NDJSON on stdout (fallback, D107). No deltas,
-  // no approval path, and per S8.7 its item ids are a per-turn counter that collides
-  // across turns of the same thread (`design/findings/S8-codex-adapter.md` §3) — tool
-  // correlation on this transport is `20-contract.md § Unresolved` 13 and this slice may
-  // not invent it (S8.7). Turn lifecycle, messages and thinking still stream; a
-  // `command_execution` item is a recognised record that this adapter deliberately does
-  // not turn into a `tool.call`/`tool.result` pair.
+  // no approval path, and its item ids are a per-turn counter that collides across turns
+  // of the same thread (`design/findings/S8-codex-adapter.md` §3). A `command_execution`
+  // item maps to a `tool.call`/`tool.result` pair under a composed `CallId`,
+  // `<turnId>.<itemId>` (D274, D276, I75): the server's `turnId` is session-unique and
+  // persisted, which an adapter-local counter is not.
   // -------------------------------------------------------------------------
 
-  function runExec(text: string, resume: CliSessionId | null): Promise<Result<void, AdapterError>> {
+  // `null` where the composite would not be a safe path segment (I22, I75).
+  function composeCallId(turnId: TurnId, itemId: unknown): CallId | null {
+    if (typeof itemId !== 'string') return null;
+    const composite = `${turnId}.${itemId}`;
+    return isSafePathSegment(composite) ? (composite as CallId) : null;
+  }
+
+  function runExec(text: string, resume: CliSessionId | null, turnId: TurnId): Promise<Result<void, AdapterError>> {
     return new Promise((resolve) => {
       let settled = false;
       let resultSeen = false;
       killRequested = false;
+      // One `adapter_unknown_record` per dropped item, not one per lifecycle record.
+      const droppedItems = new Set<unknown>();
+
+      // Returns the composed `CallId`, or `null` after dropping the item (D276).
+      function callIdFor(item: Record<string, unknown>, rec: unknown): CallId | null {
+        const callId = composeCallId(turnId, item['id']);
+        if (callId !== null) return callId;
+        if (!droppedItems.has(item['id'])) {
+          droppedItems.add(item['id']);
+          emitEvent(
+            'error',
+            { kind: 'adapter_unknown_record', message: 'a command_execution item whose id would make an unsafe CallId was not mapped', fatal: false },
+            rec,
+          );
+        }
+        return null;
+      }
 
       const failSchemaMismatch = makeFailSchemaMismatch(emitEvent, (detail) => {
         const turnOpen = settled && !resultSeen; // send() already succeeded and no result has ended the turn
@@ -620,7 +644,14 @@ function buildCodexAdapter(opts: AdapterOptions, executable: string, transport: 
           case 'item.started': {
             const item = rec['item'] as Record<string, unknown> | undefined;
             if (!item) return failSchemaMismatch('item.started carried no item', rec);
-            if (item['type'] === 'command_execution' || IGNORED_ITEM_TYPES.has(String(item['type']))) return; // S8.7: correlation not implemented on this transport
+            if (item['type'] === 'command_execution') {
+              const callId = callIdFor(item, rec);
+              if (callId === null) return;
+              const command = String(item['command'] ?? '');
+              emitEvent('tool.call', { callId, name: 'exec', input: { command }, summary: summariseCommand(command) }, rec);
+              return;
+            }
+            if (IGNORED_ITEM_TYPES.has(String(item['type']))) return;
             failSchemaMismatch(`unrecognised item type on item.started: ${String(item['type'])}`, rec);
             return;
           }
@@ -638,7 +669,19 @@ function buildCodexAdapter(opts: AdapterOptions, executable: string, transport: 
               if (itemText.length > 0) emitEvent('message', { role: 'assistant', text: itemText }, rec);
               return;
             }
-            if (itemType === 'command_execution' || IGNORED_ITEM_TYPES.has(String(itemType))) return; // S8.7
+            if (itemType === 'command_execution') {
+              const callId = callIdFor(item, rec);
+              if (callId === null) return;
+              const output = String(item['aggregated_output'] ?? '');
+              emitEvent(
+                'tool.result',
+                // `diff: null` as on `app-server` (D258): no patch item is mapped on this transport.
+                { callId, ok: item['status'] === 'completed', output, truncated: false, bytes: Buffer.byteLength(output, 'utf8'), diff: null },
+                rec,
+              );
+              return;
+            }
+            if (IGNORED_ITEM_TYPES.has(String(itemType))) return;
             failSchemaMismatch(`unrecognised item type on item.completed: ${String(itemType)}`, rec);
             return;
           }
@@ -744,11 +787,11 @@ function buildCodexAdapter(opts: AdapterOptions, executable: string, transport: 
       text: string,
       _attachments: readonly AttachmentPayload[],
       resume: CliSessionId | null,
-      _turnId: TurnId,
+      turnId: TurnId,
       model?: string,
     ): Promise<Result<void, AdapterError>> {
       currentModel = model ?? opts.model;
-      return transport === 'app-server' ? runAppServer(text, resume) : runExec(text, resume);
+      return transport === 'app-server' ? runAppServer(text, resume) : runExec(text, resume, turnId);
     },
 
     // I25: the shipped policy is `preauthorised`, so the manager's `pending` map — the
