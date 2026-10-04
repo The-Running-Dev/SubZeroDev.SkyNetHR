@@ -1,0 +1,284 @@
+{
+  "cliVersion": "0.158.0",
+  "observedAt": "2026-10-04",
+  "traces": [
+    {
+      "tool": "exec",
+      "decision": "accept",
+      "records": [
+        {
+          "direction": "out",
+          "record": {
+            "method": "item/commandExecution/requestApproval",
+            "id": 0,
+            "params": {
+              "kind": "command",
+              "threadId": "00000000-0000-0000-0000-000000000000",
+              "turnId": "00000000-0000-0000-0000-000000000000",
+              "itemId": "exec-00000000-0000-0000-0000-000000000000",
+              "startedAtMs": 1791107273036,
+              "environmentId": "local",
+              "reason": "Allow this command to write accept.txt in the isolated temporary directory outside the read-only sandbox?",
+              "command": "\"C:\\\\Program Files\\\\PowerShell\\\\7\\\\pwsh.exe\" -NoProfile -Command \"Set-Content -LiteralPath 'accept.txt' -Value 'skynet-80-accept'\"",
+              "cwd": "C:\\probe",
+              "commandActions": [
+                {
+                  "type": "unknown",
+                  "command": "Set-Content -LiteralPath 'accept.txt' -Value 'skynet-80-accept'"
+                }
+              ],
+              "proposedExecpolicyAmendment": [
+                "Set-Content",
+                "-LiteralPath",
+                "accept.txt",
+                "-Value",
+                "skynet-80-accept"
+              ],
+              "availableDecisions": [
+                "accept",
+                {
+                  "acceptWithExecpolicyAmendment": {
+                    "execpolicy_amendment": [
+                      "Set-Content",
+                      "-LiteralPath",
+                      "accept.txt",
+                      "-Value",
+                      "skynet-80-accept"
+                    ]
+                  }
+                },
+                "cancel"
+              ]
+            }
+          }
+        },
+        {
+          "direction": "in",
+          "record": {
+            "id": 0,
+            "result": {
+              "decision": "accept"
+            }
+          }
+        },
+        {
+          "direction": "out",
+          "record": {
+            "method": "serverRequest/resolved",
+            "params": {
+              "threadId": "00000000-0000-0000-0000-000000000000",
+              "requestId": 0
+            },
+            "emittedAtMs": 1791107273040
+          }
+        }
+      ]
+    },
+    {
+      "tool": "exec",
+      "decision": "decline",
+      "records": [
+        {
+          "direction": "out",
+          "record": {
+            "method": "item/commandExecution/requestApproval",
+            "id": 0,
+            "params": {
+              "kind": "command",
+              "threadId": "00000000-0000-0000-0000-000000000000",
+              "turnId": "00000000-0000-0000-0000-000000000000",
+              "itemId": "exec-00000000-0000-0000-0000-000000000000",
+              "startedAtMs": 1791107295978,
+              "environmentId": "local",
+              "reason": "Allow this command to write decline.txt in the isolated temporary directory outside the read-only sandbox?",
+              "command": "\"C:\\\\Program Files\\\\PowerShell\\\\7\\\\pwsh.exe\" -NoProfile -Command \"Set-Content -LiteralPath 'decline.txt' -Value 'skynet-80-decline'\"",
+              "cwd": "C:\\probe",
+              "commandActions": [
+                {
+                  "type": "unknown",
+                  "command": "Set-Content -LiteralPath 'decline.txt' -Value 'skynet-80-decline'"
+                }
+              ],
+              "proposedExecpolicyAmendment": [
+                "Set-Content",
+                "-LiteralPath",
+                "decline.txt",
+                "-Value",
+                "skynet-80-decline"
+              ],
+              "availableDecisions": [
+                "accept",
+                {
+                  "acceptWithExecpolicyAmendment": {
+                    "execpolicy_amendment": [
+                      "Set-Content",
+                      "-LiteralPath",
+                      "decline.txt",
+                      "-Value",
+                      "skynet-80-decline"
+                    ]
+                  }
+                },
+                "cancel"
+              ]
+            }
+          }
+        },
+        {
+          "direction": "in",
+          "record": {
+            "id": 0,
+            "result": {
+              "decision": "decline"
+            }
+          }
+        },
+        {
+          "direction": "out",
+          "record": {
+            "method": "serverRequest/resolved",
+            "params": {
+              "threadId": "00000000-0000-0000-0000-000000000000",
+              "requestId": 0
+            },
+            "emittedAtMs": 1791107295980
+          }
+        }
+      ]
+    },
+    {
+      "tool": "apply_patch",
+      "decision": "accept",
+      "records": [
+        {
+          "direction": "out",
+          "record": {
+            "method": "item/started",
+            "params": {
+              "item": {
+                "type": "fileChange",
+                "id": "exec-00000000-0000-0000-0000-000000000000",
+                "changes": [
+                  {
+                    "path": "C:\\probe\\accept.txt",
+                    "kind": {
+                      "type": "add"
+                    },
+                    "diff": "skynet-80-accept\n"
+                  }
+                ],
+                "status": "inProgress"
+              },
+              "threadId": "00000000-0000-0000-0000-000000000000",
+              "turnId": "00000000-0000-0000-0000-000000000000",
+              "startedAtMs": 1791109292143
+            },
+            "emittedAtMs": 1791109292145
+          }
+        },
+        {
+          "direction": "out",
+          "record": {
+            "method": "item/fileChange/requestApproval",
+            "id": 0,
+            "params": {
+              "threadId": "00000000-0000-0000-0000-000000000000",
+              "turnId": "00000000-0000-0000-0000-000000000000",
+              "itemId": "exec-00000000-0000-0000-0000-000000000000",
+              "startedAtMs": 1791109297683,
+              "reason": null,
+              "grantRoot": null
+            }
+          }
+        },
+        {
+          "direction": "in",
+          "record": {
+            "id": 0,
+            "result": {
+              "decision": "accept"
+            }
+          }
+        },
+        {
+          "direction": "out",
+          "record": {
+            "method": "serverRequest/resolved",
+            "params": {
+              "threadId": "00000000-0000-0000-0000-000000000000",
+              "requestId": 0
+            },
+            "emittedAtMs": 1791109297685
+          }
+        }
+      ]
+    },
+    {
+      "tool": "apply_patch",
+      "decision": "decline",
+      "records": [
+        {
+          "direction": "out",
+          "record": {
+            "method": "item/started",
+            "params": {
+              "item": {
+                "type": "fileChange",
+                "id": "exec-00000000-0000-0000-0000-000000000000",
+                "changes": [
+                  {
+                    "path": "C:\\probe\\decline.txt",
+                    "kind": {
+                      "type": "add"
+                    },
+                    "diff": "skynet-80-decline\n"
+                  }
+                ],
+                "status": "inProgress"
+              },
+              "threadId": "00000000-0000-0000-0000-000000000000",
+              "turnId": "00000000-0000-0000-0000-000000000000",
+              "startedAtMs": 1791109312230
+            },
+            "emittedAtMs": 1791109312231
+          }
+        },
+        {
+          "direction": "out",
+          "record": {
+            "method": "item/fileChange/requestApproval",
+            "id": 0,
+            "params": {
+              "threadId": "00000000-0000-0000-0000-000000000000",
+              "turnId": "00000000-0000-0000-0000-000000000000",
+              "itemId": "exec-00000000-0000-0000-0000-000000000000",
+              "startedAtMs": 1791109317753,
+              "reason": null,
+              "grantRoot": null
+            }
+          }
+        },
+        {
+          "direction": "in",
+          "record": {
+            "id": 0,
+            "result": {
+              "decision": "decline"
+            }
+          }
+        },
+        {
+          "direction": "out",
+          "record": {
+            "method": "serverRequest/resolved",
+            "params": {
+              "threadId": "00000000-0000-0000-0000-000000000000",
+              "requestId": 0
+            },
+            "emittedAtMs": 1791109317754
+          }
+        }
+      ]
+    }
+  ]
+}

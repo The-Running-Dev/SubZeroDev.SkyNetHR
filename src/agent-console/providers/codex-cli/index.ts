@@ -1,4 +1,5 @@
 import type { ChildProcess } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { spawnProcess, resolveSpawn, reportableImage, terminateProcess, closeStdin, protectStdin } from '../../process/index.js';
 import { platform } from 'node:process';
 import { probeCommand, type ProbeResult } from '../probe.js';
@@ -82,7 +83,7 @@ function statusForTransport(transport: Transport | null): ProviderStatus {
     available: transport !== null,
     ...(transport === null ? { unavailableReason: 'agent_unavailable' } : {}),
     capabilities: {
-      workspace: 'required', permissions: 'preauthorised', attachments: { supported: false },
+      workspace: 'required', permissions: transport === 'app-server' ? 'interactive' : 'preauthorised', attachments: { supported: false },
       usage: transport === 'app-server', resume: transport !== null,
       streamingDeltas: transport === 'app-server', models: 'free-form',
       sandboxModes: ['read-only', 'workspace-write', 'unrestricted'],
@@ -138,7 +139,6 @@ const IGNORED_APP_SERVER_METHODS = new Set([
   'process/outputDelta',
   'process/exited',
   'item/commandExecution/terminalInteraction',
-  'serverRequest/resolved',
   'item/mcpToolCall/progress',
   'mcpServer/oauthLogin/completed',
   'mcpServer/startupStatus/updated',
@@ -219,6 +219,10 @@ function buildCodexAdapter(opts: AdapterOptions, executable: string, transport: 
   let child: ChildProcess | null = null;
   let killRequested = false;
   let currentModel = opts.model;
+  // Each responder closes over one process and its pending RPC ids. Never send an old
+  // browser answer to a new child's reused request counter.
+  let respondToApproval: Adapter['respond'] | null = null;
+  let clearApprovals: (() => void) | null = null;
 
   function notify(n: AdapterNotification): void {
     opts.notify(n);
@@ -250,11 +254,17 @@ function buildCodexAdapter(opts: AdapterOptions, executable: string, transport: 
       let requestSeq = 1;
       const pendingOutgoing = new Map<number, { resolve: (result: unknown) => void; reject: (err: Error) => void }>();
       const filePatches = new Map<string, FileChange[]>();
+      const approvals = new Map<RequestId, string | number>();
+      const seenApprovalIds = new Set<string | number>();
+      const invalidateApprovals = () => { approvals.clear(); };
+      clearApprovals = invalidateApprovals;
 
       function writeMessage(msg: Record<string, unknown>): boolean {
-        if (!child?.stdin || child.stdin.destroyed) return false;
-        child.stdin.write(JSON.stringify(msg) + '\n');
-        return true;
+        if (child !== proc || !proc.stdin || proc.stdin.destroyed || proc.stdin.writableEnded || killRequested || resultSeen) return false;
+        try {
+          proc.stdin.write(JSON.stringify(msg) + '\n');
+          return true;
+        } catch { return false; }
       }
 
       function rpcCall(method: string, params: Record<string, unknown>, timeoutMs = 15000): Promise<unknown> {
@@ -284,6 +294,7 @@ function buildCodexAdapter(opts: AdapterOptions, executable: string, transport: 
       }
 
       const failSchemaMismatch = makeFailSchemaMismatch(emitEvent, (detail) => {
+        invalidateApprovals();
         const turnOpen = settled && !resultSeen; // send() already succeeded and no result has ended the turn
         resultSeen = true; // this failure, not a bare process exit, is why the child is about to die
         if (!settled) {
@@ -304,6 +315,7 @@ function buildCodexAdapter(opts: AdapterOptions, executable: string, transport: 
           if (typeof item['id'] !== 'string' || !isSafePathSegment(item['id']) || !isFileChanges(item['changes'])) {
             return failSchemaMismatch('fileChange carried an invalid id or changes', rec);
           }
+          filePatches.set(item['id'], item['changes']);
           emitEvent('tool.call', {
             callId: item['id'], name: 'apply_patch', input: { changes: item['changes'] },
             summary: item['changes'].map(change => `${change.kind.type}: ${change.path}`).join(', '),
@@ -319,7 +331,9 @@ function buildCodexAdapter(opts: AdapterOptions, executable: string, transport: 
           );
           return;
         }
-        if (type === 'reasoning' || IGNORED_ITEM_TYPES.has(String(type))) return;
+        // Content arrives through deltas and item/completed. Current Codex also
+        // announces an empty message item before requesting approval.
+        if (type === 'agentMessage' || type === 'reasoning' || IGNORED_ITEM_TYPES.has(String(type))) return;
         failSchemaMismatch(`unrecognised item type on item/started: ${String(type)}`, rec);
       }
 
@@ -369,23 +383,41 @@ function buildCodexAdapter(opts: AdapterOptions, executable: string, transport: 
       }
 
       function handleApprovalRequest(msg: Record<string, unknown>, rec: unknown): void {
-        // Unreachable under the shipped policy (`20-contract.md § Vendor mapping —
-        // Codex`, "Policy, and the approval prompt now known to be reachable") — the
-        // adapter always launches with `approvalPolicy: 'never'`. If one arrives anyway
-        // it is answered directly, here, rather than routed through the manager's
-        // `permission.request` path: I25 says a Codex session emits zero of those, and
-        // there is no operator-facing route to answer a request the shipped policy
-        // guarantees never to send.
-        writeMessage({ id: msg['id'], result: { decision: 'decline' } });
-        emitEvent(
-          'error',
-          { kind: 'adapter_unknown_record', message: 'an approval request arrived under the preauthorised policy and was declined', fatal: false },
-          rec,
-        );
+        const id = msg['id'];
+        const params = msg['params'];
+        if (!((typeof id === 'number' && Number.isSafeInteger(id)) || (typeof id === 'string' && id.length > 0))
+          || !params || typeof params !== 'object' || Array.isArray(params)) {
+          return failSchemaMismatch('approval request carried an invalid RPC id or params', rec);
+        }
+        const input = params as Record<string, unknown>;
+        const itemId = input['itemId'];
+        if (typeof itemId !== 'string' || !isSafePathSegment(itemId) || seenApprovalIds.has(id)) {
+          return failSchemaMismatch('approval request carried an invalid itemId or duplicate RPC id', rec);
+        }
+        const fileChange = msg['method'] === 'item/fileChange/requestApproval';
+        const changes = filePatches.get(itemId);
+        if (fileChange ? !changes?.length : typeof input['command'] !== 'string' || !input['command'].length || typeof input['cwd'] !== 'string' || !input['cwd'].length) {
+          return failSchemaMismatch('approval request is missing the command/cwd or proposed file changes', rec);
+        }
+        seenApprovalIds.add(id);
+        const requestId = randomUUID() as RequestId;
+        approvals.set(requestId, id);
+        emitEvent('permission.request', {
+          requestId, callId: itemId, tool: fileChange ? 'apply_patch' : 'exec',
+          input: fileChange ? { ...input, changes } : input,
+          // An exact command alone omits cwd and escalation context. Keep decisions
+          // per-call rather than introducing a standing-rule grammar here.
+          matchTarget: null, suggestions: [],
+        }, rec);
       }
 
       function handleNotification(method: string, params: Record<string, unknown>, rec: unknown): void {
         switch (method) {
+          case 'serverRequest/resolved':
+            for (const [requestId, id] of approvals) {
+              if (id === params['requestId']) approvals.delete(requestId);
+            }
+            return;
           case 'thread/started': {
             const threadId = (params['thread'] as Record<string, unknown> | undefined)?.['id'];
             if (typeof threadId === 'string') notify({ kind: 'cli-session', cliSessionId: threadId as CliSessionId });
@@ -432,6 +464,7 @@ function buildCodexAdapter(opts: AdapterOptions, executable: string, transport: 
             return;
           }
           case 'turn/completed': {
+            invalidateApprovals();
             resultSeen = true;
             const turn = params['turn'] as Record<string, unknown> | undefined;
             const status = turn?.['status'];
@@ -453,6 +486,7 @@ function buildCodexAdapter(opts: AdapterOptions, executable: string, transport: 
       const splitter = new NdjsonSplitter(opts.stdoutLineBytes, () => {
         if (resultSeen) return;
         resultSeen = true;
+        invalidateApprovals();
         const detail = 'provider stdout line exceeds the configured cap';
         emitEvent('error', { kind: 'adapter_output_overflow', message: detail, fatal: true }, null);
         if (!settled) { settled = true; resolve({ ok: false, error: { code: 'schema_mismatch', detail } }); }
@@ -461,6 +495,7 @@ function buildCodexAdapter(opts: AdapterOptions, executable: string, transport: 
       });
 
       function handleLine(line: string): void {
+        if (resultSeen || killRequested || child !== proc) return;
         let msg: Record<string, unknown>;
         try {
           msg = JSON.parse(line) as Record<string, unknown>;
@@ -471,9 +506,7 @@ function buildCodexAdapter(opts: AdapterOptions, executable: string, transport: 
         const method = msg['method'];
         if (typeof method === 'string') {
           if ('id' in msg) {
-            // A request from the server, not a notification. Only one is in the
-            // mapped table.
-            if (method === 'item/commandExecution/requestApproval') {
+            if (method === 'item/commandExecution/requestApproval' || method === 'item/fileChange/requestApproval') {
               handleApprovalRequest(msg, msg);
             } else {
               failSchemaMismatch(`unrecognised app-server request: ${method}`, msg);
@@ -510,6 +543,16 @@ function buildCodexAdapter(opts: AdapterOptions, executable: string, transport: 
       }
       child = proc;
       killRequested = false;
+      respondToApproval = (requestId, decision, _reason) => {
+        const id = approvals.get(requestId);
+        if (id === undefined || child !== proc || resultSeen || killRequested) return { ok: false, error: { code: 'no_child' } };
+        approvals.delete(requestId);
+        // Live-tested accept/decline are one-call decisions. Never select a session
+        // grant or an exec-policy amendment. Codex has no deny-reason text field.
+        return writeMessage({ id, result: { decision: decision === 'allow' ? 'accept' : 'decline' } })
+          ? { ok: true, value: undefined }
+          : { ok: false, error: { code: 'write_failed', detail: 'stdin not writable' } };
+      };
       // Mirrors `../claude-cli/index.ts`'s identical handler, for the identical reason: a write
       // racing this child's death lands on a pipe whose reader is gone, and an unhandled
       // stream `error` is an uncaught exception that takes the whole server down.
@@ -536,17 +579,20 @@ function buildCodexAdapter(opts: AdapterOptions, executable: string, transport: 
       });
 
       proc.on('close', (code, signal) => {
+        invalidateApprovals();
+        for (const pending of pendingOutgoing.values()) pending.reject(new Error('process exited'));
+        pendingOutgoing.clear();
         // #360: mirrors ../claude-cli/index.ts's identical guard — a close arriving after
         // this child has already been replaced by the next turn's own spawn must not
         // clear that turn's child reference or report an exit that is not its own.
         if (proc !== child) return;
         child = null;
+        respondToApproval = null;
+        clearApprovals = null;
         notify({ kind: 'exited', code, signal });
         if (!resultSeen) {
           emitEvent('turn.ended', { stopReason: killRequested ? 'interrupted' : 'process_exit', usage: null }, null);
         }
-        for (const pending of pendingOutgoing.values()) pending.reject(new Error('process exited'));
-        pendingOutgoing.clear();
       });
 
       // The handshake. `initialize` then `thread/start` (fresh) or `thread/resume`
@@ -561,7 +607,7 @@ function buildCodexAdapter(opts: AdapterOptions, executable: string, transport: 
         try {
           await rpcCall('initialize', { clientInfo: { name: 'skynet-hr', version: '0.0.0' } });
           let threadId: string | null = resume;
-          const threadOptions = { cwd: opts.cwd, sandbox: cliSandboxValue(sandbox), approvalPolicy: 'never', model: opts.model };
+          const threadOptions = { cwd: opts.cwd, sandbox: cliSandboxValue(sandbox), approvalPolicy: 'on-request', model: opts.model };
           if (resume !== null) {
             try {
               await rpcCall('thread/resume', { threadId: resume, ...threadOptions });
@@ -590,6 +636,7 @@ function buildCodexAdapter(opts: AdapterOptions, executable: string, transport: 
             resolve({ ok: true, value: undefined });
           }
         } catch (err) {
+          invalidateApprovals();
           if (!settled) {
             settled = true;
             const rpcError = (err as { rpcError?: boolean }).rpcError === true;
@@ -600,7 +647,7 @@ function buildCodexAdapter(opts: AdapterOptions, executable: string, transport: 
                 : { code: 'agent_unavailable', image: executable, detail: (err as Error).message },
             });
           }
-          if (child) terminate(child);
+          if (child === proc) terminate(proc);
         }
       })();
     });
@@ -820,7 +867,7 @@ function buildCodexAdapter(opts: AdapterOptions, executable: string, transport: 
 
   const adapter: Adapter = {
     vendor: 'codex',
-    policy: { mode: 'preauthorised', sandbox, banner },
+    policy: transport === 'app-server' ? { mode: 'interactive', sandbox, banner: null } : { mode: 'preauthorised', sandbox, banner },
     // (D160/S21.8) Undeclared, not merely unprobed: no finding has verified either Codex
     // transport carries a non-text content block, so this stays `false` until one does.
     acceptsAttachments: false,
@@ -836,19 +883,15 @@ function buildCodexAdapter(opts: AdapterOptions, executable: string, transport: 
       return transport === 'app-server' ? runAppServer(text, resume) : runExec(text, resume, turnId);
     },
 
-    // I25: the shipped policy is `preauthorised`, so the manager's `pending` map — the
-    // only source of a real `requestId` — is always empty for a Codex session. Nothing
-    // is ever outstanding to respond to.
-    // D273: Codex's wire carries no deny text, so `reason` is dropped.
-    respond(_requestId: RequestId, _decision: PermissionDecision, _reason: string | null): Result<void, AdapterError> {
-      if (!child) return { ok: false, error: { code: 'no_child' } };
-      return { ok: true, value: undefined };
+    respond(requestId: RequestId, decision: PermissionDecision, reason: string | null): Result<void, AdapterError> {
+      return respondToApproval?.(requestId, decision, reason) ?? { ok: false, error: { code: 'no_child' } };
     },
 
     async kill(): Promise<void> {
       const proc = child;
       if (!proc) return;
       killRequested = true;
+      clearApprovals?.();
       terminate(proc);
     },
   };
