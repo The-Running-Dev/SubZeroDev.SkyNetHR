@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { appendFileSync } from 'node:fs';
+import { appendFileSync, readFileSync } from 'node:fs';
 // A deterministic stand-in for the real `codex` binary. Speaks both transports this
 // adapter drives — `app-server`'s JSON-RPC 2.0 over stdio, and `exec --json`'s
 // NDJSON-on-stdout one-shot — with shapes verified against the installed
@@ -48,6 +48,33 @@ if (subcommand === 'app-server') {
 
   function runTurnScenario() {
     switch (scenario) {
+      case 'file-change':
+      case 'file-change-single':
+      case 'file-change-patch':
+      case 'file-change-malformed':
+      case 'file-change-failed':
+      case 'file-change-invalid': {
+        const captured = JSON.parse(readFileSync(new URL('./file-change-probe.json', import.meta.url), 'utf8'));
+        for (const message of captured) {
+          const item = message.params.item;
+          if (scenario !== 'file-change') item.changes = [item.changes.find(change => change.kind.type === 'update')];
+          if (scenario === 'file-change-malformed') item.changes[0].diff = '@@ -1 +1 @@\n-before\n';
+          if (message.method === 'item/completed') {
+            if (scenario === 'file-change-failed') item.status = 'failed';
+            if (scenario === 'file-change-invalid') item.changes[0].kind.type = 'unknown';
+            if (scenario === 'file-change-patch') {
+              // Generated CLI schema, not observed in the live probe. Keep the
+              // item id association under test with an unrelated notification.
+              notify('item/fileChange/patchUpdated', { threadId, turnId, itemId: item.id, changes: item.changes });
+              notify('item/fileChange/patchUpdated', { threadId, turnId, itemId: 'unrelated', changes: [{ path: 'wrong', kind: { type: 'add' }, diff: 'wrong' }] });
+              item.changes = [];
+            }
+          }
+          notify(message.method, { ...message.params, threadId, turnId });
+        }
+        notify('turn/completed', { threadId, turn: { id: turnId, status: 'completed' } });
+        return;
+      }
       case 'full': {
         notify('thread/status/changed', { threadId, status: { type: 'active' } }); // ignored, harmless
         notify('item/started', { item: { id: 'item-user', type: 'userMessage', content: [] }, threadId, turnId }); // echo, ignored

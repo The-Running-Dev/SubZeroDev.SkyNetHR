@@ -54,6 +54,62 @@ function eventsOf(notifications: readonly AdapterNotification[], kind: string) {
     .filter((n) => n.event.kind === kind);
 }
 
+test('#458 — real CLI file-change records produce a paired tool call and result', async t => {
+  delete process.env['SKYNET_CODEX_NO_APP_SERVER'];
+  process.env['SKYNET_CODEX_SCENARIO'] = 'file-change';
+  t.after(() => { delete process.env['SKYNET_CODEX_SCENARIO']; });
+  const { result, notifications } = await makeAdapter();
+  assert.ok(result.ok);
+  t.after(() => result.value.kill());
+  await result.value.send('edit files', [], null, 'turn-file-change' as never);
+  await waitUntil(() => eventsOf(notifications, 'turn.ended').length > 0);
+  assert.equal(eventsOf(notifications, 'error').length, 0);
+  assert.equal(eventsOf(notifications, 'tool.call').length, 1);
+  const results = eventsOf(notifications, 'tool.result');
+  assert.equal(results.length, 1);
+  const data = results[0]!.event.data as { callId: string; ok: boolean; output: string; diff: { hunks: unknown[] } | null };
+  assert.equal(data.callId, 'probe-file-change');
+  assert.equal(data.ok, true);
+  assert.match(data.output, /sample.txt/);
+  assert.match(data.output, /added.txt/);
+  assert.match(data.output, /remove.txt/);
+  assert.ok(data.diff);
+  assert.equal(data.diff.hunks.length, 3);
+  assert.deepEqual(data.diff.hunks.map(hunk => (hunk as { path: string }).path), ['added.txt', 'remove.txt', 'sample.txt']);
+});
+
+for (const scenario of ['single', 'patch', 'malformed', 'failed', 'invalid']) {
+  test(`#458 — file-change ${scenario}`, async t => {
+    delete process.env['SKYNET_CODEX_NO_APP_SERVER'];
+    process.env['SKYNET_CODEX_SCENARIO'] = `file-change-${scenario}`;
+    t.after(() => { delete process.env['SKYNET_CODEX_SCENARIO']; });
+    const { result, notifications } = await makeAdapter();
+    assert.ok(result.ok);
+    t.after(() => result.value.kill());
+    const sent = await result.value.send('edit files', [], null, 'turn-file-change' as never);
+    await waitUntil(() => eventsOf(notifications, 'turn.ended').length > 0 || !sent.ok);
+    if (scenario === 'invalid') {
+      assert.equal(eventsOf(notifications, 'error').length, 1);
+      assert.equal(eventsOf(notifications, 'tool.result').length, 0);
+      return;
+    }
+    assert.equal(eventsOf(notifications, 'error').length, 0);
+    const data = eventsOf(notifications, 'tool.result')[0]!.event.data as {
+      callId: string; ok: boolean; output: string; bytes: number; diff: { hunks: unknown[] } | null;
+    };
+    assert.equal(data.callId, 'probe-file-change');
+    assert.equal(data.ok, scenario !== 'failed');
+    assert.match(data.output, /sample.txt/);
+    assert.equal(data.bytes, Buffer.byteLength(data.output, 'utf8'));
+    if (scenario === 'malformed') {
+      assert.equal(data.diff, null);
+      assert.match(data.output, /-before/);
+    } else {
+      assert.deepEqual(data.diff, { hunks: [{ path: 'sample.txt', oldStart: 1, oldLines: 1, newStart: 1, newLines: 1, lines: ['-before', '+after'] }] });
+    }
+  });
+}
+
 // S8.3 — policy is reported at create, before any turn runs, and names the sandbox.
 test('S8.3 — a Codex session reports a preauthorised policy naming its sandbox', async () => {
   delete process.env['SKYNET_CODEX_NO_APP_SERVER'];

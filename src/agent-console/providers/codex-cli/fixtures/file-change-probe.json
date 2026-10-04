@@ -1,0 +1,78 @@
+[
+  {
+    "method": "item/started",
+    "params": {
+      "item": {
+        "type": "fileChange",
+        "id": "probe-file-change",
+        "changes": [
+          {
+            "path": "added.txt",
+            "kind": {
+              "type": "add"
+            },
+            "diff": "new content\n"
+          },
+          {
+            "path": "remove.txt",
+            "kind": {
+              "type": "delete"
+            },
+            "diff": "obsolete\n"
+          },
+          {
+            "path": "sample.txt",
+            "kind": {
+              "type": "update",
+              "move_path": null
+            },
+            "diff": "@@ -1 +1 @@\n-before\n+after\n"
+          }
+        ],
+        "status": "inProgress"
+      },
+      "threadId": "probe-thread",
+      "turnId": "probe-turn",
+      "startedAtMs": 1791104979305
+    },
+    "emittedAtMs": 1791104979341
+  },
+  {
+    "method": "item/completed",
+    "params": {
+      "item": {
+        "type": "fileChange",
+        "id": "probe-file-change",
+        "changes": [
+          {
+            "path": "added.txt",
+            "kind": {
+              "type": "add"
+            },
+            "diff": "new content\n"
+          },
+          {
+            "path": "remove.txt",
+            "kind": {
+              "type": "delete"
+            },
+            "diff": "obsolete\n"
+          },
+          {
+            "path": "sample.txt",
+            "kind": {
+              "type": "update",
+              "move_path": null
+            },
+            "diff": "@@ -1 +1 @@\n-before\n+after\n"
+          }
+        ],
+        "status": "completed"
+      },
+      "threadId": "probe-thread",
+      "turnId": "probe-turn",
+      "completedAtMs": 1791104982477
+    },
+    "emittedAtMs": 1791104982482
+  }
+]

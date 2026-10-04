@@ -216,6 +216,7 @@ export interface ToolResultDiff {
 }
 
 export interface ToolResultDiffHunk {
+  readonly path?: string; // display label; absent in older and single-file adapter records
   readonly oldStart: number;
   readonly oldLines: number;
   readonly newStart: number;
