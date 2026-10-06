@@ -536,7 +536,8 @@ export interface Config {
   // behind a flag. Defaults off; off produces today's envelope sequence unchanged. A
   // transport that streams deltas unconditionally ignores it (`AdapterOptions.streamDeltas`).
   readonly streamDeltas: boolean;
-  // Provider-side reporting policy for every session this server hosts ('normal' when absent).
+  // Provider-side reporting policy for every session this server hosts. `loadConfig` defaults it
+  // to 'terse' (OUTPUT_MODE=normal opts out); a Config built without the field runs 'normal'.
   // Reporting overhead only — never model, reasoning effort or routing.
   readonly outputMode?: 'normal' | 'terse';
   readonly sessionTokenBudget: number | null; // (tier two) per session; null disables the view's budget
