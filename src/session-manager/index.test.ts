@@ -5473,3 +5473,48 @@ test('S28.11 — the tree-kill obligation is this manager\'s own, not one vendor
   strayPids.push(tree!.pid, tree!.grandchildPid);
   await waitUntil(() => !isAlive(tree!.pid) && !isAlive(tree!.grandchildPid), 5000);
 });
+
+// Output policy: terse bounds successful tool output tighter than caps.toolResultBytes, keeps
+// head and tail of a failed result, and leaves normal mode untouched.
+async function runBigToolResult(configOverride: Partial<Config>, bytes: number, failed: boolean): Promise<{ output: string; truncated: boolean; bytes: number }> {
+  const { manager, workspaceRoot } = await makeManager('big-tool-result', {}, undefined, null, null, [], configOverride);
+  process.env['SKYNET_BIG_TOOL_RESULT_BYTES'] = String(bytes);
+  if (failed) process.env['SKYNET_BIG_TOOL_RESULT_ERROR'] = '1'; else delete process.env['SKYNET_BIG_TOOL_RESULT_ERROR'];
+  const owner = 'operator-1' as OperatorId;
+  const projectDir = path.join(workspaceRoot, `proj-policy-${Math.random().toString(36).slice(2)}`);
+  await mkdir(projectDir);
+  const created = await manager.create(owner, { vendor: 'claude', cwd: projectDir, model: null, sandbox: null, requisitionId: null });
+  assert.equal(created.ok, true);
+  if (!created.ok) throw new Error('create failed');
+  const { sessionId } = created.value;
+  const received: Envelope[] = [];
+  await manager.subscribe(sessionId, owner, 0, { deliver: (e) => { if ('seq' in e) received.push(e); }, close: () => {} });
+  assert.equal((await manager.message(sessionId, owner, 'go', [])).ok, true);
+  await waitUntil(() => received.some((e) => e.kind === 'permission.request'));
+  const requestId = (received.find((e) => e.kind === 'permission.request')!.data as { requestId: string }).requestId;
+  await manager.answerPermission(sessionId, owner, { requestId: requestId as never, decision: 'allow', scope: 'once', rule: null, reason: null });
+  await waitUntil(() => received.some((e) => e.kind === 'turn.ended'));
+  delete process.env['SKYNET_BIG_TOOL_RESULT_ERROR'];
+  return received.find((e) => e.kind === 'tool.result')!.data as { output: string; truncated: boolean; bytes: number };
+}
+
+test('output policy — terse caps a successful tool.result at 24000 bytes; normal mode keeps it under the 65536 cap', async () => {
+  const terse = await runBigToolResult({ outputMode: 'terse' }, 50000, false);
+  assert.equal(terse.truncated, true);
+  assert.equal(terse.bytes, 50000);
+  assert.ok(Buffer.byteLength(terse.output, 'utf8') <= 24000);
+  const normal = await runBigToolResult({}, 50000, false);
+  assert.equal(normal.truncated, false);
+  assert.equal(Buffer.byteLength(normal.output, 'utf8'), 50000);
+});
+
+test('output policy — terse keeps head and tail of a failed tool.result; a failed result in normal mode is untouched under the cap', async () => {
+  const terse = await runBigToolResult({ outputMode: 'terse' }, 50000, true);
+  assert.equal(terse.truncated, true);
+  assert.ok(Buffer.byteLength(terse.output, 'utf8') <= 24000);
+  assert.ok(terse.output.startsWith('HEAD'), 'head kept');
+  assert.ok(terse.output.endsWith('TAIL'), 'tail kept');
+  const normal = await runBigToolResult({}, 50000, true);
+  assert.equal(normal.truncated, false);
+  assert.ok(normal.output.endsWith('TAIL'));
+});

@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { spawnProcess, resolveSpawn, reportableImage, terminateProcess, closeStdin, protectStdin } from '../../process/index.js';
 import { platform } from 'node:process';
 import { probeCommand, type ProbeResult } from '../probe.js';
-import type { ProbeContext, ProviderStatus } from '../types.js';
+import { TERSE_REPORT_INSTRUCTION, type ProbeContext, type ProviderStatus } from '../types.js';
 import type {
   Adapter,
   AdapterError,
@@ -197,6 +197,17 @@ function makeFailSchemaMismatch(
   };
 }
 
+// Per-session terse config, sent on thread/start|resume (app-server) or as -c (exec), so the
+// operator's global ~/.codex/config.toml is never touched. Reasoning *effort* and the model are
+// deliberately absent: terse trims reporting, never depth.
+export const TERSE_CODEX_CONFIG: Readonly<Record<string, string | number>> = {
+  model_verbosity: 'low',
+  model_reasoning_summary: 'none',
+  model_auto_compact_token_limit: 120000,
+  model_auto_compact_token_limit_scope: 'body_after_prefix',
+  tool_output_token_limit: 6000,
+};
+
 export async function createCodexAdapter(
   opts: AdapterOptions & { readonly executable?: string },
 ): Promise<Result<Adapter, AdapterError>> {
@@ -361,7 +372,7 @@ function buildCodexAdapter(opts: AdapterOptions, executable: string, transport: 
           const summary = (item['summary'] as string[] | undefined) ?? [];
           const content = (item['content'] as string[] | undefined) ?? [];
           const text = (summary.length > 0 ? summary : content).join('\n\n');
-          if (text.length > 0) emitEvent('thinking', { text }, rec);
+          if (text.length > 0 && opts.outputPolicy?.persistReasoning !== false) emitEvent('thinking', { text }, rec);
           return;
         }
         if (type === 'agentMessage') {
@@ -607,7 +618,12 @@ function buildCodexAdapter(opts: AdapterOptions, executable: string, transport: 
         try {
           await rpcCall('initialize', { clientInfo: { name: 'skynet-hr', version: '0.0.0' } });
           let threadId: string | null = resume;
-          const threadOptions = { cwd: opts.cwd, sandbox: cliSandboxValue(sandbox), approvalPolicy: 'on-request', model: opts.model };
+          const threadOptions = {
+            cwd: opts.cwd, sandbox: cliSandboxValue(sandbox), approvalPolicy: 'on-request', model: opts.model,
+            ...(opts.outputPolicy?.mode === 'terse'
+              ? { config: TERSE_CODEX_CONFIG, developerInstructions: TERSE_REPORT_INSTRUCTION }
+              : {}),
+          };
           if (resume !== null) {
             try {
               await rpcCall('thread/resume', { threadId: resume, ...threadOptions });
@@ -750,7 +766,7 @@ function buildCodexAdapter(opts: AdapterOptions, executable: string, transport: 
             const itemType = item['type'];
             if (itemType === 'reasoning') {
               const itemText = String(item['text'] ?? '');
-              if (itemText.length > 0) emitEvent('thinking', { text: itemText }, rec);
+              if (itemText.length > 0 && opts.outputPolicy?.persistReasoning !== false) emitEvent('thinking', { text: itemText }, rec);
               return;
             }
             if (itemType === 'agent_message') {
@@ -802,6 +818,10 @@ function buildCodexAdapter(opts: AdapterOptions, executable: string, transport: 
       // The specific thread, not `--last`: `--last` names whichever thread the CLI
       // considers most recent on the whole host, which a concurrent exec-transport
       // session elsewhere on the same host could make the wrong one.
+      if (opts.outputPolicy?.mode === 'terse') {
+        // Bare values parse as TOML strings/ints, so no shell-hostile quoting is needed.
+        for (const [key, value] of Object.entries(TERSE_CODEX_CONFIG)) args.push('-c', `${key}=${value}`);
+      }
       if (currentModel !== null) args.push('--model', currentModel);
       if (resume !== null) args.push('resume', resume);
 

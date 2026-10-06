@@ -1,6 +1,7 @@
 import { createProcessSupervisor } from '../process/index.js';
 import type { ProcessLedger } from '../process/ledger.js';
 import { randomUUID } from 'node:crypto';
+import { outputPolicyFor } from '../providers/types.js';
 import os from 'node:os';
 import { resolveInsideRoot } from './workspaces/jail.js';
 import type {
@@ -194,6 +195,21 @@ const KINDS_CARRYING_TURN_ID = new Set<EventKind>([
   'usage',
 ]);
 
+// Terse mode: a failed result keeps its head and its tail, since the cause usually sits at
+// the end. Splits the budget evenly and never cuts a UTF-8 code point.
+function truncateHeadTailUtf8(buf: Buffer, maxBytes: number): string {
+  if (buf.length <= maxBytes) return buf.toString('utf8');
+  const marker = '\n…[truncated]…\n';
+  const budget = Math.max(0, maxBytes - Buffer.byteLength(marker, 'utf8'));
+  const headBytes = Math.ceil(budget / 2);
+  const tailBytes = budget - headBytes;
+  let headEnd = headBytes;
+  while (headEnd > 0 && (buf[headEnd]! & 0xc0) === 0x80) headEnd--;
+  let tailStart = buf.length - tailBytes;
+  while (tailStart < buf.length && (buf[tailStart]! & 0xc0) === 0x80) tailStart++;
+  return buf.subarray(0, headEnd).toString('utf8') + marker + buf.subarray(tailStart).toString('utf8');
+}
+
 function nowIso(): IsoTimestamp {
   return new Date().toISOString() as IsoTimestamp;
 }
@@ -232,6 +248,7 @@ export function createSessionCore(deps: {
   readonly getOsCreatedAt?: (pid: number) => Promise<IsoTimestamp | null>;
 }): SessionCore {
   const { config, store, checkpoints, createAdapter: adapterFactory, getOsCreatedAt: getOsCreatedAtOverride } = deps;
+  const outputPolicy = outputPolicyFor(config.outputMode);
   const hostCreate = coordinateHostAttempts(deps.hostCreate, deps.hostAttemptTimeoutMs);
   const audit = deps.auditSink ?? { append: (record: AuditRecord) => store.appendAudit(record) };
   const checkpointExtension = createCheckpointExtension(checkpoints);
@@ -854,6 +871,7 @@ export function createSessionCore(deps: {
             else pendingNotifications.push(n);
           },
           streamDeltas: config.streamDeltas,
+          outputPolicy,
         });
       } catch (error) {
         adapterResult = { ok: false, error: { code: 'agent_unavailable', image: input.vendor, detail: String(error) } };
@@ -1895,7 +1913,11 @@ export function createSessionCore(deps: {
         let eventData: Record<string, unknown> = data;
         if (kind === 'tool.result' && turn) {
           const d = data as unknown as { callId: CallId; output: string; bytes: number };
-          if (d.bytes > config.caps.toolResultBytes) {
+          const failed = (data as unknown as { ok?: boolean }).ok === false;
+          const limit = outputPolicy.toolOutputBytes === null
+            ? config.caps.toolResultBytes
+            : Math.min(config.caps.toolResultBytes, outputPolicy.toolOutputBytes);
+          if (d.bytes > limit) {
             const outputBytes = Buffer.from(d.output, 'utf8');
             const { turnId } = turn;
             // #200: tracked so `remove()` can drain it — see `pendingToolOutputWrites`'s own
@@ -1911,7 +1933,9 @@ export function createSessionCore(deps: {
             });
             const tracked = write.finally(() => entry.pendingToolOutputWrites.delete(tracked));
             entry.pendingToolOutputWrites.add(tracked);
-            eventData = { ...d, output: truncateUtf8(outputBytes, config.caps.toolResultBytes), truncated: true };
+            eventData = { ...d, output: failed && outputPolicy.preserveFailureTail
+              ? truncateHeadTailUtf8(outputBytes, limit)
+              : truncateUtf8(outputBytes, limit), truncated: true };
           }
         }
         // The adapter omits `turnId` from every payload that carries one (contract

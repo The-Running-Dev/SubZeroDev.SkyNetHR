@@ -30,6 +30,7 @@ export async function wrapAdapter(
     }
   }
   const made = await factory({ cwd: context.cwd, model: options.model ?? null, sandbox: options.sandbox, streamDeltas: options.streamDeltas, notify,
+    ...(options.outputPolicy === undefined ? {} : { outputPolicy: options.outputPolicy }),
     ...(options.stdoutLineBytes === undefined ? {} : { stdoutLineBytes: options.stdoutLineBytes }) });
   const result = 'ok' in made ? made : { ok: true as const, value: made };
   if (!result.ok) return result;

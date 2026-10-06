@@ -272,6 +272,10 @@ export function loadConfig(env: Readonly<Record<string, string | undefined>>): R
   // (S25.6) Defaults off; off reproduces today's envelope sequence element for element.
   const streamDeltas = env['STREAM_DELTAS'] === 'true';
 
+  // Provider-side reporting policy. Terse by default; only an exact 'normal' opts out, and any
+  // other value stays terse — no new failure mode.
+  const outputMode = env['OUTPUT_MODE'] === 'normal' ? 'normal' as const : 'terse' as const;
+
   // The `Max-Age` on the cookie `POST /api/login` mints. Read only under `shared-secret`;
   // the header modes' credential belongs to the upstream proxy and its lifetime is not
   // ours to set. Thirty days is the default rather than a constant, because shortening a
@@ -334,6 +338,7 @@ export function loadConfig(env: Readonly<Record<string, string | undefined>>): R
       sessionCookieMaxAgeSeconds: sessionCookieMaxAgeSeconds.value,
       includeRaw,
       streamDeltas,
+      outputMode,
       sessionTokenBudget,
       tokenRates: tokenRates.value,
       currency,

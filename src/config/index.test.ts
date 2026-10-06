@@ -384,3 +384,16 @@ describe('config — storage may not overlap a workspace root (S31, D185, I60)',
     assert.equal(r.ok && r.value.storageRoot, realpathSync.native(freshStorage));
   });
 });
+
+describe('OUTPUT_MODE', () => {
+  it('is terse by default and for any value but an exact normal', () => {
+    for (const value of [undefined, 'terse', 'NORMAL', 'verbose', '']) {
+      const r = loadConfig(env({ OUTPUT_MODE: value }));
+      assert.equal(r.ok && r.value.outputMode, 'terse', String(value));
+    }
+  });
+  it('OUTPUT_MODE=normal opts out', () => {
+    const r = loadConfig(env({ OUTPUT_MODE: 'normal' }));
+    assert.equal(r.ok && r.value.outputMode, 'normal');
+  });
+});

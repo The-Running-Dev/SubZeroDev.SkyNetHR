@@ -2,6 +2,15 @@
 if (process.argv.includes('--version')) { process.stdout.write('fake-cli 1.0.0\n'); process.exit(0); }
 import { appendFileSync, readFileSync, writeFileSync, writeSync } from 'node:fs';
 import { spawn } from 'node:child_process';
+// Test hook: record how the adapter launched this child (argv, a few env names, and the
+// contents of the files named by --settings / --append-system-prompt-file, which the adapter
+// deletes after the child exits).
+if (process.env.SKYNET_ARGS_LOG) {
+  const argv = process.argv.slice(2);
+  const fileAfter = (flag) => { const i = argv.indexOf(flag); try { return i < 0 ? null : readFileSync(argv[i + 1], 'utf8'); } catch { return null; } };
+  const names = ['BASH_MAX_OUTPUT_LENGTH', 'MAX_MCP_OUTPUT_TOKENS', 'CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS', 'CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH', 'CLAUDE_CODE_SUBAGENT_MODEL'];
+  appendFileSync(process.env.SKYNET_ARGS_LOG, JSON.stringify({ argv, env: Object.fromEntries(names.map((n) => [n, process.env[n] ?? null])), settings: fileAfter('--settings'), prompt: fileAfter('--append-system-prompt-file') }) + '\n');
+}
 // A deterministic stand-in for the real `claude` binary, used because
 // `--permission-prompt-tool stdio` does not emit `control_request` on the real CLI
 // today (design/findings/S1-claude-adapter.md, anthropics/claude-code#34046). This
@@ -207,7 +216,7 @@ function onLine(msg) {
       const size = Number(process.env.SKYNET_BIG_TOOL_RESULT_BYTES || 200000);
       line({
         type: 'user',
-        message: { content: [{ type: 'tool_result', tool_use_id: currentCallId, content: 'x'.repeat(size), is_error: false }] },
+        message: { content: [{ type: 'tool_result', tool_use_id: currentCallId, content: process.env.SKYNET_BIG_TOOL_RESULT_ERROR ? 'HEAD' + 'x'.repeat(size - 8) + 'TAIL' : 'x'.repeat(size), is_error: Boolean(process.env.SKYNET_BIG_TOOL_RESULT_ERROR) }] },
       });
       line({ type: 'result', subtype: 'success' });
       return;

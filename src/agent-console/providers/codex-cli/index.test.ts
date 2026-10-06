@@ -7,7 +7,7 @@ import { test } from 'node:test';
 import { promisify } from 'node:util';
 import { createCodexAdapter, resetCodexTransportCacheForTests } from './index.js';
 import { createConfiguredAdapter as createAdapter } from '../../../config/providers.js';
-import type { AdapterNotification } from '../types.js';
+import { outputPolicyFor, type AdapterNotification } from '../types.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -677,4 +677,57 @@ test('#201 — Windows: a .cmd executable is spawned via a shell, and `spawned` 
   } finally {
     await execFileAsync('taskkill', ['/PID', String(spawned.pid), '/T', '/F']).catch(() => {});
   }
+});
+
+// Output policy (terse): per-session config on thread/start|resume, no reasoning effort or model
+// override, reasoning never persisted — on both transports.
+async function runCodexWithPolicy(mode: 'terse' | 'normal', transport: 'app-server' | 'exec', resume: string | null, t: { after: (fn: () => unknown) => void }) {
+  if (transport === 'exec') process.env['SKYNET_CODEX_NO_APP_SERVER'] = '1'; else delete process.env['SKYNET_CODEX_NO_APP_SERVER'];
+  process.env['SKYNET_CODEX_SCENARIO'] = 'full';
+  const dir = await mkdtemp(path.join(tmpdir(), 'skynet-codex-policy-'));
+  const paramsLog = path.join(dir, 'params.log');
+  process.env['SKYNET_CODEX_PARAMS_LOG'] = paramsLog;
+  t.after(async () => { delete process.env['SKYNET_CODEX_PARAMS_LOG']; delete process.env['SKYNET_CODEX_NO_APP_SERVER']; await rm(dir, { recursive: true, force: true }); });
+  resetCodexTransportCacheForTests();
+  const notifications: AdapterNotification[] = [];
+  const result = await createCodexAdapter({
+    executable: FIXTURE, cwd: process.cwd() as never, model: null, sandbox: 'read-only',
+    notify: (n) => notifications.push(n), streamDeltas: false, outputPolicy: outputPolicyFor(mode),
+  });
+  assert.equal(result.ok, true);
+  if (!result.ok) throw new Error('adapter');
+  await result.value.send('hello', [], resume as never, 'turn-policy' as never);
+  await waitUntil(() => eventsOf(notifications, 'turn.ended').length > 0);
+  const calls = (await readFileOrEmpty(paramsLog)).split('\n').filter((l) => l.length > 0).map((l) => JSON.parse(l) as { method: string; params: Record<string, unknown> });
+  return { notifications, calls };
+}
+
+test('output policy — terse sends config and developerInstructions on thread/start and thread/resume, never reasoning effort', async (t) => {
+  for (const [resume, method] of [[null, 'thread/start'], ['fake-thread-resumed', 'thread/resume']] as const) {
+    const { calls, notifications } = await runCodexWithPolicy('terse', 'app-server', resume, t);
+    const call = calls.find((c) => c.method === method)!;
+    assert.deepEqual(call.params['config'], {
+      model_verbosity: 'low', model_reasoning_summary: 'none', model_auto_compact_token_limit: 120000,
+      model_auto_compact_token_limit_scope: 'body_after_prefix', tool_output_token_limit: 6000,
+    });
+    assert.match(String(call.params['developerInstructions']), /Changed:/);
+    assert.ok(!('model_reasoning_effort' in (call.params['config'] as object)));
+    assert.equal(eventsOf(notifications, 'thinking').length, 0);
+    assert.ok(eventsOf(notifications, 'message').length > 0);
+  }
+});
+
+test('output policy — normal mode sends no config and keeps reasoning, app-server and exec', async (t) => {
+  const app = await runCodexWithPolicy('normal', 'app-server', null, t);
+  const start = app.calls.find((c) => c.method === 'thread/start')!;
+  assert.ok(!('config' in start.params) && !('developerInstructions' in start.params));
+  assert.equal(eventsOf(app.notifications, 'thinking').length, 1);
+  const exec = await runCodexWithPolicy('normal', 'exec', null, t);
+  assert.equal(eventsOf(exec.notifications, 'thinking').length, 1);
+});
+
+test('output policy — terse drops reasoning on the exec transport too', async (t) => {
+  const exec = await runCodexWithPolicy('terse', 'exec', null, t);
+  assert.equal(eventsOf(exec.notifications, 'thinking').length, 0);
+  assert.ok(eventsOf(exec.notifications, 'message').length > 0);
 });

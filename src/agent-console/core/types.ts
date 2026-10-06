@@ -1,7 +1,7 @@
 // In-process session boundary. Host identity and business records stay outside it.
 import type * as Generic from '../contract/index.js';
 import type { Brand, SessionId, TurnId, Seq, AttachmentId, CliSessionId, CallId, RequestId, ResolvedPath, IsoTimestamp, GitSha, Result, Frame, SessionEndReason } from '../contract/index.js';
-import type { PermissionPolicy, SandboxMode, PermissionDecision, AdapterError } from '../providers/types.js';
+import type { OutputMode, PermissionPolicy, SandboxMode, PermissionDecision, AdapterError } from '../providers/types.js';
 import type { ProcessRecord } from '../process/ledger.js';
 import type { RuntimeLease } from '../store/lease.js';
 import type { RuntimeLeaseError } from '../store/lease.js';
@@ -26,6 +26,7 @@ export interface RuntimeOptions {
   readonly caps: Caps;
   readonly includeRaw: boolean;
   readonly streamDeltas: boolean;
+  readonly outputMode?: OutputMode;
   readonly maxLiveSessionsPerWorkspace?: number;
 }
 export type SessionState = 'live' | 'ended';
