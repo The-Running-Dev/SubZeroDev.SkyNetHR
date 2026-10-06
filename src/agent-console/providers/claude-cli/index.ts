@@ -1,6 +1,10 @@
 import type { ChildProcess } from 'node:child_process';
 import { spawnProcess, resolveSpawn, reportableImage, terminateProcess, closeStdin, protectStdin } from '../../process/index.js';
 import { platform } from 'node:process';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { TERSE_REPORT_INSTRUCTION } from '../types.js';
 import type {
   Adapter,
   AdapterError,
@@ -98,6 +102,36 @@ function projectMatchTarget(tool: string, input: Readonly<Record<string, unknown
   if (field === null) return null;
   const value = input[field];
   return typeof value === 'string' ? value : null;
+}
+
+// Per-session terse knobs. Applied through a temp settings file and per-spawn env so the
+// operator's global ~/.claude/settings.json is never touched; an env var the operator already
+// set wins over the default here. Model, effort and subagent model are deliberately absent.
+const TERSE_ENV: Readonly<Record<string, string>> = {
+  BASH_MAX_OUTPUT_LENGTH: '20000',
+  MAX_MCP_OUTPUT_TOKENS: '10000',
+  CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS: '4',
+  CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH: '2',
+};
+const TERSE_SETTINGS = { showThinkingSummaries: false, autoCompactEnabled: true, autoCompactWindow: 200000 };
+
+export function terseClaudeLaunch(sourceEnv: NodeJS.ProcessEnv, shell: boolean): { args: string[]; env: NodeJS.ProcessEnv; cleanup: () => void } {
+  const env: NodeJS.ProcessEnv = {};
+  for (const [name, value] of Object.entries(TERSE_ENV)) {
+    if (sourceEnv[name] === undefined) env[name] = value;
+  }
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'skynet-terse-'));
+  const settings = path.join(dir, 'settings.json');
+  const prompt = path.join(dir, 'terse.md');
+  writeFileSync(settings, JSON.stringify(TERSE_SETTINGS));
+  writeFileSync(prompt, TERSE_REPORT_INSTRUCTION);
+  // A shell-backed spawn joins argv with spaces and no quoting, so a path with a space needs it.
+  const arg = (p: string): string => (shell && /s/.test(p) ? `"${p}"` : p);
+  return {
+    args: ['--settings', arg(settings), '--append-system-prompt-file', arg(prompt)],
+    env,
+    cleanup: () => { try { rmSync(dir, { recursive: true, force: true }); } catch { /* best effort */ } },
+  };
 }
 
 export function createClaudeAdapter(opts: AdapterOptions & { readonly executable?: string }): Adapter {
@@ -291,6 +325,7 @@ export function createClaudeAdapter(opts: AdapterOptions & { readonly executable
           if (block['type'] === 'text' && typeof block['text'] === 'string' && block['text'].length > 0) {
             emitEvent('message', { role: 'assistant', text: block['text'] }, rec);
           } else if (block['type'] === 'thinking' && typeof block['thinking'] === 'string' && block['thinking'].length > 0) {
+            if (opts.outputPolicy?.persistReasoning === false) continue;
             emitEvent('thinking', { text: block['thinking'] }, rec);
           } else if (block['type'] === 'tool_use') {
             const id = block['id'];
@@ -490,12 +525,17 @@ export function createClaudeAdapter(opts: AdapterOptions & { readonly executable
           return;
         }
 
-        const resolved = resolveSpawn(executable, buildArgs(resume), executable === 'claude');
+        const terse = opts.outputPolicy?.mode === 'terse';
+        const shellBacked = resolveSpawn(executable, [], executable === 'claude').shell;
+        const launch = terse ? terseClaudeLaunch(process.env, shellBacked) : null;
+        const resolved = resolveSpawn(executable, [...buildArgs(resume), ...(launch?.args ?? [])], executable === 'claude');
 
         let proc: ChildProcess;
         try {
-          proc = spawnProcess(resolved, { cwd: opts.cwd, overrides: { FORCE_COLOR: '0', NO_COLOR: '1' } });
+          proc = spawnProcess(resolved, { cwd: opts.cwd, overrides: { FORCE_COLOR: '0', NO_COLOR: '1', ...launch?.env } });
+          if (launch) proc.once('close', launch.cleanup);
         } catch (err) {
+          launch?.cleanup();
           // spawn can throw synchronously (EINVAL and friends); a throw here would
           // otherwise reject this promise and bypass the Result contract entirely.
           resolve({ ok: false, error: { code: 'agent_unavailable', image: executable, detail: (err as Error).message } });

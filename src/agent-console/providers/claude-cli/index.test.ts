@@ -1,13 +1,13 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { mkdtemp, readFile, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
 import { promisify } from 'node:util';
 import { createClaudeAdapter } from './index.js';
-import type { AdapterNotification } from '../types.js';
+import { outputPolicyFor, type AdapterNotification } from '../types.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -608,4 +608,60 @@ test('#201 — Windows: a .cmd executable is spawned via a shell, and `spawned` 
   } finally {
     await execFileAsync('taskkill', ['/PID', String(spawned.pid), '/T', '/F']).catch(() => {});
   }
+});
+
+// Output policy (terse): reporting overhead only. Per-session settings file + env, no global
+// settings touched, explicit operator env wins, thinking never becomes a durable event.
+async function runWithPolicy(mode: 'terse' | 'normal', t: { after: (fn: () => unknown) => void }) {
+  const dir = mkdtempSync(path.join(tmpdir(), 'skynet-claude-policy-'));
+  const log = path.join(dir, 'args.log');
+  process.env['SKYNET_TEST_SCENARIO'] = 'full';
+  process.env['SKYNET_ARGS_LOG'] = log;
+  t.after(() => { delete process.env['SKYNET_ARGS_LOG']; rmSync(dir, { recursive: true, force: true }); });
+  const notifications: AdapterNotification[] = [];
+  const adapter = createClaudeAdapter({
+    executable: FIXTURE, cwd: process.cwd() as never, model: null, sandbox: null,
+    notify: (n) => notifications.push(n), streamDeltas: false, outputPolicy: outputPolicyFor(mode),
+  });
+  t.after(() => adapter.kill());
+  await adapter.send('hello', [], null, 'turn-policy' as never);
+  await waitUntil(() => eventsOf(notifications, 'permission.request').length > 0);
+  const requestId = (eventsOf(notifications, 'permission.request')[0]!.event.data as { requestId: string }).requestId;
+  adapter.respond(requestId as never, 'allow', null);
+  await waitUntil(() => eventsOf(notifications, 'turn.ended').length > 0);
+  const launch = JSON.parse(readFileSync(log, 'utf8').trim().split('\n')[0]!) as {
+    argv: string[]; env: Record<string, string | null>; settings: string | null; prompt: string | null;
+  };
+  return { notifications, launch };
+}
+
+test('output policy — terse launches claude with per-session settings, prompt file and env, and drops thinking', async (t) => {
+  for (const name of ['BASH_MAX_OUTPUT_LENGTH', 'MAX_MCP_OUTPUT_TOKENS', 'CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS', 'CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH', 'CLAUDE_CODE_SUBAGENT_MODEL']) delete process.env[name];
+  const { notifications, launch } = await runWithPolicy('terse', t);
+  assert.equal(eventsOf(notifications, 'thinking').length, 0, 'completed reasoning is not persisted');
+  assert.ok(eventsOf(notifications, 'message').length > 0, 'messages still flow');
+  assert.deepEqual(JSON.parse(launch.settings!), { showThinkingSummaries: false, autoCompactEnabled: true, autoCompactWindow: 200000 });
+  assert.match(launch.prompt!, /Changed:/);
+  assert.deepEqual(launch.env, {
+    BASH_MAX_OUTPUT_LENGTH: '20000', MAX_MCP_OUTPUT_TOKENS: '10000',
+    CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS: '4', CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH: '2', CLAUDE_CODE_SUBAGENT_MODEL: null,
+  });
+  assert.ok(!launch.argv.includes('--model'), 'terse never selects a model');
+});
+
+test('output policy — an operator-set env var wins over the terse default', async (t) => {
+  process.env['BASH_MAX_OUTPUT_LENGTH'] = '99999';
+  t.after(() => { delete process.env['BASH_MAX_OUTPUT_LENGTH']; });
+  const { launch } = await runWithPolicy('terse', t);
+  assert.equal(launch.env['BASH_MAX_OUTPUT_LENGTH'], '99999');
+  assert.equal(launch.env['MAX_MCP_OUTPUT_TOKENS'], '10000');
+});
+
+test('output policy — normal mode adds no settings, prompt or env and keeps thinking', async (t) => {
+  for (const name of ['BASH_MAX_OUTPUT_LENGTH', 'MAX_MCP_OUTPUT_TOKENS']) delete process.env[name];
+  const { notifications, launch } = await runWithPolicy('normal', t);
+  assert.equal(eventsOf(notifications, 'thinking').length, 1);
+  assert.equal(launch.settings, null);
+  assert.equal(launch.prompt, null);
+  assert.equal(launch.env['BASH_MAX_OUTPUT_LENGTH'], null);
 });

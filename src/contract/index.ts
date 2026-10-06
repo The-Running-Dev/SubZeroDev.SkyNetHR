@@ -536,6 +536,9 @@ export interface Config {
   // behind a flag. Defaults off; off produces today's envelope sequence unchanged. A
   // transport that streams deltas unconditionally ignores it (`AdapterOptions.streamDeltas`).
   readonly streamDeltas: boolean;
+  // Provider-side reporting policy for every session this server hosts ('normal' when absent).
+  // Reporting overhead only — never model, reasoning effort or routing.
+  readonly outputMode?: 'normal' | 'terse';
   readonly sessionTokenBudget: number | null; // (tier two) per session; null disables the view's budget
   readonly tokenRates: TokenRates | null; // (tier two) null disables the cost tile (D158)
   readonly currency: string | null; // (tier two) label only; never interpreted (D158)

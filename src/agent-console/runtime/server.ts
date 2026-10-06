@@ -106,6 +106,7 @@ export function runRuntime(input: Readable, output: Writable, dependencies: Runt
     const settings = object(p.options ?? {}), caps = object(settings.caps ?? {});
     options = { storageRoot: root as RuntimeOptions['storageRoot'], workspaceRoots: resolvedRoots,
       includeRaw: bool(settings, 'includeRaw'), streamDeltas: bool(settings, 'streamDeltas'),
+      ...(settings.outputMode === 'terse' ? { outputMode: 'terse' as const } : {}),
       maxLiveSessionsPerWorkspace: integer(settings, 'maxLiveSessionsPerWorkspace', 1, 1000, 1),
       caps: { ringCapacity: integer(caps, 'ringCapacity', 2000, 1_000_000, 1), toolResultBytes: integer(caps, 'toolResultBytes', 16_384, 1024 * 1024, 1),
         subscriberQueueHighWater: integer(caps, 'subscriberQueueHighWater', 256, 100_000, 1), auditPageMax: integer(caps, 'auditPageMax', 1000, 10_000, 1),

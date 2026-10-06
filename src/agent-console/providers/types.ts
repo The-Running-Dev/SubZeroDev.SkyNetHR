@@ -39,6 +39,36 @@ export type AdapterEvent = {
   };
 }[AdapterEmitted];
 
+export type OutputMode = 'normal' | 'terse';
+
+// Reporting overhead only. Terse never changes the model, reasoning effort, routing or
+// provider choice: it asks the provider for less narration and bounds what is persisted.
+export interface OutputPolicy {
+  readonly mode: OutputMode;
+  // Completed reasoning is dropped before it becomes durable transcript history.
+  readonly persistReasoning: boolean;
+  // Successful tool output above this many bytes is truncated; a failed result keeps head and tail.
+  readonly toolOutputBytes: number | null;
+  readonly preserveFailureTail: boolean;
+}
+
+export const TERSE_REPORT_INSTRUCTION = [
+  'Report tersely. Lead with the result; no preamble and no narration of what you are about to do.',
+  'End a completed task with these lines: "Changed: <one line>", "Tests: <pass/fail + count>", and "Risk/Blocker: <only if material>".',
+  'Do not restate the task, summarize the investigation, explain obvious changes, or suggest next steps.',
+  'When the user asks for an explanation or more detail, answer in full.',
+  'Always keep error text, test failures, security warnings and destructive-action confirmations complete.',
+  'Reasoning depth, verification and testing are unchanged.',
+].join(' ');
+
+export const TERSE_TOOL_OUTPUT_BYTES = 24_000;
+
+export function outputPolicyFor(mode: OutputMode | undefined): OutputPolicy {
+  return mode === 'terse'
+    ? { mode, persistReasoning: false, toolOutputBytes: TERSE_TOOL_OUTPUT_BYTES, preserveFailureTail: true }
+    : { mode: 'normal', persistReasoning: true, toolOutputBytes: null, preserveFailureTail: false };
+}
+
 export interface AdapterOptions {
   readonly stdoutLineBytes?: number;
   readonly cwd: ResolvedPath;
@@ -51,6 +81,8 @@ export interface AdapterOptions {
   // sequence element for element. Which adapters read it, and how, is `adapters/*`'s own
   // vendor knowledge (I20) and is not stated here.
   readonly streamDeltas: boolean;
+  // Provider-side reporting policy. Absent means 'normal'. See `OutputPolicy`.
+  readonly outputPolicy?: OutputPolicy;
 }
 
 // (D160) An attachment as the adapter receives it: the ref the envelope carries, plus the bytes.
@@ -132,6 +164,7 @@ export interface ProviderOptions {
   readonly model?: string;
   readonly sandbox: SandboxMode | null;
   readonly streamDeltas: boolean;
+  readonly outputPolicy?: OutputPolicy;
 }
 
 export interface TurnInput {
