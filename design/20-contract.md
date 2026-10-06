@@ -1140,6 +1140,17 @@ contractual** and moves with `Frame`; nothing may reimplement it from that meani
 validated `Config` or a `ConfigError`; it never partially applies a configuration and never
 warns instead of refusing.
 
+**`OUTPUT_MODE` / `Config.outputMode` is a reporting policy, not a capability knob** (D284).
+`loadConfig` defaults it to `terse`; only the exact value `normal` opts out, and any other value
+stays terse rather than refusing. It asks each provider for less narration and bounds what is
+kept: completed reasoning is dropped before it reaches the ring or the store, and a tool result
+over the terse cap is truncated at persist time — a failed result keeps its head and tail. It
+**never changes the model, the reasoning effort, routing or the provider**, and a vendor-neutral
+name is kept per I20: each adapter maps it to whatever that vendor exposes. The field is optional
+on `Config`, and a `Config` built without it behaves as `normal`, so only `loadConfig` makes
+terse the default. Terse does not alter the wire contract: no envelope kind, field or error code
+is added, and the RPC `settings.outputMode` accepts `'terse'` only.
+
 **`config` depends on `jail`, and the edge runs that way round and not the other** (D94).
 `config` must canonicalise each declared workspace root with **the same normalisation** the
 jail applies to a candidate, or a legitimate `cwd` is refused for spelling — a Windows 8.3

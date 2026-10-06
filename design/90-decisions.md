@@ -7048,6 +7048,20 @@ routing table this document owns stops being the whole of it. **A skip list in t
 a second copy of the routing table's state, kept in the tree and not in the document that owns it.
 Reversibility: cheap — one marker and two test cases.
 
+### 2026-10-06 — D284 `Config.outputMode`: terse is the loadConfig default, and only reporting changes
+Context: #510 added an output policy for Claude and Codex sessions ahead of this amendment, at the
+user's instruction. The contract stated neither the field nor its default.
+Chosen: **`Config.outputMode?: 'normal' | 'terse'`, defaulted to `terse` by `loadConfig`; the exact
+value `OUTPUT_MODE=normal` opts out.** Terse drops reasoning before persistence, caps successful
+tool output at 24000 bytes, keeps head and tail of a failed result, and asks each provider for
+less narration. It never touches model, reasoning effort, routing or provider. The user chose
+terse as the default.
+Rejected: **normal as the default.** The user chose otherwise. **Refusing an unknown `OUTPUT_MODE`
+value.** A typo would then stop the server for a reporting preference; staying terse is safe.
+**A required `Config` field.** Every hand-built `Config` would change for no behavioural gain.
+**Provider-specific names.** I20 keeps the flag vendor-neutral.
+Reversibility: cheap — one optional field and its default.
+
 ## Open
 
 Staging only. Once an item becomes an issue it leaves this list.
