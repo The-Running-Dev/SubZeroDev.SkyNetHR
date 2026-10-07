@@ -61,38 +61,9 @@ Name model *families*, never pinned versions. Version identifiers churn; family 
 - **Never use `max` effort unless I ask for it by name.**
 - **`xhigh` is for one question, not one pipeline.** Running a whole design phase at `xhigh` is not rigour, it is a substitute for asking a precise question.
 - **Escalate rather than guess.** An implementation task that raises an architectural question becomes deep reasoning. **Do not keep implementing while that uncertainty is unresolved.**
-- **Open substantive work with a banner, then gate on it.** Before starting anything beyond a trivial lookup, state what the work is (task or command, plus slice id if applicable) and the tier it requires per *Command routing* or the table above. **It is a heading, not a sentence** — three plain lines fenced above and below by a rule of `=`, labels and tier names in Title Case, never folded into a paragraph. For example:
-
-  ```
-  ===============================
-  Work: /design — write design/10-design.md
-  Tier: Deep Reasoning → opus/high
-  Session: opus
-  ===============================
-  ```
-
-  Then check the session's actual model against the required family, matching against *Vendor model aliases* below when the reported name is not in the table above. **The comparison is always by tier, never by literal name.** A required tier is often written using its Claude alias (`sonnet`, `opus` — including inside *Command routing*, next) because that is the primary table's first column; a Codex or other non-Claude session resolves its own reported name to a tier via the primary table or the alias list, then checks that *tier* against the tier the required name belongs to, not against the literal string. `Terra` resolving to Implementation and a requirement written as `sonnet, medium` is a match, not a mismatch, because both name the same row. If it matches exactly, proceed without further comment. Any mismatch gates the same way, in either direction: **stop before doing any expensive work**, name the tier the task actually needs, and wait — do not proceed on the wrong tier unless the user explicitly overrides after seeing the mismatch. Under-powered, name the stronger model needed. Over-powered, name the lighter tier that fits — running deep reasoning against implementation-tier work is the same unbudgeted cost as running implementation-tier reasoning against a task that needed more of it, just paid in the other direction. Where the model itself can't be changed mid-session (*Division of control*, next), the override this gate waits for can also be "cap your own reasoning effort to the lighter tier and proceed" rather than a model swap.
+- **Model tier is guidance, not a gate.** Per `AGENTS.shared.md` § Models, pick the model by the difficulty of the work and run at whatever model the session has; a mismatch is never a reason to stop or wait.
 
 **Division of control.** I set the session model. You set subagent models and scale your own reasoning depth. You cannot change your own session model.
-
-### Vendor model aliases
-
-The table above names each vendor's primary identity for a tier. A vendor's own tooling can report a session under a different name for the same tier — Codex has been observed reporting `Sol`, `Terra`, `Codex Spark`, and `GPT-5`, none of which appear in the table above. A name below **carrying a tier is a synonym for that tier's row, never a new tier of its own**; the gate matches on tier, not on which name the vendor happened to print.
-
-**Resolve the tier from the stamp first, then the configuration, and only then the self-report.** Where `AGENTKIT_TIER` is set in the environment, it *is* the tier and nothing further is looked up — `tools/Invoke-CodexCommand.ps1` sets it, alongside `AGENTKIT_MODEL`, `AGENTKIT_EFFORT` and `AGENTKIT_COMMAND`, from the same table that picks the profile, so a session launched through that script carries its tier as a fact rather than an inference. This exists because the configuration read below is unexecutable in the sessions that need it most: the `architect` profile is `sandbox_mode = "read-only"` scoped to the workspace, and `~/.codex/` is outside it, so a `/redteam` session cannot open the file it is told to resolve from and falls to the self-report, which stops — every time, on the one command whose routing already required the strongest model. Environment variables cross that boundary; configuration files do not. A stamp naming a tier no row below carries is not a tier — treat it as unreadable and fall through.
-
-**Failing that, resolve the tier from the session's configuration, not from what the session says it is.** A model cannot see which snapshot it is running as — it repeats whatever its system prompt calls it, and that name is chosen for the family, not for the tier. The configuration is an observable fact and the self-report is an assertion, so *Verification*'s first rule binds the gate itself: read the configured `model` and `model_reasoning_effort`, layering the `--profile` overlay over the base config when one was used, and resolve from those. [`codex/PROFILES.md`](codex/PROFILES.md) owns where both live for a given CLI version. The **family segment of the model id** is the name to look up below — `gpt-5.6-sol` resolves through the `Sol` row to Deep reasoning. Effort needs no alias at all, because `model_reasoning_effort` states it outright; that, not an unconfirmed mapping, is why `xhigh` has no Codex row.
-
-| Vendor | Reported as | Tier |
-|---|---|---|
-| Codex | `Sol` | Deep reasoning |
-| Codex | `Terra` | Implementation |
-| Codex | `Codex Spark` | Implementation |
-| Codex | `GPT-5` — bare family prefix | **none.** Resolve from configuration |
-
-**A bare family prefix is not an alias.** `GPT-5` is what every model in the family answers when asked to identify itself, Sol included, so no tier can be read off it — mapping one to a tier gates a correctly-launched session as the wrong tier every time it runs. It stays in the table without one so that it is not mapped again.
-
-**Where the configuration cannot be read, the self-report is all there is, and it stops.** A name matching neither the table above nor this list is a real mismatch, and so is a bare family prefix — the gate stops on both, same as any other mismatch, and says which of the two it hit. Add a row here, never a new column above, when another vendor name turns up; that is what keeps the primary table one identity per vendor per tier instead of an accumulating list of historical names.
 
 ### Command routing
 
@@ -123,7 +94,7 @@ Routing says which model runs a command. This says **when a session must end.** 
 
 **Compaction is a boundary you did not choose.** If a session compacts mid-slice, report it — the slice was mis-sized, and the work after the compaction was done against a summary of the contract rather than the contract.
 
-**End a response that lands on a fresh-session boundary with a banner, not a footnote.** A boundary buried in the last sentence of a report gets carried into the next reply of the same session out of habit, which is the exact failure the boundary exists to prevent. Set it off as a heading in the same form as the [work-start banner](#model-effort-and-review-budget) — `=` rules, Title Case, plain lines — naming: the boundary just crossed, the next command, and its tier from *Command routing*. For example:
+**End a response that lands on a fresh-session boundary with a banner, not a footnote.** A boundary buried in the last sentence of a report gets carried into the next reply of the same session out of habit, which is the exact failure the boundary exists to prevent. Set it off as a heading: three plain lines in Title Case, fenced above and below by a rule of `=`, naming: the boundary just crossed, the next command, and its tier from *Command routing*. For example:
 
 ```
 ===============================

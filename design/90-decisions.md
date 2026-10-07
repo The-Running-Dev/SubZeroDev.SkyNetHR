@@ -7073,6 +7073,12 @@ Chosen: delete `.claude/commands/` entirely, `track-local.md` included (`/track`
 Rejected: keep a stub `.claude/commands/` so the check passes — a directory kept alive for a validator that validates only itself; repoint the check at the kit's checkout — the kit owns its own command files and their citations.
 Reversibility: cheap.
 
+### 2026-10-07 — D287 Drop the model-tier gate; the shared contract wins
+Context: after D286, `AGENTS.md` still required stating a tier banner and stopping on any mismatch between the session's model and the tier (with a vendor-alias table to resolve Codex names), while `AGENTS.shared.md` § Models says tier guidance never gates a session.
+Chosen: remove the banner-and-gate bullet and the *Vendor model aliases* subsection from `AGENTS.md`; keep the tier table, the effort rules and the command routing as guidance, and state that tier never gates.
+Rejected: keep the gate as a repository-specific stricter rule — the shared contract binds here as fully as `AGENTS.md`, and a gate that stops sessions on a model name stalls the autonomous `/agentkit:next` loop.
+Reversibility: cheap.
+
 ## Open
 
 Staging only. Once an item becomes an issue it leaves this list.
