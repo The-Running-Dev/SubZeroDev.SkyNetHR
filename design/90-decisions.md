@@ -7067,6 +7067,12 @@ Context: `.claude/settings.json` ran `pwsh … tools/Measure-Session.ps1` on `Se
 Chosen: remove this repository's `hooks.SessionEnd` entry, in the AgentKit sync to `v2026.10.06.1`. Nothing else in `settings.json` changes.
 Rejected: point it at `measure-session.ts` — the global hook already runs that script, so every session would be logged twice; leave it — it keeps failing at every session end.
 
+### 2026-10-07 — D286 Retire the copied AgentKit commands and `Test-DesignReferences`
+Context: AgentKit v2026.10.07 runs from the machine-wide checkout and keeps nothing in the repository; its commands are `/agentkit:<name>`. The 23 copies in `.claude/commands/` were stale, and a bare `/next` or `/fix` here ran the old version. Removing them failed CI: `tools/Test-DesignReferences.ps1` checked only those files' `design/10-design.md` § citations, so with them gone it had nothing to check (PR #516 removed only `kit.json`).
+Chosen: delete `.claude/commands/` entirely, `track-local.md` included (`/track` is retired); its repository-specific facts — branch protection on `main`, the Landed-first layout of `design/30-slices.md`, the absent design-state projection — move to `AGENTS.md` § *Repository-specific facts*. Delete `tools/Test-DesignReferences.ps1`, its tests, and its `verify.yml` step. Rewrite the `AGENTS.md` passages describing the copy-based process to defer to `AGENTS.shared.md`. `tools/Test-DesignDrift.ps1` never read `.claude/commands/`, so it stays. D189 and the earlier entries stay as history.
+Rejected: keep a stub `.claude/commands/` so the check passes — a directory kept alive for a validator that validates only itself; repoint the check at the kit's checkout — the kit owns its own command files and their citations.
+Reversibility: cheap.
+
 ## Open
 
 Staging only. Once an item becomes an issue it leaves this list.
