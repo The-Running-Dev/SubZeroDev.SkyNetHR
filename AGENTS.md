@@ -94,7 +94,7 @@ Routing says which model runs a command. This says **when a session must end.** 
 
 **Compaction is a boundary you did not choose.** If a session compacts mid-slice, report it — the slice was mis-sized, and the work after the compaction was done against a summary of the contract rather than the contract.
 
-**End a response that lands on a fresh-session boundary with a banner, not a footnote.** A boundary buried in the last sentence of a report gets carried into the next reply of the same session out of habit, which is the exact failure the boundary exists to prevent. Set it off as a heading as three plain lines fenced above and below by a rule of `=`, Title Case, plain lines — naming: the boundary just crossed, the next command, and its tier from *Command routing*. For example:
+**End a response that lands on a fresh-session boundary with a banner, not a footnote.** A boundary buried in the last sentence of a report gets carried into the next reply of the same session out of habit, which is the exact failure the boundary exists to prevent. Set it off as a heading: three plain lines in Title Case, fenced above and below by a rule of `=`, naming: the boundary just crossed, the next command, and its tier from *Command routing*. For example:
 
 ```
 ===============================
