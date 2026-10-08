@@ -48,7 +48,7 @@ async function atomicWrite(targetPath: string, contents: Buffer | string): Promi
 // outlasts the retries still throws and still reads as storage_unwritable. The whole budget
 // (310 ms) stays far below `LOCK_RENEWAL_INTERVAL_MS`: two racing reclaimers' renames land
 // in some order well before either confirms, so D216's last-to-land rule still decides.
-const RENAME_RETRY_DELAYS_MS = [10, 20, 40, 80, 160] as const;
+export const RENAME_RETRY_DELAYS_MS = [10, 20, 40, 80, 160] as const;
 const TRANSIENT_RENAME_CODES: ReadonlySet<string> = new Set(['EPERM', 'EACCES', 'EBUSY']);
 
 export async function renameOver(

@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promis
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { after, test } from 'node:test';
-import { createStore as createStoreRaw, LOCK_RENEWAL_INTERVAL_MS, renameOver } from './index.js';
+import { createStore as createStoreRaw, LOCK_RENEWAL_INTERVAL_MS, RENAME_RETRY_DELAYS_MS, renameOver } from './index.js';
 import type { AuditCursor, AuditRecord, Config, Envelope, Result, ServerLock, SessionRecord, Store, StoreError } from '../contract/index.js';
 
 // #292: every `Store` opened by this suite must be closed, or its append-mode `FileHandle`s
@@ -1116,7 +1116,6 @@ test('#511 — renameOver rethrows a non-transient error without retrying', asyn
 
 test('#511 — renameOver gives up on a refusal that outlasts its bounded retries, well inside one renewal interval', async () => {
   let calls = 0;
-  const t0 = Date.now();
   await assert.rejects(
     renameOver('from', 'to', async () => {
       calls += 1;
@@ -1124,8 +1123,11 @@ test('#511 — renameOver gives up on a refusal that outlasts its bounded retrie
     }),
     { code: 'EPERM' },
   );
-  assert.equal(calls, 6, 'five retries after the first attempt');
-  assert.ok(Date.now() - t0 < LOCK_RENEWAL_INTERVAL_MS / 2, 'the retry budget leaves the confirmation window to decide the race');
+  assert.equal(calls, RENAME_RETRY_DELAYS_MS.length + 1, 'one attempt per retry, then a last one that throws');
+  // Asserted on the schedule, not on a stopwatch: a wall-clock bound is the full-suite-load flake
+  // #382 describes, and the schedule is what decides whether the confirmation window still rules.
+  const budgetMs = RENAME_RETRY_DELAYS_MS.reduce((sum, ms) => sum + ms, 0);
+  assert.ok(budgetMs < LOCK_RENEWAL_INTERVAL_MS / 2, `retry budget ${budgetMs} ms leaves the confirmation window to decide the race`);
 });
 
 // The real race, on the real filesystem: two renames onto one target at once. On Windows the
