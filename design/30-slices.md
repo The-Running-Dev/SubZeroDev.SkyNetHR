@@ -112,7 +112,7 @@ Slices placed here have no closed issue, or an issue reopened because it was clo
 
 ## S38 — Roll back without touching what the folder ignores
 
-Status: todo
+Status: done
 
 **Tier one, and it closes a data-loss path in brief item 6.** D267 and D277 decided this, and
 `20-contract.md § checkpoints` states the sequence. Today, a restore that changes `.gitignore`

@@ -60,11 +60,13 @@ import { createAttachmentStaging } from './attachments.js';
 import type { AuditSink } from '../store/audit.js';
 import { createCheckpointExtension } from '../extensions/checkpoints/extension.js';
 
-// Every `CheckpointError` variant but `no_such_checkpoint` carries `detail`; that one
-// carries `sha` instead. Centralised so every notice/error text built from a
+// Every `CheckpointError` variant but `no_such_checkpoint` and `ignored_path_collision`
+// carries `detail`; those carry `sha` and `paths` instead. Centralised so every notice/error text built from a
 // `CheckpointError` reads the same way regardless of which variant it is.
 function checkpointErrorDetail(e: CheckpointError): string {
-  return e.code === 'no_such_checkpoint' ? `no such checkpoint: ${e.sha}` : e.detail;
+  if (e.code === 'no_such_checkpoint') return `no such checkpoint: ${e.sha}`;
+  if (e.code === 'ignored_path_collision') return `ignored paths in the way: ${e.paths.join(', ')}`;
+  return e.detail;
 }
 
 // The live turn is the contract's own `Turn` (20-contract.md § Turn), not a private
@@ -1376,6 +1378,14 @@ export function createSessionCore(deps: {
             const listed = await checkpoints.list(sessionId, entry.record.cwd);
             const safety = listed.ok ? listed.value[0] : undefined;
             if (safety) await emit(entry, 'checkpoint.created', { turnId: null, sha: safety.sha, label: safety.label });
+          } else if (restored.error.code === 'ignored_set_unreadable') {
+            // D267: the detail rides an `error` event, as `restore_incomplete`'s does, but
+            // nothing was written — no safety checkpoint exists to announce.
+            await emit(entry, 'error', {
+              kind: 'checkpoint_restore_failed',
+              message: `restore to ${sha} was refused before anything changed: ${restored.error.detail}`,
+              fatal: false,
+            });
           }
           return { ok: false, error: { code: 'checkpoint', cause: restored.error } };
         }

@@ -16,6 +16,7 @@ const STATUS_FOR: Record<ApiErrorCode, number> = {
   workspace_busy: 409,
   outside_workspace_root: 409,
   bad_request: 422,
+  restore_collision: 409,
   checkpoint_failed: 500,
   agent_unavailable: 503,
   no_such_requisition: 404,

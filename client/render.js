@@ -402,6 +402,33 @@ export function renderUnreachedReport(doc, unreached) {
   return section;
 }
 
+function pathList(doc, paths) {
+  const list = doc.createElement('ul');
+  list.className = 'restore-report__list';
+  for (const p of paths) list.appendChild(el(doc, 'li', 'restore-report__path', p));
+  return list;
+}
+
+// S38.10/D277: `exposed` is a restore's `RestoreResult.exposed` — paths that were ignored when
+// the restore started and that the target's rules no longer ignore. Not a failure and not part
+// of `unreached`, so it renders as its own block, and only when non-empty. Each path is
+// untrusted and reaches the document as a text node (I26).
+export function renderExposedReport(doc, exposed) {
+  const section = el(doc, 'div', 'restore-report restore-report--exposed');
+  section.appendChild(el(doc, 'p', 'restore-report__exposed', 'no longer ignored after the rollback, left as they were; the next checkpoint will capture them'));
+  section.appendChild(pathList(doc, exposed));
+  return section;
+}
+
+// S38.10/D267: a `409 restore_collision` refusal. Nothing was changed, so this is never shown
+// as a failed restore; every path in `error.detail.paths` is named, each as a text node.
+export function renderRestoreCollision(doc, paths) {
+  const section = el(doc, 'div', 'restore-report restore-report--collision');
+  section.appendChild(el(doc, 'p', 'restore-report__collision', 'restore refused, nothing was changed: the checkpoint would replace these ignored paths. Move or delete them, then restore again'));
+  section.appendChild(pathList(doc, paths));
+  return section;
+}
+
 // S14.3: this envelope carries no `turnId` and may land mid-turn — rendered attributed to
 // the operator who ticked it (`data.by`), never to the agent.
 function checklistItemCompletedNode(doc, data) {

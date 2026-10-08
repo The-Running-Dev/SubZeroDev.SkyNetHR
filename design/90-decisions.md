@@ -7085,6 +7085,18 @@ Chosen: replace both files with the kit's copies; add the kit's table-narrowing 
 Rejected: keep the target's `story.md` and `PROFILES.md` — both were kit copies, not local triage or Codex policy, and they point at commands and sections that no longer exist; `/agentkit:interview` in `story.md` — a permanent divergence every later install would flag; the lessons verbatim — they carry another repository's specifics; the kit's hardcoded set-size lesson — its evidence is the kit's own design-state checker, with no counterpart here.
 Reversibility: cheap.
 
+### 2026-10-08 — S38: a preflight that cannot list the target's tree is `ignored_set_unreadable`
+Context: `20-contract.md § checkpoints` names two pre-write refusals — a failed protected-set `read` (`ignored_set_unreadable`) and a collision (`ignored_path_collision`) — and says nothing of the preflight's own `ls-tree` failing. The error table's `ignored_set_unreadable` row names only the opening `status`.
+Chosen: an `ls-tree` failure is `ignored_set_unreadable`, its detail naming the tree rather than the ignored paths. Both are a refusal before any write: `500 checkpoint_failed`, an `error / checkpoint_restore_failed` event, the workspace untouched, no safety commit. The core's event message now carries the runtime's detail rather than prefixing its own cause.
+Rejected: `restore_incomplete` — the core answers it by announcing the newest checkpoint as the safety commit, and with no safety commit written that would announce the previous checkpoint under the wrong name, and report a partial restore of a workspace nothing touched; `commit_failed` — no commit was attempted; `git_unavailable` — the contract reserves it for checkpoints absent from the session, and a client would stop offering restores that still work.
+Reversibility: cheap.
+
+### 2026-10-08 — S38: the checkpoints runtime takes an optional `GitRunner`, for tests only
+Context: S38.5 forces the ignore-matching `status` to fail and S38.6 records the order of git invocations within one restore. Neither can be staged from the work-tree alone without also breaking the commit that precedes the restore.
+Chosen: the runtime `createCheckpoints` takes a third, optional `GitRunner`, defaulting to `runGit`; every git call inside the module goes through it. The host factory and `Checkpoints` are unchanged, and production never passes it. The suite wraps every instance in a recorder, which is also S38.7's evidence.
+Rejected: an environment-variable seam — process-wide, so concurrent test files would interfere, and reachable in production; a `PATH` shim standing in for `git` — platform-specific, and it cannot separate one `status` form from another without parsing arguments in a shell script; asserting order from file mtimes in the shadow repository — it cannot show that a read happened at all.
+Reversibility: cheap.
+
 ### 2026-10-08 — D289 Load-sensitive test timings: two become event-driven, three are retained
 Context: issue #524 listed the timings the #382 sweep left alone because a spec or a decision sets them. Each can lose a race under concurrent load. A heavy local load run failed the codex-exec conformance test once in three runs on the probe's 2 s bound. D141 priced that bound as a stall of the whole server; since then the probe has become an async spawn, so the stall now falls only on the create that is probing.
 Chosen, first: **the provider definitions and `createCodexAdapter` take an optional probe timeout, for tests only.** Production leaves it unset and keeps `probeCommand`'s 2 s bound and D141/D226's "up to 4 s". The tests that probe a node-script fake CLI pass 30 s.

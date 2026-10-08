@@ -14,7 +14,7 @@ const ok = <T>(value: T) => ({ ok: true as const, value });
 const success = () => ok(undefined);
 function deferred<T>() { let resolve!: (value: T) => void; const promise = new Promise<T>(r => { resolve = r; }); return { promise, resolve }; }
 const checkpoint: Checkpoint = { sha: 'a'.repeat(40) as GitSha, label: 'fixture', ts: '2020-01-01T00:00:00.000Z' as IsoTimestamp };
-const checkpointBackend: Checkpoints = { async init() { return success(); }, async commit() { return ok(checkpoint); }, async list() { return ok([checkpoint]); }, async restore() { return ok({ safety: checkpoint, unreached: [] }); }, async destroy() { return success(); } };
+const checkpointBackend: Checkpoints = { async init() { return success(); }, async commit() { return ok(checkpoint); }, async list() { return ok([checkpoint]); }, async restore() { return ok({ safety: checkpoint, unreached: [], exposed: [] }); }, async destroy() { return success(); } };
 function noEffects() { return createHostAttempts({ prepare: success, async commit() { return success(); }, abort() {} }); }
 function error(result: Result<unknown, SessionError>, code: SessionError['code']) { assert.ok(!result.ok); assert.equal(result.error.code, code); }
 
@@ -98,14 +98,14 @@ test('#461 — get, list and listPage expose the recorded end reason and null wh
 });
 
 test('A11/A22 — restore reserves exclusively and refuses send/end/remove/restore until finally', async t => {
-  const entered = deferred<void>(), restore = deferred<ReturnType<typeof ok<{ safety: Checkpoint; unreached: [] }>>>();
+  const entered = deferred<void>(), restore = deferred<ReturnType<typeof ok<{ safety: Checkpoint; unreached: []; exposed: [] }>>>();
   const f = await fixture(t, { max: 2, checkpoints: { restore() { entered.resolve(); return restore.promise; } } });
   const id = await f.create();
   const restoring = f.core.restore(id, 'alice', checkpoint.sha);
   await entered.promise;
   for (const action of [() => f.core.send(id, 'alice', 'x', []), () => f.core.end(id, 'alice'), () => f.core.remove(id, 'alice'), () => f.core.restore(id, 'alice', checkpoint.sha)]) error(await action(), 'turn_in_flight');
   error(await f.core.create('bob', f.input), 'workspace_busy');
-  restore.resolve(ok({ safety: checkpoint, unreached: [] }));
+  restore.resolve(ok({ safety: checkpoint, unreached: [], exposed: [] }));
   assert.ok((await restoring).ok);
   assert.ok((await f.core.create('bob', f.input)).ok);
   error(await f.core.restore(id, 'alice', checkpoint.sha), 'workspace_busy');
@@ -336,4 +336,26 @@ test('A22 — reentrant appends preserve durable and every subscriber seq order'
   assert.ok((await f.core.events.append(id, 'alice', 'session.notice', data)).ok); await appended;
   assert.deepEqual((await f.events(id)).map(e => e.seq), [1, 2]);
   assert.deepEqual(first, [1, 2]); assert.deepEqual(second, [1, 2]);
+});
+
+test('S38.9/S38.5/S38.4 — restore_incomplete and an unreadable ignored set each emit error/checkpoint_restore_failed; a collision emits nothing', async t => {
+  const failures = [
+    { error: { code: 'restore_incomplete' as const, detail: 'nested/ left behind' }, emits: true, announces: true },
+    { error: { code: 'ignored_set_unreadable' as const, detail: 'status failed' }, emits: true, announces: false },
+    { error: { code: 'ignored_path_collision' as const, paths: ['.env'] }, emits: false, announces: false },
+  ];
+  for (const failure of failures) {
+    const f = await fixture(t, { max: 3, checkpoints: { async restore() { return { ok: false, error: failure.error }; } } });
+    const id = await f.create();
+    const before = (await f.events(id)).length;
+    const restored = await f.core.restore(id, 'alice', checkpoint.sha);
+    assert.ok(!restored.ok);
+    assert.equal(restored.error.code, 'checkpoint');
+    const added = (await f.events(id)).slice(before);
+    const errors = added.filter(e => e.kind === 'error');
+    assert.equal(errors.length, failure.emits ? 1 : 0, failure.error.code);
+    if (failure.emits) assert.equal((errors[0]!.data as { kind: string }).kind, 'checkpoint_restore_failed');
+    assert.equal(added.some(e => e.kind === 'checkpoint.created'), failure.announces, `${failure.error.code} safety announce`);
+    assert.ok((await f.core.end(id, 'alice')).ok);
+  }
 });

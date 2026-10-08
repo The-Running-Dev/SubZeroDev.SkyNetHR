@@ -1,13 +1,20 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
-import { computeUnreached, createCheckpoints as createRuntimeCheckpoints } from '../agent-console/extensions/checkpoints/index.js';
+import { computeUnreached, createCheckpoints as createRuntimeCheckpoints, runGit, type GitRunner } from '../agent-console/extensions/checkpoints/index.js';
 import type { Config, GitSha, IgnoredManifest, SessionId } from '../contract/index.js';
+import { statusForCode } from '../edge/error-envelope/index.js';
+import { apiErrorFor } from '../edge/http-common/index.js';
 
-const createCheckpoints = (config: Config) => createRuntimeCheckpoints(config, { name: 'skynet-hr', email: 'checkpoints@skynet-hr.local' });
+// S38.7: every git invocation this suite's checkpoints make, restores included, so the last
+// test can assert none of them was `clean` or a forced `add`.
+const invocations: string[][] = [];
+const recording = (inner: GitRunner): GitRunner => (gitDir, workTree, args) => { invocations.push([...args]); return inner(gitDir, workTree, args); };
+const createCheckpoints = (config: Config, git: GitRunner = runGit) => createRuntimeCheckpoints(config, { name: 'skynet-hr', email: 'checkpoints@skynet-hr.local' }, recording(git));
 
 function baseConfig(storageRoot: string): Config {
   return {
@@ -38,11 +45,11 @@ function baseConfig(storageRoot: string): Config {
   };
 }
 
-async function fixture() {
+async function fixture(git: GitRunner = runGit) {
   const storageRoot = await mkdtemp(path.join(tmpdir(), 'skynet-ckpt-store-'));
   const cwd = await mkdtemp(path.join(tmpdir(), 'skynet-ckpt-ws-'));
   const config = baseConfig(storageRoot);
-  const checkpoints = createCheckpoints(config);
+  const checkpoints = createCheckpoints(config, git);
   const sessionId = 'sess-1' as SessionId;
   return { storageRoot, cwd: cwd as never, checkpoints, sessionId };
 }
@@ -237,7 +244,7 @@ test('S6.10-adjacent/S32.11 — destroy removes ckpt.git and its ignored-path ma
   assert.equal(existsSync(ignoredDir), false, 'the manifest directory is gone along with ckpt.git');
 });
 
-test('S6.11/S32.10 — a restore left short by an embedded git repository (git leaves it behind, exit code 0) is still reported restore_incomplete, with the safety checkpoint already committed and no report', async () => {
+test('S6.11/S32.10/S38.9 — a restore left short by an embedded git repository (git leaves it behind, exit code 0) is still reported restore_incomplete, with the safety checkpoint already committed and no report', async () => {
   const { cwd, checkpoints, sessionId } = await fixture();
   await checkpoints.init(sessionId, cwd);
 
@@ -271,6 +278,11 @@ test('S6.11/S32.10 — a restore left short by an embedded git repository (git l
   assert.equal(restored.ok, false);
   if (!restored.ok) {
     assert.equal(restored.error.code, 'restore_incomplete');
+    // S38.9: removing `clean` does not let the embedded repository through — the
+    // verification read still finds it, and the route still answers 500.
+    const wire = apiErrorFor({ code: 'checkpoint', cause: restored.error });
+    assert.equal(wire.code, 'checkpoint_failed');
+    assert.equal(statusForCode(wire.code), 500);
     // S32.10: a dirty verification pass fails exactly as before, and carries no report —
     // the report step never runs on this path, so there is no `unreached` to inspect.
     assert.equal('unreached' in restored, false);
@@ -472,4 +484,243 @@ test('S32.12 — the collapsed-directory blindness is real: an edit deep inside 
   assert.equal(restored.ok, true);
   if (!restored.ok) return;
   assert.deepEqual(restored.value.unreached, [], 'a real content change is invisible to the collapsed directory\'s own metadata — this is the documented blindness (D187, I58), not a bug');
+});
+
+// --- S38 — Roll back without touching what the folder ignores -------------------------
+
+// Every file under `root`, by relative path and bytes — a directory's own presence counts
+// too, so an emptied directory reads differently from a removed one.
+async function treeHash(root: string): Promise<string> {
+  const hash = createHash('sha256');
+  async function walk(dir: string, rel: string): Promise<void> {
+    const entries = (await readdir(dir, { withFileTypes: true })).sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+    for (const entry of entries) {
+      const relPath = rel === '' ? entry.name : `${rel}/${entry.name}`;
+      if (entry.isDirectory()) {
+        hash.update(`d ${relPath}\0`);
+        await walk(path.join(dir, entry.name), relPath);
+      } else {
+        hash.update(`f ${relPath}\0`);
+        hash.update(await readFile(path.join(dir, entry.name)));
+        hash.update('\0');
+      }
+    }
+  }
+  await walk(root, '');
+  return hash.digest('hex');
+}
+
+const IGNORE_MATCHING = ['status', '--porcelain=v1', '-z', '--ignored=matching'];
+const isIgnoreMatchingStatus = (args: readonly string[]) => args.length === IGNORE_MATCHING.length && args.every((a, i) => a === IGNORE_MATCHING[i]);
+
+async function commitCount(checkpoints: ReturnType<typeof createCheckpoints>, sessionId: SessionId, cwd: never): Promise<number> {
+  const listed = await checkpoints.list(sessionId, cwd);
+  assert.equal(listed.ok, true);
+  return listed.ok ? listed.value.length : -1;
+}
+
+test('S38.1/S38.2 — paths ignored today and not by the target survive byte for byte, each named once in exposed', async () => {
+  const { cwd, checkpoints, sessionId } = await fixture();
+  await checkpoints.init(sessionId, cwd);
+  await writeFile(path.join(cwd, '.gitignore'), 'unrelated.log\n');
+  await writeFile(path.join(cwd, 'app.txt'), 'v1');
+  const target = await checkpoints.commit(sessionId, cwd, 'target');
+  assert.equal(target.ok, true);
+  if (!target.ok) return;
+
+  // Today's rules ignore both, the target's ignore neither, and the target's tree holds
+  // neither — the shape the old `clean` step deleted.
+  await writeFile(path.join(cwd, '.gitignore'), 'secrets.txt\nbuild/\n');
+  await writeFile(path.join(cwd, 'secrets.txt'), 'API_KEY=never-checkpointed');
+  await mkdir(path.join(cwd, 'build', 'nested'), { recursive: true });
+  await writeFile(path.join(cwd, 'build', 'a.o'), 'object a');
+  await writeFile(path.join(cwd, 'build', 'b.o'), 'object b');
+  await writeFile(path.join(cwd, 'build', 'nested', 'c.o'), 'object c');
+  await writeFile(path.join(cwd, 'app.txt'), 'v2');
+
+  const restored = await checkpoints.restore(sessionId, cwd, target.value.sha);
+  assert.equal(restored.ok, true, restored.ok ? '' : JSON.stringify(restored.error));
+  if (!restored.ok) return;
+
+  assert.equal(await readFile(path.join(cwd, 'app.txt'), 'utf8'), 'v1', 'the restore itself still happened');
+  assert.equal(await readFile(path.join(cwd, 'secrets.txt'), 'utf8'), 'API_KEY=never-checkpointed');
+  assert.equal(await readFile(path.join(cwd, 'build', 'a.o'), 'utf8'), 'object a');
+  assert.equal(await readFile(path.join(cwd, 'build', 'b.o'), 'utf8'), 'object b');
+  assert.equal(await readFile(path.join(cwd, 'build', 'nested', 'c.o'), 'utf8'), 'object c');
+  // S38.2: the directory is one protected-set entry, so it is one exposed entry — none of
+  // its three files is named separately.
+  assert.deepEqual([...restored.value.exposed].sort(), ['build', 'secrets.txt']);
+});
+
+test('S38.1 — exposed is exactly the one ignored file when it is the only one', async () => {
+  const { cwd, checkpoints, sessionId } = await fixture();
+  await checkpoints.init(sessionId, cwd);
+  await writeFile(path.join(cwd, '.gitignore'), '');
+  const target = await checkpoints.commit(sessionId, cwd, 'target');
+  assert.equal(target.ok, true);
+  if (!target.ok) return;
+
+  await writeFile(path.join(cwd, '.gitignore'), 'secrets.txt\n');
+  await writeFile(path.join(cwd, 'secrets.txt'), 'pre-restore bytes');
+  const restored = await checkpoints.restore(sessionId, cwd, target.value.sha);
+  assert.equal(restored.ok, true);
+  if (!restored.ok) return;
+  assert.equal(await readFile(path.join(cwd, 'secrets.txt'), 'utf8'), 'pre-restore bytes');
+  assert.deepEqual(restored.value.exposed, ['secrets.txt']);
+});
+
+test('S38.3 — exposed is the empty array, never null, when no ignore rule changed', async () => {
+  const { cwd, checkpoints, sessionId } = await fixture();
+  await checkpoints.init(sessionId, cwd);
+  await writeFile(path.join(cwd, '.gitignore'), 'secrets.txt\n');
+  await writeFile(path.join(cwd, 'secrets.txt'), 'kept');
+  await writeFile(path.join(cwd, 'a.txt'), 'v1');
+  const target = await checkpoints.commit(sessionId, cwd, 'target');
+  assert.equal(target.ok, true);
+  if (!target.ok) return;
+
+  await writeFile(path.join(cwd, 'a.txt'), 'v2');
+  const restored = await checkpoints.restore(sessionId, cwd, target.value.sha);
+  assert.equal(restored.ok, true);
+  if (!restored.ok) return;
+  assert.deepEqual(restored.value.exposed, []);
+  assert.equal(await readFile(path.join(cwd, 'secrets.txt'), 'utf8'), 'kept');
+});
+
+test('S38.4 — all three collision shapes refuse together with 409 restore_collision, nothing written and no safety commit', async () => {
+  const { cwd, checkpoints, sessionId } = await fixture();
+  await checkpoints.init(sessionId, cwd);
+  // The target holds `config.local` (shape 1), `dist/app.js` (shape 2) and `out` as a
+  // file (shape 3), none of them ignored at the time.
+  await writeFile(path.join(cwd, 'config.local'), 'checkpointed config');
+  await mkdir(path.join(cwd, 'dist'));
+  await writeFile(path.join(cwd, 'dist', 'app.js'), 'checkpointed bundle');
+  await writeFile(path.join(cwd, 'out'), 'checkpointed file named out');
+  await writeFile(path.join(cwd, 'keep.txt'), 'v1');
+  const target = await checkpoints.commit(sessionId, cwd, 'target');
+  assert.equal(target.ok, true);
+  if (!target.ok) return;
+
+  // All three leave the shadow index, then come back as paths today's rules ignore.
+  await rm(path.join(cwd, 'config.local'));
+  await rm(path.join(cwd, 'dist'), { recursive: true });
+  await rm(path.join(cwd, 'out'));
+  const between = await checkpoints.commit(sessionId, cwd, 'between');
+  assert.equal(between.ok, true);
+  await writeFile(path.join(cwd, '.gitignore'), 'config.local\ndist/\n*.log\n');
+  await writeFile(path.join(cwd, 'config.local'), 'operator config, never checkpointed');
+  await mkdir(path.join(cwd, 'dist'));
+  await writeFile(path.join(cwd, 'dist', 'local.js'), 'operator build output');
+  await mkdir(path.join(cwd, 'out'));
+  await writeFile(path.join(cwd, 'out', 'y.log'), 'operator log');
+  await writeFile(path.join(cwd, 'keep.txt'), 'v2');
+
+  const hashBefore = await treeHash(cwd);
+  const commitsBefore = await commitCount(checkpoints, sessionId, cwd);
+
+  const restored = await checkpoints.restore(sessionId, cwd, target.value.sha);
+  assert.equal(restored.ok, false);
+  if (restored.ok) return;
+  assert.equal(restored.error.code, 'ignored_path_collision');
+  if (restored.error.code !== 'ignored_path_collision') return;
+  assert.deepEqual([...restored.error.paths].sort(), ['config.local', 'dist', 'out/y.log']);
+
+  const wire = apiErrorFor({ code: 'checkpoint', cause: restored.error });
+  assert.equal(wire.code, 'restore_collision');
+  assert.equal(statusForCode(wire.code), 409);
+  assert.deepEqual([...(wire.detail as { paths: string[] }).paths].sort(), ['config.local', 'dist', 'out/y.log']);
+
+  assert.equal(await treeHash(cwd), hashBefore, 'the workspace is unchanged');
+  assert.equal(await commitCount(checkpoints, sessionId, cwd), commitsBefore, 'no safety commit was written');
+});
+
+test('S38.5 — an unreadable ignored set refuses with 500 checkpoint_failed, nothing written and no safety commit', async () => {
+  let failStatus = false;
+  const failing: GitRunner = async (gitDir, workTree, args) => (failStatus && isIgnoreMatchingStatus(args) ? { ok: false, error: { message: 'forced status failure', enoent: false } } : runGit(gitDir, workTree, args));
+  const { cwd, checkpoints, sessionId } = await fixture(failing);
+  await checkpoints.init(sessionId, cwd);
+  await writeFile(path.join(cwd, 'a.txt'), 'v1');
+  const target = await checkpoints.commit(sessionId, cwd, 'target');
+  assert.equal(target.ok, true);
+  if (!target.ok) return;
+  await writeFile(path.join(cwd, 'a.txt'), 'v2');
+
+  const hashBefore = await treeHash(cwd);
+  const commitsBefore = await commitCount(checkpoints, sessionId, cwd);
+  failStatus = true;
+  const restored = await checkpoints.restore(sessionId, cwd, target.value.sha);
+  failStatus = false;
+  assert.equal(restored.ok, false);
+  if (restored.ok) return;
+  assert.equal(restored.error.code, 'ignored_set_unreadable');
+
+  const wire = apiErrorFor({ code: 'checkpoint', cause: restored.error });
+  assert.equal(wire.code, 'checkpoint_failed');
+  assert.equal(statusForCode(wire.code), 500);
+  assert.equal(await treeHash(cwd), hashBefore, 'the workspace is unchanged');
+  assert.equal(await commitCount(checkpoints, sessionId, cwd), commitsBefore, 'no safety commit was written');
+});
+
+test('S38.5 — a target tree the preflight cannot list is the same untouched refusal, never a partial restore', async () => {
+  let failTree = false;
+  const failing: GitRunner = async (gitDir, workTree, args) => (failTree && args[0] === 'ls-tree' ? { ok: false, error: { message: 'forced ls-tree failure', enoent: false } } : runGit(gitDir, workTree, args));
+  const { cwd, checkpoints, sessionId } = await fixture(failing);
+  await checkpoints.init(sessionId, cwd);
+  await writeFile(path.join(cwd, '.gitignore'), 'secrets.txt\n');
+  await writeFile(path.join(cwd, 'secrets.txt'), 'kept');
+  await writeFile(path.join(cwd, 'a.txt'), 'v1');
+  const target = await checkpoints.commit(sessionId, cwd, 'target');
+  assert.equal(target.ok, true);
+  if (!target.ok) return;
+  await writeFile(path.join(cwd, 'a.txt'), 'v2');
+
+  const hashBefore = await treeHash(cwd);
+  const commitsBefore = await commitCount(checkpoints, sessionId, cwd);
+  failTree = true;
+  const restored = await checkpoints.restore(sessionId, cwd, target.value.sha);
+  failTree = false;
+  assert.equal(restored.ok, false);
+  if (restored.ok) return;
+  assert.equal(restored.error.code, 'ignored_set_unreadable');
+  assert.equal(await treeHash(cwd), hashBefore, 'the workspace is unchanged');
+  assert.equal(await commitCount(checkpoints, sessionId, cwd), commitsBefore, 'no safety commit was written');
+});
+
+test('S38.6 — the ignore-matching status is read once, before any write; the report reads after the verification', async () => {
+  let recorded: string[][] | null = null;
+  const tracing: GitRunner = (gitDir, workTree, args) => { recorded?.push([...args]); return runGit(gitDir, workTree, args); };
+  const { cwd, checkpoints, sessionId } = await fixture(tracing);
+  await checkpoints.init(sessionId, cwd);
+  await writeFile(path.join(cwd, '.gitignore'), 'secrets.txt\n');
+  await writeFile(path.join(cwd, 'secrets.txt'), 'kept');
+  await writeFile(path.join(cwd, 'a.txt'), 'v1');
+  const target = await checkpoints.commit(sessionId, cwd, 'target');
+  assert.equal(target.ok, true);
+  if (!target.ok) return;
+  await writeFile(path.join(cwd, 'a.txt'), 'v2');
+
+  recorded = [];
+  const restored = await checkpoints.restore(sessionId, cwd, target.value.sha);
+  const calls: string[][] = recorded;
+  recorded = null;
+  assert.equal(restored.ok, true);
+
+  const at = (predicate: (args: string[]) => boolean) => calls.findIndex(predicate);
+  const statusReads = calls.map((args, i) => (isIgnoreMatchingStatus(args) ? i : -1)).filter((i) => i !== -1);
+  const firstWrite = at((args) => ['add', 'commit', 'commit-tree', 'update-ref', 'read-tree'].includes(args[0]!));
+  const readTree = at((args) => args[0] === 'read-tree');
+  const verification = at((args) => args[0] === 'ls-files');
+  assert.ok(firstWrite !== -1 && readTree !== -1 && verification !== -1, JSON.stringify(calls));
+  const protectedReads = statusReads.filter((i) => i < readTree);
+  assert.equal(protectedReads.length, 1, 'the protected set is read exactly once');
+  assert.ok(protectedReads[0]! < firstWrite, 'and before any write to the workspace or the shadow repository');
+  const reportReads = statusReads.filter((i) => i > readTree);
+  assert.equal(reportReads.length, 1, 'the report reads once more');
+  assert.ok(reportReads[0]! > verification, 'after the verification read');
+});
+
+test('S38.7 — no checkpoint in this suite ran `clean` or a forced `add`', () => {
+  assert.ok(invocations.some((args) => args[0] === 'read-tree'), 'the suite did restore');
+  assert.equal(invocations.filter((args) => args[0] === 'clean').length, 0);
+  assert.equal(invocations.filter((args) => args[0] === 'add' && args.some((a) => a === '-f' || a === '--force')).length, 0);
 });

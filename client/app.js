@@ -1,4 +1,4 @@
-import { appendMessageDeltaText, applyAssistantMessageVerbosity, coalesceKey, createCoalesceGroup, createIncidentGroupsBuilder, foldToolCallRepeats, formatHeaderBurn, renderAuditRow, renderEvent, renderHiddenAssistantBlocks, renderPayrollSummary, renderRepeatFold, renderRequisitionRow, renderReviewRow, renderSummaryRow, renderTokenBreakdown, renderUnreachedReport, sessionIdentityFields, updateHiddenAssistantBlocks } from './render.js';
+import { appendMessageDeltaText, applyAssistantMessageVerbosity, coalesceKey, createCoalesceGroup, createIncidentGroupsBuilder, foldToolCallRepeats, formatHeaderBurn, renderAuditRow, renderEvent, renderHiddenAssistantBlocks, renderPayrollSummary, renderRepeatFold, renderRequisitionRow, renderReviewRow, renderSummaryRow, renderTokenBreakdown, renderExposedReport, renderRestoreCollision, renderUnreachedReport, sessionIdentityFields, updateHiddenAssistantBlocks } from './render.js';
 
 const $ = (id) => document.getElementById(id);
 
@@ -522,19 +522,34 @@ async function restoreCheckpoint(sha) {
   status('restoring…', 'info');
   const result = await api('POST', `/api/sessions/${encodeURIComponent(state.sessionId)}/checkpoint/restore`, { sha });
   if (result.status === 401) return;
+  const error = result.payload && result.payload.error;
+  if (result.status === 409 && error && error.code === 'restore_collision') {
+    // S38.10: a refusal, not a failure — the workspace is exactly as it was.
+    status('restore refused — nothing was changed', 'info');
+    return showRestoreCollision(error.detail && Array.isArray(error.detail.paths) ? error.detail.paths : []);
+  }
   if (result.status !== 200) return status(describe(result), 'error');
   status('restored', 'ok');
-  showRestoreReport(result.payload.unreached);
+  showRestoreReport(result.payload.unreached, result.payload.exposed);
   await refreshCheckpoints();
 }
 
 // S32.5/S32.7: `unreached` is `IgnoredDelta[]` or `null` — rendered through
 // `renderUnreachedReport` so `null` (unknown) and `[]` (nothing differs) never collapse
-// into the same message.
-function showRestoreReport(unreached) {
+// into the same message. S38.10: `exposed` is its own block beside it, shown only when
+// non-empty, and never folded into the `unreached` list.
+function showRestoreReport(unreached, exposed) {
   const container = $('restore-report');
   clear(container);
   container.appendChild(renderUnreachedReport(document, unreached));
+  if (Array.isArray(exposed) && exposed.length > 0) container.appendChild(renderExposedReport(document, exposed));
+  container.hidden = false;
+}
+
+function showRestoreCollision(paths) {
+  const container = $('restore-report');
+  clear(container);
+  container.appendChild(renderRestoreCollision(document, paths));
   container.hidden = false;
 }
 

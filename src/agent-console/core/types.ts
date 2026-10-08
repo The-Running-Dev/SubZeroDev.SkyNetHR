@@ -150,6 +150,7 @@ export interface IgnoredDelta {
 export interface RestoreResult {
     readonly safety: Checkpoint;
     readonly unreached: readonly IgnoredDelta[] | null;
+    readonly exposed: readonly string[];
 }
 
 export type AuditCursor = Brand<string, 'AuditCursor'>;
@@ -335,6 +336,12 @@ export type CheckpointError = {
     readonly detail: string;
 } | {
     readonly code: 'restore_incomplete';
+    readonly detail: string;
+} | {
+    readonly code: 'ignored_path_collision';
+    readonly paths: readonly string[];
+} | {
+    readonly code: 'ignored_set_unreadable';
     readonly detail: string;
 };
 

@@ -1323,19 +1323,21 @@ describe('S6 — GET .../checkpoints, POST .../checkpoint/restore', () => {
     assert.equal(res.status, 404);
   });
 
-  it('POST /checkpoint/restore returns 200 { ok: true, safety, unreached } and a later restore of the resulting safety checkpoint is possible (S6.4, S32.4, S32.7)', async () => {
+  it('POST /checkpoint/restore returns 200 { ok: true, safety, unreached, exposed } and a later restore of the resulting safety checkpoint is possible (S6.4, S32.4, S32.7, S38.3)', async () => {
     const h = await makeEdge();
     const id = await newSession(h, 'c3');
     const sha = await checkpointedSha(h, id);
 
     const res = await restoreAfterTurnEnds(h, id, sha);
     assert.equal(res.status, 200);
-    const restored = (await res.json()) as { ok: boolean; safety: { sha: string }; unreached: unknown[] | null };
+    const restored = (await res.json()) as { ok: boolean; safety: { sha: string }; unreached: unknown[] | null; exposed: unknown };
     assert.equal(restored.ok, true);
     assert.notEqual(restored.safety.sha, sha, 'the response carries the safety checkpoint, never the target (S32.4)');
     // S32.7: the whole workspace here has nothing ignored, so the report is the positive
     // empty answer on the wire — an array, distinguishable from unknown (`null`).
     assert.deepEqual(restored.unreached, []);
+    // S38.3: `exposed` is an array on the wire, never null or absent.
+    assert.deepEqual(restored.exposed, []);
 
     const listed = await get(h, `/api/sessions/${id}/checkpoints`);
     const body = (await listed.json()) as { checkpoints: Array<{ sha: string; label: string }> };
