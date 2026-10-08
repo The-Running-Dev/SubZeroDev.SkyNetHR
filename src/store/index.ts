@@ -38,7 +38,34 @@ async function atomicWrite(targetPath: string, contents: Buffer | string): Promi
   const dir = path.dirname(targetPath);
   const tmpPath = path.join(dir, `.${path.basename(targetPath)}.${randomBytes(6).toString('hex')}.tmp`);
   await writeFile(tmpPath, contents);
-  await rename(tmpPath, targetPath);
+  await renameOver(tmpPath, targetPath);
+}
+
+// Windows refuses a rename-over with EPERM (EACCES/EBUSY on some filesystems) while another
+// rename onto the same target is in flight — two simultaneous pairs failed about one time in
+// four in a local probe (issue #511). That is a sharing violation that clears as soon as the
+// other rename lands, not a root that cannot be written, so it is retried; a refusal that
+// outlasts the retries still throws and still reads as storage_unwritable. The whole budget
+// (310 ms) stays far below `LOCK_RENEWAL_INTERVAL_MS`: two racing reclaimers' renames land
+// in some order well before either confirms, so D216's last-to-land rule still decides.
+export const RENAME_RETRY_DELAYS_MS = [10, 20, 40, 80, 160] as const;
+const TRANSIENT_RENAME_CODES: ReadonlySet<string> = new Set(['EPERM', 'EACCES', 'EBUSY']);
+
+export async function renameOver(
+  from: string,
+  to: string,
+  renameFn: (from: string, to: string) => Promise<void> = rename,
+): Promise<void> {
+  for (const wait of RENAME_RETRY_DELAYS_MS) {
+    try {
+      await renameFn(from, to);
+      return;
+    } catch (err) {
+      if (!TRANSIENT_RENAME_CODES.has((err as NodeJS.ErrnoException).code ?? '')) throw err;
+      await delay(wait);
+    }
+  }
+  await renameFn(from, to);
 }
 
 function startupIoError(filePath: string, detail: string): Result<never, StartupError> {
