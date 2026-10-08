@@ -12,6 +12,9 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
+    # A green run takes about five minutes. The bound turns a hang into a red check instead of
+    # an in_progress job that holds every merge until someone cancels it (issue #521).
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
 
