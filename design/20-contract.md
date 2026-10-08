@@ -13,6 +13,12 @@ Structures marked **(tier two)** are the operator's working surfaces admitted by
 and D58; they are binding scope, and they are separable — tier one is finishable without any
 of them (D59).
 
+**Command names this document uses in the past tense are history and keep the name that ran**
+(D290). AgentKit has since retired them: `/contract` and `/design` are now `/agentkit:design`,
+`/slices` is `/agentkit:plan`, and `/kit-sync` is `/agentkit:sync`. `/track` has no successor; issue
+writes follow `AGENTS.shared.md` *Tracking*, and a slice's state is its `Status:` line in
+`30-slices.md`.
+
 ## Shape lives in the tree; this document carries meaning
 
 **A declaration written here and present in `src/` is two copies, and this one is the copy
@@ -3014,17 +3020,17 @@ and runs from there; this tree carries no copy (#411). Its `ClassListDisagreemen
 script's declared ids against the kit's list and never against this document, so a row written
 here would be a copy nothing checks. Every class — blocking, reported, and could-not-evaluate —
 when it is raised, and what the caller does about it, is stated there and not here. Adding a class
-is a kit contract amendment, and it reaches this repository by `/kit-sync`, not by an edit to this
-section.
+is a kit contract amendment, and it reaches this repository by `/agentkit:sync`, not by an edit to
+this section.
 
 What this section keeps is what the kit's contract cannot know about this repository.
 
 **`StateSetAbsent` is this repository's standing state, and it is not a defect** (D192). The
 tooling is adopted; the record set is not. `design/state/` holds `WorkRef` mirrors alone, which
-`/track` writes into every target regardless of adoption and which therefore never count toward
-the set being present. A run consequently reaches only the contract reads that precede it — the
-kit's class list, and this document's § *Invariants* and § *Artifacts of a unit kind* — and
-returns.
+the retired `/track` wrote into every target regardless of adoption and which therefore never
+count toward the set being present. A run consequently reaches only the contract reads that
+precede it — the kit's class list, and this document's § *Invariants* and § *Artifacts of a unit
+kind* — and returns.
 
 **And that return keeps the class-list finding** (D197, D212, D263). `Test-ClassListAgreement`
 runs *before* the graph is read, and the `StateSetAbsent` return carries its finding rather than
@@ -3633,8 +3639,8 @@ belong to the `exec --json` fallback alone; neither affects a session on `app-se
     **Resolved by D274, with the form by D276.** `/design` took the obvious fix on its merits: the
     `exec --json` adapter composes `<turnId>.<itemId>`, session-uniqueness becomes an adapter
     obligation (I75), and nothing above `adapters/*` changes. The mapping rows and the composite's
-    path-segment rule are under *Vendor mapping — Codex*. S8.7's "needs a server-side alias" stop
-    clause now contradicts this and is `/slices`' to reword. (#93)
+    path-segment rule are under *Vendor mapping — Codex*. S8.7's stop clause was reworded to match
+    by #495. (#93)
 
 14. **Resolved by D178.** The call site is one new method on `SessionManager`, declared under
     *Public surface § `session-manager`* with the three things it must do and the order it must
@@ -3656,8 +3662,7 @@ belong to the `exec --json` fallback alone; neither affects a session on `app-se
     in a position to emit, resolve or append — and the `ProcessTombstone` moves to kill time,
     where it no longer has to win a race against whatever budget the drain has left.
 
-    Building it is **S27**, with D174–D177's half, under `30-slices.md § Outstanding`. It is not
-    yet issued: `/track`'s next run opens it (`30-slices.md`, closing paragraph).
+    Building it was **S27**, with D174–D177's half, now under `30-slices.md § Landed`.
 
 15. **Resolved by D195.** Both halves are settled and neither shape was taken whole. `store` gains
     one plain method, `renewLock`, declared under *Public surface § `store`*: it performs the

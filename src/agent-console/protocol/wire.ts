@@ -8,6 +8,7 @@ export interface Session {
   id: string; owner: string; vendor: string; cwd: string; model?: string | null;
   policy: { mode: string; sandbox?: string | null; banner?: string | null }; sandbox?: string | null;
   lastSeq: number; state: string; createdAt: string; endedAt?: string | null; endReason?: string | null;
+  pendingPermissions?: number | null;
 }
 export interface Chunk { data: string; nextOffset: number; eof: boolean; contentType?: string | null; }
 export interface Operation<P, R> { params: P; result: R; }

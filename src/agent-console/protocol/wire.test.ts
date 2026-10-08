@@ -30,6 +30,19 @@ test('Phase 4 schemas — optional null equals absent; unknown outcomes remain o
   validate('event', { sessionId: 's', ts: '2026-09-17T00:00:00Z', kind: 'message.delta', data: {}, seq: null });
 });
 
+test('Phase 4 schemas — every Session declares pendingPermissions as a non-negative safe integer (#532)', () => {
+  const session = { id: 's', owner: 'o', vendor: 'v', cwd: '/w', policy: { mode: 'm' }, lastSeq: 0, state: 'idle', createdAt: '2026-10-08T00:00:00Z' };
+  const refs = ['session', 'sessions.get.result', 'admin.sessions.snapshot.result'];
+  for (const ref of refs) for (const pendingPermissions of [undefined, null, 0, 2]) validate(ref, { ...session, pendingPermissions });
+  validate('sessions.list.result', { items: [{ ...session, pendingPermissions: 1 }] });
+  validate('admin.sessions.list.result', { items: [{ ...session, pendingPermissions: 1 }] });
+  for (const pendingPermissions of [-1, 1.5, '2', 2 ** 53]) {
+    for (const ref of refs) assert.equal(ajv.getSchema(schema.$id + '#/$defs/' + ref)!({ ...session, pendingPermissions }), false, `${ref} ${pendingPermissions}`);
+    assert.equal(ajv.getSchema(schema.$id + '#/$defs/sessions.list.result')!({ items: [{ ...session, pendingPermissions }] }), false);
+    assert.equal(ajv.getSchema(schema.$id + '#/$defs/admin.sessions.list.result')!({ items: [{ ...session, pendingPermissions }] }), false);
+  }
+});
+
 test('Phase 4 admin — browser routing whitelist excludes every privileged and host operation', () => {
   assert.ok(browserMethods.every(method => !method.startsWith('admin.') && !method.startsWith('host.') && !method.startsWith('runtime.')));
   for (const f of fixtures.filter(f => f.method.startsWith('admin.'))) assert.ok(!(browserMethods as readonly string[]).includes(f.method));
