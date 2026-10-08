@@ -1,5 +1,6 @@
-import { mkdir, open, readFile, readdir, rename, rm } from 'node:fs/promises';
+import { mkdir, open, readFile, readdir, rm } from 'node:fs/promises';
 import path from 'node:path';
+import { renameOver } from '../process/rename-over.js';
 import type { PrincipalId, ResolvedPath, Result, SessionId, StoreError } from '../core/types.js';
 import { isSafePathSegment } from './paths.js';
 
@@ -47,7 +48,7 @@ export function createFsAttemptStore(storageRoot: string): CreateAttemptStore {
         const temp = file + '.tmp';
         const handle = await open(temp, 'w');
         try { await handle.writeFile(JSON.stringify(attempt)); await handle.sync(); } finally { await handle.close(); }
-        await rename(temp, file);
+        await renameOver(temp, file);
         await syncDirectory(directory);
         return ok(undefined);
       } catch (error) { return io(file, error); }

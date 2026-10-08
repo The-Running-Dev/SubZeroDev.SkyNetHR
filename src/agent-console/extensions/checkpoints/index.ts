@@ -6,7 +6,7 @@
 import { execFile } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import type {
@@ -23,6 +23,7 @@ import type {
   Result,
   SessionId,
 } from '../../core/types.js';
+import { renameOver } from '../../process/rename-over.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -92,13 +93,14 @@ function commitFailure(gitDir: string, f: GitFailure): CheckpointError {
 
 // Temp-file-then-atomic-rename, the same discipline `store`'s own `atomicWrite` uses for
 // `meta.json` (I61) — duplicated in miniature here rather than imported, since D187
-// deliberately gives `checkpoints` no dependency edge to `store`.
+// deliberately gives `checkpoints` no dependency edge to `store`. The rename itself is the
+// shared `renameOver` (#382), which lives beside the append log rather than in `store`.
 async function atomicWriteJson(targetPath: string, value: unknown): Promise<void> {
   const dir = path.dirname(targetPath);
   await mkdir(dir, { recursive: true });
   const tmpPath = path.join(dir, `.${path.basename(targetPath)}.${randomBytes(6).toString('hex')}.tmp`);
   await writeFile(tmpPath, JSON.stringify(value));
-  await rename(tmpPath, targetPath);
+  await renameOver(tmpPath, targetPath);
 }
 
 // One line of `git status --porcelain=v1 -z --ignored=matching` per ignored path, `-z` so a

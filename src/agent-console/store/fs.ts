@@ -2,9 +2,10 @@ import { auditRecordMatches, decodeAuditCursor, encodeAuditCursor } from './audi
 import { createFsRuntimeLease } from './lease.js';
 import { createFsProcessLedger } from '../process/fs-ledger.js';
 import { lazyHandle, appendToHandle, readAllLines } from '../process/append-log.js';
+import { renameOver } from '../process/rename-over.js';
 import { randomBytes } from 'node:crypto';
 import { createReadStream } from 'node:fs';
-import { mkdir, open, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, open, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { createInterface } from 'node:readline';
 import { Readable } from 'node:stream';
 import path from 'node:path';
@@ -48,7 +49,7 @@ async function atomicWrite(targetPath: string, contents: Buffer | string): Promi
   const dir = path.dirname(targetPath);
   const tmpPath = path.join(dir, `.${path.basename(targetPath)}.${randomBytes(6).toString('hex')}.tmp`);
   await writeFile(tmpPath, contents);
-  await rename(tmpPath, targetPath);
+  await renameOver(tmpPath, targetPath);
 }
 
 function sessionDir(storageRoot: string, sessionId: SessionId): string {
