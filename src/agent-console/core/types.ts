@@ -62,6 +62,8 @@ export interface SessionSummary {
     readonly endedAt: IsoTimestamp | null;
     readonly endReason: SessionEndReason | null;
     readonly name: string | null;
+    // D261, I74: the live turn's outstanding permission requests; derived, never persisted.
+    readonly pendingPermissions: number;
 }
 
 export interface SessionSnapshot {

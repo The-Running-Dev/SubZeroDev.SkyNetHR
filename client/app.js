@@ -395,6 +395,12 @@ function renderSessionList() {
     button.type = 'button';
     button.appendChild(text('span', 'session__cwd', fields.name));
     button.appendChild(text('span', 'session__meta', `${fields.vendor} · ${fields.model} · ${fields.state}`));
+    // S40.6/D261: derived here from the summary's count, as fresh as this list read; no server
+    // field names the mark (D79). The current session's badge reads its own stream (S18.6).
+    const pending = session.pendingPermissions ?? 0;
+    if (session.id !== state.sessionId && pending > 0) {
+      button.appendChild(text('span', 'session__awaiting', `AWAITING APPROVAL · ${pending}`));
+    }
     button.addEventListener('click', () => selectSession(session.id));
 
     const rename = document.createElement('button');

@@ -1942,3 +1942,25 @@ describe('#73 — GET /livez, GET /readyz', () => {
     assert.equal(res.status, 200);
   });
 });
+
+describe('S40.1 — pendingPermissions over GET /api/sessions and GET /api/sessions/:id', () => {
+  it('reads 1 on both routes while a request is outstanding and 0 on both once it is answered', async () => {
+    const h = await makeEdge();
+    const id = await newSession(h, 's40-http');
+    const counts = async () => {
+      const listed = (await (await get(h, '/api/sessions')).json()) as { sessions: { id: string; pendingPermissions: number }[] };
+      const one = (await (await get(h, `/api/sessions/${id}`)).json()) as { session: { pendingPermissions: number } };
+      return [listed.sessions.find((s) => s.id === id)!.pendingPermissions, one.session.pendingPermissions];
+    };
+    assert.deepEqual(await counts(), [0, 0], 'idle');
+    const { requestId } = await firstPermissionRequestId(h, id);
+    assert.deepEqual(await counts(), [1, 1], 'one request outstanding');
+    const answered = await post(h, `/api/sessions/${id}/permission`, { requestId, decision: 'allow', scope: 'once', rule: null, reason: null });
+    assert.equal(answered.status, 200);
+    const start = Date.now();
+    while ((await counts()).some((n) => n !== 0)) {
+      if (Date.now() - start > 5000) assert.fail('pendingPermissions did not return to 0 after the answer');
+      await new Promise((r) => setTimeout(r, 10));
+    }
+  });
+});

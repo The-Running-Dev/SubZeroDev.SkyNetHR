@@ -7103,6 +7103,12 @@ Chosen: `session-manager` opens one ordinary subscription per created session wh
 Rejected: a new core hook on `emit` — a runtime surface S39 says to escalate rather than add; reading the spill on delivery without `flush` — it can miss the crossing envelope, and the notice would then wait for the next one; folding burn in memory from the stream — a restart would forget which codes it had emitted, the thing I73 forbids; an emitter inside the payroll fold — payroll is read on request, not on arrival, so a crossing would be announced only when someone looked.
 Reversibility: cheap.
 
+### 2026-10-08 — S40: the count is read off the live entry in `toSummary`, and the list mark states it
+Context: D261 makes `pendingPermissions` a derived summary field that is never persisted (I74). `toSummary` took only the persisted `SessionRecord`, which has no view of the live turn, and S40.6 leaves the mark's wording to the client.
+Chosen: `toSummary` takes the live entry and reads `turn?.pending.size ?? 0` beside the record's fields, so the count cannot reach `record` or `meta.json` by construction. The list mark reads `AWAITING APPROVAL · <n>`, on non-current rows only.
+Rejected: a counter kept on the record and updated on request and resolution — it would sit on the object `writeMeta` serialises, so a later write could persist it, against I74; a second summary builder for the live case — two builders for one shape drift; a mark without the count — the count is already in the summary, and an operator choosing which session to open first gains from it at no cost.
+Reversibility: cheap.
+
 ### 2026-10-08 — D289 Load-sensitive test timings: two become event-driven, three are retained
 Context: issue #524 listed the timings the #382 sweep left alone because a spec or a decision sets them. Each can lose a race under concurrent load. A heavy local load run failed the codex-exec conformance test once in three runs on the probe's 2 s bound. D141 priced that bound as a stall of the whole server; since then the probe has become an async spawn, so the stall now falls only on the create that is probing.
 Chosen, first: **the provider definitions and `createCodexAdapter` take an optional probe timeout, for tests only.** Production leaves it unset and keeps `probeCommand`'s 2 s bound and D141/D226's "up to 4 s". The tests that probe a node-script fake CLI pass 30 s.
