@@ -6,6 +6,10 @@ import { test, type TestContext } from 'node:test';
 import { createCodexAdapter, resetCodexTransportCacheForTests } from './index.js';
 import type { AdapterNotification, RequestId } from '../types.js';
 
+// The fake CLI is a node script; a long probe bound keeps a loaded runner's slow start from
+// reading as a hung or missing binary (#524).
+const PROBE_TIMEOUT_MS = 30_000;
+
 const fixture = path.resolve('src/agent-console/providers/codex-cli/fixtures/fake-codex-cli.mjs');
 async function waitFor(predicate: () => boolean) {
   const until = Date.now() + 5000;
@@ -25,7 +29,7 @@ async function setup(t: TestContext, scenario: string) {
   delete process.env['SKYNET_CODEX_NO_APP_SERVER'];
   resetCodexTransportCacheForTests();
   const events: AdapterNotification[] = [];
-  const result = await createCodexAdapter({ executable: fixture, cwd: dir as never, model: null, sandbox: 'read-only', streamDeltas: false, notify: n => events.push(n) });
+  const result = await createCodexAdapter({ probeTimeoutMs: PROBE_TIMEOUT_MS, executable: fixture, cwd: dir as never, model: null, sandbox: 'read-only', streamDeltas: false, notify: n => events.push(n) });
   assert.ok(result.ok);
   t.after(async () => {
     await result.value.kill();

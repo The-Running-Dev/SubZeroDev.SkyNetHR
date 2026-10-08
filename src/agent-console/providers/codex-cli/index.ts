@@ -46,25 +46,28 @@ function sandboxBanner(mode: SandboxMode): string {
 
 const SANDBOX_MODES = new Set<SandboxMode>(['read-only', 'workspace-write', 'unrestricted']);
 
-function probeOk(executable: string, cwd: string, subcommand: string): Promise<ProbeResult> {
+// `probeTimeoutMs` is unset in production, which keeps `probeCommand`'s own bound (D141, D226).
+// Tests set it: their fake CLI is a node script, and under full-suite load its start alone can
+// outlast that bound and be cached as a hung binary (#524).
+function probeOk(executable: string, cwd: string, subcommand: string, probeTimeoutMs?: number): Promise<ProbeResult> {
   const resolved = resolveSpawn(executable, [subcommand, '--help'], executable === 'codex');
-  return probeCommand(resolved.command, resolved.args, cwd, resolved.shell);
+  return probeCommand(resolved.command, resolved.args, cwd, resolved.shell, probeTimeoutMs);
 }
 
 // Cache the in-flight promise, a detected transport, and a timed-out probe: concurrent creates
 // share one probe and a hung binary stalls once. A not-found result is dropped once settled, so
 // a Codex installed after start is picked up without a restart (D226).
 const transportCache = new Map<string, Promise<Transport | null>>();
-function detectTransport(executable: string, cwd: string, refresh = false): Promise<Transport | null> {
+function detectTransport(executable: string, cwd: string, refresh = false, probeTimeoutMs?: number): Promise<Transport | null> {
   const key = JSON.stringify([executable, cwd]);
   if (refresh) transportCache.delete(key);
   let result = transportCache.get(key);
   if (!result) {
     let hung = false;
     const probing: Promise<Transport | null> = (async () => {
-      const appServer = await probeOk(executable, cwd, 'app-server');
+      const appServer = await probeOk(executable, cwd, 'app-server', probeTimeoutMs);
       if (appServer.ok) return 'app-server';
-      const exec = await probeOk(executable, cwd, 'exec');
+      const exec = await probeOk(executable, cwd, 'exec', probeTimeoutMs);
       if (exec.ok) return 'exec';
       hung = appServer.timedOut || exec.timedOut;
       return null;
@@ -94,16 +97,16 @@ function statusForTransport(transport: Transport | null): ProviderStatus {
 
 // A create and its capability snapshot share this exact resolution, even if a
 // concurrent refresh replaces the cache while the original probe is still running.
-export async function prepareCodex(executable: string, context: ProbeContext) {
-  const transport = await detectTransport(executable, context.cwd, context.refresh);
+export async function prepareCodex(executable: string, context: ProbeContext, probeTimeoutMs?: number) {
+  const transport = await detectTransport(executable, context.cwd, context.refresh, probeTimeoutMs);
   return {
     status: statusForTransport(transport),
     create: (options: AdapterOptions) => buildCodexAdapter(options, executable, transport),
   };
 }
 
-export async function probeCodex(executable: string, context: ProbeContext): Promise<ProviderStatus> {
-  return (await prepareCodex(executable, context)).status;
+export async function probeCodex(executable: string, context: ProbeContext, probeTimeoutMs?: number): Promise<ProviderStatus> {
+  return (await prepareCodex(executable, context, probeTimeoutMs)).status;
 }
 
 export function resetCodexTransportCacheForTests(): void { transportCache.clear(); }
@@ -209,13 +212,13 @@ export const TERSE_CODEX_CONFIG: Readonly<Record<string, string | number>> = {
 };
 
 export async function createCodexAdapter(
-  opts: AdapterOptions & { readonly executable?: string },
+  opts: AdapterOptions & { readonly executable?: string; readonly probeTimeoutMs?: number },
 ): Promise<Result<Adapter, AdapterError>> {
   if (opts.sandbox === null || !SANDBOX_MODES.has(opts.sandbox)) {
     return { ok: false, error: { code: 'unsupported_sandbox', sandbox: String(opts.sandbox) } };
   }
   const executable = opts.executable ?? process.env['SKYNET_CODEX_EXECUTABLE'] ?? 'codex';
-  return (await prepareCodex(executable, { cwd: opts.cwd })).create(opts);
+  return (await prepareCodex(executable, { cwd: opts.cwd }, opts.probeTimeoutMs)).create(opts);
 }
 
 function buildCodexAdapter(opts: AdapterOptions, executable: string, transport: Transport | null): Result<Adapter, AdapterError> {

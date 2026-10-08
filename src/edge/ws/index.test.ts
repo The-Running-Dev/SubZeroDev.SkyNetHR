@@ -61,6 +61,41 @@ interface Harness {
   readonly workspaceRoot: string;
 }
 
+// #524: the edge closes a subscriber's subscription when it drops it, either in its teardown or
+// straight after `subscribe` returns when the drop landed during it. A client that has read
+// nothing and has not hung up gives the edge no other reason to close it, so awaiting that close
+// is awaiting the drop itself. A backpressure test withholds reading until the server has
+// actually dropped it, not for a fixed window it hopes was long enough (#246, #382).
+function observeDrop(): { wrap: (real: SessionManager) => SessionManager; dropped: () => Promise<void> } {
+  let resolveDropped!: () => void;
+  const settled = new Promise<void>((resolve) => {
+    resolveDropped = resolve;
+  });
+  const dropped = (): Promise<void> =>
+    Promise.race([
+      settled,
+      new Promise<never>((_resolve, reject) => setTimeout(() => reject(new Error('the server never dropped the subscriber')), 20000).unref()),
+    ]);
+  const wrap = (real: SessionManager): SessionManager => ({
+    ...real,
+    subscribe: async (...args: Parameters<SessionManager['subscribe']>) => {
+      const subscribed = await real.subscribe(...args);
+      if (!subscribed.ok) return subscribed;
+      const inner = subscribed.value;
+      return {
+        ...subscribed,
+        value: {
+          close() {
+            resolveDropped();
+            inner.close();
+          },
+        },
+      };
+    },
+  });
+  return { wrap, dropped };
+}
+
 /** Both edges wired to the *same* `SessionManager` (S11.1's whole point: one truth, two
  * transports reading it — not two independent runs whose vendor-minted ids could never
  * line up). */
@@ -653,6 +688,7 @@ describe('#178 — a route handler that throws answers 503, rather than hanging 
 
 describe('#133 — a slow live subscriber is dropped past caps.subscriberQueueHighWater', () => {
   it('a client that never reads is dropped with a replay_gap frame, and the server closes the connection', async () => {
+    const drop = observeDrop();
     const h = await makeSharedEdges(
       undefined,
       {
@@ -671,6 +707,7 @@ describe('#133 — a slow live subscriber is dropped past caps.subscriberQueueHi
         },
       },
       'many-big',
+      drop.wrap,
     );
     const id = await newSession(h, 'w133-ws');
 
@@ -708,14 +745,13 @@ describe('#133 — a slow live subscriber is dropped past caps.subscriberQueueHi
 
     await post(h.sseBase, `/api/sessions/${id}/message`, { text: 'go' });
 
-    // #246: withhold reading for a fixed real-time window before draining at all.
-    // Production speed is not reliable across environments — CI's Windows runner has been
-    // observed delivering the burst as a slow trickle an actively-draining client can keep
-    // pace with indefinitely, regardless of total volume. TCP flow control only closes the
-    // window when nothing reads it, whatever the peer's write rate; a fixed real delay with
-    // zero consumption forces genuine backpressure everywhere the fast-burst assumption
-    // this scenario used to rely on alone did not.
-    await new Promise((resolve) => setTimeout(resolve, 3000).unref());
+    // #246: read nothing at all until the server has dropped this subscriber. Production
+    // speed is not reliable across environments — CI's Windows runner has been observed
+    // delivering the burst as a slow trickle an actively-draining client can keep pace with
+    // indefinitely, regardless of total volume. TCP flow control only closes the window when
+    // nothing reads it, whatever the peer's write rate. Waiting on the drop itself rather than
+    // a fixed window (#524) means a loaded runner cannot start reading before it happens.
+    await drop.dropped();
 
     // Same shape as the SSE half of this fix: the client has read nothing at all, so the
     // server's own final write (the gap frame, then the WS close frame) cannot flush until
@@ -745,6 +781,7 @@ describe('#133 — a slow live subscriber is dropped past caps.subscriberQueueHi
 describe('D225 — a backpressure drop before anything is delivered restates the resume point, not seq 0', () => {
   it('a resumed stream whose first write is an undrained frame reports a gap at `after`', async () => {
     const RESUME_AT = 7;
+    const drop = observeDrop();
     const h = await makeSharedEdges(
       undefined,
       {
@@ -767,7 +804,7 @@ describe('D225 — a backpressure drop before anything is delivered restates the
       // move the stream's watermark — and together they are far larger than the socket's buffers,
       // so a write cannot flush to a client that is not reading. How many it takes before the
       // kernel stops accepting them varies by platform; deliveries after the drop are ignored.
-      (real) => ({
+      (real) => drop.wrap({
         ...real,
         subscribe: async (sessionId, _owner, _after, sink) => {
           const frame = {
@@ -808,9 +845,9 @@ describe('D225 — a backpressure drop before anything is delivered restates the
     });
     socket.write(encodeClientFrame(0x1, Buffer.from(JSON.stringify({ after: RESUME_AT }), 'utf8')));
 
-    // Nothing is read until the server has had time to write and drop, so the write above
+    // Nothing is read until the server has dropped this subscriber (#524), so the write above
     // cannot have flushed.
-    await new Promise((resolve) => setTimeout(resolve, 500).unref());
+    await drop.dropped();
 
     const raw: Buffer[] = head.length > 0 ? [head] : [];
     await new Promise<void>((resolve, reject) => {
