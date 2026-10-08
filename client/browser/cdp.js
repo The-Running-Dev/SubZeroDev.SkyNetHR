@@ -8,7 +8,9 @@ import { readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-const LAUNCH_TIMEOUT_MS = 15_000;
+// A cold browser start on a windows-latest runner has missed 15 s (issue #521); the wait ends
+// as soon as the port file appears, so the longer bound costs nothing on a normal launch.
+const LAUNCH_TIMEOUT_MS = 60_000;
 const NAVIGATE_TIMEOUT_MS = 15_000;
 const PORT_POLL_INTERVAL_MS = 100;
 const CLEANUP_MAX_RETRIES = 5;

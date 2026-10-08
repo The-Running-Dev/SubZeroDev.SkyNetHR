@@ -6,6 +6,7 @@
 import { findBrowser } from './discover.js';
 import { Browser } from './cdp.js';
 import { startServer } from './server.js';
+import { withServerAndBrowser } from './lifecycle.js';
 import { SURFACES, THEMES } from './surfaces.js';
 import {
   assertFontSizeToken,
@@ -124,15 +125,13 @@ async function checkTheme(page, theme, failures) {
 
 async function main() {
   const executablePath = findBrowser();
-  const server = await startServer();
-  const browser = await Browser.launch(executablePath);
 
   const failures = [];
   let covered = 0;
 
   let mastheadCovered = 0;
 
-  try {
+  await withServerAndBrowser({ startServer, launchBrowser: () => Browser.launch(executablePath) }, async (server, browser) => {
     for (const theme of THEMES) {
       const page = await browser.newPage();
       page.origin = server.origin;
@@ -150,10 +149,7 @@ async function main() {
     } finally {
       await mastheadPage.close();
     }
-  } finally {
-    await browser.close();
-    await server.close();
-  }
+  });
 
   const total = THEMES.length * SURFACES.length;
   console.log(`S18.5 browser pass: ${covered}/${total} surface x theme checks covered across ${THEMES.length} themes.`);

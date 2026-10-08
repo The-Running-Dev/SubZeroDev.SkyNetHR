@@ -41,6 +41,16 @@ and preferences belong in `AGENTS.md`.
   silently when a document is restructured. Positional numbering makes this worse: inserting
   a document between existing ones means renumbering everything after it and rewriting every
   link. **Prefer appending.**
+- **Checking a table for *missing* rows has not checked the table.** A row also goes stale by
+  *narrowing*: the class it names widens, the row does not, and a pass hunting absent rows sees
+  nothing wrong. Rows of a failure-modes table survived the very pass that added the rows it was
+  missing, and finding them cost a further reconciliation re-deriving every row against the code.
+  Re-derive each existing row, not only the gaps.
+- **A deferral whose stated blocker is later removed is not re-checked by anything.** Work left
+  undone on a named blocker, with the reason recorded only in a commit message, stayed undone
+  across several later passes after the blocker itself was removed — the change that removed it
+  swept only the cases it had been filed for. **When work is deferred on a named blocker, the
+  change that removes that blocker owes a sweep of everything citing it.**
 - **A decision recorded is not a decision executed.** D105 froze `design/`; `design/FROZEN.md`
   is the whole mechanism and no commit ever added it, so every command the freeze was supposed
   to gate ran unfrozen until a `/track` pass noticed three days later. **Cost: three slices'
