@@ -1214,7 +1214,7 @@ test('D213/#322 — a write_failed from respond() resolves the pending permissio
   assert.equal(resolved.operator, null);
   assert.equal(resolved.reason, 'cancelled_process_exit', 'a write_failed on respond() must not be reported as though the operator\'s decision reached the child');
 
-  await new Promise((r) => setTimeout(r, 100));
+  await waitUntil(async () => (await readAudit(storageRoot)).length >= 2);
   const audit = await readAudit(storageRoot);
   assert.equal(audit.length, 2, 'the operator\'s durable decision, then the correction — never just the decision as though it were delivered');
   assert.equal(audit[0]!.decision, 'allow');
@@ -1290,7 +1290,7 @@ test('D218/#339 — a child that exits while an answer awaits its audit append r
   await waitUntil(() => received.some((e) => e.kind === 'turn.ended'));
   release();
   await answering;
-  await new Promise((r) => setTimeout(r, 100));
+  await waitUntil(async () => received.some((e) => e.kind === 'permission.resolved') && (await readAudit(storageRoot)).length >= 2);
 
   const resolutions = received.filter((e) => e.kind === 'permission.resolved');
   assert.equal(resolutions.length, 1, 'exactly one permission.resolved for the request');
@@ -1433,7 +1433,7 @@ test('S4.13 — another operator answering gets no_such_session and writes no au
 
   const ownerResult = await manager.answerPermission(sessionId, owner, { requestId: requestId as never, decision: 'allow', scope: 'once', rule: null, reason: null });
   assert.equal(ownerResult.ok, true);
-  await new Promise((r) => setTimeout(r, 50));
+  await waitUntil(async () => (await readAudit(storageRoot)).length >= 1);
   const audit = await readAudit(storageRoot);
   assert.equal(audit.length, 1);
   assert.equal(audit[0]!.operator, owner);
@@ -1565,7 +1565,8 @@ test("S10.3 — scope: 'always' with a matching rule is accepted, and updatedPer
     assert.equal(answered.ok, true);
     if (answered.ok) assert.equal(answered.value.accepted, true);
 
-    await new Promise((r) => setTimeout(r, 50)); // let the write actually land
+    // The write lands asynchronously; wait for it rather than for a fixed interval (#382).
+    await waitUntil(async () => existsSync(stdinLog) && (await readFile(stdinLog, 'utf8')).trim().length > 0);
     const written = existsSync(stdinLog) ? (await readFile(stdinLog, 'utf8')).split('\n').filter((l) => l.trim().length > 0) : [];
     assert.ok(written.length > 0, "expected at least one line written to the child's stdin");
     for (const line of written) assert.ok(!line.includes('updatedPermissions'), `updatedPermissions must never reach the child: ${line}`);
@@ -1922,7 +1923,9 @@ test('S5.2 — interrupt terminates the whole process tree: no live descendant f
   // five seconds from that point, by real process enumeration against pids this test
   // spawned itself — D38, and `design/30-slices.md § What no slice covers` notes this
   // is verified per-platform until the two-platform CI gate (#28) exists to run both.
-  await new Promise((r) => setTimeout(r, 5000));
+  // Polled rather than slept: the bound is still five seconds, but a fast teardown passes at
+  // once instead of always spending the whole window (#382).
+  await waitUntil(() => !isAlive(cliPid) && !isAlive(grandchildPid), 5000).catch(() => {});
   assert.equal(isAlive(cliPid), false, 'the CLI child is gone');
   assert.equal(isAlive(grandchildPid), false, 'the grandchild is gone too, not just the recorded pid');
 });

@@ -52,7 +52,7 @@ test('Phase 4 first slice — every stdout line is JSON-RPC under a noisy provid
   assert.ok(logs.some(log => log.message === 'provider module loaded'));
 });
 
-test('Phase 4 EOF — muted filesystem shutdown exits within five seconds and next boot closes the turn once', { timeout: 20_000 }, async t => {
+test('Phase 4 EOF — muted filesystem shutdown exits within five seconds and next boot closes the turn once', { timeout: 60_000 }, async t => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'runtime-eof-'));
   const children: ReturnType<typeof spawn>[] = [];
   t.after(async () => { for (const child of children) child.kill(); await rm(root, { recursive: true, force: true, maxRetries: 30, retryDelay: 20 }); });

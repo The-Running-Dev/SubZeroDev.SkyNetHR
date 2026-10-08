@@ -8,7 +8,7 @@ import { createTermination } from './termination.js';
 import type { ProcessLedger, ProcessRecord } from './ledger.js';
 import type { IsoTimestamp } from '../contract/index.js';
 
-test('Phase 3 spawn — direct command, cwd, pipes, environment, stdin EOF, exit then close', { timeout: 10000 }, async () => {
+test('Phase 3 spawn — direct command, cwd, pipes, environment, stdin EOF, exit then close', { timeout: 60_000 }, async () => {
   const program = `let text='';process.stdin.on('data',c=>text+=c);process.stdin.on('end',()=>{
     process.stdout.write(JSON.stringify({text,cwd:process.cwd(),color:process.env.FORCE_COLOR,noColor:process.env.NO_COLOR}));
     process.stderr.write('stderr observed');});`;

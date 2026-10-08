@@ -513,9 +513,15 @@ test('S36.5 — the panel states it is diagnostic and that nothing above was pre
 
 test('S36.6 — a 20,000-call fold completes within the declared bound', () => {
   const calls = Array.from({ length: 20000 }, (_, i) => ({ name: 'Bash', input: { command: `cmd ${i % 50}` } }));
-  const start = Date.now();
-  foldToolCallRepeats(calls);
-  const elapsed = Date.now() - start;
+  // The fastest of three runs: a contended runner preempting the process only ever adds time,
+  // so one sample can exceed the bound without the fold being slow (#382). The bound itself is
+  // unchanged, and a fold that is genuinely too slow fails every run.
+  let elapsed = Infinity;
+  for (let i = 0; i < 3; i += 1) {
+    const start = Date.now();
+    foldToolCallRepeats(calls);
+    elapsed = Math.min(elapsed, Date.now() - start);
+  }
   assert.ok(elapsed < REPEAT_FOLD_TIME_BOUND_MS, `fold took ${elapsed}ms, bound is ${REPEAT_FOLD_TIME_BOUND_MS}ms`);
 });
 

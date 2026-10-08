@@ -510,7 +510,9 @@ async function readFrames(
   return { frames: raw.split('\n\n').filter((f) => f.trim().length > 0), raw };
 }
 
-it('readFrames enforces its own timeout while an open SSE stream is idle', { timeout: 1000 }, async () => {
+// The test timeout is a hang detector, not the bound under test (that is the helper's own
+// timeout below), so it sits well clear of a loaded runner (#382).
+it('readFrames enforces its own timeout while an open SSE stream is idle', { timeout: 10_000 }, async () => {
   const stream = new ReadableStream<Uint8Array>({
     start(controller) {
       controller.enqueue(new TextEncoder().encode('event: session.started\n\n'));
