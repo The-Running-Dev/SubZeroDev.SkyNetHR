@@ -298,6 +298,18 @@ export function loadConfig(env: Readonly<Record<string, string | undefined>>): R
     sessionTokenBudget = n;
   }
 
+  // D260: a fraction, not a token count, so a changed budget moves the warning with it.
+  // Set without a budget it is refused rather than ignored — a warning the operator
+  // configured and never receives is what a refusal at boot exists to prevent.
+  let sessionTokenBudgetWarnFraction: number | null = null;
+  const fractionRaw = env['SESSION_TOKEN_BUDGET_WARN_FRACTION'];
+  if (fractionRaw !== undefined && fractionRaw !== '') {
+    const n = Number(fractionRaw);
+    if (!Number.isFinite(n) || n <= 0 || n >= 1) return invalid('SESSION_TOKEN_BUDGET_WARN_FRACTION', `expected a number strictly between 0 and 1, got '${fractionRaw}'`);
+    if (sessionTokenBudget === null) return invalid('SESSION_TOKEN_BUDGET_WARN_FRACTION', 'set while SESSION_TOKEN_BUDGET is unset; the warning could never fire');
+    sessionTokenBudgetWarnFraction = n;
+  }
+
   const checklist = parseChecklist(env);
   if (!checklist.ok) return checklist;
 
@@ -340,6 +352,7 @@ export function loadConfig(env: Readonly<Record<string, string | undefined>>): R
       streamDeltas,
       outputMode,
       sessionTokenBudget,
+      sessionTokenBudgetWarnFraction,
       tokenRates: tokenRates.value,
       currency,
       checklist: checklist.value,

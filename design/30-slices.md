@@ -187,7 +187,7 @@ Out of scope:
 
 ## S39 — Warn before the token budget runs out
 
-Status: todo
+Status: done
 
 **Tier two, under brief item 8.** D260 decided the notices, and D265 decided that nothing stops.
 The figure they read is the one S16's payroll tile already subtracts.

@@ -7,8 +7,9 @@ import type { ProcessLedger } from '../agent-console/process/ledger.js';
 import { createConfiguredAdapter } from '../config/providers.js';
 import { claimHostLease } from './boot.js';
 import { createPayrollFold } from './payroll.js';
+import { createBudgetNotices } from './budget.js';
 import type {
-  Adapter, AdapterError, AdapterOptions, Checkpoints, ChecklistItemId, Config,
+  Adapter, AdapterError, AdapterOptions, Checkpoints, ChecklistItemId, Config, Envelope,
   IsoTimestamp, OperatorId, Records, RecordsError, RequisitionId, Result, SessionError,
   SessionId, SessionManager, SessionRecord, Store, StoreError, Vendor,
 } from '../contract/index.js';
@@ -79,6 +80,24 @@ export function createSessionManager(deps: {
   const foldPayroll = createPayrollFold(config, {
     readEventsAfter: runtime.admin.readEvents as Store['readEventsAfter'],
   });
+  // S39 (D265): the budget notices ride the host append path the checklist tick uses, and
+  // observe `usage` envelopes through an ordinary subscription — no runtime surface is added.
+  const budget = createBudgetNotices(config, {
+    readEvents: id => runtime.admin.readEvents(id) as AsyncIterable<Result<Envelope, StoreError>>,
+    append: (id, owner, data) => runtime.events.append(id, owner, 'session.notice', data),
+    flush: () => runtime.flush(),
+  });
+  const budgetWatches = new Map<SessionId, { close(): void }>();
+  async function watchBudget(id: SessionId, owner: OperatorId): Promise<void> {
+    if (config.sessionTokenBudget === null) return;
+    const record = runtime.admin.snapshot(id);
+    if (!record) return;
+    const watched = await runtime.subscribe(id, owner, record.lastSeq, {
+      deliver(event) { if ('seq' in event && event.kind === 'usage') void budget.observe(id, owner); },
+      close() { budgetWatches.delete(id); },
+    });
+    if (watched.ok) budgetWatches.set(id, watched.value);
+  }
   async function completed(sessionId: SessionId) {
     const items = new Map<ChecklistItemId, { by: OperatorId; completedAt: IsoTimestamp }>();
     for await (const result of runtime.admin.readEvents(sessionId)) {
@@ -101,7 +120,11 @@ export function createSessionManager(deps: {
       return { ok: false, error: { code: 'storage_unwritable', path: booted.error.path, detail: 'detail' in booted.error ? booted.error.detail : booted.error.code } };
     },
     shutdown: () => runtime.shutdown(),
-    async create(owner, input) { return mapped(await runtime.create(owner, { ...input, hostData: input.requisitionId })); },
+    async create(owner, input) {
+      const created = mapped(await runtime.create(owner, { ...input, hostData: input.requisitionId }));
+      if (created.ok) await watchBudget(created.value.sessionId, owner);
+      return created;
+    },
     list: owner => runtime.list(owner) as ReturnType<SessionManager['list']>,
     get: (id, owner) => mapped(runtime.get(id, owner)) as ReturnType<SessionManager['get']>,
     async message(id, owner, text, attachments) {
@@ -134,7 +157,11 @@ export function createSessionManager(deps: {
     end: async (...args) => mapped(await runtime.end(...args)),
     remove: async (...args) => {
       const result = mapped(await runtime.remove(...args));
-      if (result.ok) ticks.delete(args[0]);
+      if (result.ok) {
+        ticks.delete(args[0]);
+        budgetWatches.get(args[0])?.close();
+        budgetWatches.delete(args[0]);
+      }
       return result;
     },
     rename: async (...args) => mapped(await runtime.rename(...args)),

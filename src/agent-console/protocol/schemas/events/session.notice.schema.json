@@ -31,7 +31,9 @@
             "task_progress",
             "task_completed",
             "task_failed",
-            "task_cancelled"
+            "task_cancelled",
+            "budget_warning",
+            "budget_exhausted"
           ]
         },
         "text": {

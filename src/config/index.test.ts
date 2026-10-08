@@ -185,6 +185,27 @@ describe('config — the onboarding checklist (S14)', () => {
   });
 });
 
+describe('config — the budget warning fraction (S39, D260)', () => {
+  it('S39.1 — 0, 1, -0.1, 1.5, abc and 0.8 with no budget each refuse with invalid_field naming the variable', () => {
+    for (const [fraction, budget] of [['0', '1000'], ['1', '1000'], ['-0.1', '1000'], ['1.5', '1000'], ['abc', '1000'], ['0.8', undefined]] as const) {
+      const r = loadConfig(env({ SESSION_TOKEN_BUDGET_WARN_FRACTION: fraction, SESSION_TOKEN_BUDGET: budget }));
+      assert.equal(r.ok, false, `${fraction} with budget ${budget ?? 'unset'}`);
+      assert.equal(r.ok === false && r.error.code, 'invalid_field', fraction);
+      assert.equal(r.ok === false && r.error.code === 'invalid_field' && r.error.field, 'SESSION_TOKEN_BUDGET_WARN_FRACTION', fraction);
+    }
+  });
+
+  it('S39.1 — 0.8 with a budget reads as 0.8; an unset fraction reads as null', () => {
+    const set = loadConfig(env({ SESSION_TOKEN_BUDGET: '1000', SESSION_TOKEN_BUDGET_WARN_FRACTION: '0.8' }));
+    assert.equal(set.ok && set.value.sessionTokenBudgetWarnFraction, 0.8);
+    assert.equal(set.ok && set.value.sessionTokenBudget, 1000);
+    const unset = loadConfig(env({ SESSION_TOKEN_BUDGET: '1000' }));
+    assert.equal(unset.ok && unset.value.sessionTokenBudgetWarnFraction, null);
+    const neither = loadConfig(env());
+    assert.equal(neither.ok && neither.value.sessionTokenBudgetWarnFraction, null);
+  });
+});
+
 describe('config — the payroll cost tile\'s rates and currency (D158)', () => {
   it('defaults tokenRates and currency to null, so the tile is disabled', () => {
     const r = loadConfig(env());

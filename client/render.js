@@ -339,8 +339,22 @@ export function createCoalesceGroup(doc, node, firstTs) {
   };
 }
 
+// S39 (D260): the two budget notices carry a sentence the console owns, keyed on `code`; the
+// server's `text`, which states the figures, is shown beneath it and never inspected. Both are
+// warnings whatever `level` says, since neither stops anything (D265).
+const BUDGET_NOTICE_HEADLINES = {
+  budget_warning: 'This session is nearing its token budget. Nothing has been stopped.',
+  budget_exhausted: 'This session has used its whole token budget. It keeps running and accepting messages.',
+};
+
 function noticeNode(doc, data) {
   const body = el(doc, 'div', 'notice');
+  const headline = Object.hasOwn(BUDGET_NOTICE_HEADLINES, data.code) ? BUDGET_NOTICE_HEADLINES[data.code] : null;
+  if (headline !== null) {
+    body.appendChild(el(doc, 'div', 'notice__headline', headline));
+    body.appendChild(el(doc, 'div', 'notice__text', data.text));
+    return row(doc, 'notice-warn', data.code, body);
+  }
   body.appendChild(el(doc, 'div', 'notice__text', data.text));
   return row(doc, `notice-${data.level}`, data.code, body);
 }

@@ -270,8 +270,9 @@ type ResultReexport = Assert<Equals<<T, E>() => Host.Result<T, E>, <T, E>() => E
 type HistoricalError = { readonly kind: Exclude<Host.ErrorEventKind, 'adapter_output_overflow'>; readonly message: Host.ErrorEvent['message']; readonly fatal: Host.ErrorEvent['fatal'] };
 // Same pinning treatment for the task-lifecycle addition to SessionNoticeCode: the
 // historical subset and the delta are pinned independently rather than widening the
-// frozen `Before.SessionNotice` declaration.
-type HistoricalSessionNoticeCode = Exclude<Host.SessionNoticeCode, 'task_started' | 'task_progress' | 'task_completed' | 'task_failed' | 'task_cancelled'>;
+// frozen `Before.SessionNotice` declaration. D260's two budget codes are pinned the same way.
+type HistoricalSessionNoticeCode = Exclude<Host.SessionNoticeCode, 'task_started' | 'task_progress' | 'task_completed' | 'task_failed' | 'task_cancelled' | 'budget_warning' | 'budget_exhausted'>;
+type BudgetNoticeAddition = Assert<Equals<Exclude<Host.SessionNoticeCode, Before.SessionNoticeCode | 'task_started' | 'task_progress' | 'task_completed' | 'task_failed' | 'task_cancelled'>, 'budget_warning' | 'budget_exhausted'>>;
 type HistoricalSessionNotice = { readonly level: Host.SessionNotice['level']; readonly code: HistoricalSessionNoticeCode; readonly text: Host.SessionNotice['text'] };
 // Same pinning treatment for D258's `diff` addition to ToolResult: the historical
 // subset and the delta are pinned independently rather than widening the frozen

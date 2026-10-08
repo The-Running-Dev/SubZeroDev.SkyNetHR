@@ -490,3 +490,34 @@ test('S31.2 — a storage root inside the workspace root is refused at startup, 
   assert.notEqual(code, 0, 'a storage root overlapping a workspace root exits non-zero');
   await assert.rejects(request(port, 'GET', '/api/sessions'), 'nothing is listening on the configured port');
 });
+
+test('S39.1 — an out-of-range budget warning fraction is refused at startup, non-zero exit, no port bound', async () => {
+  const workspaceRoot = await mkdtemp(path.join(tmpdir(), 'skynet-server-ws-'));
+  const storageRoot = await mkdtemp(path.join(tmpdir(), 'skynet-server-storage-'));
+  const port = 21000 + (process.pid % 2000) + nextPortOffset++;
+
+  const child = spawn(process.execPath, [SERVER_ENTRY], {
+    env: {
+      ...process.env,
+      BIND_HOST: '127.0.0.1',
+      BIND_PORT: String(port),
+      AUTH_MODE: 'shared-secret',
+      AUTH_COOKIE_NAME: 'skynet_hr_session',
+      AUTH_SECRET: 'server-test-secret',
+      WORKSPACE_ROOTS: workspaceRoot,
+      STORAGE_ROOT: storageRoot,
+      ALLOWED_ORIGINS: 'http://skynet-hr.test',
+      SESSION_TOKEN_BUDGET: '1000',
+      SESSION_TOKEN_BUDGET_WARN_FRACTION: '1.5',
+    },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  liveServers.push(child);
+  let stderr = '';
+  child.stderr?.on('data', (c: Buffer) => { stderr += c.toString('utf8'); });
+
+  const { code } = await waitForExit(child);
+  assert.notEqual(code, 0, 'an invalid fraction exits non-zero');
+  assert.match(stderr, /SESSION_TOKEN_BUDGET_WARN_FRACTION is invalid/);
+  await assert.rejects(request(port, 'GET', '/api/sessions'), 'nothing is listening on the configured port');
+});
