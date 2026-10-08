@@ -184,3 +184,19 @@ test('pre-cutover fixture — full boot rebuilds ended history without rewriting
   assert.equal(await readFile(path.join(sessionDir, 'meta.json'), 'utf8'), meta);
   assert.equal(await readFile(path.join(sessionDir, 'events.ndjson'), 'utf8'), events);
 });
+
+// #382: two meta writes for one session (a rename racing an end, say) both rename a temp file
+// over the same `meta.json`, and Windows refuses one of two simultaneous renames onto a target.
+// Unretried, that loser came back as an `io` error although nothing was wrong with the store.
+test('SessionStore fs — simultaneous meta writes for one session both succeed (#382)', async t => {
+  const { dir, beforeRemove } = await root(t);
+  const created = await createFsSessionStore(configuration(dir), () => null); assert.ok(created.ok); const store = created.value;
+  beforeRemove(() => store.close());
+  assert.ok((await store.createSession(record)).ok);
+  const refused: string[] = [];
+  for (let round = 0; round < 200; round += 1) {
+    const writes = await Promise.all([store.writeMeta({ ...record, name: `a-${round}` }), store.writeMeta({ ...record, name: `b-${round}` })]);
+    for (const w of writes) if (!w.ok) refused.push(`${round}: ${JSON.stringify(w.error)}`);
+  }
+  assert.deepEqual(refused, []);
+});

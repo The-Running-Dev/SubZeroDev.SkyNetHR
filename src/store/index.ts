@@ -1,6 +1,7 @@
 import { lazyHandle, appendToHandle, foldLatestById } from '../agent-console/process/append-log.js';
+import { renameOver } from '../agent-console/process/rename-over.js';
 import { randomBytes } from 'node:crypto';
-import { link, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { link, readFile, rm, writeFile } from 'node:fs/promises';
 import { setTimeout as delay } from 'node:timers/promises';
 import path from 'node:path';
 import type {
@@ -33,39 +34,14 @@ function ioError(filePath: string, detail: string): Result<never, StoreError> {
 // Temp-file-then-atomic-rename, in the same directory so the rename is on one volume. A
 // reader opening `targetPath` mid-write otherwise observes it after `writeFile`'s internal
 // create/truncate but before the bytes land — this closes that window: `targetPath` only
-// ever exists absent or complete.
+// ever exists absent or complete. The rename retries a Windows sharing violation (#511); its
+// whole budget stays far below `LOCK_RENEWAL_INTERVAL_MS`, so two racing reclaimers' renames
+// land in some order well before either confirms and D216's last-to-land rule still decides.
 async function atomicWrite(targetPath: string, contents: Buffer | string): Promise<void> {
   const dir = path.dirname(targetPath);
   const tmpPath = path.join(dir, `.${path.basename(targetPath)}.${randomBytes(6).toString('hex')}.tmp`);
   await writeFile(tmpPath, contents);
   await renameOver(tmpPath, targetPath);
-}
-
-// Windows refuses a rename-over with EPERM (EACCES/EBUSY on some filesystems) while another
-// rename onto the same target is in flight — two simultaneous pairs failed about one time in
-// four in a local probe (issue #511). That is a sharing violation that clears as soon as the
-// other rename lands, not a root that cannot be written, so it is retried; a refusal that
-// outlasts the retries still throws and still reads as storage_unwritable. The whole budget
-// (310 ms) stays far below `LOCK_RENEWAL_INTERVAL_MS`: two racing reclaimers' renames land
-// in some order well before either confirms, so D216's last-to-land rule still decides.
-export const RENAME_RETRY_DELAYS_MS = [10, 20, 40, 80, 160] as const;
-const TRANSIENT_RENAME_CODES: ReadonlySet<string> = new Set(['EPERM', 'EACCES', 'EBUSY']);
-
-export async function renameOver(
-  from: string,
-  to: string,
-  renameFn: (from: string, to: string) => Promise<void> = rename,
-): Promise<void> {
-  for (const wait of RENAME_RETRY_DELAYS_MS) {
-    try {
-      await renameFn(from, to);
-      return;
-    } catch (err) {
-      if (!TRANSIENT_RENAME_CODES.has((err as NodeJS.ErrnoException).code ?? '')) throw err;
-      await delay(wait);
-    }
-  }
-  await renameFn(from, to);
 }
 
 function startupIoError(filePath: string, detail: string): Result<never, StartupError> {
