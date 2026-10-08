@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promis
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { after, test } from 'node:test';
-import { createStore as createStoreRaw, LOCK_RENEWAL_INTERVAL_MS } from './index.js';
+import { createStore as createStoreRaw, LOCK_RENEWAL_INTERVAL_MS, renameOver } from './index.js';
 import type { AuditCursor, AuditRecord, Config, Envelope, Result, ServerLock, SessionRecord, Store, StoreError } from '../contract/index.js';
 
 // #292: every `Store` opened by this suite must be closed, or its append-mode `FileHandle`s
@@ -1083,6 +1083,65 @@ test('D247 — a reclaim whose confirming sample finds the lock absent retries t
   assert.equal(claimed.ok, true, 'the retry claims the now-absent lock rather than raising storage_unwritable');
   const raw = await readFile(filePath, 'utf8');
   assert.deepEqual(JSON.parse(raw), self, 'the retried exclusive claim writes self');
+});
+
+// Issue #511: D216's two reclaimers rename over `server.lock` at almost the same instant, and
+// Windows refuses one of two simultaneous renames onto a target with EPERM. Unretried, that
+// surfaced as storage_unwritable from the loser's overwrite rather than storage_locked from its
+// confirmation. These pin the retry rule itself, independent of when the race happens to land.
+function errnoError(code: string): NodeJS.ErrnoException {
+  return Object.assign(new Error(`${code}: simulated`), { code });
+}
+
+test('#511 — renameOver retries a transient EPERM and completes the rename', async () => {
+  let calls = 0;
+  await renameOver('from', 'to', async () => {
+    calls += 1;
+    if (calls <= 2) throw errnoError('EPERM');
+  });
+  assert.equal(calls, 3, 'two refusals, then the rename lands');
+});
+
+test('#511 — renameOver rethrows a non-transient error without retrying', async () => {
+  let calls = 0;
+  await assert.rejects(
+    renameOver('from', 'to', async () => {
+      calls += 1;
+      throw errnoError('ENOENT');
+    }),
+    { code: 'ENOENT' },
+  );
+  assert.equal(calls, 1);
+});
+
+test('#511 — renameOver gives up on a refusal that outlasts its bounded retries, well inside one renewal interval', async () => {
+  let calls = 0;
+  const t0 = Date.now();
+  await assert.rejects(
+    renameOver('from', 'to', async () => {
+      calls += 1;
+      throw errnoError('EPERM');
+    }),
+    { code: 'EPERM' },
+  );
+  assert.equal(calls, 6, 'five retries after the first attempt');
+  assert.ok(Date.now() - t0 < LOCK_RENEWAL_INTERVAL_MS / 2, 'the retry budget leaves the confirmation window to decide the race');
+});
+
+// The real race, on the real filesystem: two renames onto one target at once. On Windows the
+// unretried form fails this on most runs of 200 rounds; elsewhere it passes either way.
+test('#511 — two simultaneous rename-overs onto one target both land', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'skynet-store-rename-'));
+  const target = path.join(dir, 'server.lock');
+  await writeFile(target, '{}');
+  let failures = 0;
+  for (let round = 0; round < 200; round += 1) {
+    const sources = [path.join(dir, `a-${round}.tmp`), path.join(dir, `b-${round}.tmp`)];
+    await Promise.all(sources.map((s) => writeFile(s, s)));
+    const settled = await Promise.allSettled(sources.map((s) => renameOver(s, target)));
+    failures += settled.filter((x) => x.status === 'rejected').length;
+  }
+  assert.equal(failures, 0);
 });
 
 // S30.2: the criterion the slice exists for (#206) — a lock naming a different hostname,
