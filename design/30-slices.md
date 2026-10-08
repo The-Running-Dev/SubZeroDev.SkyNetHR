@@ -94,6 +94,12 @@ the local process table and kills whatever holds that number (D181). Building th
 that window and closes it in the following slice. S31 and S32 depend on neither and can be taken in
 any order, before or after; S32 is the one of the five that closes a definition-of-done item.
 
+**S38, S39 and S40 are what the contract decided after S37 and nothing built.** S38 goes first
+because it is the only one of the three that loses data: until it lands, a restore that changes
+`.gitignore` can delete a file no checkpoint holds. S39 and S40 depend on neither each other nor
+S38, and can be taken in any order after it. None opens with a stop, because D260, D261 and D267
+each settled their surface before this pass.
+
 `spike/` covers parts of S1 and S2 as throwaway proof. It is not the implementation; see
 `spike/README.md § What this is not`. `spike/.data` is deleted rather than migrated
 (`20-contract.md § Migration`).
@@ -102,7 +108,194 @@ any order, before or after; S32 is the one of the five that closes a definition-
 
 ## Outstanding
 
-No slice is outstanding. Slices placed here have no closed issue, or an issue reopened because it was closed with unticked `Done when` boxes; `/track` syncs these normally.
+Slices placed here have no closed issue, or an issue reopened because it was closed with unticked `Done when` boxes; `/track` syncs these normally.
+
+## S38 — Roll back without touching what the folder ignores
+
+Status: todo
+
+**Tier one, and it closes a data-loss path in brief item 6.** D267 and D277 decided this, and
+`20-contract.md § checkpoints` states the sequence. Today, a restore that changes `.gitignore`
+deletes a file that the current rules ignore and the target's rules do not. This happens because
+the `clean` step reads the target's rules after `read-tree` has written them. That file was never
+checkpointed, so nothing can bring it back.
+
+Delivers: An operator may roll the project folder back to a point whose ignore rules differ from
+today's. Every file the folder ignores today — the environment file, the dependency folder — is
+kept byte for byte. A rollback that would have to overwrite one of those files refuses, lists every
+such path, and changes nothing. A file the old rules no longer ignore is named, with a note that the
+next checkpoint will capture it.
+
+Touches:
+  - `contract`: `RestoreResult.exposed` in both declarations; `CheckpointError`'s
+    `ignored_path_collision` and `ignored_set_unreadable`; `ApiErrorCode`'s `restore_collision`.
+  - `checkpoints` (`src/agent-console/extensions/checkpoints/index.ts`): the protected-set read,
+    the preflight, the verification read, and the removal of `clean`.
+  - `edge/error-envelope`: `STATUS_FOR`.
+  - The restore route.
+  - `client`.
+
+Depends on: S6, S32.
+
+Acceptance:
+  - S38.1 Setup: the workspace ignores `secrets.txt` today, the target checkpoint's `.gitignore`
+    does not list it, and the target's tree does not hold it. After a restore, `secrets.txt` is
+    present with its pre-restore bytes, and `exposed` is exactly `['secrets.txt']`.
+  - S38.2 Same setup, with an ignored directory `build/` holding three files. After a restore, all
+    three files are unchanged byte for byte. `exposed` names the directory in exactly one entry —
+    the protected-set entry — and none of the three files appears there separately.
+  - S38.3 `exposed` is never null. It is `[]` on a restore where no ignore rule changed, and it is
+    an array on the wire in every `200` response.
+  - S38.4 One workspace holds all three collision shapes:
+    1. a protected path that the target's tree holds;
+    2. a protected directory with target paths beneath it;
+    3. a protected path with a target *file* as an ancestor.
+
+    The restore returns `409 restore_collision`, and `error.detail.paths` lists all three paths.
+    The workspace's recursive hash is unchanged. The shadow repository's `git log` holds the same
+    number of commits as before, so no safety commit was written.
+  - S38.5 Setup: the ignore-matching status is forced to fail. The restore returns
+    `500 checkpoint_failed`. The workspace's recursive hash is unchanged, and no safety commit was
+    written.
+  - S38.6 An instrumented git runner shows the ignore-matching status read exactly once. That read
+    comes before the safety commit, and before any write to the workspace or the shadow
+    repository. The report's status read comes after the verification read.
+  - S38.7 No restore runs `clean` or `add -f`. The test records every git invocation made by the
+    checkpoint suite's restores. None has `clean` as its subcommand, and no `add` carries `-f`.
+  - S38.8 S6.3, S6.6 and S32.5 are re-run against the new sequence and still hold:
+    - a file the agent modified is reverted, and a file it created is gone, compared by recursive
+      hash;
+    - an ignored `node_modules/` is present and unchanged;
+    - the four-way report is unaltered.
+  - S38.9 A tree holding an embedded repository still comes back `restore_incomplete`. It emits
+    `error / checkpoint_restore_failed` and returns `500 checkpoint_failed`.
+  - S38.10 The console renders the two outcomes:
+    - `exposed` paths, with text saying the next checkpoint will capture them;
+    - a `restore_collision`, with every path and text saying nothing changed.
+
+    Neither renders as a failed restore, and neither is folded into the `unreached` report. Paths
+    reach the page as text nodes (I26), asserted with a path carrying angle brackets.
+
+Out of scope:
+  - Capturing ignored bytes into a checkpoint so that a collision becomes passable — I77 forbids
+    it.
+  - An override that restores through a collision.
+  - Narrowing `clean` with excludes — D267 removes the step rather than narrowing it.
+  - A workspace edited out of band during a restore, which is outside the guarantee the contract
+    states.
+  - Running this slice's suite on the second platform, which is S19's.
+
+## S39 — Warn before the token budget runs out
+
+Status: todo
+
+**Tier two, under brief item 8.** D260 decided the notices, and D265 decided that nothing stops.
+The figure they read is the one S16's payroll tile already subtracts.
+
+Delivers: An operator who set a token budget for a session is told once when the session crosses
+a warning line they chose, and told once more when it uses the whole budget. Nothing they are doing
+is interrupted: the agent keeps working, and they can keep sending. A server restart never repeats
+either message.
+
+Touches:
+  - `contract`: `Config.sessionTokenBudgetWarnFraction` and the two `SessionNoticeCode` members.
+  - `config`: `SESSION_TOKEN_BUDGET_WARN_FRACTION`.
+  - `session-manager`: the emitter on the `usage` path, through the host append path the checklist
+    uses.
+  - `client`: the two notices.
+
+Depends on: S16.
+
+Acceptance:
+  - S39.1 Each of these `SESSION_TOKEN_BUDGET_WARN_FRACTION` values refuses at boot with
+    `ConfigError.invalid_field`, and the server does not start:
+    - `0`
+    - `1`
+    - `-0.1`
+    - `1.5`
+    - `abc`
+    - `0.8` with `SESSION_TOKEN_BUDGET` unset
+
+    The value `0.8` with a budget set boots and reads as `0.8`. An unset fraction reads as `null`.
+  - S39.2 Setup: budget `1000`, fraction `0.8`, and three `usage` envelopes bringing burn to 500,
+    850 and 900. The spill holds exactly one `session.notice / budget_warning`, at level `warn`,
+    with a `seq` higher than the second envelope's. Burn counts input, output, cache-read and
+    cache-creation tokens: a crossing made only by cache tokens still fires the notice.
+  - S39.3 The same session continues to a burn of 1000, then 1200. The spill holds exactly one
+    `budget_exhausted`, at level `warn`, after the envelope that reached 1000.
+  - S39.4 One envelope that takes burn from 0 to 1100 produces `budget_warning`, then
+    `budget_exhausted`, in that `seq` order.
+  - S39.5 After S39.3, the server restarts over the same storage root, and another `usage`
+    envelope arrives. No third notice appears. None appears either after the budget is raised to
+    `5000` and burn crosses the old line again.
+  - S39.6 Setup: a session whose spill holds `budget_exhausted` and no `budget_warning`. It is
+    restarted with a fraction newly set, then receives further `usage` envelopes. It never gains a
+    `budget_warning`.
+  - S39.7 Setup: a spill holding the crossing `usage` envelope and no notice, which simulates a
+    crash between the two appends. The spill gains the notice on the next `usage` envelope. It
+    gains nothing if no further `usage` arrives.
+  - S39.8 After `budget_exhausted`:
+    - `POST /message` is accepted;
+    - the live turn runs to completion;
+    - the next turn starts normally.
+  - S39.9 With `sessionTokenBudget` null, no budget notice is ever emitted, whatever burn arrives.
+    With the fraction null and a budget set, `budget_exhausted` still fires and `budget_warning`
+    never does.
+  - S39.10 The console renders each notice as a warning, not an error, and the two as different
+    sentences, asserted on text. The client branches on `code` and never on `text`.
+
+Out of scope:
+  - Any stop, gate, refusal or interrupt at either line. D265 refused each, and none may be added
+    except through `/design`.
+  - A soft-stop threshold.
+  - Absolute token thresholds.
+  - Re-arming a notice when the budget changes.
+  - Per-model or per-category budgets.
+
+## S40 — See which sessions are waiting for an approval
+
+Status: todo
+
+**Tier one, under brief item 4.** D261 decided this. A pending permission request was always
+representable, but only a subscription to the session's own stream surfaced it.
+
+Delivers: An operator looking at the session list can see which sessions are held up waiting for
+them to approve or deny something, without opening each one. The console never claims to know when
+the agent has asked a question in its own words, because it cannot tell.
+
+Touches:
+  - `contract`: `SessionSummary.pendingPermissions` in `src/contract/index.ts` and
+    `src/agent-console/core/types.ts`.
+  - `agent-console/core`: `toSummary`.
+  - `client`: the session list.
+
+Depends on: S4, S18.
+
+Acceptance:
+  - S40.1 A live session with two outstanding permission requests reports `pendingPermissions: 2`
+    on `GET /api/sessions` and on `GET /api/sessions/:id`. After one is answered it reports `1`,
+    and after both are answered it reports `0`.
+  - S40.2 Each of these reports `0`:
+    - an idle session;
+    - an ended session;
+    - a session rehydrated after a restart.
+  - S40.3 While a request is outstanding, `meta.json` holds no `pendingPermissions` key, and
+    `schemaVersion` is unchanged.
+  - S40.4 A turn whose assistant text ends in a question, with no permission request outstanding,
+    reports `0`.
+  - S40.5 The field is present in both `SessionSummary` declarations. A type-level assertion fails
+    to compile if either declaration lacks it.
+  - S40.6 The session list marks a session as awaiting approval when it is not the current session
+    and its summary carries a count above zero. A count of zero carries no mark.
+    - The mark is derived on the client, and no server field names it (D79).
+    - The mark is as fresh as the last list read.
+    - The current session's status badge still reads its own stream (S18.6).
+
+Out of scope:
+  - Detecting a question the model asked in its own text, which D261 declines by name.
+  - A `blocked` turn phase or stop reason, which D261 rejects.
+  - Pushing a count change to clients that are not subscribed; the list is a snapshot.
+  - An employment-status field on the server, which D79 forbids.
 
 ---
 
@@ -2409,3 +2602,39 @@ pass, D252 to D255, are contract item 19's semantics and spelling and the surfac
 them, all merged. **#206 is not reopened**: D199 asked for it, D204 settled that it stays closed.
 `design/90-decisions.md § Open` is empty, so nothing needs clearing from it this pass.
 `/slices` does not write to GitHub.
+
+**The pass of 2026-10-08, and what it supersedes above.**
+
+`/contract` ran, and the four items D256 routed there are settled:
+
+- **Unresolved 20 and 23 were refused** (D264, D266). There is nothing to build for either.
+- **Unresolved 21 and 22 were resolved into surface** (D260 and D265 for the budget notices, D261
+  for the pending-permission count). Both are sliced under `## Outstanding`.
+- **D267 and D277 are sliced there too.** They make a restore leave every path ignored at its start
+  untouched, which closes a data-loss path. D267 asked for these cases to be added to the restore
+  slices. They are a slice of their own instead, because both of those slices are landed and a
+  landed slice is not rewritten.
+
+Nothing else in `20-contract.md` is both decided and unbuilt.
+
+**Shipped without a slice since the last pass**, recorded here rather than retro-sliced for the
+reasons D256 gives:
+
+| Decision or issue | Change | Pull request |
+|---|---|---|
+| D262 | The runtime lease's `server.lock` generation | — |
+| D273, D275, D276 | The deny reason, which now reaches the agent | #501 |
+| D274 | Codex's composed `CallId` | #499 |
+| D278 | The hook event | #506 |
+| D279 | `resume_unavailable` | #507 |
+| D280 | The vendor listing | #508 |
+| D281 | `endReason` | #504 |
+| D282's probe | Codex file-change diffs | #505 |
+| #80 | Per-call Codex approvals | #509 |
+| D284 | Output mode | #510, #512 |
+
+**Still uncovered:**
+
+- **Unresolved 12's consumer half.** Whether `PayrollView.burn` becomes nullable is a `/design`
+  question, not a slice.
+- **Unresolved 13 is closed.** D274 settled it, and #495 reworded S8.7's stop clause to match.
