@@ -6,6 +6,17 @@ import { RpcReader } from './reader.js';
 import { RpcPeer, HEARTBEAT_INTERVAL_MS, HEARTBEAT_TIMEOUT_MS } from './peer.js';
 import { LINE_BYTES, RpcWriter } from './writer.js';
 
+// Polls for the observable effect a test is waiting on instead of sleeping a fixed interval and
+// assuming it has happened: under concurrent `node --test` load one stalled event-loop turn
+// outlasts any small constant (#382). Bounded, because `node --test` applies no per-test timeout.
+async function waitFor(predicate: () => boolean, what: string, timeoutMs = 10_000): Promise<void> {
+  const start = Date.now();
+  while (!predicate()) {
+    if (Date.now() - start > timeoutMs) throw new Error(`timed out waiting for ${what}`);
+    await delay(5);
+  }
+}
+
 test('Phase 4 framing — UTF-8 boundaries and terminal overflow without dispatching trailing requests', async () => {
   const lines: string[] = [], errors: string[] = [];
   const reader = new RpcReader(line => lines.push(line), reason => errors.push(reason), 10);
@@ -64,7 +75,7 @@ test('Phase 4 cancellation — cooperative signal does not suppress a completed 
   let complete!: () => void; const gate = new Promise<void>(resolve => { complete = resolve; });
   const peer = new RpcPeer(input, output, async (_method, _params, signal) => { await gate; cancelled = signal.aborted; return 'committed'; }, () => {});
   input.write('{"jsonrpc":"2.0","id":1,"method":"create"}\n{"jsonrpc":"2.0","method":"$/cancel","params":{"id":1}}\n');
-  complete(); await delay(10); assert.equal(cancelled, true); assert.equal(JSON.parse(wire).result, 'committed'); peer.stop('test');
+  complete(); await waitFor(() => wire.includes('\n'), 'the create response'); assert.equal(cancelled, true); assert.equal(JSON.parse(wire).result, 'committed'); peer.stop('test');
 });
 
 test('Phase 4 writer — control priority and round-robin delivery across subscriptions', async () => {
@@ -74,14 +85,14 @@ test('Phase 4 writer — control priority and round-robin delivery across subscr
     let count = 0;
     writer.add(id, { next: () => ++count <= 2 ? writer.encode({ id, count }) : undefined });
   }
-  writer.control({ response: true }); await delay(10);
+  writer.control({ response: true }); await waitFor(() => lines.length >= 5, 'five frames');
   assert.deepEqual(lines.map(line => JSON.parse(line).id ?? 'control'), ['control', 'a', 'b', 'a', 'b']); writer.close();
 });
 
 test('Phase 4 writer — stalled global pipe faults the link instead of manufacturing gaps', async () => {
   const output = new Writable({ highWaterMark: 1, write(_chunk, _encoding, _callback) {} });
   const faults: string[] = []; const writer = new RpcWriter(output, reason => faults.push(reason), 1024, 2);
-  writer.control({ first: true }); await delay(10);
+  writer.control({ first: true }); await waitFor(() => output.writableLength > 0, 'the first frame to reach the stalled pipe');
   writer.control({ second: true }); writer.control({ third: true }); writer.control({ fourth: true });
   assert.deepEqual(faults, ['writer_budget_exhausted']); output.destroy();
 });
@@ -95,5 +106,5 @@ test('Phase 4 heartbeat — peer silence faults on every OS; traffic resets the 
   now = 50; input.write('{"jsonrpc":"2.0","method":"runtime.heartbeat"}\n');
   now = 100; await delay(30); assert.equal(ended, false);
   now = 111;
-  assert.equal(await Promise.race([fault, delay(1000).then(() => 'test_timeout')]), 'heartbeat_timeout'); peer.stop('test');
+  assert.equal(await Promise.race([fault, delay(10_000).then(() => 'test_timeout')]), 'heartbeat_timeout'); peer.stop('test');
 });

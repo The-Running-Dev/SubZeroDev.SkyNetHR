@@ -857,15 +857,21 @@ test('S12.9 — no read scans the whole file: first-page elapsed time at 100,000
   const store100k = storeResult100k.value;
   await writeAuditFixture(storageRoot100k, Array.from({ length: 100_000 }, (_, i) => auditRecord(i + 1)));
 
-  const start10k = performance.now();
-  const first10k = await store10k.readAuditPage(emptyAuditQuery({ limit: 50 }));
-  const elapsed10k = performance.now() - start10k;
-  assert.equal(first10k.ok, true);
-
-  const start100k = performance.now();
-  const first100k = await store100k.readAuditPage(emptyAuditQuery({ limit: 50 }));
-  const elapsed100k = performance.now() - start100k;
-  assert.equal(first100k.ok, true);
+  // The fastest of several reads, not one: a scheduler stall or GC pause on a loaded runner only
+  // ever adds time, so one sample of a few-millisecond read can be inflated many times over and
+  // flip the ratio below (#382). The minimum is the read's own cost.
+  const fastestFirstPage = async (store: Store): Promise<number> => {
+    let fastest = Infinity;
+    for (let i = 0; i < 5; i += 1) {
+      const start = performance.now();
+      const first = await store.readAuditPage(emptyAuditQuery({ limit: 50 }));
+      fastest = Math.min(fastest, performance.now() - start);
+      assert.equal(first.ok, true);
+    }
+    return fastest;
+  };
+  const elapsed10k = await fastestFirstPage(store10k);
+  const elapsed100k = await fastestFirstPage(store100k);
 
   // Also page all the way back to the oldest record in the 10k log, to report the
   // "deepest page" figure S12.9 asks for.

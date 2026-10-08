@@ -313,7 +313,8 @@ test('S21.1/D160 — attachments become image content blocks on the child\'s std
     assert.equal(sendResult.ok, true);
     await waitUntil(() => eventsOf(notifications, 'turn.ended').length > 0);
 
-    await new Promise((r) => setTimeout(r, 50)); // let the write actually land
+    // The write lands asynchronously; wait for it rather than for a fixed interval (#382).
+    await waitUntil(() => existsSync(stdinLog) && readFileSync(stdinLog, 'utf8').trim().length > 0);
     const written = existsSync(stdinLog) ? (await readFile(stdinLog, 'utf8')).split('\n').filter((l) => l.trim().length > 0) : [];
     assert.ok(written.length > 0, "expected at least one line written to the child's stdin");
     const userLine = JSON.parse(written[0]!) as { message: { content: Array<Record<string, unknown>> } };

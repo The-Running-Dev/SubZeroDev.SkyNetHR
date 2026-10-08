@@ -24,7 +24,14 @@ const capabilities = { workspace: 'required', permissions: 'interactive', attach
 const schema = JSON.parse(await readFile('src/agent-console/protocol/schemas/wire.schema.json', 'utf8'));
 const ajv = new Ajv2020({ strict: true }); addFormats.default(ajv); ajv.addSchema(schema);
 
-async function fixture(t: TestContext, settings: { root?: string; rootAlias?: boolean; fs?: boolean; budget?: number; stdoutCap?: number; version?: string; expectHelloError?: string; sendError?: boolean; registry?: ProviderRegistry; host?: (message: Message) => Promise<unknown>; checkpoints?: Partial<Checkpoints>; start?: (input: TurnInput, turn: TurnContext) => Promise<void> } = {}) {
+// Polls for an effect instead of sleeping a fixed interval and assuming it landed (#382). Bounded
+// well above any healthy delivery, since `node --test` applies no per-test timeout.
+async function waitUntil(predicate: () => boolean, timeoutMs = 15_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) { assert.ok(Date.now() < deadline, 'timed out waiting for condition'); await delay(5); }
+}
+
+async function fixture(t: TestContext, settings: { root?: string; rootAlias?: boolean; fs?: boolean; budget?: number; stdoutCap?: number; version?: string; expectHelloError?: string; sendError?: boolean; hostAttemptTimeoutMs?: number; registry?: ProviderRegistry; host?: (message: Message) => Promise<unknown>; checkpoints?: Partial<Checkpoints>; start?: (input: TurnInput, turn: TurnContext) => Promise<void> } = {}) {
   const root = settings.root ?? await mkdtemp(path.join(os.tmpdir(), 'protocol-conformance-'));
   const cwd = path.join(root, 'workspace'); await mkdir(cwd, { recursive: true });
   const workspaceRoot = settings.rootAlias ? path.join(root, 'workspace-alias') : cwd;
@@ -71,7 +78,7 @@ async function fixture(t: TestContext, settings: { root?: string; rootAlias?: bo
     input.write(JSON.stringify({ jsonrpc: '2.0', id, method, params }) + '\n'); return result;
   };
   const hello = await request('runtime.hello', { version: settings.version ?? '1.0.0', storage: { kind: settings.fs ? 'fs' : 'memory', root }, workspaceRoots: [workspaceRoot],
-    hostMethods: settings.host ? hostMethods : [], options: { hostAttemptTimeoutMs: 200, providerStdoutLineBytes: settings.stdoutCap ?? 64 * 1024 * 1024, caps: { subscriberQueueHighWater: settings.budget ?? 256 } } });
+    hostMethods: settings.host ? hostMethods : [], options: { hostAttemptTimeoutMs: settings.hostAttemptTimeoutMs ?? 200, providerStdoutLineBytes: settings.stdoutCap ?? 64 * 1024 * 1024, caps: { subscriberQueueHighWater: settings.budget ?? 256 } } });
   if (settings.expectHelloError) assert.equal(hello.error?.data?.code, settings.expectHelloError);
   else assert.ok(hello.result, JSON.stringify(hello));
   const create = () => request('sessions.create', { principal: 'alice', provider: 'fixture', cwd });
@@ -163,14 +170,16 @@ test('Phase 4 credits — one exhausted subscriber gaps once while a credited pe
   assert.equal((await f.request('events.credit', { subscriptionId: slow, principal: 'bob', count: 1 })).error?.data?.code, 'not_found');
   await f.request('events.credit', { subscriptionId: fast, principal: 'alice', count: 100 });
   for (let n = 0; n < 12; n++) await f.request('events.append', { ...owner, kind: 'x-fixture.tick', data: { n } });
-  await delay(10);
   const forId = (id: string) => f.messages.filter(m => m.method === 'events.event' && m.params?.subscriptionId === id).map(m => m.params!.event as any);
+  // Polled rather than slept: delivery trails the append responses, and a fixed pause loses to a
+  // loaded runner (#382). The slow subscriber's one gap is checked after the peer has all twelve.
+  await waitUntil(() => forId(fast).length >= 12 && forId(slow).length >= 1);
   assert.equal(forId(slow).length, 1); assert.equal(forId(slow)[0].data.kind, 'replay_gap'); assert.equal(forId(slow)[0].seq, 0);
   assert.equal(forId(fast).length, 12); assert.ok(forId(fast).every(e => e.kind === 'x-fixture.tick'));
   await f.request('events.unsubscribe', { subscriptionId: slow, principal: 'alice' });
   const resumed = (await f.request('events.subscribe', { ...owner, fromSeq: 12 })).result.subscriptionId;
   await f.request('events.credit', { subscriptionId: resumed, principal: 'alice', count: 1 });
-  await f.request('events.append', { ...owner, kind: 'x-fixture.tick', data: { n: 12 } }); await delay(10);
+  await f.request('events.append', { ...owner, kind: 'x-fixture.tick', data: { n: 12 } }); await waitUntil(() => forId(resumed).length >= 1);
   assert.equal(forId(resumed)[0].seq, 13);
 });
 
@@ -179,7 +188,7 @@ for (const fs of [false, true]) test(`Phase 4 replay credits — ${fs ? 'filesys
   const append = async (n: number) => assert.ok((await f.request('events.append', { ...owner, kind: 'x-fixture.tick', data: { n } })).result);
   const events = (id: string) => f.messages.filter(m => m.method === 'events.event' && m.params?.subscriptionId === id).map(m => m.params!.event as any);
   const waitFor = async (id: string, count: number) => {
-    const deadline = Date.now() + 5000;
+    const deadline = Date.now() + 15_000;
     while (events(id).length < count) { assert.ok(Date.now() < deadline, `expected ${count} events, got ${events(id).length}`); await delay(5); }
   };
   const credit = async (id: string, count: number) => {
@@ -213,7 +222,7 @@ for (const action of ['unsubscribe', 'reassign', 'shutdown'] as const) test(`Pha
   const subscriptionId = (await f.request('events.subscribe', owner)).result.subscriptionId;
   const events = () => f.messages.filter(m => m.method === 'events.event' && m.params?.subscriptionId === subscriptionId);
   assert.equal((await f.request('events.credit', { subscriptionId, principal: 'alice', count: 1 })).error, undefined);
-  const deadline = Date.now() + 5000;
+  const deadline = Date.now() + 15_000;
   while (!events().length) { assert.ok(Date.now() < deadline); await delay(5); }
   assert.equal((events()[0]!.params!.event as any).seq, 1);
   if (action === 'shutdown') await f.close();
@@ -234,7 +243,7 @@ test('Phase 4 A19 — turn events may precede send response; cancellation never 
   const subscriptionId = (await f.request('events.subscribe', owner)).result.subscriptionId;
   await f.request('events.credit', { subscriptionId, principal: 'alice', count: 100 });
   const sent = f.request('turns.send', { ...owner, text: 'hello' }); await entered.promise;
-  await delay(10); assert.ok(f.messages.some(m => m.method === 'events.event' && (m.params?.event as any).kind === 'turn.started'));
+  await waitUntil(() => f.messages.some(m => m.method === 'events.event' && (m.params?.event as any).kind === 'turn.started'));
   f.input.write('{"jsonrpc":"2.0","method":"$/cancel","params":{"id":5}}\n');
   started.resolve(); assert.ok((await sent).result); assert.equal(f.kills(), 0);
 });
@@ -330,7 +339,7 @@ test('Phase 4 A5 — slow commit and a lost commit reply reconcile without abort
   assert.equal((await f.request('sessions.list', { principal: 'alice' })).result.items.length, 0);
   assert.equal((await f.create()).error?.data?.code, 'workspace_busy');
   // Wait for the bounded coordinator's retry, rather than racing a fixed fsync delay.
-  const deadline = Date.now() + 3000; while (commits < 2) { assert.ok(Date.now() < deadline); await delay(5); }
+  await waitUntil(() => commits >= 2);
   release.resolve(); assert.ok((await creating).result); assert.equal(aborts, 0);
 });
 
@@ -355,6 +364,8 @@ test('Phase 4 versions and leases — same-major versions share one runtime leas
   const incompatible = await fixture(t, { version: '2.0.0', expectHelloError: 'protocol_version_mismatch' }); await incompatible.close();
 });
 
+// The commit is held open across a `sessions.list` round trip; the coordinator's 200 ms attempt
+// timeout must not fire inside that window on a loaded runner, so this test lifts it (#382).
 test('Phase 4 A5 — host abort racing an accepted commit waits for the terminal result', async t => {
   const accepted = gate<void>(), release = gate<void>(); let aborts = 0, id = '';
   const helper = createHostAttempts({ prepare: () => ok(undefined), commit: async () => { accepted.resolve(); await release.promise; return ok(undefined); }, abort: () => { aborts++; } });
@@ -364,7 +375,7 @@ test('Phase 4 A5 — host abort racing an accepted commit waits for the terminal
     if (m.method === 'host.create.commit') { await helper.commit(key); return null; }
     if (m.method === 'host.create.abort') { await helper.abort(key); return { state: await helper.status(key) }; }
     return { state: await helper.status(key) };
-  } });
+  }, hostAttemptTimeoutMs: 30_000 });
   const creating = f.create(); await accepted.promise;
   let aborted = false; const abort = helper.abort(id as never).then(() => { aborted = true; });
   await f.request('sessions.list', { principal: 'alice' }); assert.equal(aborted, false); assert.equal(aborts, 0);

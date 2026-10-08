@@ -575,8 +575,10 @@ describe('#205 — an unauthenticated socket that sends no first frame is closed
     }
   });
 
+  // A longer deadline than 205a's: here the socket must speak *before* it elapses, and on a
+  // loaded runner the handshake-to-send gap alone can outlast 200 ms (#382).
   it('clears the deadline once a first frame arrives — a socket that speaks is not later closed by it', async () => {
-    process.env['SKYNET_WS_FIRST_FRAME_DEADLINE_MS'] = '200';
+    process.env['SKYNET_WS_FIRST_FRAME_DEADLINE_MS'] = '2000';
     try {
       const h = await makeSharedEdges();
       const id = await newSession(h, 'w-205b');
@@ -592,7 +594,7 @@ describe('#205 — an unauthenticated socket that sends no first frame is closed
       await client!.collectEnvelopes(1, 5000);
 
       // Outlast the original deadline; the connection must still be open.
-      await new Promise((resolve) => setTimeout(resolve, 400));
+      await new Promise((resolve) => setTimeout(resolve, 2500));
       assert.equal(client!.closed, false, 'a socket that already authenticated is not closed by the first-frame deadline');
       client!.close();
     } finally {

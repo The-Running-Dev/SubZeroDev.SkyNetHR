@@ -244,13 +244,16 @@ test('S27.2/S27.3/S27.10/S27.12 — one signal, with a subscriber attached, stil
   });
 
   const exitPromise = waitForExit(child);
+  const shuttingDown = waitForOutput(child, /SIGTERM received — shutting down\./);
   const killedAt = Date.now();
   child.kill('SIGTERM');
 
   // S27.2: the listener is closed at once — a new connection attempt fails rather than
-  // hanging or succeeding. Given a moment for `server.close()`'s synchronous effect to
-  // take hold; this is not the drain bound, which only governs already-open connections.
-  await new Promise((r) => setTimeout(r, 200));
+  // hanging or succeeding. `server.close()` is called in the same synchronous run as the
+  // shutdown line, so waiting on that line rather than a fixed pause (#382) is what makes
+  // the listener's state known; this is not the drain bound, which only governs
+  // already-open connections.
+  await shuttingDown;
   await assert.rejects(request(port, 'GET', '/api/sessions'), 'a new connection is refused once the listener is closed');
 
   // S27.3: the process still reaches exit 0 — well inside the drain bound, since nothing
@@ -290,14 +293,17 @@ test('S27.1 — a second signal during a stalled drain exits at once, non-zero, 
   await openSubscribedSession(port, workspaceRoot);
 
   const exitPromise = waitForExit(child);
+  const shuttingDown = waitForOutput(child, /SIGTERM received — shutting down\./);
   child.kill('SIGTERM'); // begins the drain, bounded at 5s in this build, with the stream still open
-  await new Promise((r) => setTimeout(r, 300)); // well inside the drain window
+  await shuttingDown; // the first signal has been handled, not merely sent (#382)
   const before = Date.now();
   child.kill('SIGTERM'); // the guard: no drain, no kill, no release — exit now
   const { code, signal } = await exitPromise;
   const elapsedMs = Date.now() - before;
 
-  assert.ok(elapsedMs < 2000, `the guard exits at once rather than waiting out the drain (took ${elapsedMs}ms)`);
+  // Below the 5 s drain window with room for a loaded runner (#382): what is asserted is "not
+  // the drain", and anything short of the window already proves that.
+  assert.ok(elapsedMs < 4000, `the guard exits at once rather than waiting out the drain (took ${elapsedMs}ms)`);
   assert.equal(signal, null, 'process.exit, not a delivered signal killing it');
   assert.notEqual(code, 0, 'the guard is the one non-zero exit in this path (D174)');
   // Past the guard nothing below it ran: the kill step never reached the lock, so release
