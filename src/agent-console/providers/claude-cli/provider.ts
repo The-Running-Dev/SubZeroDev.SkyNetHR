@@ -5,7 +5,9 @@ import { wrapAdapter } from '../adapter-session.js';
 import type { ProbeContext, ProviderDefinition, ProviderStatus } from '../types.js';
 
 const cache = new Map<string, Promise<ProviderStatus>>();
-export function defineClaudeProvider(executableOverride?: string) {
+// `probeTimeoutMs` is for tests only. Production leaves it unset and keeps `probeCommand`'s own
+// bound; a test's fake CLI is a node script whose start alone can outlast it under load (#524).
+export function defineClaudeProvider(executableOverride?: string, settings: { readonly probeTimeoutMs?: number } = {}) {
   const executable = (): string => executableOverride ?? process.env['SKYNET_CLAUDE_EXECUTABLE'] ?? 'claude';
   async function probe(context: ProbeContext): Promise<ProviderStatus> {
     const image = executable();
@@ -15,7 +17,7 @@ export function defineClaudeProvider(executableOverride?: string) {
     if (!result) {
       result = (async () => {
         const resolved = resolveSpawn(image, ['--version'], image === 'claude');
-        const found = await probeCommand(resolved.command, resolved.args, context.cwd, resolved.shell);
+        const found = await probeCommand(resolved.command, resolved.args, context.cwd, resolved.shell, settings.probeTimeoutMs);
         return {
           available: found.ok,
           ...(found.ok ? (found.output ? { version: found.output } : {}) : { unavailableReason: 'agent_unavailable' }),

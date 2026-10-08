@@ -12,6 +12,10 @@ import { defineClaudeProvider } from './claude-cli/provider.js';
 import { probeCommand } from './probe.js';
 import type { Adapter, AdapterOptions, ProviderCapabilities, ProviderDefinition } from './types.js';
 
+// The fake CLI is a node script; a long probe bound keeps a loaded runner's slow start from
+// reading as a hung or missing binary (#524).
+const PROBE_TIMEOUT_MS = 30_000;
+
 const capabilities: ProviderCapabilities = {
   workspace: 'required', permissions: 'interactive', attachments: { supported: true },
   usage: true, resume: true, streamingDeltas: true, needsProcess: true, conversationState: 'provider', models: 'free-form',
@@ -113,7 +117,7 @@ test('Phase 2 — concurrent Codex probes share one async result; refresh change
   const cli = path.join(dir, 'cli.mjs');
   await writeFile(mode, 'app-server');
   await writeFile(cli, `import {appendFileSync,readFileSync} from 'node:fs';\nappendFileSync(${JSON.stringify(log)},process.argv[2]+'\\n');\nsetTimeout(()=>process.exit(readFileSync(${JSON.stringify(mode)},'utf8') === process.argv[2] ? 0 : 1),80);\n`);
-  const provider = defineCodexProvider(cli);
+  const provider = defineCodexProvider(cli, { probeTimeoutMs: PROBE_TIMEOUT_MS });
   let timerFired = false;
   const timer = setTimeout(() => { timerFired = true; }, 10);
   const statuses = await Promise.all([provider.probe({ cwd }), provider.probe({ cwd }), provider.probe({ cwd })]);
@@ -141,7 +145,7 @@ test('D226 — a Codex installed after a failed create is picked up without a re
   const dir = await mkdtemp(path.join(tmpdir(), 'provider-install-'));
   t.after(() => rm(dir, { recursive: true, force: true }));
   const cli = path.join(dir, 'cli.mjs');
-  const provider = defineCodexProvider(cli);
+  const provider = defineCodexProvider(cli, { probeTimeoutMs: PROBE_TIMEOUT_MS });
   const input = { sandbox: 'workspace-write', streamDeltas: false } as const;
   const missing = await provider.create({ cwd, notify() {}, emit() {} }, input);
   assert.deepEqual(missing.ok, false, 'create before install is refused');
@@ -159,7 +163,7 @@ test('D226 — a timed-out Codex probe is cached: a hung binary stalls once, not
   const log = path.join(dir, 'probes');
   const cli = path.join(dir, 'cli.mjs');
   await writeFile(cli, `import {appendFileSync} from 'node:fs';\nappendFileSync(${JSON.stringify(log)},process.argv[2]+'\\n');\nsetInterval(()=>{},1000);\n`);
-  const provider = defineCodexProvider(cli);
+  const provider = defineCodexProvider(cli, { probeTimeoutMs: PROBE_TIMEOUT_MS });
   assert.equal((await provider.probe({ cwd })).available, false);
   const before = await readFile(log, 'utf8');
   assert.equal((await provider.probe({ cwd })).available, false);
@@ -182,7 +186,7 @@ if(target==='app-server') {
 } else process.exit(target===process.argv[2]?0:1);
 `);
   const notices: unknown[] = [];
-  const provider = defineCodexProvider(cli);
+  const provider = defineCodexProvider(cli, { probeTimeoutMs: PROBE_TIMEOUT_MS });
   const creating = provider.create({ cwd, notify() {}, emit: (_kind, data) => notices.push(data) }, { sandbox: 'workspace-write', streamDeltas: false });
   let started = false;
   for (let attempt = 0; attempt < 100; attempt++) {

@@ -130,8 +130,10 @@ for (const transport of ['claude', 'codex-app', 'codex-exec'] as const) {
     if (transport === 'codex-exec') process.env.SKYNET_CODEX_NO_APP_SERVER = '1'; else delete process.env.SKYNET_CODEX_NO_APP_SERVER;
     t.after(() => { if (saved === undefined) delete process.env.SKYNET_CODEX_NO_APP_SERVER; else process.env.SKYNET_CODEX_NO_APP_SERVER = saved; });
     const registry = createProviderRegistry();
-    registry.register(transport === 'claude' ? defineClaudeProvider(path.resolve('src/agent-console/providers/claude-cli/fixtures/fake-claude-cli.mjs'))
-      : defineCodexProvider(path.resolve('src/agent-console/providers/codex-cli/fixtures/fake-codex-cli.mjs')));
+    // The fake CLIs are node scripts; a long probe bound keeps a loaded runner's slow start from
+    // reading as an unavailable agent (#524).
+    registry.register(transport === 'claude' ? defineClaudeProvider(path.resolve('src/agent-console/providers/claude-cli/fixtures/fake-claude-cli.mjs'), { probeTimeoutMs: 30_000 })
+      : defineCodexProvider(path.resolve('src/agent-console/providers/codex-cli/fixtures/fake-codex-cli.mjs'), { probeTimeoutMs: 30_000 }));
     const f = await fixture(t, { registry, stdoutCap: overflow ? 32 : 64 * 1024 * 1024 });
     const created = await f.request('sessions.create', { principal: 'alice', provider: transport === 'claude' ? 'claude' : 'codex', cwd: f.cwd, sandbox: transport === 'claude' ? null : 'workspace-write' });
     assert.ok(created.result, JSON.stringify(created));

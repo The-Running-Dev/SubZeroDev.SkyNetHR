@@ -67,6 +67,41 @@ interface Harness {
   readonly readiness: ReadinessState;
 }
 
+// #524: the edge closes a subscriber's subscription when it drops it, either in its teardown or
+// straight after `subscribe` returns when the drop landed during it. A client that has read
+// nothing and has not hung up gives the edge no other reason to close it, so awaiting that close
+// is awaiting the drop itself. A backpressure test withholds reading until the server has
+// actually dropped it, not for a fixed window it hopes was long enough (#246, #382).
+function observeDrop(): { wrap: (real: SessionManager) => SessionManager; dropped: () => Promise<void> } {
+  let resolveDropped!: () => void;
+  const settled = new Promise<void>((resolve) => {
+    resolveDropped = resolve;
+  });
+  const dropped = (): Promise<void> =>
+    Promise.race([
+      settled,
+      new Promise<never>((_resolve, reject) => setTimeout(() => reject(new Error('the server never dropped the subscriber')), 20000).unref()),
+    ]);
+  const wrap = (real: SessionManager): SessionManager => ({
+    ...real,
+    subscribe: async (...args: Parameters<SessionManager['subscribe']>) => {
+      const subscribed = await real.subscribe(...args);
+      if (!subscribed.ok) return subscribed;
+      const inner = subscribed.value;
+      return {
+        ...subscribed,
+        value: {
+          close() {
+            resolveDropped();
+            inner.close();
+          },
+        },
+      };
+    },
+  });
+  return { wrap, dropped };
+}
+
 async function makeEdge(
   auth: AuthConfig = { mode: 'proxy-header', userHeader: 'x-forwarded-user' },
   over: Partial<Config> = {},
@@ -74,6 +109,7 @@ async function makeEdge(
   recordsOverride: ((config: Config, store: Store) => Records) | null = null,
   readiness: ReadinessState = { ready: true },
   managerOverride: SessionManager | null = null,
+  wrapManager: (real: SessionManager) => SessionManager = (real) => real,
 ): Promise<Harness> {
   process.env['SKYNET_TEST_SCENARIO'] = scenario;
   process.env['SKYNET_CLAUDE_EXECUTABLE'] = FIXTURE;
@@ -114,12 +150,12 @@ async function makeEdge(
   const storeResult = await createStore(config);
   if (!storeResult.ok) throw new Error('store failed to init');
   const records = recordsOverride ? recordsOverride(config, storeResult.value) : notImplementedProxy<Records>('records');
-  const manager = managerOverride ?? createSessionManager({
+  const manager = wrapManager(managerOverride ?? createSessionManager({
     config,
     store: storeResult.value,
     checkpoints: createCheckpoints(config),
     records,
-  });
+  }));
   const listener = createSseEdge({ config, identity: resolverFor(config.auth, config.trustProxy), manager, records, readiness });
   const server = createServer(listener);
   servers.push(server);
@@ -997,6 +1033,7 @@ describe('#178 — a route handler that throws answers 503, rather than hanging 
 
 describe('#133 — a slow live subscriber is dropped past caps.subscriberQueueHighWater', () => {
   it('a client that never reads is dropped with a replay_gap frame, and the server closes the connection', async () => {
+    const drop = observeDrop();
     const h = await makeEdge(
       undefined,
       {
@@ -1015,6 +1052,10 @@ describe('#133 — a slow live subscriber is dropped past caps.subscriberQueueHi
         },
       },
       'many-big',
+      null,
+      undefined,
+      null,
+      drop.wrap,
     );
     const id = await newSession(h, 'w133-sse');
 
@@ -1032,14 +1073,13 @@ describe('#133 — a slow live subscriber is dropped past caps.subscriberQueueHi
 
     await post(h, `/api/sessions/${id}/message`, { text: 'go' });
 
-    // #246: withhold reading for a fixed real-time window before draining at all.
-    // Production speed is not reliable across environments — CI's Windows runner has been
-    // observed delivering the burst as a slow trickle an actively-draining client can keep
-    // pace with indefinitely, regardless of total volume. TCP flow control only closes the
-    // window when nothing reads it, whatever the peer's write rate; a fixed real delay with
-    // zero consumption forces genuine backpressure everywhere the fast-burst assumption
-    // this scenario used to rely on alone did not.
-    await new Promise((resolve) => setTimeout(resolve, 3000).unref());
+    // #246: read nothing at all until the server has dropped this subscriber. Production
+    // speed is not reliable across environments — CI's Windows runner has been observed
+    // delivering the burst as a slow trickle an actively-draining client can keep pace with
+    // indefinitely, regardless of total volume. TCP flow control only closes the window when
+    // nothing reads it, whatever the peer's write rate. Waiting on the drop itself rather than
+    // a fixed window (#524) means a loaded runner cannot start reading before it happens.
+    await drop.dropped();
 
     // The burst is megabytes and the client has read nothing at all yet, so by the time
     // this resolves the server has already forced real backpressure and, past a

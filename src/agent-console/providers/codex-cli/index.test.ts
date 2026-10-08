@@ -9,6 +9,10 @@ import { createCodexAdapter, resetCodexTransportCacheForTests } from './index.js
 import { createConfiguredAdapter as createAdapter } from '../../../config/providers.js';
 import { outputPolicyFor, type AdapterNotification } from '../types.js';
 
+// The fake CLI is a node script; a long probe bound keeps a loaded runner's slow start from
+// reading as a hung or missing binary (#524).
+const PROBE_TIMEOUT_MS = 30_000;
+
 const execFileAsync = promisify(execFile);
 
 const FIXTURE = path.join(process.cwd(), 'src', 'agent-console', 'providers', 'codex-cli', 'fixtures', 'fake-codex-cli.mjs');
@@ -21,7 +25,7 @@ async function makeAdapter(sandbox: 'read-only' | 'workspace-write' | 'unrestric
   // silently answer every test after it.
   resetCodexTransportCacheForTests();
   const notifications: AdapterNotification[] = [];
-  const result = await createCodexAdapter({
+  const result = await createCodexAdapter({ probeTimeoutMs: PROBE_TIMEOUT_MS,
     executable: FIXTURE,
     cwd: process.cwd() as never,
     model,
@@ -374,7 +378,7 @@ test('#360 — app-server: a late close from a replaced child is ignored rather 
       queueMicrotask(() => triggerSecondSend?.());
     }
   };
-  const result = await createCodexAdapter({
+  const result = await createCodexAdapter({ probeTimeoutMs: PROBE_TIMEOUT_MS,
     executable: FIXTURE,
     cwd: process.cwd() as never,
     model: null,
@@ -414,7 +418,7 @@ test('#360 — exec fallback: a late close from a replaced child is ignored rath
         queueMicrotask(() => triggerSecondSend?.());
       }
     };
-    const result = await createCodexAdapter({
+    const result = await createCodexAdapter({ probeTimeoutMs: PROBE_TIMEOUT_MS,
       executable: FIXTURE,
       cwd: process.cwd() as never,
       model: null,
@@ -559,7 +563,7 @@ test('#134 — detectTransport is probed once for a given (executable, cwd), not
   process.env['SKYNET_CODEX_PROBE_LOG'] = probeLog;
   resetCodexTransportCacheForTests();
 
-  const first = await createCodexAdapter({
+  const first = await createCodexAdapter({ probeTimeoutMs: PROBE_TIMEOUT_MS,
     executable: FIXTURE,
     cwd: process.cwd() as never,
     model: null,
@@ -571,7 +575,7 @@ test('#134 — detectTransport is probed once for a given (executable, cwd), not
   const afterFirst = (await readFileOrEmpty(probeLog)).split('\n').filter((l) => l.length > 0);
   assert.ok(afterFirst.length >= 1, 'the first call actually probed');
 
-  const second = await createCodexAdapter({
+  const second = await createCodexAdapter({ probeTimeoutMs: PROBE_TIMEOUT_MS,
     executable: FIXTURE,
     cwd: process.cwd() as never,
     model: null,
@@ -586,7 +590,7 @@ test('#134 — detectTransport is probed once for a given (executable, cwd), not
   // A different cwd is a different cache key — detection runs again, proving this is a
   // real cache keyed on the inputs, not a probe that has simply stopped running at all.
   const otherDir = await mkdtemp(path.join(tmpdir(), 'skynet-codex-probe-other-'));
-  const third = await createCodexAdapter({
+  const third = await createCodexAdapter({ probeTimeoutMs: PROBE_TIMEOUT_MS,
     executable: FIXTURE,
     cwd: otherDir as never,
     model: null,
@@ -603,7 +607,7 @@ test('#134 — detectTransport is probed once for a given (executable, cwd), not
 
 test('createCodexAdapter refuses when neither transport responds', async () => {
   const notifications: AdapterNotification[] = [];
-  const result = await createCodexAdapter({
+  const result = await createCodexAdapter({ probeTimeoutMs: PROBE_TIMEOUT_MS,
     executable: path.join(process.cwd(), 'src', 'agent-console', 'providers', 'codex-cli', 'fixtures', 'does-not-exist.mjs'),
     cwd: process.cwd() as never,
     model: null,
@@ -646,7 +650,7 @@ test('#201 — Windows: a .cmd executable is spawned via a shell, and `spawned` 
   await writeFile(cmdPath, `@echo off\r\n"${process.execPath}" "${FIXTURE}" %*\r\n`);
 
   const notifications: AdapterNotification[] = [];
-  const result = await createCodexAdapter({
+  const result = await createCodexAdapter({ probeTimeoutMs: PROBE_TIMEOUT_MS,
     executable: cmdPath,
     cwd: process.cwd() as never,
     model: null,
@@ -690,7 +694,7 @@ async function runCodexWithPolicy(mode: 'terse' | 'normal', transport: 'app-serv
   t.after(async () => { delete process.env['SKYNET_CODEX_PARAMS_LOG']; delete process.env['SKYNET_CODEX_NO_APP_SERVER']; await rm(dir, { recursive: true, force: true }); });
   resetCodexTransportCacheForTests();
   const notifications: AdapterNotification[] = [];
-  const result = await createCodexAdapter({
+  const result = await createCodexAdapter({ probeTimeoutMs: PROBE_TIMEOUT_MS,
     executable: FIXTURE, cwd: process.cwd() as never, model: null, sandbox: 'read-only',
     notify: (n) => notifications.push(n), streamDeltas: false, outputPolicy: outputPolicyFor(mode),
   });
