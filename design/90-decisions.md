@@ -7079,6 +7079,12 @@ Chosen: remove the banner-and-gate bullet and the *Vendor model aliases* subsect
 Rejected: keep the gate as a repository-specific stricter rule — the shared contract binds here as fully as `AGENTS.md`, and a gate that stops sessions on a model name stalls the autonomous `/agentkit:next` loop.
 Reversibility: cheap.
 
+### 2026-10-08 — D288 Reconcile per-repository files against the current AgentKit install
+Context: `/agentkit:install` found `story.md` and `codex/PROFILES.md` still at the copies synced in #513 — `story.md` sends an outgrown story to `/brief`, and `PROFILES.md` cites the retired `/slice`, *Session boundaries* and `-Effort` — and two kit lessons absent from `agent.md`. Everything else was identical or already satisfied.
+Chosen: replace both files with the kit's copies; add the kit's table-narrowing and stale-deferral lessons to `agent.md` § *Drift*, reworded without the kit's own examples. Keep `AGENTS.md` as the contract with `CLAUDE.md` as its `@`-import pointer, and keep the target's `agent.md` wholesale rather than merging the seed.
+Rejected: keep the target's `story.md` and `PROFILES.md` — both were kit copies, not local triage or Codex policy, and they point at commands and sections that no longer exist; `/agentkit:interview` in `story.md` — a permanent divergence every later install would flag; the lessons verbatim — they carry another repository's specifics; the kit's hardcoded set-size lesson — its evidence is the kit's own design-state checker, with no counterpart here.
+Reversibility: cheap.
+
 ## Open
 
 Staging only. Once an item becomes an issue it leaves this list.
