@@ -157,13 +157,7 @@ not (see *Rules the renderer may rely on*). It is declared twice — the host's 
 `src/contract/index.ts` and `agent-console/core`'s in `src/agent-console/core/types.ts`, which
 `toSummary` builds and the host passes through — and a field added to one is added to both.
 
-**`pendingPermissions` — scaffold, owed to both declarations** (D261):
-
-```ts
-readonly pendingPermissions: number;
-```
-
-It is the size of the live turn's `pending` map: `0` when `turn === null`, and therefore always
+**`pendingPermissions`** is declared in both copies (D261, S40). It is the size of the live turn's `pending` map: `0` when `turn === null`, and therefore always
 `0` once `state === 'ended'`. **Derived at read time and never persisted** — `meta.json` does not
 carry it and `SessionRecord` does not gain it, because a count written to disk would outlive the
 in-memory map it counts and a rehydrated session holds no turn. It counts permission requests only.
@@ -172,13 +166,7 @@ and which nothing here can detect or hold the turn for; a field claiming to woul
 that claims to block what it does not. It is exactly as fresh as the summary carrying it: a list
 read is a snapshot, and nothing pushes a change to it.
 
-**`endReason` — scaffold, owed to both declarations** (D281):
-
-```ts
-readonly endReason: SessionEndReason | null;
-```
-
-It is `SessionRecord.endReason` passed through, with an absent field read as `null`. **A
+**`endReason`** is declared in both copies (D281). It is `SessionRecord.endReason` passed through, with an absent field read as `null`. **A
 projection and never a derivation**: nothing reconstructs it from the spill, from `endedAt`, or
 from which notices a session carries, so a session ended before the field existed reads `null`
 for ever and is not back-filled. It is `null` whenever `state === 'live'`. Once
@@ -253,8 +241,7 @@ deployments that are the only ones that have existed — shared storage was unsu
 so no current `pids.ndjson` holds a foreign record to mistake.
 
 **The guard's fourth limb reads a value the server recorded, not one it computes** (D183, D186).
-An amendment owed to the declaration: `ProcessRecord` gains `osCreatedAt: IsoTimestamp | null`,
-the operating system's *own* reading of when that process was created, taken at spawn. The three
+`ProcessRecord` carries `osCreatedAt: IsoTimestamp | null`, the operating system's *own* reading of when that process was created, taken at spawn. The three
 original limbs — no `exitedAt`, a `startedAt` later than the host's last boot, a matching `image`
 — all pass when the host reuses a pid within a single boot for another child of the same name,
 which in a console whose every child is `claude` or `codex` is not a remote case. What separates
@@ -419,8 +406,8 @@ it is not something the stream needs to replay.
 | `storage_failure` | a spill write failed; the session is ending |
 | `server_restart` | boot found this session live at shutdown (D130) |
 | `usage_unavailable` | this session's transport reports no token usage, so its burn is unknown rather than zero (D146) |
-| `budget_warning` | **scaffold — owed to the declaration** (D260). A `usage` envelope carried the session's burn to at least `sessionTokenBudgetWarnFraction × sessionTokenBudget`; level `warn` |
-| `budget_exhausted` | **scaffold — owed to the declaration** (D260). A `usage` envelope carried the session's burn to at least `sessionTokenBudget`; level `warn` |
+| `budget_warning` | (D260, S39) A `usage` envelope carried the session's burn to at least `sessionTokenBudgetWarnFraction × sessionTokenBudget`; level `warn` |
+| `budget_exhausted` | (D260, S39) A `usage` envelope carried the session's burn to at least `sessionTokenBudget`; level `warn` |
 
 **A `task_*` notice's `text` is best-effort.** The adapter maps the subtype, which is observed; the
 payload fields it reads the text from are not verified against a published schema, so a client
@@ -514,21 +501,8 @@ or security-relevant from it, and **its shape is not contractual**, so an adapte
 how it reads without breaking a consumer. Testing it for empty, to decide whether to show the
 line at all, is display and is permitted.
 
-**`hook` — scaffold, owed to `EventPayloadMap` and to `AdapterEmitted`** (D268, D278):
-
-```ts
-export interface HookEvent {
-  readonly turnId: TurnId;
-  readonly hookId: string;
-  readonly phase: 'started' | 'completed';
-  readonly hookEvent: string;
-  readonly hookName: string;
-  readonly outcome: string | null;
-  readonly exitCode: number | null;
-}
-```
-
-It records that configuration the console does not own ran inside a session, and nothing more.
+**`hook`** carries `HookEvent`, declared in `src/agent-console/contract/index.ts` and in
+`EventPayloadMap`; `AdapterEmitted` includes it (D268, D278). It records that configuration the console does not own ran inside a session, and nothing more.
 **It is a transcript event, not an audit record**: it is spilled, replayed and deleted with the
 session under D25, and it never enters `audit.ndjson`. That log holds permission decisions and
 nothing else (S14.10). The cost, accepted by name, is that a deleted session's hook history goes
@@ -725,16 +699,8 @@ a pointer and evidence is invisible at the call site.
 manifest read at restore can fail; all three land on `null`, and a client renders it as unknown.
 An empty array is a real answer and says the ignored paths match.
 
-**`RestoreResult` gains `exposed`** (D267, D277). **Scaffold, owed to the declaration** in both
-places `RestoreResult` is declared (`src/contract/index.ts`, `src/agent-console/core/types.ts`):
-
-```ts
-interface RestoreResult {
-  readonly safety: Checkpoint;
-  readonly unreached: readonly IgnoredDelta[] | null;
-  readonly exposed: readonly string[];
-}
-```
+**`RestoreResult.exposed`** is declared in both places `RestoreResult` is declared
+(`src/contract/index.ts`, `src/agent-console/core/types.ts`) (D267, D277, S38).
 
 **An `exposed` entry is a protected path the target's rules do not ignore.** The protected set
 is what `status --ignored=matching` named when the restore started (*Public surface §
@@ -935,8 +901,8 @@ Declared in `src/contract/index.ts`: `AuthConfig`, `Caps`, `TokenRates`, `Config
 **This document declares the fields and sets none of the values** (D84). The values are a
 deployment's.
 
-**`storageRoot` is a `ResolvedPath`, not a raw string** (D185) — an amendment owed to the
-declaration. It was the one path in this configuration that reached the server unnormalised while
+**`storageRoot` is a `ResolvedPath`, not a raw string** (D185). It was
+the one path in this configuration that reached the server unnormalised while
 `workspaceRoots` beside it were already jail-resolved, which is D94's argument arriving one field
 short: two spellings of one directory are two values to every comparison, and the comparison this
 field now has to survive is the overlap check under *Public surface § `config`*. Canonicalising it
@@ -961,14 +927,8 @@ constructs `createSseEdge` or `createWsEdge` accordingly; exactly one binds.
 deployment (D158). `null` disables the cost tile. `checklist` empty disables the checklist.
 `sessionTokenBudget` null disables the view's budget, and both budget notices with it.
 
-**`sessionTokenBudgetWarnFraction` — scaffold, owed to the declaration** (D260), read from
-`SESSION_TOKEN_BUDGET_WARN_FRACTION`:
-
-```ts
-readonly sessionTokenBudgetWarnFraction: number | null;
-```
-
-A number strictly between `0` and `1`; anything else is `ConfigError.invalid_field`. **It is a
+**`sessionTokenBudgetWarnFraction`** is declared in `src/contract/index.ts` (D260, S39) and read
+from `SESSION_TOKEN_BUDGET_WARN_FRACTION`. A number strictly between `0` and `1`; anything else is `ConfigError.invalid_field`. **It is a
 fraction of the budget rather than a token count** so that changing the budget does not silently
 move the warning past it. Null disables `budget_warning` and leaves `budget_exhausted` armed. Set
 while `SESSION_TOKEN_BUDGET` is unset, it is `invalid_field` rather than ignored: a warning the
@@ -977,16 +937,10 @@ operator configured and never receives is the failure a refusal at boot exists t
 `Caps.sessionToolOutputBytes` is declared in `src/contract/index.ts` (D162, S23): total blob
 bytes one session may store, enforced at the `writeToolOutput` call site.
 
-**`permissionReasonBytes` — scaffold, owed to both `Caps` declarations** (D276) —
-`src/contract/index.ts` and `src/agent-console/core/types.ts` — read from
-`CAPS_PERMISSION_REASON_BYTES`:
-
-```ts
-readonly permissionReasonBytes: number; // rejection threshold for one PermissionAnswer.reason
-```
-
-UTF-8 bytes of one non-null `PermissionAnswer.reason`, on any decision. A threshold, never a
-truncation, per the rule above: **a reason the agent reads is the reason the audit records**
+**`permissionReasonBytes`** is declared in both `Caps` declarations (D276) —
+`src/contract/index.ts` and `src/agent-console/core/types.ts` — and read from
+`CAPS_PERMISSION_REASON_BYTES`. UTF-8 bytes of one non-null `PermissionAnswer.reason`, on any
+decision. A threshold, never a truncation, per the rule above: **a reason the agent reads is the reason the audit records**
 (I76), so shortening one would put text in front of the model that the operator never wrote.
 
 ## Persisted schemas
@@ -1532,7 +1486,8 @@ report    <sha>'s manifest vs status --ignored=matching say what was not reached
 ```
 
 **Nothing is written to the workspace or the shadow repository before `preflight` passes** (I77).
-A failed `read` is `ignored_set_unreadable`; a collision is `ignored_path_collision`. Both leave
+A failed `read` is `ignored_set_unreadable`, and so is a preflight that cannot list the target's
+tree (S38); a collision is `ignored_path_collision`. Both leave
 the workspace untouched and write no safety commit, so neither is a partial restore. A collision
 is a protected path the target's tree holds, a protected path with target paths beneath it, or a
 protected path with a target *file* as an ancestor. The lookup reads the target's tree and never
@@ -2536,16 +2491,7 @@ The `404` is `no_such_session` because `ApiErrorCode` carries no route-level not
 |---|---|---|---|---|
 | `GET` | `/api/vendors` | — | `200 { vendors: VendorListing[] }` | `401 unauthenticated` |
 
-**`VendorListing` — scaffold, owed to `src/contract/index.ts`** (D280):
-
-```ts
-export interface VendorListing {
-  readonly id: Vendor;
-  readonly label: string;
-  readonly available: boolean;
-  readonly unavailableReason: string | null;
-}
-```
+`VendorListing` is declared in `src/contract/index.ts` (D280).
 
 **This is how a client learns which vendors exist, and it is the only way** (D280, I81). It
 projects the configured provider registry's `list`, one entry per registered definition, in
@@ -2854,15 +2800,10 @@ one variant. The two are also acted on differently — a held root is someone el
 operator goes and looks at it; a corrupt lock is a damaged file on this host and the operator
 removes it.
 
-**`CheckpointError` gains two variants, and `ApiErrorCode` gains `restore_collision`** (D267,
-D277). **Scaffold, owed to the declaration** in both places `CheckpointError` is declared
-(`src/contract/index.ts`, `src/agent-console/core/types.ts`), and to `STATUS_FOR` in
-`src/edge/error-envelope/index.ts`:
-
-```ts
-| { readonly code: 'ignored_path_collision'; readonly paths: readonly string[] }
-| { readonly code: 'ignored_set_unreadable'; readonly detail: string }
-```
+**`CheckpointError.ignored_path_collision` and `.ignored_set_unreadable`, and `ApiErrorCode`'s
+`restore_collision`** (D267, D277, S38), are declared in both places `CheckpointError` is declared
+(`src/contract/index.ts`, `src/agent-console/core/types.ts`) and in `STATUS_FOR` in
+`src/edge/error-envelope/index.ts`.
 
 `paths` is non-empty and holds every colliding protected-set entry, in `IgnoredEntry.path`'s
 form, not only the first one found. An operator who fixes one path and retries into the next has
@@ -2968,7 +2909,7 @@ control rather than concealment (D50, D70).
 | `CheckpointError.commit_failed` | A commit fails for any other reason | Sometimes | As above |
 | *(no variant)* | **The ignored-path manifest could not be captured at commit, written, read, or parsed at restore** (D182) | — | **Not an error at all, at either end.** The commit succeeds with no manifest; the restore succeeds with `unreached: null`. A manifest is a report and never a gate, so no path may fail on its absence — and `null` is the one thing that must never be rendered as "nothing differs" (I58) |
 | `CheckpointError.no_such_checkpoint` | Restore names an unknown `sha` | No | `404 no_such_checkpoint`; the workspace is untouched |
-| `CheckpointError.ignored_set_unreadable` | The restore's opening `status --ignored=matching` fails or its output does not parse (D267) | Sometimes | `500 checkpoint_failed`, with the detail on the accompanying `error` event. **The workspace is untouched and no safety commit is written.** Never reported as a partial restore, and never as `checkpoints_unavailable` |
+| `CheckpointError.ignored_set_unreadable` | The restore's opening `status --ignored=matching` fails or its output does not parse (D267), or the preflight cannot list the target's tree (S38) | Sometimes | `500 checkpoint_failed`, with the detail on the accompanying `error` event. **The workspace is untouched and no safety commit is written.** Never reported as a partial restore, and never as `checkpoints_unavailable` |
 | `CheckpointError.ignored_path_collision` | The preflight finds a protected-set entry in the target's tree, with target paths beneath it, or with a target file as an ancestor (D267) | Not until the operator moves or deletes the named paths | `409 restore_collision` naming every path. **The workspace is untouched and no safety commit is written.** The server never resolves the collision itself, never with `add -f` and never by deleting |
 | `CheckpointError.restore_incomplete` | `read-tree` fails, **or the verification pass comes back dirty** — `diff --quiet <sha>` for tracked content, `ls-files --others --exclude-standard` less the protected set for what was left behind (D267). Never an exit code alone: `read-tree` exits 0 with a warning on the embedded-repository case (D112) | No | `error / checkpoint_restore_failed`, non-fatal, plus `500 checkpoint_failed`. **The workspace is partially restored**; the safety checkpoint is the way back |
 | `AdapterError.invalid_model` | A provider option or turn override fails the existing shell-safe model grammar | No, correct the value | Refuse before sending; the host maps to `422 bad_request` for model |
@@ -3838,7 +3779,7 @@ belong to the `exec --json` fallback alone; neither affects a session on `app-se
     **Resolved by D260 for thresholds and crossings; the stop is routed to `/design`.** One
     warning threshold, a fraction on `Config` (`sessionTokenBudgetWarnFraction`), and the budget
     itself as the second line. A crossing is a `session.notice` code — `budget_warning`,
-    `budget_exhausted` — not a new envelope kind and not a client derivation, scaffolded under
+    `budget_exhausted` — not a new envelope kind and not a client derivation, declared under
     *Event payloads* and held by I73. **Nothing is stopped**: no soft-stop threshold exists, and
     the failure mode above cannot occur because no stop does. What a stop stops, and whether a
     soft one exists at all, is `/design`'s, staged in `90-decisions.md § Open` for `/track`; this
@@ -3861,7 +3802,7 @@ belong to the `exec --json` fallback alone; neither affects a session on `app-se
     is worse than no state.
 
     **Resolved by D261: no state, a derived count.** Neither a `TurnStopReason` member, a turn
-    phase, nor a flag: `SessionSummary.pendingPermissions`, scaffolded under *Types § Session* and
+    phase, nor a flag: `SessionSummary.pendingPermissions`, declared under *Types § Session* and
     held by I74. It covers the operator's-approval case, which was already representable and only
     not surfaced, and **declines the model-asked-a-question case by name**, because nothing here
     can detect that question or hold a turn for its answer. (no issue — resolved by `/contract`)

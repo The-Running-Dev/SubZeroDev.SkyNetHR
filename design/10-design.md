@@ -608,12 +608,11 @@ sync.
 **The sequence is `20-contract.md § checkpoints`'s and is not restated here** — what follows is
 why the second operation is not the one D31 named (D112), why a fifth was added to report
 what the restore did not reach (D182), and why the ignored set is now fixed before the first
-operation and `clean -fd` is gone (D267). **D267 changes the sequence the contract states** —
+operation and `clean -fd` is gone (D267). **D267 changed the sequence the contract states** —
 a protected-set read and a preflight ahead of the safety commit, no `clean`, a verification
 that excludes the protected set, a new refusal code, and a way for the restore result to mark
-a protected path the target no longer ignores. That is an amendment `/contract` owns; until it
-lands, the contract's five-operation sequence and the shipped code both carry the deletion
-D267 closes.
+a protected path the target no longer ignores. The contract carries it as a six-operation
+sequence (D277, I77) and S38 built it.
 
 **D31 specified `checkout <sha> -- .` here, and that sequence cannot do what D31 says it
 does.** The argument was that `clean -fd` removes what the agent created since the target.
@@ -696,8 +695,7 @@ warning:
   evidence**, and nothing in *Security controls* leans on it; and **content is never
   recorded**, because storing it would be the widening the brief declined, arriving by the
   back door and paid for on every checkpoint. The manifest's shape and where it lives are
-  `20-contract.md`'s, as is the field the restore result grows to carry the list — an
-  amendment `/contract` owns, which this document does not pre-empt.
+  `20-contract.md`'s, as is the field the restore result carries the list in (`unreached`).
 - **Success is verified rather than inferred from an exit code.** `read-tree` exits 0 with
   only a warning when it cannot remove a directory an embedded repository occupies. So the
   sequence ends with `diff --quiet <sha>` for tracked content and
@@ -1950,8 +1948,8 @@ a client tell a silent agent from a dead connection, so this costs nothing on th
 | `ckpt.git` init fails | git exit code | `session.notice / warn`; session proceeds **without** checkpoints | Banner: no checkpoints | Session usable, DoD #6 unavailable |
 | Pre-turn `checkpoint.commit` fails | git exit code | `session.notice / warn` naming the cause; **the turn proceeds** with no restore point (D42) | "This turn has no checkpoint", and `ckpt.git/index.lock` named when that is the cause | Turn runs. Earlier checkpoints intact; this turn is not rollback-able |
 | Restore while a turn is in flight | Manager turn state | `409 turn_in_flight` | "Finish or interrupt first" | Workspace untouched |
-| Protected-set read fails at restore start | `status --ignored=matching` exit code, before the safety commit (D267) | Refuse the restore | Refusal naming the cause | **Workspace untouched**, no safety commit written |
-| Restore would reach an ignored path | Preflight: a path ignored under the pre-restore rules is in the target's tree, has target paths beneath it, or has a target *file* as an ancestor (D267) | Refuse with a new `CheckpointError` code — named by the `/contract` amendment | Refusal naming each colliding path | **Workspace untouched**, no safety commit written. Moving or deleting the named paths, then retrying, is the operator's call |
+| Protected-set read fails at restore start | `status --ignored=matching` exit code, or the preflight's `ls-tree` of the target, before the safety commit (D267, S38) | Refuse with `CheckpointError.ignored_set_unreadable` | Refusal naming the cause | **Workspace untouched**, no safety commit written |
+| Restore would reach an ignored path | Preflight: a path ignored under the pre-restore rules is in the target's tree, has target paths beneath it, or has a target *file* as an ancestor (D267) | Refuse with `CheckpointError.ignored_path_collision`, `409 restore_collision` (D277) | Refusal naming each colliding path | **Workspace untouched**, no safety commit written. Moving or deleting the named paths, then retrying, is the operator's call |
 | Restore fails part-way | **The verification pass, not the exit code** — `diff --quiet <sha>` for tracked content, `ls-files --others --exclude-standard` less the protected set for what was left behind (D112, D267) | `error / checkpoint_restore_failed`, non-fatal, plus `500 checkpoint_failed` | Failure named, with the paths left behind | **Workspace is partially restored.** No step in the sequence is atomic, and `read-tree` exits 0 on the embedded-repository case, which is why this is detected rather than assumed absent. The safety checkpoint (D31) is already committed, so the pre-restore state is still reachable |
 | Disk full or write error on spill | Write error | **Fatal to the session** (D41): interrupt the live turn with `stopReason: 'storage_failure'`, mark the session ended | "Storage failed; this session has ended" | Transcript ends at the last durable event. The ring never outruns the spill, so replay stays truthful |
 | Audit append fails | Write error on `audit.ndjson` | **Deny** the permission with the failure as its reason; `session.notice / error` (D33) | "Denied — the approval could not be recorded" | Turn continues. No tool ran unaudited |
@@ -3261,7 +3259,7 @@ these are cited by number elsewhere in this document and in the slices.
    and never replays, for both vendors, which removes the collision with S1.5's contiguity by
    construction instead of weakening it. What this now owes elsewhere: `20-contract.md` states
    the concatenation rule in `seq` order and lists `message.delta` among the envelope kinds,
-   and both are amendments `/contract` owns, not this document. (#13)
+   and the contract now states both (D168, I51). (#13)
 6. **Answered by S8.1: two live interfaces, and neither matches the rollout schema.**
    `codex app-server` is JSON-RPC 2.0 over stdio, marked `[experimental]` by the CLI itself
    and schema-generated rather than hand-transcribed; `codex exec --json` is newline-delimited
@@ -3278,7 +3276,7 @@ these are cited by number elsewhere in this document and in the slices.
    *storage* half stays closed — the blob path carries `turnId` (D22). **The *correlation*
    half is resolved by D274**: the `exec --json` adapter composes its `CallId` from
    `(turnId, item id)`, and session-uniqueness is an adapter obligation (*Identity spaces*).
-   `20-contract.md § Unresolved` 13 closes with `/contract`'s amendment.
+   `20-contract.md § Unresolved` 13 is closed by D274 and D276.
 8. **Answered by S10.1, and more narrowly than it was asked.** The question was whether
    `permission_suggestions` is a *sufficient* grammar. It is not merely insufficient, it is
    **unobservable**: the `control_request` that would carry it has never appeared on this
