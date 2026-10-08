@@ -245,7 +245,7 @@ This repository has two instances today. An issue's `<!-- agent:start -->` block
 ## Repository-specific facts
 
 - **Direct pushes to `main` are rejected, mirror-only or not.** Branch protection fails every push not made through a pull request (GH013, confirmed by a rejected mirror-only push, PR #327). The mirror-refresh carve-out in *Git and delivery* is therefore unavailable here: commit the refreshed `design/state/work/` files on a branch and open a pull request.
-- **`design/30-slices.md` keeps every landed slice's full body under `## Landed`, which precedes `## Outstanding`.** Other documents cite criterion ids (S1.6, S3.3, S7.5) by text, and a bare index would lose them (D207, issue #305). Retiring a landed slice to an index row is not done in this repository.
+- **`design/30-slices.md` keeps every landed slice's full body under `## Landed`, which follows `## Outstanding`.** The order is load-bearing: the kit's `get-next-slice.ts` reads everything above `## Landed` as live slices and everything below it as landed, so a slice placed after the heading is never built. Other documents cite criterion ids (S1.6, S3.3, S7.5) by text, and a bare index would lose them (D207, issue #305). Retiring a landed slice to an index row is not done in this repository.
 - **There is no design-state projection.** `design/state-index.md` does not exist and `design/20-contract.md` has no `invariants` region; only the `WorkRef` mirror under `design/state/work/` is adopted (D208, issue #312). Stage only `design/state/work` when committing a mirror refresh.
 
 ## Decision logging
