@@ -376,6 +376,12 @@ body {
   font-size: var(--text-xs);
 }
 
+.session__awaiting {
+  color: var(--danger);
+  font-size: var(--text-xs);
+  font-weight: 600;
+}
+
 /* ------------------------------------------------------------------- forms */
 
 /* The UA sheet gives `form` a bottom margin. On the desktop it is a stray gap; on the

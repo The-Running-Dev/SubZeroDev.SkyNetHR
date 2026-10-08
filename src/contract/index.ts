@@ -164,6 +164,9 @@ export interface SessionSummary {
   readonly endedAt: IsoTimestamp | null;
   readonly endReason: SessionEndReason | null;
   readonly name: string | null;
+  // D261, I74: the live turn's outstanding permission requests. Derived at read time and
+  // never persisted; it does not count a question the model asked in its own text.
+  readonly pendingPermissions: number;
 }
 
 // The denormalised session identity a review copies at authorship (D67). It is a copy,

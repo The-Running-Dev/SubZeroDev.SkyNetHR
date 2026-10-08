@@ -254,7 +254,7 @@ Out of scope:
 
 ## S40 — See which sessions are waiting for an approval
 
-Status: todo
+Status: done
 
 **Tier one, under brief item 4.** D261 decided this. A pending permission request was always
 representable, but only a subscription to the session's own stream surfaced it.

@@ -511,6 +511,27 @@ test('S35.5 — an ended session reads as "ended" in both surfaces and states no
   assert.equal(/reason/i.test(row.children[0].children[1].textContent), false);
 });
 
+// S40.6 — the list marks a non-current session whose summary carries outstanding permission
+// requests. The mark is the client's own reading of the count (D79), and the current session's
+// badge keeps reading its own stream (S18.6) rather than the summary.
+test('S40.6 — a non-current session with a count above zero is marked awaiting approval; zero, or the current session, is not', async () => {
+  const sessions = [
+    { id: 'sess-a', cwd: '/work/a', vendor: 'acme-agent', state: 'live', name: null, model: null, pendingPermissions: 2 },
+    { id: 'sess-b', cwd: '/work/b', vendor: 'acme-agent', state: 'live', name: null, model: null, pendingPermissions: 0 },
+    { id: 'sess-c', cwd: '/work/c', vendor: 'acme-agent', state: 'live', name: null, model: null, pendingPermissions: 1 },
+  ];
+  const { doc, selectA } = await setUpApp({ sessions });
+  const marks = () => doc.getElementById('sessions').children.map(row =>
+    row.children[0].children.filter(child => child.className === 'session__awaiting').map(child => child.textContent));
+
+  assert.deepEqual(marks(), [['AWAITING APPROVAL · 2'], [], ['AWAITING APPROVAL · 1']], 'no session is current yet');
+
+  selectA();
+  await flush();
+  assert.deepEqual(marks(), [[], [], ['AWAITING APPROVAL · 1']], 'the current session carries no list mark');
+  assert.notEqual(doc.getElementById('status-badge').textContent, 'BLOCKED', 'the badge reads the stream, not the summary count');
+});
+
 for (const edge of ['sse', 'ws']) {
   test(`#461 ${edge} — session end updates the header and sidebar without a reload`, async () => {
     const { doc, sseInstances, wsInstances, selectA } = await setUpApp();

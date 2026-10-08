@@ -975,7 +975,7 @@ export function createSessionCore(deps: {
         // an ordinary caller may treat as successfully created. Keep the entry and
         // its allocation intact; confirmed commit alone clears `creating`.
         if (entry.creating || entry.record.owner !== owner) continue;
-        out.push(toSummary(entry.record));
+        out.push(toSummary(entry));
       }
       return out;
     },
@@ -983,7 +983,7 @@ export function createSessionCore(deps: {
     get(sessionId, owner) {
       const entry = sessions.get(sessionId);
       if (!entry || entry.creating || entry.record.owner !== owner) return { ok: false, error: { code: 'not_found', sessionId } };
-      return { ok: true, value: toSummary(entry.record) };
+      return { ok: true, value: toSummary(entry) };
     },
 
     async send(sessionId, owner, text, attachments, model) {
@@ -2014,7 +2014,10 @@ export function createSessionCore(deps: {
   return manager;
 }
 
-function toSummary(record: SessionRecord): SessionSummary {
+// D261, I74: `pendingPermissions` is read off the live turn here and nowhere else, so it is
+// never on `record` and never reaches `meta.json`. No turn — idle, ended, rehydrated — is `0`.
+function toSummary(live: LiveSession): SessionSummary {
+  const record = live.record;
   return {
     id: record.id,
     owner: record.owner,
@@ -2029,6 +2032,7 @@ function toSummary(record: SessionRecord): SessionSummary {
     endedAt: record.endedAt,
     endReason: record.state === 'live' ? null : (record.endReason ?? null),
     name: record.name,
+    pendingPermissions: live.turn?.pending.size ?? 0,
   };
 }
 

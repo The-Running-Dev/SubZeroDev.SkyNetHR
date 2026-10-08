@@ -5616,3 +5616,117 @@ test('S39.9 — with no budget configured a manager emits no budget notice, what
   await manager.end(sessionId, owner);
   assert.equal(received.filter((e) => noticeCode(e) === 'budget_warning' || noticeCode(e) === 'budget_exhausted').length, 0);
 });
+
+// S40 (D261, I74): `SessionSummary.pendingPermissions` is the live turn's outstanding permission
+// requests, read at summary time and never persisted. The adapter hands the test its `notify` so
+// the requests, the assistant's own question, and the turn's end arrive exactly when the test says.
+function pendingAdapter() {
+  const handle: { notify: AdapterOptions['notify'] | null; turnId: TurnId | null } = { notify: null, turnId: null };
+  const factory = (vendor: Vendor, adapterOpts: AdapterOptions): Result<Adapter, AdapterError> => {
+    handle.notify = adapterOpts.notify;
+    return { ok: true, value: {
+      vendor,
+      policy: { mode: 'interactive', sandbox: null, banner: null },
+      acceptsAttachments: false,
+      async send(_text, _attachments, _resume, turnId) { handle.turnId = turnId; return { ok: true, value: undefined }; },
+      respond() { return { ok: true, value: undefined }; },
+      async kill() {},
+    } };
+  };
+  const request = (requestId: string) => handle.notify!({
+    kind: 'event',
+    event: { kind: 'permission.request', data: { turnId: handle.turnId, requestId, callId: `call-${requestId}`, tool: 'Bash', input: { cmd: 'ls' }, matchTarget: null, suggestions: [] } },
+  } as never);
+  const ask = (text: string) => handle.notify!({ kind: 'event', event: { kind: 'message', data: { turnId: handle.turnId, role: 'assistant', text, attachments: [] } } } as never);
+  const endTurn = () => handle.notify!({ kind: 'event', event: { kind: 'turn.ended', data: { stopReason: 'completed', usage: null } } } as never);
+  return { factory, request, ask, endTurn };
+}
+
+async function pendingSession(dir: string) {
+  const made = await makeManager('full');
+  const { config, checkpoints, workspaceRoot } = made;
+  const owner = 'operator-1' as OperatorId;
+  const projectDir = path.join(workspaceRoot, dir);
+  await mkdir(projectDir);
+  const adapter = pendingAdapter();
+  const manager = createSessionManager({ config, store: made.store, checkpoints, records: notImplementedProxy<Records>('records'), createAdapter: adapter.factory });
+  const created = await manager.create(owner, { vendor: 'claude', cwd: projectDir, model: null, sandbox: null, requisitionId: null });
+  if (!created.ok) throw new Error('create failed');
+  const { sessionId } = created.value;
+  const received: Envelope[] = [];
+  await manager.subscribe(sessionId, owner, 0, { deliver: (e) => { if ('seq' in e) received.push(e); }, close: () => {} });
+  const listed = () => manager.list(owner).find((s) => s.id === sessionId)!.pendingPermissions;
+  const got = () => { const g = manager.get(sessionId, owner); if (!g.ok) throw new Error('get failed'); return g.value.pendingPermissions; };
+  return { made, manager, owner, sessionId, received, listed, got, ...adapter };
+}
+
+const answer = (requestId: string) => ({ requestId: requestId as never, decision: 'allow' as const, scope: 'once' as const, rule: null, reason: null });
+
+test('S40.1/S40.2/S40.3 — two outstanding requests read 2 on list and get, then 1, then 0; meta.json never carries the count; idle and ended read 0', async () => {
+  const s = await pendingSession('proj-s40-count');
+  assert.equal(s.listed(), 0, 'S40.2: an idle session reads 0');
+  assert.equal(s.got(), 0);
+  const metaPath = path.join(s.made.storageRoot, 'sessions', s.sessionId, 'meta.json');
+  const metaBefore = JSON.parse(await readFile(metaPath, 'utf8')) as { schemaVersion: number };
+
+  assert.equal((await s.manager.message(s.sessionId, s.owner, 'go', [])).ok, true);
+  await waitUntil(() => s.received.some((e) => e.kind === 'turn.started'));
+  s.request('req-1');
+  s.request('req-2');
+  await waitUntil(() => s.received.filter((e) => e.kind === 'permission.request').length === 2);
+  assert.equal(s.listed(), 2, 'S40.1: list reports both outstanding requests');
+  assert.equal(s.got(), 2, 'S40.1: get reports both outstanding requests');
+
+  // S40.3: the count is derived, never written down; the file format is untouched.
+  const metaDuring = await readFile(metaPath, 'utf8');
+  assert.equal(metaDuring.includes('pendingPermissions'), false, 'meta.json holds no pendingPermissions key');
+  assert.equal((JSON.parse(metaDuring) as { schemaVersion: number }).schemaVersion, metaBefore.schemaVersion, 'schemaVersion is unchanged');
+
+  assert.equal((await s.manager.answerPermission(s.sessionId, s.owner, answer('req-1'))).ok, true);
+  await waitUntil(() => s.listed() === 1);
+  assert.equal(s.got(), 1, 'S40.1: one answered leaves one');
+  assert.equal((await s.manager.answerPermission(s.sessionId, s.owner, answer('req-2'))).ok, true);
+  await waitUntil(() => s.listed() === 0);
+  assert.equal(s.got(), 0, 'S40.1: both answered leaves none');
+
+  s.endTurn();
+  await waitUntil(() => s.received.some((e) => e.kind === 'turn.ended'));
+  await s.manager.end(s.sessionId, s.owner);
+  assert.equal(s.listed(), 0, 'S40.2: an ended session reads 0');
+  assert.equal(s.got(), 0);
+});
+
+test('S40.2 — a session rehydrated after a restart reads 0, even with an unanswered request in its spill', async () => {
+  const s = await pendingSession('proj-s40-restart');
+  assert.equal((await s.manager.message(s.sessionId, s.owner, 'go', [])).ok, true);
+  await waitUntil(() => s.received.some((e) => e.kind === 'turn.started'));
+  s.request('req-1');
+  await waitUntil(() => s.listed() === 1);
+  // The process "dies" here: the request is durable and never resolved.
+  await waitUntil(async () => {
+    for await (const r of s.made.store.readEventsAfter(s.sessionId, 0 as never)) if (r.ok && r.value.kind === 'permission.request') return true;
+    return false;
+  });
+
+  const restarted = createSessionManager({ config: s.made.config, store: s.made.store, checkpoints: s.made.checkpoints, records: notImplementedProxy<Records>('records') });
+  assert.equal((await restarted.boot()).ok, true);
+  const summary = restarted.list(s.owner).find((x) => x.id === s.sessionId);
+  assert.ok(summary, 'the session is rehydrated');
+  assert.equal(summary.pendingPermissions, 0);
+  const got = restarted.get(s.sessionId, s.owner);
+  assert.equal(got.ok && got.value.pendingPermissions, 0);
+});
+
+test('S40.4 — assistant text ending in a question, with no permission request, reads 0', async () => {
+  const s = await pendingSession('proj-s40-question');
+  assert.equal((await s.manager.message(s.sessionId, s.owner, 'go', [])).ok, true);
+  await waitUntil(() => s.received.some((e) => e.kind === 'turn.started'));
+  s.ask('I can delete the build folder. Shall I go ahead?');
+  await waitUntil(() => s.received.some((e) => e.kind === 'message' && (e.data as { role: string }).role === 'assistant'));
+  assert.equal(s.listed(), 0, 'mid-turn, after the question');
+  assert.equal(s.got(), 0);
+  s.endTurn();
+  await waitUntil(() => s.received.some((e) => e.kind === 'turn.ended'));
+  assert.equal(s.listed(), 0, 'after the turn that ended on a question');
+  await s.manager.end(s.sessionId, s.owner);
+});

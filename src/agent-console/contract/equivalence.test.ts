@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type * as Host from '../../contract/index.js';
 import type * as Extracted from './index.js';
+import type * as Core from '../core/types.js';
 import { isFrame as hostIsFrame } from '../../contract/index.js';
 import { isFrame as extractedIsFrame } from './index.js';
 
@@ -273,6 +274,10 @@ type HistoricalError = { readonly kind: Exclude<Host.ErrorEventKind, 'adapter_ou
 // frozen `Before.SessionNotice` declaration. D260's two budget codes are pinned the same way.
 type HistoricalSessionNoticeCode = Exclude<Host.SessionNoticeCode, 'task_started' | 'task_progress' | 'task_completed' | 'task_failed' | 'task_cancelled' | 'budget_warning' | 'budget_exhausted'>;
 type BudgetNoticeAddition = Assert<Equals<Exclude<Host.SessionNoticeCode, Before.SessionNoticeCode | 'task_started' | 'task_progress' | 'task_completed' | 'task_failed' | 'task_cancelled'>, 'budget_warning' | 'budget_exhausted'>>;
+// S40.5 (D261, I74): `pendingPermissions` is declared in both `SessionSummary`s. Indexing a
+// declaration that lacks it fails to compile, which is the whole point of these two lines.
+type PendingPermissionsHost = Assert<Equals<Host.SessionSummary['pendingPermissions'], number>>;
+type PendingPermissionsCore = Assert<Equals<Core.SessionSummary['pendingPermissions'], number>>;
 type HistoricalSessionNotice = { readonly level: Host.SessionNotice['level']; readonly code: HistoricalSessionNoticeCode; readonly text: Host.SessionNotice['text'] };
 // Same pinning treatment for D258's `diff` addition to ToolResult: the historical
 // subset and the delta are pinned independently rather than widening the frozen
