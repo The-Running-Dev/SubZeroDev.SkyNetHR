@@ -7117,23 +7117,30 @@ Chosen, third: **retained with reasons.** The EOF exit bound, `< 5000`, is `PROT
 Rejected: **raising `probeCommand`'s default**, because a hung binary would then delay a create by up to 20 s for every operator, to fix a test. **Retaining the probe flake as accepted risk**, because the seam costs one optional parameter. **A drop-observer hook on the edges' backpressure guard**, chosen at first and then not needed: the subscription close already marks the drop, and the hook would have added a field to the contract module's `EdgeDeps`. **An exit watchdog that enforces the EOF bound**, because it could skip the flush and storage close it is waiting for. **Relaxing the test-side EOF bound**, because the test would then no longer check the published promise. **Shortening the drain in S27.3's test** or **widening its bound**: the first is a new seam on the shutdown path and stops exercising the real window, and a widened bound matches nothing the server does. **Amending S5.2's number**, because that weakens a stated criterion to absorb load.
 Reversibility: cheap.
 
+### 2026-10-08 — D290 Retired command names: one mapping, history kept, present tense corrected
+Context: #532 item 1. AgentKit retired `/track`, `/slices`, `/contract`, `/design` and `/kit-sync` in favour of `/agentkit:<name>` commands and a `Status:` line per slice. `test-design.ts` reports 17 places in `design/` that still name them. Most are past tense, recording what a command did when it ran; a few state as present fact what no longer holds, including both section preambles of `30-slices.md`, which said every slice is tracked by an issue `/track` opens.
+Chosen: **one mapping sentence at the head of `20-contract.md`**, naming each retired command's successor and that `/track` has none. Past-tense references keep the name that ran. Present-tense claims that are now false are rewritten: the Outstanding and Landed preambles of `30-slices.md`, and two live references in `20-contract.md`. S38–S40, done, move under *Landed*, as #482 did for earlier slices.
+Rejected: **rewriting all 17 to the new names**, because a past-tense line would then say a command ran that did not exist yet, and `/track` has no successor to rename it to. **The mapping alone**, because the preambles would go on stating a tracking regime the repository no longer follows. The checker keeps reporting the past-tense lines; that residue is accepted.
+Reversibility: cheap.
+
+### 2026-10-08 — D291 S39.5 and S39.6 are met by a fresh emitter over the same spill
+Context: #532 item 3. S39.5 and S39.6 describe a server restart followed by more `usage` on the same session. D20 makes that unreachable: a session rehydrated after restart is ended and read-only, so no further usage can arrive. Their tests (`src/session-manager/budget.test.ts`, the S39.5 and S39.6 cases) instead build a fresh notice emitter over the same spill, which is the state a restart leaves, and feed it usage directly.
+Chosen: **accept the two criteria as satisfied by those tests.** S39 is done, so its criteria are not edited; this entry is the record of how they are read. If a future decision lets a session resume across a restart, these two criteria are revisited against the real path.
+Rejected: **a criterion in a future slice** restating the case, because there is no reachable path for it to test. **Reversing D20** so the literal case exists, because that is a design change far larger than this finding and belongs to `/agentkit:design`.
+Reversibility: cheap.
+
+### 2026-10-08 — D292 S39.8 needs a test through the message route, filed as #533
+Context: #532 item 4. S39.8 says that after `budget_exhausted`, `POST /message` is accepted, the live turn completes and the next turn starts normally. Its only test, "S39.4/S39.8" in `src/session-manager/index.test.ts`, calls the session manager, below the route an operator uses.
+Chosen: **manager-level coverage is not accepted.** An HTTP-level test in `src/edge/sse/index.test.ts` is owed, carried by #533 for `/agentkit:fix`. S39's criteria and status are unchanged.
+Rejected: **accepting the manager-level test**, because `agent.md`'s S25.5 lesson is that a test reaching the behaviour through a different entry point guards nothing on the path users take, and a refusal added at the edge would pass it.
+Reversibility: cheap.
+
+### 2026-10-08 — D293 The wire `Session` declares `pendingPermissions`
+Context: #532 item 5. S40 added `pendingPermissions` to `SessionSummary` (D261, I74), and the Phase 4 AgentConsole wire sends the same summary as its `Session`, but neither `src/agent-console/protocol/wire.ts` nor `schemas/wire.schema.json` named the field.
+Chosen: **declare it in this reconciliation's pull request**, optional, a non-negative safe integer or null, in `wire.ts` and in all five `Session` objects of the schema, with a test that validates and rejects values at each.
+Rejected: **a separate `/agentkit:fix` bug**, because the user chose to close it here. **Leaving it undeclared**, because the schema would not name a field the runtime sends, and a consumer generated from it would drop the field.
+Reversibility: cheap; the Phase 4 wire has no consumer yet.
+
 ## Open
 
 Staging only. Once an item becomes an issue it leaves this list.
-
-- **D267's code.** The contract is amended (D277, I77). Add `exposed` to both `RestoreResult`
-  declarations, and `ignored_path_collision` and `ignored_set_unreadable` to both `CheckpointError`
-  declarations. Add `restore_collision` to `ApiErrorCode` and `STATUS_FOR` (409), and map the new
-  variants in `http-common` with `detail: { paths }` for the collision. In `restore`, after
-  `cat-file -e`: read the protected set, preflight against `ls-tree -r <sha>`, then commit and
-  `read-tree`. Remove `clean -fd`, exclude the protected set from the untracked-path check, and
-  derive `exposed` from that read. The client renders `exposed` and every path of a
-  `restore_collision`. Comments that still say "neither `read-tree` nor `clean -fd` takes `-x`" go.
-- **D267's acceptance criteria.** `/slices` adds to S6 (or S32, where the manifest lives) the
-  cases that close F1. A restore that un-ignores a path leaves its bytes and names it in
-  `exposed`. A target that tracks a currently ignored path refuses with `restore_collision` and
-  writes nothing. A failed protected-set read refuses with no safety commit. A tree with an
-  embedded repository still comes back `restore_incomplete`.
-- **D278–D281's code and acceptance criteria.** The contract is amended (I78–I81). Each issue —
-  #415, #83, #64, #461 — carries its own slice; `/slices` writes their criteria, then this item
-  goes. #64's slice deletes the `*owed*` marker on `GET /api/vendors` (D283).
