@@ -40,6 +40,7 @@ function baseConfig(storageRoot: string, requisitionTextBytes = 1024, reviewBody
     includeRaw: false,
     streamDeltas: false,
     sessionTokenBudget: null,
+    sessionTokenBudgetWarnFraction: null,
     tokenRates: null,
     currency: null,
     checklist: [],

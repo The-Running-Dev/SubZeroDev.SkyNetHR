@@ -524,6 +524,8 @@ body {
 .event--thinking .event__label { color: var(--thinking); }
 .event--error .event__label { color: var(--danger); }
 .event--permission .event__label { color: var(--warn); }
+.event--notice-warn .event__label { color: var(--warn); }
+.notice__headline { font-weight: 600; }
 
 .message__text,
 .thinking__text,

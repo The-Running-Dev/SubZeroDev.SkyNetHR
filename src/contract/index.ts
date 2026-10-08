@@ -542,6 +542,9 @@ export interface Config {
   // Reporting overhead only — never model, reasoning effort or routing.
   readonly outputMode?: 'normal' | 'terse';
   readonly sessionTokenBudget: number | null; // (tier two) per session; null disables the view's budget
+  // D260: a fraction of the budget, strictly between 0 and 1; null disables `budget_warning`
+  // and leaves `budget_exhausted` armed. Refused at boot when set without a budget.
+  readonly sessionTokenBudgetWarnFraction: number | null;
   readonly tokenRates: TokenRates | null; // (tier two) null disables the cost tile (D158)
   readonly currency: string | null; // (tier two) label only; never interpreted (D158)
   readonly checklist: readonly ChecklistItemTemplate[]; // (tier two) empty disables the checklist

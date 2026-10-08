@@ -84,6 +84,7 @@ async function makeSharedEdges(): Promise<Harness> {
     includeRaw: false,
     streamDeltas: false,
     sessionTokenBudget: null,
+    sessionTokenBudgetWarnFraction: null,
     tokenRates: null,
     currency: null,
     checklist: [],

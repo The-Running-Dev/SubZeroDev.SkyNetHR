@@ -223,6 +223,7 @@ async function makeManager(
     includeRaw: false,
     streamDeltas: false,
     sessionTokenBudget: null,
+    sessionTokenBudgetWarnFraction: null,
     tokenRates: null,
     currency: null,
     checklist: checklistOverride,
@@ -5520,4 +5521,98 @@ test('output policy — terse keeps head and tail of a failed tool.result; a fai
   const normal = await runBigToolResult({}, 50000, true);
   assert.equal(normal.truncated, false);
   assert.ok(normal.output.endsWith('TAIL'));
+});
+
+// S39: an adapter whose `notify` the test drives, so `usage` envelopes arrive exactly when and
+// as large as a criterion needs, inside a turn the test also ends.
+function budgetAdapter() {
+  const handle: { notify: AdapterOptions['notify'] | null; sends: number } = { notify: null, sends: 0 };
+  const factory = (vendor: Vendor, adapterOpts: AdapterOptions): Result<Adapter, AdapterError> => {
+    handle.notify = adapterOpts.notify;
+    return { ok: true, value: {
+      vendor,
+      policy: { mode: 'interactive', sandbox: null, banner: null },
+      acceptsAttachments: false,
+      async send() { handle.sends++; return { ok: true, value: undefined }; },
+      respond() { return { ok: true, value: undefined }; },
+      async kill() {},
+    } };
+  };
+  const usage = (inputTokens: number) =>
+    handle.notify!({ kind: 'event', event: { kind: 'usage', data: { usage: { inputTokens, outputTokens: 0, cacheRead: 0, cacheCreate: 0 } } } } as never);
+  const endTurn = () =>
+    handle.notify!({ kind: 'event', event: { kind: 'turn.ended', data: { stopReason: 'completed', usage: null } } } as never);
+  return { factory, handle, usage, endTurn };
+}
+
+const noticeCode = (e: Envelope) => e.kind === 'session.notice' ? (e.data as { code: string }).code : null;
+
+test('S39.4/S39.8 — one usage envelope crossing both lines gives budget_warning then budget_exhausted after it, and the session keeps working', async () => {
+  const made = await makeManager('full', {}, (s) => s, null, null, [], { sessionTokenBudget: 1000, sessionTokenBudgetWarnFraction: 0.8 });
+  const { config, checkpoints, workspaceRoot } = made;
+  const owner = 'operator-1' as OperatorId;
+  const projectDir = path.join(workspaceRoot, 'proj-s39');
+  await mkdir(projectDir);
+  const { factory, handle, usage, endTurn } = budgetAdapter();
+  const manager = createSessionManager({ config, store: made.store, checkpoints, records: notImplementedProxy<Records>('records'), createAdapter: factory });
+  const created = await manager.create(owner, { vendor: 'claude', cwd: projectDir, model: null, sandbox: null, requisitionId: null });
+  assert.equal(created.ok, true);
+  if (!created.ok) return;
+  const { sessionId } = created.value;
+  const received: Envelope[] = [];
+  await manager.subscribe(sessionId, owner, 0, { deliver: (e) => { if ('seq' in e) received.push(e); }, close: () => {} });
+
+  assert.equal((await manager.message(sessionId, owner, 'first', [])).ok, true);
+  await waitUntil(() => received.some((e) => e.kind === 'turn.started'));
+  usage(1100);
+  await waitUntil(() => received.some((e) => noticeCode(e) === 'budget_exhausted'));
+  const crossing = received.find((e) => e.kind === 'usage')!;
+  const warning = received.find((e) => noticeCode(e) === 'budget_warning')!;
+  const exhausted = received.find((e) => noticeCode(e) === 'budget_exhausted')!;
+  assert.ok(warning, 'the warning is emitted');
+  assert.equal((warning.data as { level: string }).level, 'warn');
+  assert.equal((exhausted.data as { level: string }).level, 'warn');
+  assert.ok((crossing.seq as number) < (warning.seq as number) && (warning.seq as number) < (exhausted.seq as number), 'usage, then warning, then exhausted');
+
+  // S39.8: the live turn runs to completion, a further message is accepted, and the next turn starts.
+  endTurn();
+  await waitUntil(() => received.some((e) => e.kind === 'turn.ended'));
+  assert.equal((received.find((e) => e.kind === 'turn.ended')!.data as { stopReason: string }).stopReason, 'completed');
+  const second = await manager.message(sessionId, owner, 'second', []);
+  assert.equal(second.ok, true, 'a message after budget_exhausted is accepted');
+  await waitUntil(() => received.filter((e) => e.kind === 'turn.started').length === 2);
+  assert.equal(handle.sends, 2, 'the adapter received the second message');
+  usage(50);
+  endTurn();
+  await waitUntil(() => received.filter((e) => e.kind === 'turn.ended').length === 2);
+  await manager.end(sessionId, owner);
+
+  // The spill — not only the live stream — holds each notice exactly once.
+  const spilled: Envelope[] = [];
+  for await (const r of made.store.readEventsAfter(sessionId, 0 as never)) if (r.ok) spilled.push(r.value);
+  assert.equal(spilled.filter((e) => noticeCode(e) === 'budget_warning').length, 1);
+  assert.equal(spilled.filter((e) => noticeCode(e) === 'budget_exhausted').length, 1);
+});
+
+test('S39.9 — with no budget configured a manager emits no budget notice, whatever burn arrives', async () => {
+  const made = await makeManager('full');
+  const { config, checkpoints, workspaceRoot } = made;
+  const owner = 'operator-1' as OperatorId;
+  const projectDir = path.join(workspaceRoot, 'proj-s39-off');
+  await mkdir(projectDir);
+  const { factory, usage, endTurn } = budgetAdapter();
+  const manager = createSessionManager({ config, store: made.store, checkpoints, records: notImplementedProxy<Records>('records'), createAdapter: factory });
+  const created = await manager.create(owner, { vendor: 'claude', cwd: projectDir, model: null, sandbox: null, requisitionId: null });
+  assert.equal(created.ok, true);
+  if (!created.ok) return;
+  const { sessionId } = created.value;
+  const received: Envelope[] = [];
+  await manager.subscribe(sessionId, owner, 0, { deliver: (e) => { if ('seq' in e) received.push(e); }, close: () => {} });
+  await manager.message(sessionId, owner, 'go', []);
+  await waitUntil(() => received.some((e) => e.kind === 'turn.started'));
+  usage(10_000_000);
+  endTurn();
+  await waitUntil(() => received.some((e) => e.kind === 'turn.ended'));
+  await manager.end(sessionId, owner);
+  assert.equal(received.filter((e) => noticeCode(e) === 'budget_warning' || noticeCode(e) === 'budget_exhausted').length, 0);
 });

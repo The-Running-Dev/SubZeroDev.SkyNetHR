@@ -120,7 +120,9 @@ export type SessionNoticeCode =
   | 'task_progress' // a subagent/task lifecycle step reported progress
   | 'task_completed' // a subagent/task lifecycle step finished
   | 'task_failed' // a subagent/task lifecycle step failed
-  | 'task_cancelled'; // a subagent/task lifecycle step was cancelled
+  | 'task_cancelled' // a subagent/task lifecycle step was cancelled
+  | 'budget_warning' // D260: a `usage` envelope carried burn to the configured fraction of the budget
+  | 'budget_exhausted'; // D260: a `usage` envelope carried burn to the whole budget
 
 export interface SessionNotice {
   readonly level: 'info' | 'warn' | 'error';

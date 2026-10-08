@@ -578,3 +578,28 @@ test('D275/D276 — a typed reason is sent with the deny; an empty or blank fiel
   assert.deepEqual((await denyWith('   ')).calls, [['req-1', 'deny', null]]);
   assert.deepEqual((await denyWith('ignored on allow', 'allow')).calls, [['req-1', 'allow', null]], 'an allow never carries a reason');
 });
+
+// S39.10: the budget notices render as warnings, as two different console-owned sentences
+// chosen by `code`; the server's `text` is shown but never read.
+test('S39.10 — budget_warning and budget_exhausted render as warnings with distinct sentences keyed on code, not text', () => {
+  const doc = fakeDocument();
+  const warning = renderEvent(doc, notice('This session has used 850 of its 1000-token budget.', 'warn', 'budget_warning'), null);
+  const exhausted = renderEvent(doc, notice('This session has used 1000 tokens, its whole 1000-token budget.', 'warn', 'budget_exhausted'), null);
+  for (const node of [warning, exhausted]) {
+    assert.match(node.className, /event--notice-warn/);
+    assert.doesNotMatch(node.className, /error/);
+  }
+  const headlineOf = (node) => find(node, 'notice__headline').textContent;
+  assert.equal(headlineOf(warning), 'This session is nearing its token budget. Nothing has been stopped.');
+  assert.equal(headlineOf(exhausted), 'This session has used its whole token budget. It keeps running and accepting messages.');
+  assert.notEqual(headlineOf(warning), headlineOf(exhausted));
+  assert.equal(find(warning, 'notice__text').textContent, 'This session has used 850 of its 1000-token budget.');
+
+  // Swapping the texts leaves each sentence with its code: the branch reads `code` only.
+  const swapped = renderEvent(doc, notice('This session has used 1000 tokens, its whole 1000-token budget.', 'warn', 'budget_warning'), null);
+  assert.equal(headlineOf(swapped), headlineOf(warning));
+  // An unrelated notice whose text mentions the budget gets no budget sentence.
+  const unrelated = renderEvent(doc, notice('budget_exhausted', 'info', 'task_progress'), null);
+  assert.equal(find(unrelated, 'notice__headline'), null);
+  assert.match(unrelated.className, /event--notice-info/);
+});
