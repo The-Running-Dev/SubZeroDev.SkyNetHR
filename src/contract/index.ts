@@ -331,6 +331,7 @@ export interface IgnoredDelta {
 export interface RestoreResult {
   readonly safety: Checkpoint;
   readonly unreached: readonly IgnoredDelta[] | null;
+  readonly exposed: readonly string[];
 }
 
 // ---------------------------------------------------------------------------
@@ -942,6 +943,7 @@ export type ApiErrorCode =
   | 'outside_workspace_root'
   | 'bad_request'
   | 'checkpoint_failed'
+  | 'restore_collision'
   | 'agent_unavailable'
   // tier two
   | 'no_such_requisition'
@@ -997,7 +999,9 @@ export type CheckpointError =
   | { readonly code: 'locked'; readonly detail: string } // ckpt.git/index.lock
   | { readonly code: 'no_such_checkpoint'; readonly sha: GitSha }
   | { readonly code: 'commit_failed'; readonly detail: string }
-  | { readonly code: 'restore_incomplete'; readonly detail: string };
+  | { readonly code: 'restore_incomplete'; readonly detail: string }
+  | { readonly code: 'ignored_path_collision'; readonly paths: readonly string[] }
+  | { readonly code: 'ignored_set_unreadable'; readonly detail: string };
 
 // tier two
 export type RecordsError =

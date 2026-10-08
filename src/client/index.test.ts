@@ -1654,7 +1654,7 @@ describe('#146 — interrupt, end and the hang indicator', () => {
 // (`[]`) on screen, and renders every path as a text node.
 // ---------------------------------------------------------------------------
 
-async function withRestoreResponse(unreachedResponsePayload: unknown) {
+async function withRestoreResponse(unreachedResponsePayload: unknown, restoreStatus = 200) {
   const console_ = await runConsole([{ id: 's1', owner: 'ben', cwd: '/w', vendor: 'claude', state: 'live' }]);
   const globals = globalThis as unknown as Record<string, unknown>;
   // Overrides the shared fetch stub for this test only: a real checkpoint to restore, and
@@ -1662,7 +1662,7 @@ async function withRestoreResponse(unreachedResponsePayload: unknown) {
   // whatever `fetch` existed before `runConsole` ran, regardless of this reassignment.
   globals['fetch'] = async (input: string) => {
     if (String(input).endsWith('/checkpoint/restore')) {
-      return { status: 200, json: async () => unreachedResponsePayload };
+      return { status: restoreStatus, json: async () => unreachedResponsePayload };
     }
     return {
       status: 200,
@@ -1745,6 +1745,89 @@ describe('S32.5/S32.7 — the restore report renders unknown and a positive empt
         for (const child of node.children) walk(child);
       })(report);
       assert.ok(!tags.includes('img'), 'no <img> element was ever created from the path');
+    } finally {
+      await restore();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// S38.10 — exposed paths and a collision refusal are each shown, neither as a failed
+// restore nor inside the unreached list, with every path a text node.
+// ---------------------------------------------------------------------------
+
+function tagsUnder(node: FakeEl): string[] {
+  const tags: string[] = [];
+  (function walk(n: FakeEl) {
+    tags.push(n.tag);
+    for (const child of n.children) walk(child);
+  })(node);
+  return tags;
+}
+
+function classesUnder(node: FakeEl): string[] {
+  const classes: string[] = [];
+  (function walk(n: FakeEl) {
+    classes.push(String((n as unknown as { className?: string }).className ?? ""));
+    for (const child of n.children) walk(child);
+  })(node);
+  return classes;
+}
+
+async function clickRestore(byId: Map<string, FakeEl>): Promise<void> {
+  const restoreButton = byId.get("checkpoint-list")!.children[0]!.children.find((c) => c.tag === "button")!;
+  for (const fn of restoreButton.listeners.get("click") ?? []) fn({});
+  await new Promise((resolve) => setTimeout(resolve, 0));
+}
+
+describe("S38.10 — a restore's exposed paths and a restore_collision refusal are rendered as themselves", () => {
+  const hostile = "<img src=x onerror=alert(1)>";
+
+  it("names each exposed path and says the next checkpoint captures it, apart from the unreached list", async () => {
+    const { byId, restore } = await withRestoreResponse({ ok: true, safety: { sha: "b".repeat(40), label: "x", ts: "x" }, unreached: [], exposed: ["secrets.txt", hostile] });
+    try {
+      await clickRestore(byId);
+      const report = byId.get("restore-report")!;
+      const rendered = allFakeText(report).join(" ");
+      assert.match(rendered, /nothing.*left standing/, "the unreached answer is still its own, unchanged");
+      assert.match(rendered, /next checkpoint will capture/);
+      assert.ok(rendered.includes("secrets.txt"));
+      assert.ok(rendered.includes(hostile), "the exact hostile characters survive as a text node");
+      assert.ok(!tagsUnder(report).includes("img"), "no <img> element was ever created from the path");
+      const exposedItems = classesUnder(report).filter((c) => c.includes("restore-report__item"));
+      assert.equal(exposedItems.length, 0, "no exposed path was folded into the unreached list");
+      assert.doesNotMatch(allFakeText(byId.get("status")!).join(" "), /fail|error/i, "the restore is not shown as failed");
+      assert.ok(classesUnder(byId.get("status")!).some((c) => c.includes("status__text--ok")));
+    } finally {
+      await restore();
+    }
+  });
+
+  it("shows no exposed block when exposed is empty", async () => {
+    const { byId, restore } = await withRestoreResponse({ ok: true, safety: { sha: "b".repeat(40), label: "x", ts: "x" }, unreached: [], exposed: [] });
+    try {
+      await clickRestore(byId);
+      assert.doesNotMatch(allFakeText(byId.get("restore-report")!).join(" "), /next checkpoint/);
+    } finally {
+      await restore();
+    }
+  });
+
+  it("names every colliding path, says nothing changed, and is not shown as a failure", async () => {
+    const paths = ["a.log", "cache", hostile];
+    const { byId, restore } = await withRestoreResponse({ error: { code: "restore_collision", message: "m", detail: { paths } } }, 409);
+    try {
+      await clickRestore(byId);
+      const report = byId.get("restore-report")!;
+      assert.equal(report.hidden, false);
+      const rendered = allFakeText(report).join(" ");
+      for (const p of paths) assert.ok(rendered.includes(p), `${p} is named`);
+      assert.match(rendered, /nothing was changed/);
+      assert.ok(!tagsUnder(report).includes("img"), "no <img> element was ever created from the path");
+      assert.equal(classesUnder(report).filter((c) => c.includes("restore-report__item")).length, 0, "not rendered as unreached entries");
+      const statusClasses = classesUnder(byId.get("status")!);
+      assert.ok(!statusClasses.some((c) => c.includes("status__text--error")), "a refusal is not rendered as a failed restore");
+      assert.match(allFakeText(byId.get("status")!).join(" "), /nothing was changed/);
     } finally {
       await restore();
     }

@@ -737,6 +737,12 @@ body {
   color: var(--ink-dim);
 }
 
+/* S38.10: neither is a failure, so neither takes `--danger`. */
+.restore-report__exposed,
+.restore-report__collision {
+  color: var(--warn);
+}
+
 .restore-report__list {
   margin: var(--space-0);
   padding: var(--space-0);

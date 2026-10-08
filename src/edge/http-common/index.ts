@@ -170,9 +170,14 @@ export function apiErrorFor(error: SessionError): { code: ApiErrorCode; message:
       // no_such_checkpoint`) from every other checkpoint failure (`500
       // checkpoint_failed`); collapsing both to the same code would make a restore
       // against a typo'd sha indistinguishable from a git failure.
-      return error.cause.code === 'no_such_checkpoint'
-        ? { code: 'no_such_checkpoint', message: 'no such checkpoint', detail: { sha: error.cause.sha } }
-        : { code: 'checkpoint_failed', message: 'a checkpoint operation failed' };
+      // A collision is not a checkpoint failure either (D267): nothing went wrong and
+      // nothing was written, and the body names every path so the operator need not find
+      // them by hand.
+      if (error.cause.code === 'no_such_checkpoint') return { code: 'no_such_checkpoint', message: 'no such checkpoint', detail: { sha: error.cause.sha } };
+      if (error.cause.code === 'ignored_path_collision') {
+        return { code: 'restore_collision', message: 'the restore would delete or overwrite ignored paths; nothing was changed', detail: { paths: error.cause.paths } };
+      }
+      return { code: 'checkpoint_failed', message: 'a checkpoint operation failed' };
     case 'storage':
       return { code: 'agent_unavailable', message: 'session storage is unavailable' };
     case 'records':
@@ -960,7 +965,7 @@ export function createHttpHandlers(deps: EdgeDeps) {
     }
     const restored = await manager.restore(sessionId, owner, sha as never);
     if (!restored.ok) return failWith(res, restored.error);
-    sendJson(res, 200, { ok: true, safety: restored.value.safety, unreached: restored.value.unreached });
+    sendJson(res, 200, { ok: true, safety: restored.value.safety, unreached: restored.value.unreached, exposed: restored.value.exposed });
   }
 
   async function handleChecklist(req: IncomingMessage, res: ServerResponse, owner: OperatorId, sessionId: SessionId): Promise<void> {
