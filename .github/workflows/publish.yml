@@ -29,14 +29,13 @@ on:
 # rather than aborting a push partway. This scoping only ever serialises two runs of the
 # identical commit — different commits' runs always proceed independently and in parallel —
 # so it does nothing to guarantee run *order* between commits, which is why `:latest`'s own
-# correctness below no longer depends on it (see "Update latest, only if this commit is
-# still main's current tip").
+# correctness no longer depends on it (tools/ci/Publish-Image.ps1 pushes it only while this
+# commit is still main's current tip).
 concurrency:
   group: publish-${{ github.event.workflow_run.head_sha || github.sha }}
   cancel-in-progress: false
 
-permissions:
-  contents: read
+permissions: {}
 
 env:
   # The commit to build: the SHA `verify` just tested when triggered by its completion,
@@ -57,67 +56,11 @@ jobs:
         with:
           ref: ${{ env.IMAGE_SHA }}
 
-      - run: docker build -t "skynet-hr:${{ env.IMAGE_SHA }}" .
-
-      # Minimal config to clear src/config/index.ts's fail-closed startup checks (S2.8):
-      # shared-secret needs no reverse proxy, and a loopback-only bind needs no
-      # TRUST_PROXY entry. No claude CLI credential is mounted — this smoke test only
-      # proves the server starts and binds; it never drives a real turn.
-      # `/data` is a Docker-managed volume, never a host bind mount: a bind mount keeps the
-      # host directory's ownership, and the runner user is uid 1001 while the image runs as
-      # uid 1000 (`node`), so the Dockerfile's `chown node:node /data` would be masked and
-      # `createStore` (src/store/index.ts) would fail EACCES on `mkdir /data/sessions`
-      # before the server ever binds. A fresh named volume inherits the image's ownership.
-      # `/workspaces` stays a bind mount — it is only ever read.
-      - name: Start the container
-        run: |
-          mkdir -p /tmp/skynet-hr-workspace
-          docker volume create skynet-hr-smoke-storage
-          docker run -d --name skynet-hr \
-            -p 3000:3000 \
-            -e BIND_HOST=0.0.0.0 \
-            -e AUTH_MODE=shared-secret \
-            -e AUTH_COOKIE_NAME=skynet_hr_session \
-            -e AUTH_SECRET=image-gate-smoke-test \
-            -e WORKSPACE_ROOTS=/workspaces \
-            -e STORAGE_ROOT=/data \
-            -v /tmp/skynet-hr-workspace:/workspaces \
-            -v skynet-hr-smoke-storage:/data \
-            "skynet-hr:${{ env.IMAGE_SHA }}"
-
-      - name: Wait for the container to answer
-        run: |
-          for i in $(seq 1 30); do
-            code=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:3000/ || echo 000)
-            if [ "$code" != "000" ]; then exit 0; fi
-            sleep 1
-          done
-          echo "the container never answered on :3000" >&2
-          docker logs skynet-hr >&2
-          exit 1
-
-      # #198: the image gate above only proves the server binds; it says nothing about
-      # whether the *other* half of the two-vendor contract (src/adapters/index.ts's
-      # `VENDORS`) is actually reachable in the published artifact. Both CLIs answer
-      # `--help`/`exec --help`/`app-server --help` with no credential mounted (that is what
-      # the Codex adapter's own transport probe, `probeOk` in src/adapters/codex/index.ts,
-      # relies on), so this proves the executable is on PATH and responsive without needing
-      # a real credential in CI.
-      - name: Verify the Codex CLI is present and reachable
-        run: |
-          docker exec skynet-hr codex --version
-          docker exec skynet-hr codex exec --help >/dev/null
-
-      - name: Stop the container
-        if: always()
-        run: |
-          docker rm -f skynet-hr
-          docker volume rm -f skynet-hr-smoke-storage
-
-      - name: Save the gated image
-        run: |
-          docker inspect -f '{{.Id}}' "skynet-hr:${{ env.IMAGE_SHA }}" > image-digest.txt
-          docker save "skynet-hr:${{ env.IMAGE_SHA }}" -o image.tar
+      # Builds the image, starts it and checks that it answers and that both agent CLIs are
+      # present, then saves the gated image (see the script for why each check exists).
+      - name: Build and test the image
+        shell: pwsh
+        run: ./tools/ci/Invoke-ImageGate.ps1
 
       - uses: actions/upload-artifact@v4
         with:
@@ -135,22 +78,18 @@ jobs:
       contents: read
       packages: write
     steps:
+      # The script comes from the repository, so the job needs the checkout as well as the image.
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.IMAGE_SHA }}
+
       - uses: actions/download-artifact@v4
         with:
           name: gated-image
 
-      # The gated image is carried, never rebuilt: its digest is asserted equal on both
-      # sides of the job boundary before anything is pushed, the same check
-      # SubZeroDev.com's `publish-release` job makes against `image-gate`'s artifact.
       - name: Load the gated image
-        run: |
-          docker load -i image.tar
-          LOADED=$(docker inspect -f '{{.Id}}' "skynet-hr:${{ env.IMAGE_SHA }}")
-          GATED=$(cat image-digest.txt)
-          if [ "$LOADED" != "$GATED" ]; then
-            echo "the loaded image's digest ($LOADED) does not match the gated image's digest ($GATED)" >&2
-            exit 1
-          fi
+        shell: pwsh
+        run: ./tools/ci/Import-GatedImage.ps1
 
       - name: Log in to GHCR
         uses: docker/login-action@v3
@@ -159,57 +98,8 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # #199: pushed unconditionally, every run, regardless of what `main` has done since —
-      # this is the tag "three rapidly verified commits each receive their immutable image
-      # tag" is about, and it must never be skipped just because a later commit has since
-      # landed. No tag is announced until the push has succeeded and the tag resolves in the
-      # registry, the same read-back SubZeroDev.com's `publish-release` job makes.
-      - name: Push the immutable per-commit tag to GHCR
-        run: |
-          REPO_OWNER_LC=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
-          echo "IMAGE=ghcr.io/$REPO_OWNER_LC/skynet-hr" >> "$GITHUB_ENV"
-          IMAGE="ghcr.io/$REPO_OWNER_LC/skynet-hr"
-          docker tag "skynet-hr:${{ env.IMAGE_SHA }}" "$IMAGE:${{ env.IMAGE_SHA }}"
-          docker push "$IMAGE:${{ env.IMAGE_SHA }}"
-          docker manifest inspect "$IMAGE:${{ env.IMAGE_SHA }}" > /dev/null
-          {
-            echo "### Image pushed";
-            echo "\`$IMAGE:${{ env.IMAGE_SHA }}\`";
-          } >> "$GITHUB_STEP_SUMMARY"
-
-      # #199: `:latest` is the one thing here that must reflect an *order*, and neither this
-      # workflow's own concurrency group (scoped per-commit, above) nor `workflow_run`'s
-      # completion order actually guarantees one run for an older commit cannot finish this
-      # step after a newer commit's run already has — `verify.yml` for an older commit can
-      # simply take longer. So this asks the one thing that is never stale: `main`'s actual
-      # current tip, via the API, right before the push — not "newer than the last one I saw"
-      # (which a crashed/restarted runner could get wrong) but "still this commit, right now".
-      #
-      # Validation scenario (no automated workflow test exists for this — GitHub Actions
-      # itself is the thing under test, and this repository has no workflow-execution harness
-      # to run one against without a new CI dependency): push commit A, then immediately push
-      # commit B, with A's `verify` run made slower than B's (e.g. temporarily widen a test's
-      # sleep) — B's publish run reaches this step first and tags `:latest`; A's reaches it
-      # later, reads `main` at B's SHA, sees a mismatch against its own `IMAGE_SHA`, and skips.
-      # `docker manifest inspect ghcr.io/.../skynet-hr:latest` after both runs finish must
-      # resolve to B's digest, and A's own per-commit tag must still exist unchanged.
-      - name: Update latest, only if this commit is still main's current tip
+      - name: Push the image tags to GHCR
+        shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          CURRENT_MAIN_SHA=$(gh api "repos/${{ github.repository }}/commits/main" --jq .sha)
-          if [ "$CURRENT_MAIN_SHA" != "${{ env.IMAGE_SHA }}" ]; then
-            echo "main is now at $CURRENT_MAIN_SHA, not this run's ${{ env.IMAGE_SHA }} — leaving :latest alone" >&2
-            {
-              echo "### latest left unchanged";
-              echo "main has moved to \`$CURRENT_MAIN_SHA\` since this commit was verified — only its immutable \`:${{ env.IMAGE_SHA }}\` tag was pushed.";
-            } >> "$GITHUB_STEP_SUMMARY"
-            exit 0
-          fi
-          docker tag "skynet-hr:${{ env.IMAGE_SHA }}" "${{ env.IMAGE }}:latest"
-          docker push "${{ env.IMAGE }}:latest"
-          docker manifest inspect "${{ env.IMAGE }}:latest" > /dev/null
-          {
-            echo "### latest updated";
-            echo "\`${{ env.IMAGE }}:latest\` now resolves to \`${{ env.IMAGE_SHA }}\`.";
-          } >> "$GITHUB_STEP_SUMMARY"
+        run: ./tools/ci/Publish-Image.ps1
