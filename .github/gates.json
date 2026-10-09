@@ -1,0 +1,20 @@
+{
+  "gates": [
+    {
+      "name": "test / install",
+      "command": "npm ci"
+    },
+    {
+      "name": "test / test",
+      "command": "npm run test"
+    },
+    {
+      "name": "test / test:browser",
+      "command": "npm run test:browser"
+    },
+    {
+      "name": "powershell / Pester tools",
+      "command": "pwsh -NoProfile -Command \"Invoke-Pester -Configuration @{ Run = @{ Path = @('tools'); Exit = [bool]1 } }\""
+    }
+  ]
+}
