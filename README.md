@@ -75,7 +75,7 @@ docker compose -f docker-compose.dev.yml up -d --build
 The console listens on `http://localhost:3000`.
 
 The repository root's `docker-compose.yml` is the deployment counterpart: it pulls the
-image `.github/workflows/publish.yml` publishes to `ghcr.io/the-running-dev/skynet-hr`
+image the `image` job of `.github/workflows/verify.yml` publishes to `ghcr.io/the-running-dev/skynet-hr`
 rather than building, joins the pre-existing `proxy-net` and publishes no port — see that
 file's header for the full set of environment variables a deployment needs to set.
 

@@ -4,6 +4,8 @@ on:
   pull_request:
   push:
     branches: [main]
+  # Re-runs the tests and, on main, the image push (the old publish workflow's manual trigger).
+  workflow_dispatch:
 
 permissions: {}
 
@@ -30,3 +32,47 @@ jobs:
       os: '["windows-latest"]'
       paths: .
       tests: tools
+
+  # The deployment image (design/90-decisions.md, 2026-08-19 - "The deployment artifact borrows
+  # the host's authenticated Claude CLI"). Builds it and starts it on every run; pushes
+  # `ghcr.io/<owner>/skynet-hr` only from main, and only after the jobs above passed. The pushed
+  # image is the smoke-tested one, not a rebuild. Nothing here redeploys: docker-compose.yml's
+  # `pull_policy: always` picks the new tag up on the next `docker compose up`.
+  image:
+    needs: [test, powershell]
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    uses: The-Running-Dev/GitHub-ActionTemplates/.github/workflows/container.yml@v0
+    with:
+      image-name: skynet-hr
+      tags: sha latest
+      # A commit that is no longer main's tip still gets its immutable `:<sha>` tag (#199) but
+      # leaves `:latest` alone.
+      require-tip: latest
+      # Minimal config to clear src/config/index.ts's fail-closed startup checks (S2.8):
+      # shared-secret needs no reverse proxy, and a loopback-only bind needs no TRUST_PROXY
+      # entry. No claude CLI credential is mounted - the smoke test only proves the server starts
+      # and binds and both CLIs answer; it never drives a real turn.
+      smoke-env: |
+        BIND_HOST=0.0.0.0
+        AUTH_MODE=shared-secret
+        AUTH_COOKIE_NAME=skynet_hr_session
+        AUTH_SECRET=image-gate-smoke-test
+        WORKSPACE_ROOTS=/workspaces
+        STORAGE_ROOT=/data
+      # `/data` is a Docker-managed volume, never a host bind mount: a bind mount keeps the host
+      # directory's ownership (the runner is uid 1001, the image runs as uid 1000 `node`), which
+      # would mask the Dockerfile's `chown node:node /data` and fail `createStore`
+      # (src/store/index.ts) with EACCES before the server binds. A fresh named volume inherits
+      # the image's ownership. `/workspaces` is a bind mount that is only ever read; Docker
+      # creates the host folder when it is missing.
+      smoke-options: |
+        --volume skynet-hr-smoke-storage:/data
+        --volume /tmp/skynet-hr-workspace:/workspaces
+      smoke-port: '3000'
+      # Any HTTP response means the server is bound and answering.
+      smoke-status: any
+      smoke-exec: tools/ci/smoke-clis.sh
