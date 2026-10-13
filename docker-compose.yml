@@ -1,7 +1,7 @@
 # The deployment artifact (design/90-decisions.md, 2026-08-19 — "The deployment artifact
 # borrows the host's authenticated Claude CLI"; corrected 2026-08-25, D179, to cover both
-# vendors). Pulls the image `.github/workflows/
-# publish.yml` already built and pushed to GHCR — never builds. docker-compose.dev.yml is
+# vendors). Pulls the image the `image` job of `.github/workflows/verify.yml`
+# already built and pushed to GHCR — never builds. docker-compose.dev.yml is
 # the local-development counterpart; it has `build:` and a deliberately different image
 # name so a local `up --build` there can never tag something as this deployable image.
 #
@@ -55,7 +55,7 @@
 #     by a different uid, `chown -R 1000:1000` it (or match the container's uid to the host
 #     owner) before the corresponding CLI can read or refresh its credentials.
 #   - The published image is pushed with the workflow's own `GITHUB_TOKEN`
-#     (`.github/workflows/publish.yml`), so GHCR creates the `skynet-hr` package **private**
+#     (`.github/workflows/verify.yml`), so GHCR creates the `skynet-hr` package **private**
 #     on its first push. Either make it public in the repository's Packages settings, or
 #     `docker login ghcr.io` on this host with a PAT scoped `read:packages` before `docker
 #     compose pull`.

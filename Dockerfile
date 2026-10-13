@@ -16,7 +16,7 @@ ARG NODE_IMAGE=node:22-bookworm-slim
 # `stream-json` wire schema and reports anything it does not recognise as
 # `adapter_unknown_record`, so a floating version would let two builds of the same commit
 # behave differently — and the image gate never drives a real turn, so nothing would catch
-# it (.github/workflows/publish.yml).
+# it (the `image` job in .github/workflows/verify.yml).
 ARG CLAUDE_CODE_VERSION=2.1.235
 
 # ---- build: compile TypeScript -------------------------------------------------------
