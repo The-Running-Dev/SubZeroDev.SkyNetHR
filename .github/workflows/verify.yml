@@ -13,7 +13,7 @@ jobs:
   test:
     permissions:
       contents: read
-    uses: The-Running-Dev/GitHub-ActionTemplates/.github/workflows/node-ci.yml@v0
+    uses: The-Running-Dev/GitHub-ActionTemplates/.github/workflows/node-ci.yml@v1
     with:
       os: '["ubuntu-latest", "windows-latest"]'
       node-versions: '["22.11.0"]'
@@ -27,7 +27,7 @@ jobs:
   powershell:
     permissions:
       contents: read
-    uses: The-Running-Dev/GitHub-ActionTemplates/.github/workflows/pwsh-ci.yml@v0
+    uses: The-Running-Dev/GitHub-ActionTemplates/.github/workflows/pwsh-ci.yml@v1
     with:
       os: '["windows-latest"]'
       paths: .
@@ -45,7 +45,7 @@ jobs:
       packages: write
       id-token: write
       attestations: write
-    uses: The-Running-Dev/GitHub-ActionTemplates/.github/workflows/container.yml@v0
+    uses: The-Running-Dev/GitHub-ActionTemplates/.github/workflows/container.yml@v1
     with:
       image-name: skynet-hr
       tags: sha latest
